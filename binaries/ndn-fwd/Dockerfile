@@ -9,7 +9,7 @@
 #   9696/tcp  — WebSocket face (wss:// when websocket-tls feature is enabled)
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM rust:1.82-slim AS builder
+FROM rust:1.85-slim AS builder
 
 # Install system libraries required for native-tls / OpenSSL.
 RUN apt-get update && apt-get install -y --no-install-recommends \
