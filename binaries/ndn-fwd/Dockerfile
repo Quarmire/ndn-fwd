@@ -37,6 +37,7 @@ COPY binaries/ binaries/
 COPY crates/ crates/
 COPY tools/ tools/
 COPY bindings/ bindings/
+COPY examples/ examples/
 
 # Build only the ndn-fwd binary in release mode.
 RUN cargo build --release --bin ndn-fwd
