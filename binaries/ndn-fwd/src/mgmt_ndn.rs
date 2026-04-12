@@ -35,7 +35,7 @@ use ndn_routing::DvrConfig;
 use ndn_engine::stages::ErasedStrategy;
 use ndn_faces::local::InProcHandle;
 use ndn_packet::{Interest, Name, NameComponent, encode::encode_data_unsigned};
-use ndn_security::FilePib;
+use ndn_security::{FilePib, SchemaRule};
 use ndn_strategy::{BestRouteStrategy, MulticastStrategy};
 use ndn_transport::{Face, FaceId, FacePersistency};
 use tokio_util::sync::CancellationToken;
@@ -294,6 +294,8 @@ pub struct MgmtHandles {
     pub discovery_cfg: Option<Arc<RwLock<DiscoveryConfig>>>,
     /// Shared DVR config — `None` when DVR is not running.
     pub dvr_cfg: Option<Arc<RwLock<DvrConfig>>>,
+    /// Whether the active signing identity is ephemeral (in-memory, not persisted).
+    pub security_is_ephemeral: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -356,6 +358,7 @@ pub async fn run_ndn_mgmt_handler(
                 pib: pib.as_deref(),
                 discovery_cfg: mgmt_handles.discovery_cfg.as_ref(),
                 dvr_cfg: mgmt_handles.dvr_cfg.as_ref(),
+                security_is_ephemeral: mgmt_handles.security_is_ephemeral,
             },
         )
         .await;
@@ -379,6 +382,8 @@ struct DispatchCtx<'a> {
     discovery_cfg: Option<&'a Arc<RwLock<DiscoveryConfig>>>,
     /// Runtime-mutable DVR config (None when DVR is not running).
     dvr_cfg: Option<&'a Arc<RwLock<DvrConfig>>>,
+    /// Whether the active signing identity is ephemeral (not persisted to disk).
+    security_is_ephemeral: bool,
 }
 
 async fn dispatch_command(
@@ -397,6 +402,7 @@ async fn dispatch_command(
         pib,
         discovery_cfg,
         dvr_cfg,
+        security_is_ephemeral,
     } = ctx;
     match module_name {
         m if m == module::RIB => handle_rib(verb_name, params, source_face, engine),
@@ -418,7 +424,7 @@ async fn dispatch_command(
         m if m == module::STATUS => handle_status(verb_name, engine, cancel),
         m if m == module::MEASUREMENTS => handle_measurements(verb_name, engine),
         m if m == module::CONFIG => handle_config(verb_name, config),
-        m if m == module::SECURITY => handle_security(verb_name, params, pib, engine, config).await,
+        m if m == module::SECURITY => handle_security(verb_name, params, pib, engine, config, security_is_ephemeral).await,
         m if m == module::LOG => handle_log(verb_name, params),
         _ => ControlResponse::error(status::NOT_FOUND, "unknown module"),
     }
@@ -1646,13 +1652,21 @@ async fn handle_security(
     pib: Option<&FilePib>,
     engine: &ForwarderEngine,
     config: &ndn_config::ForwarderConfig,
+    is_ephemeral: bool,
 ) -> ControlResponse {
-    // Verbs that don't need the PIB first.
+    // Verbs that don't need the PIB.
     match verb_name {
-        v if v == verb::CA_INFO         => return security_ca_info(config),
-        v if v == verb::CA_REQUESTS     => return security_ca_requests(),
-        v if v == verb::CA_TOKEN_ADD    => return security_ca_token_add(params),
-        v if v == verb::YUBIKEY_DETECT  => return security_yubikey_detect(),
+        v if v == verb::CA_INFO             => return security_ca_info(config),
+        v if v == verb::CA_REQUESTS         => return security_ca_requests(),
+        v if v == verb::CA_TOKEN_ADD        => return security_ca_token_add(params),
+        v if v == verb::YUBIKEY_DETECT      => return security_yubikey_detect(),
+        // Trust schema management — work directly with the engine's validator.
+        v if v == verb::SCHEMA_RULE_ADD    => return security_schema_rule_add(params, engine),
+        v if v == verb::SCHEMA_RULE_REMOVE => return security_schema_rule_remove(params, engine),
+        v if v == verb::SCHEMA_LIST        => return security_schema_list(engine),
+        v if v == verb::SCHEMA_SET         => return security_schema_set(params, engine),
+        // identity-status: reports active identity name + ephemeral flag.
+        v if v == verb::IDENTITY_STATUS    => return security_identity_status(engine, config, is_ephemeral),
         _ => {}
     }
 
@@ -1675,6 +1689,49 @@ async fn handle_security(
         v if v == verb::YUBIKEY_GENERATE  => security_yubikey_generate(params, pib).await,
         _ => ControlResponse::error(status::NOT_FOUND, "unknown security verb"),
     }
+}
+
+/// Return the active identity status: name, ephemeral flag, PIB path.
+fn security_identity_status(
+    engine: &ForwarderEngine,
+    config: &ndn_config::ForwarderConfig,
+    is_ephemeral: bool,
+) -> ControlResponse {
+    // Prefer the explicitly configured identity name; fall back to deriving it
+    // from the first trust-anchor name in the SecurityManager.
+    let identity_name: String = if let Some(id) = &config.security.identity {
+        id.clone()
+    } else if let Some(mgr) = engine.security() {
+        mgr.trust_anchor_names()
+            .first()
+            .map(|n| {
+                let s = n.to_string();
+                // Strip /KEY/... suffix to get the bare identity prefix.
+                if let Some(pos) = s.find("/KEY/") { s[..pos].to_string() } else { s }
+            })
+            .unwrap_or_else(|| "(none)".to_string())
+    } else {
+        "(none)".to_string()
+    };
+
+    let pib_path = config.security.pib_path.as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| dirs_or_tmp_pib().display().to_string());
+
+    let text = format!(
+        "identity={identity_name} is_ephemeral={is_ephemeral} pib_path={pib_path}\n"
+    );
+    ControlResponse::ok_empty(text)
+}
+
+/// Derive the default PIB path (mirrors default_pib_path() in main.rs).
+fn dirs_or_tmp_pib() -> std::path::PathBuf {
+    let mut p = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    p.push(".ndn");
+    p.push("pib");
+    p
 }
 
 fn security_identity_list(pib: &FilePib) -> ControlResponse {
@@ -1767,6 +1824,130 @@ fn security_identity_did(params: ControlParameters, pib: &FilePib) -> ControlRes
     let encoded = name.to_string().replace('/', "%2F");
     let did = format!("did:ndn:{encoded}");
     ControlResponse::ok_empty(did)
+}
+
+// ─── Trust schema management ─────────────────────────────────────────────────
+
+/// Helper: get the validator from the engine or return a 404 error.
+macro_rules! require_validator {
+    ($engine:expr) => {
+        match $engine.validator() {
+            Some(v) => v,
+            None => {
+                return ControlResponse::error(
+                    status::NOT_FOUND,
+                    "validation is disabled; set [security] profile = \"default\" or \
+                     \"accept-signed\" to enable trust schema management",
+                );
+            }
+        }
+    };
+}
+
+/// `security/schema-rule-add` — append a rule to the active trust schema.
+///
+/// ControlParameters.uri must contain a rule in the form:
+/// `"<data_pattern> => <key_pattern>"`
+///
+/// Example: `/sensor/<node>/<type> => /sensor/<node>/KEY/<id>`
+fn security_schema_rule_add(params: ControlParameters, engine: &ForwarderEngine) -> ControlResponse {
+    let rule_text = match params.uri.as_deref() {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => {
+            return ControlResponse::error(
+                status::BAD_PARAMS,
+                "Uri is required: \"<data_pattern> => <key_pattern>\"",
+            );
+        }
+    };
+
+    let rule = match SchemaRule::parse(&rule_text) {
+        Ok(r) => r,
+        Err(e) => {
+            return ControlResponse::error(
+                status::BAD_PARAMS,
+                format!("invalid rule: {e}"),
+            );
+        }
+    };
+
+    let validator = require_validator!(engine);
+    let rule_str = rule.to_string();
+    validator.add_schema_rule(rule);
+    tracing::info!(rule = %rule_str, "security/schema-rule-add");
+    ControlResponse::ok_empty(format!("added rule: {rule_str}"))
+}
+
+/// `security/schema-rule-remove` — remove a rule by index.
+///
+/// ControlParameters.count must contain the 0-based rule index from `schema-list`.
+fn security_schema_rule_remove(params: ControlParameters, engine: &ForwarderEngine) -> ControlResponse {
+    let idx = match params.count {
+        Some(i) => i as usize,
+        None => {
+            return ControlResponse::error(
+                status::BAD_PARAMS,
+                "Count is required: 0-based rule index from schema-list",
+            );
+        }
+    };
+
+    let validator = require_validator!(engine);
+    match validator.remove_schema_rule(idx) {
+        Some(rule) => {
+            let rule_str = rule.to_string();
+            tracing::info!(index = idx, rule = %rule_str, "security/schema-rule-remove");
+            ControlResponse::ok_empty(format!("removed rule[{idx}]: {rule_str}"))
+        }
+        None => ControlResponse::error(
+            status::NOT_FOUND,
+            format!("rule index {idx} out of range"),
+        ),
+    }
+}
+
+/// `security/schema-list` — list all active trust schema rules.
+fn security_schema_list(engine: &ForwarderEngine) -> ControlResponse {
+    let validator = require_validator!(engine);
+    let rules = validator.schema_rules_text();
+    let mut text = format!("{} rule(s)\n", rules.len());
+    for (i, (data_pat, key_pat)) in rules.iter().enumerate() {
+        text.push_str(&format!("  [{i}] {data_pat} => {key_pat}\n"));
+    }
+    ControlResponse::ok_empty(text)
+}
+
+/// `security/schema-set` — replace the entire trust schema.
+///
+/// ControlParameters.uri must contain newline-separated rules, each in the form:
+/// `"<data_pattern> => <key_pattern>"`
+///
+/// An empty uri clears all rules (schema rejects everything).
+fn security_schema_set(params: ControlParameters, engine: &ForwarderEngine) -> ControlResponse {
+    let text = params.uri.as_deref().unwrap_or("").trim().to_owned();
+
+    let mut new_schema = ndn_security::TrustSchema::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match SchemaRule::parse(line) {
+            Ok(rule) => new_schema.add_rule(rule),
+            Err(e) => {
+                return ControlResponse::error(
+                    status::BAD_PARAMS,
+                    format!("invalid rule {line:?}: {e}"),
+                );
+            }
+        }
+    }
+
+    let validator = require_validator!(engine);
+    let rule_count = new_schema.rules().len();
+    validator.set_schema(new_schema);
+    tracing::info!(rules = rule_count, "security/schema-set");
+    ControlResponse::ok_empty(format!("schema replaced with {rule_count} rule(s)"))
 }
 
 fn security_ca_info(config: &ndn_config::ForwarderConfig) -> ControlResponse {
