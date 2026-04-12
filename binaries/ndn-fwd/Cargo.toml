@@ -20,7 +20,7 @@ yubikey-piv = ["ndn-security/yubikey-piv"]
 [dependencies]
 base64           = { workspace = true }
 ndn-engine       = { workspace = true }
-ndn-discovery    = { workspace = true, features = ["udp-hello"] }
+ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd"] }
 ndn-app          = { workspace = true }
 ndn-faces        = { workspace = true }
 ndn-strategy     = { workspace = true }
