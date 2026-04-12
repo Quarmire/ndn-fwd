@@ -29,12 +29,15 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "yubikey-piv")]
 use base64::Engine as _;
 use bytes::Bytes;
-use ndn_discovery::{DiscoveryConfig, HelloStrategyKind, NeighborState, PrefixAnnouncementMode, ServiceDiscoveryProtocol, ServiceRecord};
-use ndn_engine::{ForwarderEngine, RibRoute};
-use ndn_routing::DvrConfig;
+use ndn_discovery::{
+    DiscoveryConfig, HelloStrategyKind, NeighborState, PrefixAnnouncementMode,
+    ServiceDiscoveryProtocol, ServiceRecord,
+};
 use ndn_engine::stages::ErasedStrategy;
+use ndn_engine::{ForwarderEngine, RibRoute};
 use ndn_faces::local::InProcHandle;
 use ndn_packet::{Interest, Name, NameComponent, encode::encode_data_unsigned};
+use ndn_routing::DvrConfig;
 use ndn_security::{FilePib, SchemaRule};
 use ndn_strategy::{BestRouteStrategy, MulticastStrategy};
 use ndn_transport::{Face, FaceId, FacePersistency};
@@ -424,7 +427,17 @@ async fn dispatch_command(
         m if m == module::STATUS => handle_status(verb_name, engine, cancel),
         m if m == module::MEASUREMENTS => handle_measurements(verb_name, engine),
         m if m == module::CONFIG => handle_config(verb_name, config),
-        m if m == module::SECURITY => handle_security(verb_name, params, pib, engine, config, security_is_ephemeral).await,
+        m if m == module::SECURITY => {
+            handle_security(
+                verb_name,
+                params,
+                pib,
+                engine,
+                config,
+                security_is_ephemeral,
+            )
+            .await
+        }
         m if m == module::LOG => handle_log(verb_name, params),
         _ => ControlResponse::error(status::NOT_FOUND, "unknown module"),
     }
@@ -605,10 +618,16 @@ fn routing_disable(params: ControlParameters, engine: &ForwarderEngine) -> Contr
     };
     if engine.routing().disable(origin) {
         tracing::info!(origin, "routing/disable");
-        let echo = ControlParameters { origin: Some(origin), ..Default::default() };
+        let echo = ControlParameters {
+            origin: Some(origin),
+            ..Default::default()
+        };
         ControlResponse::ok("OK", echo)
     } else {
-        ControlResponse::error(status::NOT_FOUND, format!("no protocol running with origin {origin}"))
+        ControlResponse::error(
+            status::NOT_FOUND,
+            format!("no protocol running with origin {origin}"),
+        )
     }
 }
 
@@ -625,7 +644,12 @@ fn routing_dvr_status(
         .rib()
         .dump()
         .iter()
-        .map(|(_, routes)| routes.iter().filter(|r| r.origin == ndn_config::control_parameters::origin::DVR).count())
+        .map(|(_, routes)| {
+            routes
+                .iter()
+                .filter(|r| r.origin == ndn_config::control_parameters::origin::DVR)
+                .count()
+        })
         .sum();
     let text = format!(
         "dvr: enabled\nupdate_interval_ms: {}\nroute_ttl_ms: {}\nroute_count: {}\n",
@@ -1656,17 +1680,19 @@ async fn handle_security(
 ) -> ControlResponse {
     // Verbs that don't need the PIB.
     match verb_name {
-        v if v == verb::CA_INFO             => return security_ca_info(config),
-        v if v == verb::CA_REQUESTS         => return security_ca_requests(),
-        v if v == verb::CA_TOKEN_ADD        => return security_ca_token_add(params),
-        v if v == verb::YUBIKEY_DETECT      => return security_yubikey_detect(),
+        v if v == verb::CA_INFO => return security_ca_info(config),
+        v if v == verb::CA_REQUESTS => return security_ca_requests(),
+        v if v == verb::CA_TOKEN_ADD => return security_ca_token_add(params),
+        v if v == verb::YUBIKEY_DETECT => return security_yubikey_detect(),
         // Trust schema management — work directly with the engine's validator.
-        v if v == verb::SCHEMA_RULE_ADD    => return security_schema_rule_add(params, engine),
+        v if v == verb::SCHEMA_RULE_ADD => return security_schema_rule_add(params, engine),
         v if v == verb::SCHEMA_RULE_REMOVE => return security_schema_rule_remove(params, engine),
-        v if v == verb::SCHEMA_LIST        => return security_schema_list(engine),
-        v if v == verb::SCHEMA_SET         => return security_schema_set(params, engine),
+        v if v == verb::SCHEMA_LIST => return security_schema_list(engine),
+        v if v == verb::SCHEMA_SET => return security_schema_set(params, engine),
         // identity-status: reports active identity name + ephemeral flag.
-        v if v == verb::IDENTITY_STATUS    => return security_identity_status(engine, config, is_ephemeral),
+        v if v == verb::IDENTITY_STATUS => {
+            return security_identity_status(engine, config, is_ephemeral);
+        }
         _ => {}
     }
 
@@ -1680,13 +1706,13 @@ async fn handle_security(
         }
     };
     match verb_name {
-        v if v == verb::IDENTITY_LIST     => security_identity_list(pib),
+        v if v == verb::IDENTITY_LIST => security_identity_list(pib),
         v if v == verb::IDENTITY_GENERATE => security_identity_generate(params, pib),
-        v if v == verb::IDENTITY_DID      => security_identity_did(params, pib),
-        v if v == verb::ANCHOR_LIST       => security_anchor_list(pib),
-        v if v == verb::KEY_DELETE        => security_key_delete(params, pib),
-        v if v == verb::CA_ENROLL         => security_ca_enroll(params, pib, engine).await,
-        v if v == verb::YUBIKEY_GENERATE  => security_yubikey_generate(params, pib).await,
+        v if v == verb::IDENTITY_DID => security_identity_did(params, pib),
+        v if v == verb::ANCHOR_LIST => security_anchor_list(pib),
+        v if v == verb::KEY_DELETE => security_key_delete(params, pib),
+        v if v == verb::CA_ENROLL => security_ca_enroll(params, pib, engine).await,
+        v if v == verb::YUBIKEY_GENERATE => security_yubikey_generate(params, pib).await,
         _ => ControlResponse::error(status::NOT_FOUND, "unknown security verb"),
     }
 }
@@ -1707,20 +1733,26 @@ fn security_identity_status(
             .map(|n| {
                 let s = n.to_string();
                 // Strip /KEY/... suffix to get the bare identity prefix.
-                if let Some(pos) = s.find("/KEY/") { s[..pos].to_string() } else { s }
+                if let Some(pos) = s.find("/KEY/") {
+                    s[..pos].to_string()
+                } else {
+                    s
+                }
             })
             .unwrap_or_else(|| "(none)".to_string())
     } else {
         "(none)".to_string()
     };
 
-    let pib_path = config.security.pib_path.as_deref()
+    let pib_path = config
+        .security
+        .pib_path
+        .as_deref()
         .map(str::to_owned)
         .unwrap_or_else(|| dirs_or_tmp_pib().display().to_string());
 
-    let text = format!(
-        "identity={identity_name} is_ephemeral={is_ephemeral} pib_path={pib_path}\n"
-    );
+    let text =
+        format!("identity={identity_name} is_ephemeral={is_ephemeral} pib_path={pib_path}\n");
     ControlResponse::ok_empty(text)
 }
 
@@ -1850,7 +1882,10 @@ macro_rules! require_validator {
 /// `"<data_pattern> => <key_pattern>"`
 ///
 /// Example: `/sensor/<node>/<type> => /sensor/<node>/KEY/<id>`
-fn security_schema_rule_add(params: ControlParameters, engine: &ForwarderEngine) -> ControlResponse {
+fn security_schema_rule_add(
+    params: ControlParameters,
+    engine: &ForwarderEngine,
+) -> ControlResponse {
     let rule_text = match params.uri.as_deref() {
         Some(s) if !s.is_empty() => s.to_owned(),
         _ => {
@@ -1864,10 +1899,7 @@ fn security_schema_rule_add(params: ControlParameters, engine: &ForwarderEngine)
     let rule = match SchemaRule::parse(&rule_text) {
         Ok(r) => r,
         Err(e) => {
-            return ControlResponse::error(
-                status::BAD_PARAMS,
-                format!("invalid rule: {e}"),
-            );
+            return ControlResponse::error(status::BAD_PARAMS, format!("invalid rule: {e}"));
         }
     };
 
@@ -1881,7 +1913,10 @@ fn security_schema_rule_add(params: ControlParameters, engine: &ForwarderEngine)
 /// `security/schema-rule-remove` — remove a rule by index.
 ///
 /// ControlParameters.count must contain the 0-based rule index from `schema-list`.
-fn security_schema_rule_remove(params: ControlParameters, engine: &ForwarderEngine) -> ControlResponse {
+fn security_schema_rule_remove(
+    params: ControlParameters,
+    engine: &ForwarderEngine,
+) -> ControlResponse {
     let idx = match params.count {
         Some(i) => i as usize,
         None => {
@@ -1899,10 +1934,7 @@ fn security_schema_rule_remove(params: ControlParameters, engine: &ForwarderEngi
             tracing::info!(index = idx, rule = %rule_str, "security/schema-rule-remove");
             ControlResponse::ok_empty(format!("removed rule[{idx}]: {rule_str}"))
         }
-        None => ControlResponse::error(
-            status::NOT_FOUND,
-            format!("rule index {idx} out of range"),
-        ),
+        None => ControlResponse::error(status::NOT_FOUND, format!("rule index {idx} out of range")),
     }
 }
 
@@ -2110,14 +2142,20 @@ async fn run_enrollment(
     // ── PROBE ────────────────────────────────────────────────────────────────
     let probe_name = ca_prefix.clone().append(b"CA").append(b"PROBE");
     let probe_interest = encode_interest(&probe_name, None);
-    handle.send(probe_interest).await.map_err(|e| format!("PROBE send: {e}"))?;
+    handle
+        .send(probe_interest)
+        .await
+        .map_err(|e| format!("PROBE send: {e}"))?;
 
     let probe_resp = tokio::time::timeout(TIMEOUT, handle.recv())
         .await
         .map_err(|_| "PROBE timeout")?
         .ok_or("PROBE: face closed")?;
 
-    tracing::debug!(bytes = probe_resp.len(), "ca-enroll: PROBE response received");
+    tracing::debug!(
+        bytes = probe_resp.len(),
+        "ca-enroll: PROBE response received"
+    );
 
     // ── NEW ──────────────────────────────────────────────────────────────────
     let mut session = EnrollmentSession::new(
@@ -2129,7 +2167,10 @@ async fn run_enrollment(
     let new_body = session.new_request_body().map_err(|e| e.to_string())?;
     let new_name = ca_prefix.clone().append(b"CA").append(b"NEW");
     let new_interest = encode_interest(&new_name, Some(&new_body));
-    handle.send(new_interest).await.map_err(|e| format!("NEW send: {e}"))?;
+    handle
+        .send(new_interest)
+        .await
+        .map_err(|e| format!("NEW send: {e}"))?;
 
     let new_resp = tokio::time::timeout(TIMEOUT, handle.recv())
         .await
@@ -2137,19 +2178,31 @@ async fn run_enrollment(
         .ok_or("NEW: face closed")?;
 
     let new_body_content = extract_data_content(&new_resp).ok_or("NEW: malformed Data")?;
-    session.handle_new_response(&new_body_content).map_err(|e| e.to_string())?;
+    session
+        .handle_new_response(&new_body_content)
+        .map_err(|e| e.to_string())?;
 
     // ── CHALLENGE ────────────────────────────────────────────────────────────
     let mut challenge_params = serde_json::Map::new();
-    challenge_params.insert("code".to_owned(), serde_json::Value::String(challenge_param.to_owned()));
+    challenge_params.insert(
+        "code".to_owned(),
+        serde_json::Value::String(challenge_param.to_owned()),
+    );
     let chal_body = session
         .challenge_request_body(challenge_type, challenge_params)
         .map_err(|e| e.to_string())?;
 
     let request_id = session.request_id().unwrap_or("").to_owned();
-    let chal_name = ca_prefix.clone().append(b"CA").append(b"CHALLENGE").append(request_id.as_bytes());
+    let chal_name = ca_prefix
+        .clone()
+        .append(b"CA")
+        .append(b"CHALLENGE")
+        .append(request_id.as_bytes());
     let chal_interest = encode_interest(&chal_name, Some(&chal_body));
-    handle.send(chal_interest).await.map_err(|e| format!("CHALLENGE send: {e}"))?;
+    handle
+        .send(chal_interest)
+        .await
+        .map_err(|e| format!("CHALLENGE send: {e}"))?;
 
     let chal_resp = tokio::time::timeout(TIMEOUT, handle.recv())
         .await
@@ -2157,12 +2210,18 @@ async fn run_enrollment(
         .ok_or("CHALLENGE: face closed")?;
 
     let chal_body_content = extract_data_content(&chal_resp).ok_or("CHALLENGE: malformed Data")?;
-    session.handle_challenge_response(&chal_body_content).map_err(|e| e.to_string())?;
+    session
+        .handle_challenge_response(&chal_body_content)
+        .map_err(|e| e.to_string())?;
 
     if session.is_complete() {
-        session.into_certificate().ok_or_else(|| "no cert after completion".to_owned())
+        session
+            .into_certificate()
+            .ok_or_else(|| "no cert after completion".to_owned())
     } else if session.needs_another_round() {
-        let msg = session.challenge_status_message().unwrap_or("another round required");
+        let msg = session
+            .challenge_status_message()
+            .unwrap_or("another round required");
         Err(format!("multi-round challenge not supported: {msg}"))
     } else {
         Err("enrollment did not complete".to_owned())
@@ -2234,10 +2293,7 @@ fn security_yubikey_detect() -> ControlResponse {
     {
         match ndn_security::yubikey::YubikeyKeyStore::open() {
             Ok(_) => ControlResponse::ok_empty("present"),
-            Err(e) => ControlResponse::error(
-                status::NOT_FOUND,
-                format!("YubiKey not found: {e}"),
-            ),
+            Err(e) => ControlResponse::error(status::NOT_FOUND, format!("YubiKey not found: {e}")),
         }
     }
     #[cfg(not(feature = "yubikey-piv"))]
@@ -2256,10 +2312,7 @@ fn security_yubikey_detect() -> ControlResponse {
 /// is returned base64url-encoded in the `uri` field of the response.
 ///
 /// Requires the `yubikey-piv` cargo feature.
-async fn security_yubikey_generate(
-    params: ControlParameters,
-    pib: &FilePib,
-) -> ControlResponse {
+async fn security_yubikey_generate(params: ControlParameters, pib: &FilePib) -> ControlResponse {
     let key_name = match params.name {
         Some(n) => n,
         None => return ControlResponse::error(status::BAD_PARAMS, "missing name parameter"),
@@ -2271,10 +2324,12 @@ async fn security_yubikey_generate(
 
         let store = match YubikeyKeyStore::open() {
             Ok(s) => s,
-            Err(e) => return ControlResponse::error(
-                status::NOT_FOUND,
-                format!("YubiKey not found: {e}"),
-            ),
+            Err(e) => {
+                return ControlResponse::error(
+                    status::NOT_FOUND,
+                    format!("YubiKey not found: {e}"),
+                );
+            }
         };
 
         let pub_bytes = match store
@@ -2282,10 +2337,12 @@ async fn security_yubikey_generate(
             .await
         {
             Ok(b) => b,
-            Err(e) => return ControlResponse::error(
-                status::SERVER_ERROR,
-                format!("YubiKey generate failed: {e}"),
-            ),
+            Err(e) => {
+                return ControlResponse::error(
+                    status::SERVER_ERROR,
+                    format!("YubiKey generate failed: {e}"),
+                );
+            }
         };
 
         // Persist the name→slot mapping alongside the PIB.
@@ -2372,7 +2429,10 @@ fn handle_log(verb_name: &[u8], params: ControlParameters) -> ControlResponse {
         v if v == verb::SET_FILTER => {
             let filter_str = params.uri.unwrap_or_default();
             if filter_str.is_empty() {
-                return ControlResponse::error(status::BAD_PARAMS, "uri field must contain the filter string");
+                return ControlResponse::error(
+                    status::BAD_PARAMS,
+                    "uri field must contain the filter string",
+                );
             }
             if let Some(apply) = crate::APPLY_FILTER.get() {
                 apply(&filter_str);

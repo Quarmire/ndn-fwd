@@ -18,8 +18,8 @@
 use std::collections::VecDeque;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -67,15 +67,23 @@ struct RingWriter {
 
 impl IoWrite for RingWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let line = String::from_utf8_lossy(buf).trim_end_matches('\n').to_string();
-        if !line.is_empty() && let Ok(mut r) = self.ring.lock() {
+        let line = String::from_utf8_lossy(buf)
+            .trim_end_matches('\n')
+            .to_string();
+        if !line.is_empty()
+            && let Ok(mut r) = self.ring.lock()
+        {
             let seq = LOG_SEQ.fetch_add(1, Ordering::Relaxed);
             r.push_back((seq, line));
-            if r.len() > 500 { r.pop_front(); }
+            if r.len() > 500 {
+                r.pop_front();
+            }
         }
         Ok(buf.len())
     }
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 struct RingMakeWriter {
@@ -85,7 +93,9 @@ struct RingMakeWriter {
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RingMakeWriter {
     type Writer = RingWriter;
     fn make_writer(&'a self) -> Self::Writer {
-        RingWriter { ring: Arc::clone(&self.ring) }
+        RingWriter {
+            ring: Arc::clone(&self.ring),
+        }
     }
 }
 
@@ -215,7 +225,9 @@ fn init_tracing(
                 .with_target(true)
                 .with_thread_ids(false)
                 .with_ansi(false)
-                .with_writer(RingMakeWriter { ring: Arc::clone(ring) })
+                .with_writer(RingMakeWriter {
+                    ring: Arc::clone(ring),
+                })
         });
         tracing_subscriber::registry()
             .with(filter_layer)
@@ -232,7 +244,9 @@ fn init_tracing(
                 .with_target(true)
                 .with_thread_ids(false)
                 .with_ansi(false)
-                .with_writer(RingMakeWriter { ring: Arc::clone(ring) })
+                .with_writer(RingMakeWriter {
+                    ring: Arc::clone(ring),
+                })
         });
         tracing_subscriber::registry()
             .with(filter_layer)
@@ -291,9 +305,10 @@ async fn main() -> Result<()> {
     let (mgmt_app_face, mgmt_handle) = InProcFace::new(ndn_transport::FaceId(MGMT_FACE_ID), 64);
 
     let security_init = load_security(&fwd_config);
-    let pib: Option<Arc<FilePib>> = security_init.pib_path.as_ref().and_then(|path| {
-        FilePib::open(path).ok().map(Arc::new)
-    });
+    let pib: Option<Arc<FilePib>> = security_init
+        .pib_path
+        .as_ref()
+        .and_then(|path| FilePib::open(path).ok().map(Arc::new));
     let security_is_ephemeral = security_init.is_ephemeral;
 
     let cs = build_cs(&fwd_config.cs);
@@ -366,14 +381,19 @@ async fn main() -> Result<()> {
     let auto_ether_ifaces: Vec<ndn_faces::iface::InterfaceInfo> =
         if fwd_config.face_system.ether.auto_multicast {
             let list = ndn_faces::iface::list_interfaces();
-            tracing::debug!(total = list.len(), "interface enumeration for ether auto_multicast");
+            tracing::debug!(
+                total = list.len(),
+                "interface enumeration for ether auto_multicast"
+            );
             list.into_iter()
                 .filter(|i| i.is_up && i.is_multicast && !i.is_loopback)
-                .filter(|i| ndn_faces::iface::interface_allowed(
-                    &i.name,
-                    &fwd_config.face_system.ether.whitelist,
-                    &fwd_config.face_system.ether.blacklist,
-                ))
+                .filter(|i| {
+                    ndn_faces::iface::interface_allowed(
+                        &i.name,
+                        &fwd_config.face_system.ether.whitelist,
+                        &fwd_config.face_system.ether.blacklist,
+                    )
+                })
                 .collect()
         } else {
             vec![]
@@ -382,14 +402,19 @@ async fn main() -> Result<()> {
     let auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)> =
         if fwd_config.face_system.udp.auto_multicast {
             let list = ndn_faces::iface::list_interfaces();
-            tracing::debug!(total = list.len(), "interface enumeration for udp auto_multicast");
+            tracing::debug!(
+                total = list.len(),
+                "interface enumeration for udp auto_multicast"
+            );
             list.into_iter()
                 .filter(|i| i.is_up && i.is_multicast && !i.is_loopback)
-                .filter(|i| ndn_faces::iface::interface_allowed(
-                    &i.name,
-                    &fwd_config.face_system.udp.whitelist,
-                    &fwd_config.face_system.udp.blacklist,
-                ))
+                .filter(|i| {
+                    ndn_faces::iface::interface_allowed(
+                        &i.name,
+                        &fwd_config.face_system.udp.whitelist,
+                        &fwd_config.face_system.udp.blacklist,
+                    )
+                })
                 .flat_map(|i| {
                     let name = i.name.clone();
                     i.ipv4_addrs.into_iter().map(move |a| (name.clone(), a))
@@ -834,7 +859,11 @@ async fn main() -> Result<()> {
         match ndn_faces::l2::MulticastEtherFace::new(id, iface_name) {
             Ok(face) => {
                 let c = cancel.child_token();
-                engine.add_face_with_persistency(face, c, ndn_transport::FacePersistency::Permanent);
+                engine.add_face_with_persistency(
+                    face,
+                    c,
+                    ndn_transport::FacePersistency::Permanent,
+                );
                 tracing::info!(iface=%iface_name, face=%id, "auto multicast ethernet face opened");
             }
             Err(e) => {
@@ -850,7 +879,11 @@ async fn main() -> Result<()> {
             match ndn_faces::l2::MulticastEtherFace::new(id, &iface_info.name) {
                 Ok(face) => {
                     let c = cancel.child_token();
-                    engine.add_face_with_persistency(face, c, ndn_transport::FacePersistency::Permanent);
+                    engine.add_face_with_persistency(
+                        face,
+                        c,
+                        ndn_transport::FacePersistency::Permanent,
+                    );
                     tracing::info!(iface=%iface_info.name, face=%id, "auto multicast ethernet face opened");
                 }
                 Err(e) => {
@@ -879,7 +912,11 @@ async fn main() -> Result<()> {
             match ndn_faces::net::MulticastUdpFace::ndn_default(addr, id).await {
                 Ok(face) => {
                     let face = if udp_ad_hoc { face.ad_hoc() } else { face };
-                    eng.add_face_with_persistency(face, c, ndn_transport::FacePersistency::Permanent);
+                    eng.add_face_with_persistency(
+                        face,
+                        c,
+                        ndn_transport::FacePersistency::Permanent,
+                    );
                     tracing::info!(iface=%iface_name, addr=%addr, face=%id, "auto multicast UDP face opened");
                 }
                 Err(e) => {
@@ -900,7 +937,11 @@ async fn main() -> Result<()> {
                 match ndn_faces::net::MulticastUdpFace::ndn_default(addr, id).await {
                     Ok(face) => {
                         let face = if udp_ad_hoc { face.ad_hoc() } else { face };
-                        eng.add_face_with_persistency(face, c, ndn_transport::FacePersistency::Permanent);
+                        eng.add_face_with_persistency(
+                            face,
+                            c,
+                            ndn_transport::FacePersistency::Permanent,
+                        );
                         tracing::info!(iface=%iface_name, addr=%addr, face=%id, "auto multicast UDP face opened");
                     }
                     Err(e) => {
@@ -913,9 +954,13 @@ async fn main() -> Result<()> {
 
     // ── Face system: interface hotplug watcher ────────────────────────────────
     if fwd_config.face_system.watch_interfaces {
-        let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::channel::<ndn_faces::iface_watcher::InterfaceEvent>(64);
+        let (watcher_tx, mut watcher_rx) =
+            tokio::sync::mpsc::channel::<ndn_faces::iface_watcher::InterfaceEvent>(64);
         let watcher_cancel = cancel.child_token();
-        tokio::spawn(ndn_faces::iface_watcher::watch_interfaces(watcher_tx, watcher_cancel));
+        tokio::spawn(ndn_faces::iface_watcher::watch_interfaces(
+            watcher_tx,
+            watcher_cancel,
+        ));
 
         let watcher_engine = engine.clone();
         let watcher_fwd_cfg = fwd_config.face_system.clone();
@@ -1110,9 +1155,9 @@ async fn run_ws_listener(
 
 /// Result of the security initialization step.
 pub(crate) struct SecurityInit {
-    pub mgr:          SecurityManager,
+    pub mgr: SecurityManager,
     /// Path of the file-backed PIB when a persistent identity was loaded.
-    pub pib_path:     Option<PathBuf>,
+    pub pib_path: Option<PathBuf>,
     /// `true` when the identity is in-memory only (not persisted to disk).
     pub is_ephemeral: bool,
 }
@@ -1155,12 +1200,14 @@ fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
                         "loaded existing security identity from PIB"
                     );
                 }
-                return SecurityInit { mgr, pib_path: Some(pib_path), is_ephemeral: false };
+                return SecurityInit {
+                    mgr,
+                    pib_path: Some(pib_path),
+                    is_ephemeral: false,
+                };
             }
             Err(e) => {
-                return recover_from_pib_error(
-                    identity_uri, &e.to_string(), &pib_path, cfg,
-                );
+                return recover_from_pib_error(identity_uri, &e.to_string(), &pib_path, cfg);
             }
         }
     }
@@ -1168,9 +1215,7 @@ fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
     let pib = match FilePib::open(&pib_path) {
         Ok(p) => p,
         Err(e) => {
-            return recover_from_pib_error(
-                identity_uri, &e.to_string(), &pib_path, cfg,
-            );
+            return recover_from_pib_error(identity_uri, &e.to_string(), &pib_path, cfg);
         }
     };
 
@@ -1181,20 +1226,22 @@ fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
                 pib = %pib_path.display(),
                 "loaded security identity from PIB"
             );
-            SecurityInit { mgr, pib_path: Some(pib_path), is_ephemeral: false }
+            SecurityInit {
+                mgr,
+                pib_path: Some(pib_path),
+                is_ephemeral: false,
+            }
         }
-        Err(e) => {
-            recover_from_pib_error(identity_uri, &e.to_string(), &pib_path, cfg)
-        }
+        Err(e) => recover_from_pib_error(identity_uri, &e.to_string(), &pib_path, cfg),
     }
 }
 
 /// Handle a PIB error: interactive prompt (TTY) or silent ephemeral fallback.
 fn recover_from_pib_error(
     identity_uri: &str,
-    error:        &str,
-    pib_path:     &std::path::Path,
-    cfg:          &ForwarderConfig,
+    error: &str,
+    pib_path: &std::path::Path,
+    cfg: &ForwarderConfig,
 ) -> SecurityInit {
     use std::io::IsTerminal as _;
 
@@ -1219,23 +1266,21 @@ fn recover_from_pib_error(
         let mut input = String::new();
         let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input);
         match input.trim() {
-            "1" => {
-                match SecurityManager::auto_init(&parse_name(identity_uri), pib_path) {
-                    Ok((mgr, _)) => {
-                        eprintln!();
-                        eprintln!("  Generated new identity '{identity_uri}' in PIB.");
-                        return SecurityInit {
-                            mgr,
-                            pib_path: Some(pib_path.to_path_buf()),
-                            is_ephemeral: false,
-                        };
-                    }
-                    Err(e) => {
-                        eprintln!("  Key generation failed: {e}");
-                        eprintln!("  Falling back to ephemeral identity.");
-                    }
+            "1" => match SecurityManager::auto_init(&parse_name(identity_uri), pib_path) {
+                Ok((mgr, _)) => {
+                    eprintln!();
+                    eprintln!("  Generated new identity '{identity_uri}' in PIB.");
+                    return SecurityInit {
+                        mgr,
+                        pib_path: Some(pib_path.to_path_buf()),
+                        is_ephemeral: false,
+                    };
                 }
-            }
+                Err(e) => {
+                    eprintln!("  Key generation failed: {e}");
+                    eprintln!("  Falling back to ephemeral identity.");
+                }
+            },
             "3" => {
                 eprintln!("  Aborting.");
                 std::process::exit(1);
@@ -1266,8 +1311,8 @@ fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) -> S
     let name_str = if let Some(prefix) = &cfg.security.ephemeral_prefix {
         prefix.clone()
     } else {
-        let host = std::env::var("HOSTNAME")
-            .unwrap_or_else(|_| format!("pid-{}", std::process::id()));
+        let host =
+            std::env::var("HOSTNAME").unwrap_or_else(|_| format!("pid-{}", std::process::id()));
         format!("/ndn-fwd/{host}")
     };
 
@@ -1299,11 +1344,19 @@ fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) -> S
                      add `identity = \"/your/name\"` to the [security] config to persist signing"
                 );
             }
-            SecurityInit { mgr, pib_path: None, is_ephemeral: true }
+            SecurityInit {
+                mgr,
+                pib_path: None,
+                is_ephemeral: true,
+            }
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to generate ephemeral identity; starting unsigned");
-            SecurityInit { mgr: SecurityManager::new(), pib_path: None, is_ephemeral: true }
+            SecurityInit {
+                mgr: SecurityManager::new(),
+                pib_path: None,
+                is_ephemeral: true,
+            }
         }
     }
 }
