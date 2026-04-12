@@ -10,10 +10,11 @@ name = "ndn-fwd"
 path = "src/main.rs"
 
 [features]
-default = ["spsc-shm", "websocket", "serial"]
+default = ["spsc-shm", "websocket", "serial", "l2"]
 spsc-shm    = ["ndn-faces/spsc-shm"]
 websocket   = ["ndn-faces/websocket", "dep:tokio-tungstenite"]
 serial      = ["ndn-faces/serial"]
+l2          = ["ndn-faces/l2"]
 yubikey-piv = ["ndn-security/yubikey-piv"]
 
 [dependencies]

@@ -562,7 +562,7 @@ async fn main() -> Result<()> {
                 };
                 match ndn_faces::l2::get_interface_mac(iface) {
                     Ok(local_mac) => {
-                        let ether_nd = ndn_faces::l2::EtherNeighborDiscovery::new_with_config(
+                        let ether_nd = ndn_discovery::EtherNeighborDiscovery::new_with_config(
                             *ether_id,
                             iface,
                             node_name.clone(),
@@ -581,7 +581,7 @@ async fn main() -> Result<()> {
             for (ether_id, iface_name) in &auto_ether_ids {
                 match ndn_faces::l2::get_interface_mac(iface_name) {
                     Ok(local_mac) => {
-                        let ether_nd = ndn_faces::l2::EtherNeighborDiscovery::new_with_config(
+                        let ether_nd = ndn_discovery::EtherNeighborDiscovery::new_with_config(
                             *ether_id,
                             iface_name.as_str(),
                             node_name.clone(),
