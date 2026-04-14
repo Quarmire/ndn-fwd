@@ -48,7 +48,30 @@ use ndn_config::{
     control_parameters::{origin, route_flags},
     control_response::status,
     nfd_command::{module, parse_command_name, verb},
+    nfd_dataset,
 };
+
+// ─── Management response type ─────────────────────────────────────────────────
+
+/// Response from a management command dispatch.
+///
+/// - `Control` — standard ControlResponse (type 0x65), encoded as NFD TLV and
+///   wrapped in a Data content field.  Used for command results and ndn-rs
+///   custom read-only endpoints.
+/// - `Dataset` — raw NFD status dataset bytes (concatenated type-0x80 entries),
+///   sent directly as the Data content.  Used for `faces/list`, `fib/list`,
+///   `rib/list`, and `strategy-choice/list` so that yanfd-compatible clients
+///   (e.g. `ndn-ctl`) can decode them.
+enum MgmtResponse {
+    Control(Box<ControlResponse>),
+    Dataset(bytes::Bytes),
+}
+
+impl From<ControlResponse> for MgmtResponse {
+    fn from(r: ControlResponse) -> Self {
+        MgmtResponse::Control(Box::new(r))
+    }
+}
 
 // ─── Socket helpers ──────────────────────────────────────────────────────────
 
@@ -369,7 +392,12 @@ pub async fn run_ndn_mgmt_handler(
         )
         .await;
 
-        send_response(&handle, &interest.name, &resp).await;
+        match resp {
+            MgmtResponse::Control(cr) => send_response(&handle, &interest.name, &cr).await,
+            MgmtResponse::Dataset(bytes) => {
+                send_dataset(&handle, &interest.name, bytes).await;
+            }
+        }
     }
 
     tracing::info!("NFD management handler stopped");
@@ -398,7 +426,7 @@ async fn dispatch_command(
     params: ControlParameters,
     source_face: Option<FaceId>,
     ctx: DispatchCtx<'_>,
-) -> ControlResponse {
+) -> MgmtResponse {
     let DispatchCtx {
         engine,
         cancel,
@@ -412,13 +440,19 @@ async fn dispatch_command(
     } = ctx;
     match module_name {
         m if m == module::RIB => handle_rib(verb_name, params, source_face, engine),
-        m if m == module::ROUTING => handle_routing(verb_name, params, engine, dvr_cfg),
-        m if m == module::DISCOVERY => handle_discovery(verb_name, params, discovery_cfg),
-        m if m == module::FACES => handle_faces(verb_name, params, source_face, engine).await,
+        m if m == module::ROUTING => {
+            handle_routing(verb_name, params, engine, dvr_cfg).into()
+        }
+        m if m == module::DISCOVERY => {
+            handle_discovery(verb_name, params, discovery_cfg).into()
+        }
+        m if m == module::FACES => {
+            handle_faces(verb_name, params, source_face, engine).await
+        }
         m if m == module::FIB => handle_fib(verb_name, params, source_face, engine),
         m if m == module::STRATEGY => handle_strategy(verb_name, params, engine),
-        m if m == module::CS => handle_cs(verb_name, params, engine).await,
-        m if m == module::NEIGHBORS => handle_neighbors(verb_name, engine),
+        m if m == module::CS => handle_cs(verb_name, params, engine).await.into(),
+        m if m == module::NEIGHBORS => handle_neighbors(verb_name, engine).into(),
         m if m == module::SERVICE => handle_service(
             verb_name,
             params,
@@ -426,10 +460,11 @@ async fn dispatch_command(
             source_face,
             discovery_sd,
             discovery_claimed,
-        ),
-        m if m == module::STATUS => handle_status(verb_name, engine, cancel),
-        m if m == module::MEASUREMENTS => handle_measurements(verb_name, engine),
-        m if m == module::CONFIG => handle_config(verb_name, config),
+        )
+        .into(),
+        m if m == module::STATUS => handle_status(verb_name, engine, cancel).into(),
+        m if m == module::MEASUREMENTS => handle_measurements(verb_name, engine).into(),
+        m if m == module::CONFIG => handle_config(verb_name, config).into(),
         m if m == module::SECURITY => {
             handle_security(
                 verb_name,
@@ -440,9 +475,10 @@ async fn dispatch_command(
                 security_is_ephemeral,
             )
             .await
+            .into()
         }
-        m if m == module::LOG => handle_log(verb_name, params),
-        _ => ControlResponse::error(status::NOT_FOUND, "unknown module"),
+        m if m == module::LOG => handle_log(verb_name, params).into(),
+        _ => ControlResponse::error(status::NOT_FOUND, "unknown module").into(),
     }
 }
 
@@ -453,12 +489,12 @@ fn handle_rib(
     params: ControlParameters,
     source_face: Option<FaceId>,
     engine: &ForwarderEngine,
-) -> ControlResponse {
+) -> MgmtResponse {
     match verb_name {
-        v if v == verb::REGISTER => rib_register(params, source_face, engine),
-        v if v == verb::UNREGISTER => rib_unregister(params, source_face, engine),
-        v if v == verb::LIST => rib_list(engine),
-        _ => ControlResponse::error(status::NOT_FOUND, "unknown rib verb"),
+        v if v == verb::REGISTER => rib_register(params, source_face, engine).into(),
+        v if v == verb::UNREGISTER => rib_unregister(params, source_face, engine).into(),
+        v if v == verb::LIST => MgmtResponse::Dataset(rib_list_dataset(engine)),
+        _ => ControlResponse::error(status::NOT_FOUND, "unknown rib verb").into(),
     }
 }
 
@@ -553,29 +589,32 @@ fn rib_unregister(
     ControlResponse::ok("OK", echo)
 }
 
-fn rib_list(engine: &ForwarderEngine) -> ControlResponse {
+fn rib_list_dataset(engine: &ForwarderEngine) -> bytes::Bytes {
     let entries = engine.rib().dump();
-    let route_count: usize = entries.iter().map(|(_, routes)| routes.len()).sum();
-    let mut text = format!("{} routes\n", route_count);
-    let mut sorted = entries;
-    sorted.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
-    for (name, routes) in &sorted {
-        for r in routes {
-            let exp = match r.expires_at {
-                Some(exp) => {
-                    let rem = exp.saturating_duration_since(std::time::Instant::now());
-                    format!(" expires_in={:.0}s", rem.as_secs_f64())
-                }
-                None => String::new(),
-            };
-            text.push_str(&format!(
-                "  {name} faceid={} origin={} cost={} flags={}{}",
-                r.face_id.0, r.origin, r.cost, r.flags, exp,
-            ));
-            text.push('\n');
-        }
+    let mut buf = bytes::BytesMut::new();
+    for (name, routes) in &entries {
+        let rib_entry = nfd_dataset::RibEntry {
+            name: name.clone(),
+            routes: routes
+                .iter()
+                .map(|r| {
+                    let expiration_period = r.expires_at.map(|exp| {
+                        exp.saturating_duration_since(std::time::Instant::now())
+                            .as_millis() as u64
+                    });
+                    nfd_dataset::Route {
+                        face_id: r.face_id.0 as u64,
+                        origin: r.origin,
+                        cost: r.cost as u64,
+                        flags: r.flags,
+                        expiration_period,
+                    }
+                })
+                .collect(),
+        };
+        buf.extend_from_slice(&rib_entry.encode());
     }
-    ControlResponse::ok_empty(text)
+    buf.freeze()
 }
 
 // ─── Routing module ───────────────────────────────────────────────────────────
@@ -854,13 +893,13 @@ async fn handle_faces(
     params: ControlParameters,
     source_face: Option<FaceId>,
     engine: &ForwarderEngine,
-) -> ControlResponse {
+) -> MgmtResponse {
     match verb_name {
-        v if v == verb::CREATE => faces_create(params, source_face, engine).await,
-        v if v == verb::DESTROY => faces_destroy(params, source_face, engine),
-        v if v == verb::LIST => faces_list(engine),
-        v if v == verb::COUNTERS => faces_counters(engine),
-        _ => ControlResponse::error(status::NOT_FOUND, "unknown faces verb"),
+        v if v == verb::CREATE => faces_create(params, source_face, engine).await.into(),
+        v if v == verb::DESTROY => faces_destroy(params, source_face, engine).into(),
+        v if v == verb::LIST => MgmtResponse::Dataset(faces_list_dataset(engine)),
+        v if v == verb::COUNTERS => faces_counters(engine).into(),
+        _ => ControlResponse::error(status::NOT_FOUND, "unknown faces verb").into(),
     }
 }
 
@@ -1068,33 +1107,45 @@ fn faces_destroy(
     ControlResponse::ok("OK", echo)
 }
 
-fn faces_list(engine: &ForwarderEngine) -> ControlResponse {
+fn faces_list_dataset(engine: &ForwarderEngine) -> bytes::Bytes {
     let entries = engine.faces().face_info();
     let face_states = engine.face_states();
-    let mut text = format!("{} faces\n", entries.len());
+    let mut buf = bytes::BytesMut::new();
     for info in &entries {
         let persistency = face_states
             .get(&info.id)
             .map(|s| s.persistency)
             .unwrap_or(FacePersistency::OnDemand);
-        let mut line = format!(
-            "  faceid={} remote={} local={} persistency={:?}",
-            info.id.0,
-            info.remote_uri.as_deref().unwrap_or("N/A"),
-            info.local_uri.as_deref().unwrap_or("N/A"),
-            persistency,
-        );
-        // Show kind if no URIs are available (e.g. App, Internal faces).
-        if info.remote_uri.is_none() && info.local_uri.is_none() {
-            line = format!(
-                "  faceid={} kind={:?} persistency={:?}",
-                info.id.0, info.kind, persistency
-            );
-        }
-        text.push_str(&line);
-        text.push('\n');
+        let face_persistency = match persistency {
+            FacePersistency::Persistent => 0,
+            FacePersistency::OnDemand => 1,
+            FacePersistency::Permanent => 2,
+        };
+        let fs = nfd_dataset::FaceStatus {
+            face_id: info.id.0 as u64,
+            uri: info
+                .remote_uri
+                .clone()
+                .unwrap_or_else(|| format!("internal://{:?}", info.kind)),
+            local_uri: info.local_uri.clone().unwrap_or_default(),
+            face_scope: 0, // non-local (management faces not distinguished yet)
+            face_persistency,
+            link_type: 0, // point-to-point
+            mtu: None,
+            base_congestion_marking_interval: None,
+            default_congestion_threshold: None,
+            n_in_interests: 0,
+            n_in_data: 0,
+            n_in_nacks: 0,
+            n_out_interests: 0,
+            n_out_data: 0,
+            n_out_nacks: 0,
+            n_in_bytes: 0,
+            n_out_bytes: 0,
+        };
+        buf.extend_from_slice(&fs.encode());
     }
-    ControlResponse::ok_empty(text)
+    buf.freeze()
 }
 
 // ─── FIB module ───────────────────────────────────────────────────────────────
@@ -1104,12 +1155,12 @@ fn handle_fib(
     params: ControlParameters,
     source_face: Option<FaceId>,
     engine: &ForwarderEngine,
-) -> ControlResponse {
+) -> MgmtResponse {
     match verb_name {
-        v if v == verb::ADD_NEXTHOP => fib_add_nexthop(params, source_face, engine),
-        v if v == verb::REMOVE_NEXTHOP => fib_remove_nexthop(params, source_face, engine),
-        v if v == verb::LIST => fib_list(engine),
-        _ => ControlResponse::error(status::NOT_FOUND, "unknown fib verb"),
+        v if v == verb::ADD_NEXTHOP => fib_add_nexthop(params, source_face, engine).into(),
+        v if v == verb::REMOVE_NEXTHOP => fib_remove_nexthop(params, source_face, engine).into(),
+        v if v == verb::LIST => MgmtResponse::Dataset(fib_list_dataset(engine)),
+        _ => ControlResponse::error(status::NOT_FOUND, "unknown fib verb").into(),
     }
 }
 
@@ -1175,18 +1226,24 @@ fn fib_remove_nexthop(
     ControlResponse::ok("OK", echo)
 }
 
-fn fib_list(engine: &ForwarderEngine) -> ControlResponse {
+fn fib_list_dataset(engine: &ForwarderEngine) -> bytes::Bytes {
     let routes = engine.fib().dump();
-    let mut text = format!("{} routes\n", routes.len());
+    let mut buf = bytes::BytesMut::new();
     for (name, entry) in &routes {
-        let nexthops: Vec<String> = entry
-            .nexthops
-            .iter()
-            .map(|nh| format!("faceid={} cost={}", nh.face_id.0, nh.cost))
-            .collect();
-        text.push_str(&format!("  {name} nexthops=[{}]\n", nexthops.join(", ")));
+        let fib_entry = nfd_dataset::FibEntry {
+            name: name.clone(),
+            nexthops: entry
+                .nexthops
+                .iter()
+                .map(|nh| nfd_dataset::NextHopRecord {
+                    face_id: nh.face_id.0 as u64,
+                    cost: nh.cost as u64,
+                })
+                .collect(),
+        };
+        buf.extend_from_slice(&fib_entry.encode());
     }
-    ControlResponse::ok_empty(text)
+    buf.freeze()
 }
 
 // ─── Strategy-choice module ──────────────────────────────────────────────────
@@ -1195,12 +1252,12 @@ fn handle_strategy(
     verb_name: &[u8],
     params: ControlParameters,
     engine: &ForwarderEngine,
-) -> ControlResponse {
+) -> MgmtResponse {
     match verb_name {
-        v if v == verb::SET => strategy_set(params, engine),
-        v if v == verb::UNSET => strategy_unset(params, engine),
-        v if v == verb::LIST => strategy_list(engine),
-        _ => ControlResponse::error(status::NOT_FOUND, "unknown strategy-choice verb"),
+        v if v == verb::SET => strategy_set(params, engine).into(),
+        v if v == verb::UNSET => strategy_unset(params, engine).into(),
+        v if v == verb::LIST => MgmtResponse::Dataset(strategy_list_dataset(engine)),
+        _ => ControlResponse::error(status::NOT_FOUND, "unknown strategy-choice verb").into(),
     }
 }
 
@@ -1291,13 +1348,17 @@ fn strategy_unset(params: ControlParameters, engine: &ForwarderEngine) -> Contro
     ControlResponse::ok("OK", echo)
 }
 
-fn strategy_list(engine: &ForwarderEngine) -> ControlResponse {
+fn strategy_list_dataset(engine: &ForwarderEngine) -> bytes::Bytes {
     let entries = engine.strategy_table().dump();
-    let mut text = format!("{} strategy entries\n", entries.len());
+    let mut buf = bytes::BytesMut::new();
     for (prefix, strategy) in &entries {
-        text.push_str(&format!("  prefix={prefix} strategy={}\n", strategy.name()));
+        let sc = nfd_dataset::StrategyChoice {
+            name: prefix.clone(),
+            strategy: strategy.name().clone(),
+        };
+        buf.extend_from_slice(&sc.encode());
     }
-    ControlResponse::ok_empty(text)
+    buf.freeze()
 }
 
 // ─── CS module ───────────────────────────────────────────────────────────────
@@ -2454,5 +2515,12 @@ async fn send_response(handle: &InProcHandle, name: &Name, resp: &ControlRespons
     let data = encode_data_unsigned(name, &content);
     if let Err(e) = handle.send(data).await {
         tracing::warn!(error = %e, "nfd-mgmt: failed to send Data response");
+    }
+}
+
+async fn send_dataset(handle: &InProcHandle, name: &Name, content: bytes::Bytes) {
+    let data = encode_data_unsigned(name, &content);
+    if let Err(e) = handle.send(data).await {
+        tracing::warn!(error = %e, "nfd-mgmt: failed to send dataset");
     }
 }
