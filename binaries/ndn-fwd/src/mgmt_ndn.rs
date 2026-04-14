@@ -40,7 +40,7 @@ use ndn_packet::{Interest, Name, NameComponent, encode::encode_data_unsigned};
 use ndn_routing::DvrConfig;
 use ndn_security::{FilePib, SchemaRule};
 use ndn_strategy::{BestRouteStrategy, MulticastStrategy};
-use ndn_transport::{Face, FaceId, FacePersistency};
+use ndn_transport::{Face, FaceId, FacePersistency, FaceKind, FaceScope};
 use tokio_util::sync::CancellationToken;
 
 use ndn_config::{
@@ -125,7 +125,7 @@ pub fn mgmt_prefix() -> Name {
 
 /// Accept NDN face connections on `path` and register each as a dynamic face.
 ///
-/// `path` is a Unix domain socket path on Unix (e.g. `/tmp/ndn.sock`)
+/// `path` is a Unix domain socket path on Unix (e.g. `/run/nfd/nfd.sock`)
 /// or a Named Pipe path on Windows (e.g. `\\.\pipe\ndn`).
 pub async fn run_face_listener(path: &str, engine: ForwarderEngine, cancel: CancellationToken) {
     let listener = match ndn_faces::local::IpcListener::bind(path) {
@@ -1108,12 +1108,14 @@ fn faces_destroy(
 }
 
 fn faces_list_dataset(engine: &ForwarderEngine) -> bytes::Bytes {
+    use std::sync::atomic::Ordering;
     let entries = engine.faces().face_info();
     let face_states = engine.face_states();
     let mut buf = bytes::BytesMut::new();
     for info in &entries {
-        let persistency = face_states
-            .get(&info.id)
+        let state = face_states.get(&info.id);
+        let persistency = state
+            .as_ref()
             .map(|s| s.persistency)
             .unwrap_or(FacePersistency::OnDemand);
         let face_persistency = match persistency {
@@ -1121,27 +1123,50 @@ fn faces_list_dataset(engine: &ForwarderEngine) -> bytes::Bytes {
             FacePersistency::OnDemand => 1,
             FacePersistency::Permanent => 2,
         };
+        let (n_in_interests, n_in_data, n_out_interests, n_out_data, n_in_bytes, n_out_bytes) =
+            state
+                .as_ref()
+                .map(|s| {
+                    (
+                        s.counters.in_interests.load(Ordering::Relaxed),
+                        s.counters.in_data.load(Ordering::Relaxed),
+                        s.counters.out_interests.load(Ordering::Relaxed),
+                        s.counters.out_data.load(Ordering::Relaxed),
+                        s.counters.in_bytes.load(Ordering::Relaxed),
+                        s.counters.out_bytes.load(Ordering::Relaxed),
+                    )
+                })
+                .unwrap_or_default();
+        let face_scope = if info.kind.scope() == FaceScope::Local { 1 } else { 0 };
+        // Multi-access link types: EtherMulticast and Multicast faces.
+        let link_type = match info.kind {
+            FaceKind::EtherMulticast | FaceKind::Multicast => 1,
+            _ => 0,
+        };
+        // Local faces have no remote_uri; use an "internal://<kind>" scheme so
+        // the client can distinguish them from network faces.
+        let uri = info
+            .remote_uri
+            .clone()
+            .unwrap_or_else(|| format!("internal://{}", info.kind));
         let fs = nfd_dataset::FaceStatus {
             face_id: info.id.0 as u64,
-            uri: info
-                .remote_uri
-                .clone()
-                .unwrap_or_else(|| format!("internal://{:?}", info.kind)),
+            uri,
             local_uri: info.local_uri.clone().unwrap_or_default(),
-            face_scope: 0, // non-local (management faces not distinguished yet)
+            face_scope,
             face_persistency,
-            link_type: 0, // point-to-point
+            link_type,
             mtu: None,
             base_congestion_marking_interval: None,
             default_congestion_threshold: None,
-            n_in_interests: 0,
-            n_in_data: 0,
+            n_in_interests,
+            n_in_data,
             n_in_nacks: 0,
-            n_out_interests: 0,
-            n_out_data: 0,
+            n_out_interests,
+            n_out_data,
             n_out_nacks: 0,
-            n_in_bytes: 0,
-            n_out_bytes: 0,
+            n_in_bytes,
+            n_out_bytes,
         };
         buf.extend_from_slice(&fs.encode());
     }
@@ -2364,7 +2389,7 @@ fn security_yubikey_detect() -> ControlResponse {
     {
         ControlResponse::error(
             status::NOT_FOUND,
-            "yubikey-piv feature is not compiled in; rebuild ndn-router with --features yubikey-piv",
+            "yubikey-piv feature is not compiled in; rebuild ndn-fwd with --features yubikey-piv",
         )
     }
 }
@@ -2451,7 +2476,7 @@ async fn security_yubikey_generate(params: ControlParameters, pib: &FilePib) -> 
         let _ = (key_name, pib);
         ControlResponse::error(
             status::NOT_FOUND,
-            "yubikey-piv feature is not compiled in; rebuild ndn-router with --features yubikey-piv",
+            "yubikey-piv feature is not compiled in; rebuild ndn-fwd with --features yubikey-piv",
         )
     }
 }
