@@ -273,6 +273,13 @@ async fn main() -> Result<()> {
     // Initialise tracing — must hold the guard until shutdown.
     let _log_guard = init_tracing(&fwd_config.logging, cli.log_level.as_deref());
 
+    tracing::warn!(
+        "NOTICE: ndn-rs is primarily AI-authored and not yet proven spec-compliant. \
+         See docs/notes/spec-compliance-audit-2026-04-20.md and \
+         testbed/EXPECTED_FAILURES.md for known issues. Do not use as a reference \
+         implementation of NDN."
+    );
+
     if let Some(ref path) = cli.config_path {
         tracing::info!(path = %path.display(), "loading config");
     } else {
