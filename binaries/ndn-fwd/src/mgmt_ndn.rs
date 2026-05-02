@@ -2553,9 +2553,140 @@ async fn send_response(handle: &InProcHandle, name: &Name, resp: &ControlRespons
     }
 }
 
+/// ndn-cxx `mgmt/status-dataset-context.cpp` segments status datasets
+/// into payloads no larger than `MAX_NDN_PACKET_SIZE - 800`. We use the
+/// same conservative default; the constant is the dataset payload
+/// budget per Data, not the wire size of the Data itself.
+const MAX_DATASET_PAYLOAD_LEN: usize = 8000;
+
+/// Build the segment Data wires for a status dataset response, per the
+/// audit's E.04 finding (ndn-cxx `mgmt/dispatcher.cpp` +
+/// `mgmt/status-dataset-context.cpp`).
+///
+/// The response name shape per segment is
+/// `<interest>/v=<version>/seg=<n>`. The last segment carries
+/// `FinalBlockId = seg=<last>` so the consumer can stop fetching.
+fn build_segmented_dataset(base_name: &Name, version: u64, content: &[u8]) -> Vec<bytes::Bytes> {
+    use ndn_packet::NameComponent;
+    use ndn_packet::encode::DataBuilder;
+
+    let total = content.len();
+    let last_seg = if total == 0 {
+        0
+    } else {
+        (total - 1) / MAX_DATASET_PAYLOAD_LEN
+    };
+
+    (0..=last_seg)
+        .map(|seg| {
+            let start = seg * MAX_DATASET_PAYLOAD_LEN;
+            let end = ((seg + 1) * MAX_DATASET_PAYLOAD_LEN).min(total);
+            let chunk = &content[start..end];
+
+            let seg_name = base_name
+                .clone()
+                .append_version(version)
+                .append_segment(seg as u64);
+
+            let mut builder = DataBuilder::new(seg_name, chunk)
+                .freshness(std::time::Duration::ZERO);
+            if seg == last_seg {
+                let last_seg_comp = NameComponent::new(
+                    ndn_packet::tlv_type::SEGMENT,
+                    bytes::Bytes::copy_from_slice(&seg_to_nni(last_seg as u64)),
+                );
+                builder = builder.final_block_id(last_seg_comp.value);
+            }
+            builder.sign_digest_sha256()
+        })
+        .collect()
+}
+
+/// NDN NonNegativeInteger: 1, 2, 4, or 8 bytes big-endian (shortest form).
+fn seg_to_nni(v: u64) -> Vec<u8> {
+    let be = v.to_be_bytes();
+    if v <= 0xFF {
+        vec![be[7]]
+    } else if v <= 0xFFFF {
+        vec![be[6], be[7]]
+    } else if v <= 0xFFFF_FFFF {
+        vec![be[4], be[5], be[6], be[7]]
+    } else {
+        be.to_vec()
+    }
+}
+
 async fn send_dataset(handle: &InProcHandle, name: &Name, content: bytes::Bytes) {
-    let data = encode_data_unsigned(name, &content);
-    if let Err(e) = handle.send(data).await {
-        tracing::warn!(error = %e, "nfd-mgmt: failed to send dataset");
+    let version = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    for wire in build_segmented_dataset(name, version, &content) {
+        if let Err(e) = handle.send(wire).await {
+            tracing::warn!(error = %e, "nfd-mgmt: failed to send dataset segment");
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod e04_tests {
+    use super::*;
+    use ndn_packet::Data;
+
+    /// E.04 — status datasets must be segmented per ndn-cxx
+    /// `mgmt/dispatcher.cpp:282-297`. A single-segment payload still
+    /// gets `<base>/v=<v>/seg=0` naming and `FinalBlockId = seg=0`.
+    #[test]
+    fn e04_single_segment_response_carries_version_segment_and_final_block_id() {
+        let base: Name = "/localhost/nfd/faces/list".parse().unwrap();
+        let content = vec![0x42u8; 100];
+        let segments = build_segmented_dataset(&base, 17, &content);
+
+        assert_eq!(segments.len(), 1, "small dataset must produce 1 segment");
+
+        let data = Data::decode(segments[0].clone()).expect("segment must parse");
+        let comps = data.name.components();
+        let n = comps.len();
+
+        assert_eq!(comps[n - 2].typ, ndn_packet::tlv_type::VERSION);
+        assert_eq!(comps[n - 1].typ, ndn_packet::tlv_type::SEGMENT);
+        assert_eq!(comps[n - 1].as_segment(), Some(0));
+
+        let mi = data.meta_info().expect("must carry MetaInfo");
+        let fb = mi.final_block_id.as_ref().expect("FinalBlockId required");
+        assert_eq!(fb.as_ref(), &[0u8]);
+    }
+
+    /// E.04 — payloads larger than `MAX_DATASET_PAYLOAD_LEN` produce
+    /// multiple segments; only the last carries `FinalBlockId`.
+    #[test]
+    fn e04_multi_segment_response_marks_only_last_segment_as_final() {
+        let base: Name = "/localhost/nfd/rib/list".parse().unwrap();
+        let content = vec![0xABu8; MAX_DATASET_PAYLOAD_LEN * 2 + 100];
+        let segments = build_segmented_dataset(&base, 42, &content);
+
+        assert_eq!(segments.len(), 3, "expected 3 segments for 2.x payload");
+
+        for (i, wire) in segments.iter().enumerate() {
+            let data = Data::decode(wire.clone()).expect("segment must parse");
+            let comps = data.name.components();
+            assert_eq!(
+                comps[comps.len() - 1].as_segment(),
+                Some(i as u64),
+                "segment {i} must be named seg={i}"
+            );
+            let fb = data.meta_info().and_then(|mi| mi.final_block_id.clone());
+            if i == segments.len() - 1 {
+                let fb = fb.expect("last segment must carry FinalBlockId");
+                assert_eq!(
+                    fb.as_ref(),
+                    seg_to_nni((segments.len() - 1) as u64).as_slice(),
+                    "FinalBlockId value must be the last segment's NNI bytes"
+                );
+            } else {
+                assert!(fb.is_none(), "non-final segment must not carry FinalBlockId");
+            }
+        }
     }
 }
