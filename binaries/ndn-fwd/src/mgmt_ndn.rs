@@ -336,6 +336,30 @@ pub struct MgmtHandles {
     pub command_replay_cache: Option<CommandReplayCache>,
 }
 
+/// Audit N.11 — pure decision over a command's `ControlParameters` location.
+///
+/// NFD management Interests carry ControlParameters in either the Name's
+/// 5th component or the `ApplicationParameters` field, never both. A peer
+/// that supplies CP in both locations is malformed per spec — the mgmt
+/// dispatcher must reject before the (possibly inconsistent) values reach
+/// per-module handlers. Audit A.09's signed-region calculation already
+/// covers both Name and AppParameters, so a SIGNED command with mismatched
+/// CP-in-both-locations would also fail signature verification; this
+/// rejection covers the unsigned and unbound-by-PSDC paths.
+///
+/// Returns the resolved `ControlParameters` slot to dispatch with, or an
+/// `Err(reason)` describing why the command was rejected.
+pub(crate) fn resolve_control_parameters(
+    in_name: Option<ControlParameters>,
+    in_app_params: Option<ControlParameters>,
+) -> Result<Option<ControlParameters>, &'static str> {
+    match (in_name, in_app_params) {
+        (Some(_), Some(_)) => Err("ControlParameters present in both Name and AppParameters"),
+        (Some(p), None) | (None, Some(p)) => Ok(Some(p)),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Audit N.10 — sliding `SignatureTime` window per signer. Mirrors
 /// ndn-cxx `ValidationPolicyCommandInterest` which keeps a per-signer
 /// last-seen timestamp and rejects either out-of-window or
@@ -562,14 +586,26 @@ pub async fn run_ndn_mgmt_handler(
         // v0.3 Signed Interest style).  NDNts Signed Interest v0.3 may place
         // them in ApplicationParameters instead, so fall back to that field if
         // name-based parsing yielded nothing.
-        let params = parsed
-            .params
-            .or_else(|| {
-                interest
-                    .app_parameters()
-                    .and_then(|app| ControlParameters::decode(app.clone()).ok())
-            })
-            .unwrap_or_default();
+        //
+        // Audit N.11 — ControlParameters MUST appear in exactly one location.
+        // Signed commands have signed-region integrity over the entire wire
+        // (audit A.09's signed-region calculation covers both Name and
+        // AppParameters), but a peer that supplies CP in *both* locations is
+        // malformed per spec: pick one. Reject with `BAD_PARAMS` to avoid
+        // ambiguity that mgmt versions / proxies could resolve differently.
+        let params_in_name = parsed.params.clone();
+        let params_in_app = interest
+            .app_parameters()
+            .and_then(|app| ControlParameters::decode(app.clone()).ok());
+        let params = match resolve_control_parameters(params_in_name, params_in_app) {
+            Ok(opt) => opt.unwrap_or_default(),
+            Err(reason) => {
+                tracing::warn!(name = %interest.name, %reason, "nfd-mgmt: rejecting (N.11)");
+                let resp = ControlResponse::error(status::BAD_PARAMS, reason);
+                send_response(&handle, &interest.name, &resp).await;
+                continue;
+            }
+        };
 
         let resp = dispatch_command(
             parsed.module.as_ref(),
@@ -2983,6 +3019,43 @@ mod e01_tests {
             err.contains("replay") || err.contains("reorder") || err.contains("SignatureTime"),
             "rejection reason should mention replay/reorder/SignatureTime, got: {err}"
         );
+    }
+
+    /// Audit N.11 — `resolve_control_parameters` rejects the
+    /// CP-in-both-locations shape that has ambiguous semantics; accepts a
+    /// single-location ControlParameters; falls through to `None` when
+    /// neither location populated. Mirrors NFD's spec-shaped requirement
+    /// that ControlParameters appear in exactly one place per Interest.
+    #[test]
+    fn n11_resolve_control_parameters_rejects_both_locations() {
+        let cp1 = ControlParameters::default();
+        let cp2 = ControlParameters::default();
+        let err = resolve_control_parameters(Some(cp1), Some(cp2))
+            .expect_err("CP in both locations must be rejected");
+        assert!(err.contains("both"), "{err}");
+    }
+
+    #[test]
+    fn n11_resolve_control_parameters_accepts_name_only() {
+        let cp = ControlParameters::default();
+        let out =
+            resolve_control_parameters(Some(cp.clone()), None).expect("Name-only CP must accept");
+        assert_eq!(out, Some(cp));
+    }
+
+    #[test]
+    fn n11_resolve_control_parameters_accepts_app_params_only() {
+        let cp = ControlParameters::default();
+        let out = resolve_control_parameters(None, Some(cp.clone()))
+            .expect("AppParams-only CP must accept");
+        assert_eq!(out, Some(cp));
+    }
+
+    #[test]
+    fn n11_resolve_control_parameters_no_cp_returns_none() {
+        let out =
+            resolve_control_parameters(None, None).expect("absent CP must produce None, not Err");
+        assert_eq!(out, None);
     }
 
     /// Audit N.10 — missing SignatureTime always rejected.
