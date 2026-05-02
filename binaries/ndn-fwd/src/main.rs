@@ -1091,6 +1091,11 @@ async fn main() -> Result<()> {
             // operators populate trust anchors. Wiring it on takes a
             // single `Some(Arc::new(Mutex::new(HashMap::new())))`.
             command_replay_cache: None,
+            // N.12 — sign control responses with the daemon's identity
+            // key when wired. Off by default to keep the bare-digest
+            // legacy behaviour; flip to `Some(signer)` once the daemon
+            // identity is provisioned.
+            command_response_signer: None,
         },
     ));
     let listener_engine = engine.clone();

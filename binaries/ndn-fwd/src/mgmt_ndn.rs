@@ -334,6 +334,14 @@ pub struct MgmtHandles {
     /// check entirely (back-compat for deployments running before the
     /// audit).
     pub command_replay_cache: Option<CommandReplayCache>,
+    /// Audit N.12 — signer used for control-response Data packets. NFD
+    /// signs control responses with the daemon's NFD key; ndn-cxx
+    /// `nfd::Controller` configured against an NFD trust schema rejects
+    /// the bare `DigestSha256` responses ndn-rs has emitted historically.
+    /// `Some(signer)` switches `send_response` onto `DataBuilder::sign_sync`
+    /// with that signer's `sig_type()` and key-locator name. `None`
+    /// preserves the legacy DigestSha256 behaviour for back-compat.
+    pub command_response_signer: Option<Arc<dyn ndn_security::Signer>>,
 }
 
 /// Audit N.11 — pure decision over a command's `ControlParameters` location.
@@ -557,7 +565,7 @@ pub async fn run_ndn_mgmt_handler(
             Some(p) => p,
             None => {
                 let resp = ControlResponse::error(status::BAD_PARAMS, "invalid command name");
-                send_response(&handle, &interest.name, &resp).await;
+                send_response(&handle, &interest.name, &resp, mgmt_handles.command_response_signer.as_deref()).await;
                 continue;
             }
         };
@@ -578,7 +586,7 @@ pub async fn run_ndn_mgmt_handler(
         .await
         {
             let resp = ControlResponse::error(status::UNAUTHORIZED, reason);
-            send_response(&handle, &interest.name, &resp).await;
+            send_response(&handle, &interest.name, &resp, mgmt_handles.command_response_signer.as_deref()).await;
             continue;
         }
 
@@ -602,7 +610,7 @@ pub async fn run_ndn_mgmt_handler(
             Err(reason) => {
                 tracing::warn!(name = %interest.name, %reason, "nfd-mgmt: rejecting (N.11)");
                 let resp = ControlResponse::error(status::BAD_PARAMS, reason);
-                send_response(&handle, &interest.name, &resp).await;
+                send_response(&handle, &interest.name, &resp, mgmt_handles.command_response_signer.as_deref()).await;
                 continue;
             }
         };
@@ -627,7 +635,7 @@ pub async fn run_ndn_mgmt_handler(
         .await;
 
         match resp {
-            MgmtResponse::Control(cr) => send_response(&handle, &interest.name, &cr).await,
+            MgmtResponse::Control(cr) => send_response(&handle, &interest.name, &cr, mgmt_handles.command_response_signer.as_deref()).await,
             MgmtResponse::Dataset(bytes) => {
                 send_dataset(&handle, &interest.name, bytes).await;
             }
@@ -2779,11 +2787,43 @@ fn handle_log(verb_name: &[u8], params: ControlParameters) -> ControlResponse {
     }
 }
 
-async fn send_response(handle: &InProcHandle, name: &Name, resp: &ControlResponse) {
+async fn send_response(
+    handle: &InProcHandle,
+    name: &Name,
+    resp: &ControlResponse,
+    signer: Option<&dyn ndn_security::Signer>,
+) {
     let content = resp.encode();
-    let data = encode_data_unsigned(name, &content);
+    let data = build_mgmt_response_wire(name, &content, signer);
     if let Err(e) = handle.send(data).await {
         tracing::warn!(error = %e, "nfd-mgmt: failed to send Data response");
+    }
+}
+
+/// Audit N.12 — encode a management control-response Data packet,
+/// signed with `signer` when one is wired and otherwise falling back to
+/// `DigestSha256` via `encode_data_unsigned`. NFD's
+/// `nfd::ControlCommandResponseDispatcher` signs every response with the
+/// daemon's identity key; ndn-cxx clients configured against an NFD
+/// trust schema reject the bare-digest variant.
+pub(crate) fn build_mgmt_response_wire(
+    name: &Name,
+    content: &[u8],
+    signer: Option<&dyn ndn_security::Signer>,
+) -> bytes::Bytes {
+    use ndn_packet::encode::DataBuilder;
+    match signer {
+        Some(s) => {
+            // FreshnessPeriod=0 keeps mgmt responses out of intermediate
+            // caches, matching `encode_data_unsigned`'s existing policy.
+            let key_name = s.cert_name().cloned().or_else(|| Some(s.key_name().clone()));
+            DataBuilder::new(name.clone(), content)
+                .freshness(std::time::Duration::ZERO)
+                .sign_sync(s.sig_type(), key_name.as_ref(), |region| {
+                    s.sign_sync(region).unwrap_or_default()
+                })
+        }
+        None => encode_data_unsigned(name, content),
     }
 }
 
@@ -3018,6 +3058,56 @@ mod e01_tests {
         assert!(
             err.contains("replay") || err.contains("reorder") || err.contains("SignatureTime"),
             "rejection reason should mention replay/reorder/SignatureTime, got: {err}"
+        );
+    }
+
+    /// Audit N.12 — `build_mgmt_response_wire` falls back to the legacy
+    /// `DigestSha256` shape when no signer is wired (back-compat).
+    #[test]
+    fn n12_response_falls_back_to_digest_sha256_when_no_signer() {
+        use ndn_packet::Data;
+        let name: Name = "/localhost/nfd/status".parse().unwrap();
+        let wire = build_mgmt_response_wire(&name, b"ok", None);
+        let data = Data::decode(wire).expect("response Data must decode");
+        let si = data.sig_info().expect("sig_info present");
+        assert_eq!(
+            si.sig_type,
+            ndn_packet::SignatureType::DigestSha256,
+            "no-signer path must fall back to DigestSha256"
+        );
+        assert!(
+            si.key_locator.is_none(),
+            "DigestSha256 must not carry KeyLocator"
+        );
+    }
+
+    /// Audit N.12 — when a signer is wired, the response Data is signed
+    /// with that signer's `sig_type()` and the SignatureInfo carries a
+    /// KeyLocator naming the signer's cert (or key) name. Mirrors NFD's
+    /// control-response signing path.
+    #[tokio::test]
+    async fn n12_response_uses_signer_when_wired() {
+        use ndn_packet::Data;
+        use ndn_security::signer::Ed25519Signer;
+
+        let seed = [21u8; 32];
+        let key_name: Name = "/operators/n12/KEY/k0".parse().unwrap();
+        let signer = Ed25519Signer::from_seed(&seed, key_name.clone());
+
+        let name: Name = "/localhost/nfd/status".parse().unwrap();
+        let wire = build_mgmt_response_wire(&name, b"ok", Some(&signer));
+        let data = Data::decode(wire).expect("response Data must decode");
+        let si = data.sig_info().expect("sig_info present");
+        assert_eq!(
+            si.sig_type,
+            ndn_packet::SignatureType::SignatureEd25519,
+            "signed response must label SignatureEd25519, not DigestSha256"
+        );
+        let kl = si.key_locator.as_ref().expect("KeyLocator must be set");
+        assert_eq!(
+            kl.to_string(),
+            key_name.to_string(),
+            "KeyLocator falls through to signer's key_name when no cert wired"
         );
     }
 
