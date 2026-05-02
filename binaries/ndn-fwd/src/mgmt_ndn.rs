@@ -328,6 +328,27 @@ pub struct MgmtHandles {
     pub require_signed_commands: bool,
 }
 
+/// Audit E.03 — `true` when `module` is an ndn-rs extension beyond NFD's
+/// canonical management surface. NFD ships only
+/// `faces`, `fib`, `rib`, `cs`, `strategy-choice`, `status`. Every other
+/// module under `/localhost/nfd/` (including `security`, `routing`,
+/// `discovery`, `neighbors`, `service`, `measurements`, `config`, `log`)
+/// is ndn-rs-only and exposes privileged surface (key generation, schema
+/// edits, route changes) that must require signed commands regardless of
+/// the operator's global `require_signed_commands` flag.
+pub(crate) fn is_extended_module(module: &[u8]) -> bool {
+    use ndn_config::nfd_command::module as m;
+    let standard: [&[u8]; 6] = [m::FACES, m::FIB, m::RIB, m::CS, m::STRATEGY, m::STATUS];
+    !standard.iter().any(|s| *s == module)
+}
+
+/// Audit E.03 — effective auth gate for a parsed command. Extended modules
+/// always require signed commands; standard modules use the operator's
+/// `require_signed_commands` flag.
+pub(crate) fn effective_require_signed(module: &[u8], require_signed_global: bool) -> bool {
+    require_signed_global || is_extended_module(module)
+}
+
 /// Authorise a command Interest per audit finding E.01 / I.07 +
 /// NFD `daemon/mgmt/command-authenticator.cpp`. Returns
 /// `Ok(())` when the Interest is permitted to dispatch, or an
@@ -417,10 +438,15 @@ pub async fn run_ndn_mgmt_handler(
 
         // E.01 / I.07 — gate command dispatch on the operator's
         // command-authentication policy (NFD command-authenticator).
+        // E.03 — extended (ndn-rs-only) modules unconditionally require
+        // signed commands; the operator-level flag only relaxes the
+        // standard NFD modules.
+        let effective_required =
+            effective_require_signed(&parsed.module, mgmt_handles.require_signed_commands);
         if let Err(reason) = authorize_command(
             &interest,
             mgmt_handles.command_validator.as_deref(),
-            mgmt_handles.require_signed_commands,
+            effective_required,
         )
         .await
         {
@@ -2789,6 +2815,74 @@ mod e01_tests {
                 .await
                 .is_ok()
         );
+    }
+
+    /// Audit E.03 — `is_extended_module` recognizes the NFD-canonical set.
+    /// Anything outside `faces / fib / rib / cs / strategy-choice / status`
+    /// is an ndn-rs extension and must be treated as privileged.
+    #[test]
+    fn e03_is_extended_module_classifies_correctly() {
+        use ndn_config::nfd_command::module as m;
+        // NFD-standard modules — never extended.
+        for std_mod in [m::FACES, m::FIB, m::RIB, m::CS, m::STRATEGY, m::STATUS] {
+            assert!(
+                !is_extended_module(std_mod),
+                "{} must NOT be extended",
+                String::from_utf8_lossy(std_mod)
+            );
+        }
+        // ndn-rs extensions — always extended.
+        for ext_mod in [
+            m::SECURITY,
+            m::ROUTING,
+            m::DISCOVERY,
+            m::NEIGHBORS,
+            m::SERVICE,
+            m::MEASUREMENTS,
+            m::CONFIG,
+            m::LOG,
+        ] {
+            assert!(
+                is_extended_module(ext_mod),
+                "{} MUST be extended",
+                String::from_utf8_lossy(ext_mod)
+            );
+        }
+    }
+
+    /// Audit E.03 — extended modules always require signed commands, even
+    /// when the operator left `require_signed_commands = false`.
+    #[test]
+    fn e03_effective_require_signed_forces_extended_modules() {
+        use ndn_config::nfd_command::module as m;
+        // Standard module follows the global flag.
+        assert!(!effective_require_signed(m::RIB, false));
+        assert!(effective_require_signed(m::RIB, true));
+        // Extended module ignores the global flag's `false` setting.
+        assert!(effective_require_signed(m::SECURITY, false));
+        assert!(effective_require_signed(m::ROUTING, false));
+        assert!(effective_require_signed(m::CONFIG, false));
+    }
+
+    /// Audit E.03 — concretely: an unsigned `/localhost/nfd/security/...`
+    /// Interest must be rejected by `authorize_command` when the gate is
+    /// computed via `effective_require_signed`, even though the global
+    /// `require_signed_commands` flag is `false`.
+    #[tokio::test]
+    async fn e03_unsigned_security_command_rejected_by_default() {
+        use ndn_config::nfd_command::module as m;
+        let cmd_name: Name = "/localhost/nfd/security/identity-generate"
+            .parse()
+            .unwrap();
+        let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
+        let global_flag = false;
+        let effective = effective_require_signed(m::SECURITY, global_flag);
+        assert!(
+            effective,
+            "extended module must escalate `require_signed`"
+        );
+        // No validator wired and effective_required=true → reject.
+        assert!(authorize_command(&interest, None, effective).await.is_err());
     }
 }
 
