@@ -314,6 +314,61 @@ pub struct MgmtHandles {
     pub dvr_cfg: Option<Arc<RwLock<DvrConfig>>>,
     /// Whether the active signing identity is ephemeral (in-memory, not persisted).
     pub security_is_ephemeral: bool,
+    /// Validator used to authorise signed command Interests (audit
+    /// finding E.01). When `None`, the auth gate is skipped and
+    /// commands run unauthenticated — current default for backward
+    /// compatibility while operators populate trust anchors.
+    pub command_validator: Option<Arc<ndn_security::Validator>>,
+    /// When `true`, an unsigned or invalid command Interest is rejected
+    /// with `status::UNAUTHORIZED`; when `false` (default), a warning is
+    /// logged but the command proceeds. Operators flip this to `true`
+    /// once trust anchors are configured. Spec ref: NFD
+    /// `daemon/mgmt/command-authenticator.cpp`; ndn-cxx
+    /// `mgmt/dispatcher.cpp:166-185`.
+    pub require_signed_commands: bool,
+}
+
+/// Authorise a command Interest per audit finding E.01 / I.07 +
+/// NFD `daemon/mgmt/command-authenticator.cpp`. Returns
+/// `Ok(())` when the Interest is permitted to dispatch, or an
+/// `Err(reason)` describing why it was rejected.
+///
+/// Behaviour:
+/// - If `require_signed = false`, every Interest is permitted; an
+///   unsigned-command warning is logged at the call site.
+/// - If `require_signed = true` and `validator = None`, every
+///   Interest is rejected — the operator opted in but didn't
+///   wire trust anchors, which is configuration error, not a
+///   silent pass.
+/// - If `require_signed = true` and `validator = Some(v)`, the
+///   Interest must be signed and `v.validate_interest` must return
+///   `Valid`.
+pub(crate) async fn authorize_command(
+    interest: &ndn_packet::Interest,
+    validator: Option<&ndn_security::Validator>,
+    require_signed: bool,
+) -> Result<(), String> {
+    if !require_signed {
+        if interest.sig_info().is_none() {
+            tracing::warn!(
+                name = %interest.name,
+                "nfd-mgmt: unsigned command accepted (require_signed_commands=false; \
+                 enable in config to enforce E.01 / NFD command-authenticator parity)"
+            );
+        }
+        return Ok(());
+    }
+    let Some(validator) = validator else {
+        return Err(
+            "command authentication required but no validator is configured".to_string(),
+        );
+    };
+    use ndn_security::InterestValidationOutcome::*;
+    match validator.validate_interest(interest).await {
+        Valid => Ok(()),
+        Invalid(e) => Err(format!("invalid command signature: {e}")),
+        Pending => Err("signing certificate not yet resolved".to_string()),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -359,6 +414,20 @@ pub async fn run_ndn_mgmt_handler(
                 continue;
             }
         };
+
+        // E.01 / I.07 — gate command dispatch on the operator's
+        // command-authentication policy (NFD command-authenticator).
+        if let Err(reason) = authorize_command(
+            &interest,
+            mgmt_handles.command_validator.as_deref(),
+            mgmt_handles.require_signed_commands,
+        )
+        .await
+        {
+            let resp = ControlResponse::error(status::UNAUTHORIZED, reason);
+            send_response(&handle, &interest.name, &resp).await;
+            continue;
+        }
 
         // ControlParameters are at name[4] for ndn-cxx (NFD management v0.2 /
         // v0.3 Signed Interest style).  NDNts Signed Interest v0.3 may place
@@ -2626,6 +2695,100 @@ async fn send_dataset(handle: &InProcHandle, name: &Name, content: bytes::Bytes)
             tracing::warn!(error = %e, "nfd-mgmt: failed to send dataset segment");
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod e01_tests {
+    use super::*;
+    use ndn_packet::Interest;
+    use ndn_packet::encode::{InterestBuilder, encode_interest};
+    use ndn_security::Validator;
+    use ndn_security::trust_schema::{NamePattern, PatternComponent, SchemaRule, TrustSchema};
+
+    fn open_schema() -> TrustSchema {
+        let mut schema = TrustSchema::new();
+        schema.add_rule(SchemaRule {
+            data_pattern: NamePattern(vec![PatternComponent::MultiCapture("_".into())]),
+            key_pattern: NamePattern(vec![PatternComponent::MultiCapture("_".into())]),
+        });
+        schema
+    }
+
+    /// E.01 — when `require_signed_commands = false` (default), every
+    /// Interest is allowed to dispatch even if unsigned. The
+    /// architecture is in place; the wire-level enforcement is opt-in
+    /// while operators populate trust anchors.
+    #[tokio::test]
+    async fn e01_unsigned_command_passes_when_require_signed_false() {
+        let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
+        let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
+        assert!(authorize_command(&interest, None, false).await.is_ok());
+    }
+
+    /// E.01 — when `require_signed_commands = true` and no validator
+    /// is wired, every command is rejected. Catches the misconfig of
+    /// "we want to enforce auth but forgot to populate trust anchors."
+    #[tokio::test]
+    async fn e01_unsigned_command_rejected_when_require_signed_true_no_validator() {
+        let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
+        let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
+        assert!(authorize_command(&interest, None, true).await.is_err());
+    }
+
+    /// E.01 — when a validator is wired and `require_signed_commands =
+    /// true`, an unsigned command is rejected.
+    #[tokio::test]
+    async fn e01_unsigned_command_rejected_when_validator_wired() {
+        let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
+        let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
+        let validator = Validator::new(open_schema());
+        assert!(
+            authorize_command(&interest, Some(&validator), true)
+                .await
+                .is_err()
+        );
+    }
+
+    /// E.01 — a properly-signed command Interest is dispatched when
+    /// the validator's cert cache holds the signer's key.
+    #[tokio::test]
+    async fn e01_signed_command_passes_when_validator_wired() {
+        use ndn_security::cert_cache::Certificate;
+        use ndn_security::signer::{Ed25519Signer, Signer as _};
+
+        let seed = [9u8; 32];
+        let key_name: Name = "/operators/alice/KEY/k1".parse().unwrap();
+        let signer = Ed25519Signer::from_seed(&seed, key_name.clone());
+        let pubkey = signer.public_key_bytes();
+
+        let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
+        let wire = InterestBuilder::new(cmd_name)
+            .app_parameters(bytes::Bytes::from_static(b"params"))
+            .sign_sync(
+                ndn_packet::SignatureType::SignatureEd25519,
+                Some(&key_name),
+                |region| signer.sign_sync(region).expect("ed25519 sign"),
+            );
+        let interest = Interest::decode(wire).unwrap();
+
+        let validator = Validator::new(open_schema());
+        validator.cert_cache().insert(Certificate {
+            name: Arc::new(key_name),
+            public_key: bytes::Bytes::copy_from_slice(&pubkey),
+            valid_from: 0,
+            valid_until: u64::MAX,
+            issuer: None,
+            signed_region: None,
+            sig_value: None,
+            sig_type: ndn_packet::SignatureType::SignatureEd25519,
+        });
+
+        assert!(
+            authorize_command(&interest, Some(&validator), true)
+                .await
+                .is_ok()
+        );
     }
 }
 

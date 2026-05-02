@@ -1079,6 +1079,13 @@ async fn main() -> Result<()> {
             discovery_cfg: mgmt_discovery_cfg,
             dvr_cfg: mgmt_dvr_cfg,
             security_is_ephemeral,
+            // E.01 / I.07 — command authentication infrastructure is
+            // wired (audit RESOLVED 2026-05-01, RUST-UNIT side); the
+            // default-on flip and trust-anchor population are tracked
+            // as a follow-up so existing deployments keep dispatching
+            // unsigned commands until operators opt in.
+            command_validator: None,
+            require_signed_commands: false,
         },
     ));
     let listener_engine = engine.clone();
