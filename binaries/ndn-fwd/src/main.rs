@@ -1086,6 +1086,11 @@ async fn main() -> Result<()> {
             // unsigned commands until operators opt in.
             command_validator: None,
             require_signed_commands: false,
+            // N.10 — replay-protection cache for signed commands. Off
+            // by default; the validator gate above is also off until
+            // operators populate trust anchors. Wiring it on takes a
+            // single `Some(Arc::new(Mutex::new(HashMap::new())))`.
+            command_replay_cache: None,
         },
     ));
     let listener_engine = engine.clone();

@@ -326,6 +326,62 @@ pub struct MgmtHandles {
     /// `daemon/mgmt/command-authenticator.cpp`; ndn-cxx
     /// `mgmt/dispatcher.cpp:166-185`.
     pub require_signed_commands: bool,
+    /// Audit N.10 — sliding `SignatureTime` window per signer to defeat
+    /// replay of captured signed commands. The cache is consulted only
+    /// when a signed command actually validates; an unsigned command
+    /// path (default `require_signed_commands=false`) does not touch
+    /// it. `Some(empty cache)` enables enforcement; `None` skips the
+    /// check entirely (back-compat for deployments running before the
+    /// audit).
+    pub command_replay_cache: Option<CommandReplayCache>,
+}
+
+/// Audit N.10 — sliding `SignatureTime` window per signer. Mirrors
+/// ndn-cxx `ValidationPolicyCommandInterest` which keeps a per-signer
+/// last-seen timestamp and rejects either out-of-window or
+/// non-strictly-increasing values to defeat replay of captured signed
+/// commands.
+pub const COMMAND_SIG_TIME_TOLERANCE_MS: u64 = 120_000; // ±2 minutes
+
+/// Audit N.10 — replay-protection cache mapping a signer's KeyLocator
+/// (or fingerprint) to the last accepted `SignatureTime`. Keyed by the
+/// canonical `Name` of the signer's certificate; one entry per active
+/// command-issuing identity.
+pub type CommandReplayCache =
+    Arc<std::sync::Mutex<std::collections::HashMap<ndn_packet::Name, u64>>>;
+
+/// Audit N.10 — pure decision over `(sig_time, now, last_seen)`. Returns
+/// the accepted `sig_time_ms` so the caller can update the cache, or an
+/// `Err(reason)` if the command must be rejected.
+///
+/// The check rejects:
+/// - missing `SignatureTime`,
+/// - `sig_time` further than `tolerance_ms` from the local clock
+///   (handles both stale captures and far-future timestamps),
+/// - `sig_time <= last_seen` (replay or out-of-order).
+pub(crate) fn check_sig_time(
+    sig_time_ms: Option<u64>,
+    now_ms: u64,
+    last_seen: Option<u64>,
+    tolerance_ms: u64,
+) -> Result<u64, String> {
+    let Some(sig_time) = sig_time_ms else {
+        return Err("signed command missing SignatureTime header".to_string());
+    };
+    let delta = now_ms.abs_diff(sig_time);
+    if delta > tolerance_ms {
+        return Err(format!(
+            "command SignatureTime {sig_time} ms is outside ±{tolerance_ms} ms window of now={now_ms}"
+        ));
+    }
+    if let Some(last) = last_seen
+        && sig_time <= last
+    {
+        return Err(format!(
+            "command SignatureTime {sig_time} ms <= last accepted {last} ms (replay or reorder)"
+        ));
+    }
+    Ok(sig_time)
 }
 
 /// Audit E.03 — `true` when `module` is an ndn-rs extension beyond NFD's
@@ -364,10 +420,16 @@ pub(crate) fn effective_require_signed(module: &[u8], require_signed_global: boo
 /// - If `require_signed = true` and `validator = Some(v)`, the
 ///   Interest must be signed and `v.validate_interest` must return
 ///   `Valid`.
+/// - If `replay_cache` is `Some(_)`, audit N.10's `SignatureTime`
+///   window is enforced after the signature passes: timestamps must
+///   be within ±`COMMAND_SIG_TIME_TOLERANCE_MS` of the local clock
+///   AND strictly greater than the last accepted value for the same
+///   signer.
 pub(crate) async fn authorize_command(
     interest: &ndn_packet::Interest,
     validator: Option<&ndn_security::Validator>,
     require_signed: bool,
+    replay_cache: Option<&CommandReplayCache>,
 ) -> Result<(), String> {
     if !require_signed {
         if interest.sig_info().is_none() {
@@ -386,10 +448,50 @@ pub(crate) async fn authorize_command(
     };
     use ndn_security::InterestValidationOutcome::*;
     match validator.validate_interest(interest).await {
-        Valid => Ok(()),
-        Invalid(e) => Err(format!("invalid command signature: {e}")),
-        Pending => Err("signing certificate not yet resolved".to_string()),
+        Valid => {}
+        Invalid(e) => return Err(format!("invalid command signature: {e}")),
+        Pending => return Err("signing certificate not yet resolved".to_string()),
     }
+
+    // Audit N.10 — replay protection (only when the operator wired a
+    // cache). Identifies the signer via the SignatureInfo's KeyLocator;
+    // if the locator is missing or doesn't carry a `Name`, the command
+    // is rejected (an auth path without a stable signer identity is
+    // not a path that can be replay-protected).
+    if let Some(cache) = replay_cache {
+        let sig_info = interest
+            .sig_info()
+            .ok_or_else(|| "signed command missing SignatureInfo for replay check".to_string())?;
+        let signer = sig_info
+            .key_locator
+            .as_ref()
+            .ok_or_else(|| {
+                "signed command missing KeyLocator name for replay check".to_string()
+            })?
+            .as_ref()
+            .clone();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let last_seen = cache
+            .lock()
+            .map_err(|_| "command replay cache poisoned".to_string())?
+            .get(&signer)
+            .copied();
+        let accepted = check_sig_time(
+            sig_info.sig_time,
+            now_ms,
+            last_seen,
+            COMMAND_SIG_TIME_TOLERANCE_MS,
+        )?;
+        cache
+            .lock()
+            .map_err(|_| "command replay cache poisoned".to_string())?
+            .insert(signer, accepted);
+    }
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,6 +549,7 @@ pub async fn run_ndn_mgmt_handler(
             &interest,
             mgmt_handles.command_validator.as_deref(),
             effective_required,
+            mgmt_handles.command_replay_cache.as_ref(),
         )
         .await
         {
@@ -2749,7 +2852,7 @@ mod e01_tests {
     async fn e01_unsigned_command_passes_when_require_signed_false() {
         let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
         let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
-        assert!(authorize_command(&interest, None, false).await.is_ok());
+        assert!(authorize_command(&interest, None, false, None).await.is_ok());
     }
 
     /// E.01 — when `require_signed_commands = true` and no validator
@@ -2759,7 +2862,7 @@ mod e01_tests {
     async fn e01_unsigned_command_rejected_when_require_signed_true_no_validator() {
         let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
         let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
-        assert!(authorize_command(&interest, None, true).await.is_err());
+        assert!(authorize_command(&interest, None, true, None).await.is_err());
     }
 
     /// E.01 — when a validator is wired and `require_signed_commands =
@@ -2770,7 +2873,7 @@ mod e01_tests {
         let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
         let validator = Validator::new(open_schema());
         assert!(
-            authorize_command(&interest, Some(&validator), true)
+            authorize_command(&interest, Some(&validator), true, None)
                 .await
                 .is_err()
         );
@@ -2811,10 +2914,142 @@ mod e01_tests {
         });
 
         assert!(
-            authorize_command(&interest, Some(&validator), true)
+            authorize_command(&interest, Some(&validator), true, None)
                 .await
                 .is_ok()
         );
+    }
+
+    /// Audit N.10 — end-to-end replay protection.
+    /// Build a signed command Interest with an explicit SignatureTime,
+    /// run `authorize_command` twice with the same wire bytes through a
+    /// `CommandReplayCache`. First call accepts and records the
+    /// timestamp; second call rejects on the strictly-greater rule.
+    #[tokio::test]
+    async fn n10_replay_rejected_when_cache_enabled() {
+        use ndn_security::cert_cache::Certificate;
+        use ndn_security::signer::{Ed25519Signer, Signer as _};
+
+        let seed = [13u8; 32];
+        let key_name: Name = "/operators/n10/KEY/k0".parse().unwrap();
+        let signer = Ed25519Signer::from_seed(&seed, key_name.clone());
+        let pubkey = signer.public_key_bytes();
+
+        // Build one signed Interest (whose `sign_sync` writes a fresh
+        // SignatureTime ≈ now); decode the same wire bytes twice. Both
+        // decoded Interests share that single SigTime, so the second
+        // dispatch is a true replay.
+        let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
+        let wire = InterestBuilder::new(cmd_name)
+            .app_parameters(bytes::Bytes::from_static(b"params"))
+            .sign_sync(
+                ndn_packet::SignatureType::SignatureEd25519,
+                Some(&key_name),
+                |region| signer.sign_sync(region).expect("ed25519 sign"),
+            );
+        let interest = Interest::decode(wire.clone()).unwrap();
+        let interest_replay = Interest::decode(wire).unwrap();
+
+        let validator = Validator::new(open_schema());
+        validator.cert_cache().insert(Certificate {
+            name: Arc::new(key_name.clone()),
+            public_key: bytes::Bytes::copy_from_slice(&pubkey),
+            valid_from: 0,
+            valid_until: u64::MAX,
+            issuer: None,
+            signed_region: None,
+            sig_value: None,
+            sig_type: ndn_packet::SignatureType::SignatureEd25519,
+        });
+
+        let cache: CommandReplayCache =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
+        // First dispatch — valid signature, fresh timestamp.
+        assert!(
+            authorize_command(&interest, Some(&validator), true, Some(&cache))
+                .await
+                .is_ok(),
+            "first signed command must be accepted"
+        );
+
+        // Second dispatch with the same Interest = replay. The cache now
+        // has `last_seen == sig_time`, so the strictly-greater rule
+        // rejects.
+        let err = authorize_command(&interest_replay, Some(&validator), true, Some(&cache))
+            .await
+            .expect_err("replayed signed command must be rejected (N.10)");
+        assert!(
+            err.contains("replay") || err.contains("reorder") || err.contains("SignatureTime"),
+            "rejection reason should mention replay/reorder/SignatureTime, got: {err}"
+        );
+    }
+
+    /// Audit N.10 — missing SignatureTime always rejected.
+    #[test]
+    fn n10_check_sig_time_rejects_missing() {
+        let err = check_sig_time(None, 1_000, None, COMMAND_SIG_TIME_TOLERANCE_MS)
+            .expect_err("missing SignatureTime must reject");
+        assert!(err.contains("SignatureTime"), "{err}");
+    }
+
+    /// Audit N.10 — SignatureTime outside the ±tolerance window rejected.
+    #[test]
+    fn n10_check_sig_time_rejects_out_of_window() {
+        let now = 10_000_000u64;
+        let stale = now - (COMMAND_SIG_TIME_TOLERANCE_MS + 1);
+        let future = now + (COMMAND_SIG_TIME_TOLERANCE_MS + 1);
+        assert!(check_sig_time(Some(stale), now, None, COMMAND_SIG_TIME_TOLERANCE_MS).is_err());
+        assert!(check_sig_time(Some(future), now, None, COMMAND_SIG_TIME_TOLERANCE_MS).is_err());
+    }
+
+    /// Audit N.10 — fresh SignatureTime within window with no prior
+    /// observation is accepted.
+    #[test]
+    fn n10_check_sig_time_accepts_fresh_in_window() {
+        let now = 10_000_000u64;
+        let sig = now - 1_000;
+        let accepted = check_sig_time(Some(sig), now, None, COMMAND_SIG_TIME_TOLERANCE_MS)
+            .expect("fresh in-window SignatureTime must accept");
+        assert_eq!(accepted, sig);
+    }
+
+    /// Audit N.10 — replay (same SignatureTime as last accepted) rejected.
+    /// Mirrors ndn-cxx `ValidationPolicyCommandInterest`'s strict-greater
+    /// rule.
+    #[test]
+    fn n10_check_sig_time_rejects_replay() {
+        let now = 10_000_000u64;
+        let sig = now - 5_000;
+        // First call accepts
+        let _ = check_sig_time(Some(sig), now, None, COMMAND_SIG_TIME_TOLERANCE_MS).unwrap();
+        // Replay: identical sig_time with last_seen=sig must reject.
+        let err = check_sig_time(Some(sig), now, Some(sig), COMMAND_SIG_TIME_TOLERANCE_MS)
+            .expect_err("replay must reject");
+        assert!(err.contains("replay") || err.contains("reorder"), "{err}");
+
+        // Older-than-last also rejected.
+        let stale_but_in_window = sig - 1;
+        let err2 = check_sig_time(
+            Some(stale_but_in_window),
+            now,
+            Some(sig),
+            COMMAND_SIG_TIME_TOLERANCE_MS,
+        )
+        .expect_err("non-strictly-increasing must reject");
+        assert!(err2.contains("replay") || err2.contains("reorder"), "{err2}");
+    }
+
+    /// Audit N.10 — strictly-greater SignatureTime within window accepted
+    /// even when a prior observation exists for the same signer.
+    #[test]
+    fn n10_check_sig_time_accepts_strictly_greater() {
+        let now = 10_000_000u64;
+        let last = now - 5_000;
+        let sig = last + 1; // strictly greater
+        let accepted =
+            check_sig_time(Some(sig), now, Some(last), COMMAND_SIG_TIME_TOLERANCE_MS).unwrap();
+        assert_eq!(accepted, sig);
     }
 
     /// Audit E.03 — `is_extended_module` recognizes the NFD-canonical set.
@@ -2882,7 +3117,7 @@ mod e01_tests {
             "extended module must escalate `require_signed`"
         );
         // No validator wired and effective_required=true → reject.
-        assert!(authorize_command(&interest, None, effective).await.is_err());
+        assert!(authorize_command(&interest, None, effective, None).await.is_err());
     }
 }
 
