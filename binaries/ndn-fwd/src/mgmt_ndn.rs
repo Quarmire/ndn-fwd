@@ -495,13 +495,11 @@ pub(crate) async fn authorize_command(
             .sig_info()
             .ok_or_else(|| "signed command missing SignatureInfo for replay check".to_string())?;
         let signer = sig_info
-            .key_locator
-            .as_ref()
+            .key_locator_name()
             .ok_or_else(|| {
                 "signed command missing KeyLocator name for replay check".to_string()
-            })?
-            .as_ref()
-            .clone();
+            })
+            .map(|arc_name| arc_name.as_ref().clone())?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -3109,6 +3107,7 @@ mod e01_tests {
             key_name.to_string(),
             "KeyLocator falls through to signer's key_name when no cert wired"
         );
+        // Note: kl.to_string() works because KeyLocator implements Display.
     }
 
     /// Audit N.11 — `resolve_control_parameters` rejects the
