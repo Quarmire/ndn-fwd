@@ -478,6 +478,20 @@ pub(crate) async fn authorize_command(
             "command authentication required but no validator is configured".to_string(),
         );
     };
+    // DigestSha256 verifies byte integrity but carries no key identity.
+    // Per NFD command-authenticator.cpp, only key-backed signature types
+    // (Ed25519, ECDSA, RSA, BLAKE3) are accepted when a key validator is
+    // present. DigestSha256-only Interests are treated as unsigned here.
+    if matches!(
+        interest.sig_info().map(|s| s.sig_type),
+        None | Some(ndn_packet::SignatureType::DigestSha256)
+    ) {
+        return Err(
+            "command rejected: key-backed signature required \
+             (DigestSha256 does not establish key identity)"
+                .to_string(),
+        );
+    }
     use ndn_security::InterestValidationOutcome::*;
     match validator.validate_interest(interest).await {
         Valid => {}
@@ -2946,6 +2960,24 @@ mod e01_tests {
             authorize_command(&interest, Some(&validator), true, None)
                 .await
                 .is_err()
+        );
+    }
+
+    /// E.01 — DigestSha256-signed command is rejected when a key validator
+    /// is wired; DigestSha256 establishes integrity only, not key identity.
+    #[tokio::test]
+    async fn e01_digest_sha256_rejected_when_validator_wired() {
+        let cmd_name: Name = "/localhost/nfd/rib/register".parse().unwrap();
+        let wire = InterestBuilder::new(cmd_name)
+            .app_parameters(bytes::Bytes::from_static(b"params"))
+            .sign_digest_sha256();
+        let interest = Interest::decode(wire).unwrap();
+        let validator = Validator::new(open_schema());
+        let result = authorize_command(&interest, Some(&validator), true, None).await;
+        assert!(result.is_err(), "DigestSha256 must be rejected with a key validator");
+        assert!(
+            result.unwrap_err().contains("key-backed"),
+            "error message must explain why"
         );
     }
 

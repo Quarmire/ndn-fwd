@@ -312,6 +312,9 @@ async fn main() -> Result<()> {
     let (mgmt_app_face, mgmt_handle) = InProcFace::new(ndn_transport::FaceId(MGMT_FACE_ID), 64);
 
     let security_init = load_security(&fwd_config);
+    // E.01 — load management command validator from trust_anchor_pib if set.
+    // Aborts on startup if the PIB is missing or empty (fail-fast per spec).
+    let mgmt_validator = load_mgmt_validator(&fwd_config.security.mgmt)?;
     let pib: Option<Arc<FilePib>> = security_init
         .pib_path
         .as_ref()
@@ -1079,22 +1082,18 @@ async fn main() -> Result<()> {
             discovery_cfg: mgmt_discovery_cfg,
             dvr_cfg: mgmt_dvr_cfg,
             security_is_ephemeral,
-            // E.01 / I.07 — command authentication infrastructure is
-            // wired (audit RESOLVED 2026-05-01, RUST-UNIT side); the
-            // default-on flip and trust-anchor population are tracked
-            // as a follow-up so existing deployments keep dispatching
-            // unsigned commands until operators opt in.
-            command_validator: None,
-            require_signed_commands: false,
-            // N.10 — replay-protection cache for signed commands. Off
-            // by default; the validator gate above is also off until
-            // operators populate trust anchors. Wiring it on takes a
-            // single `Some(Arc::new(Mutex::new(HashMap::new())))`.
+            // E.01 — command validator loaded from [security.mgmt] trust_anchor_pib.
+            // None when trust_anchor_pib is unset; require_signed_commands = true
+            // with no validator rejects all commands (fail-secure; operator must
+            // provide anchors or set require_signed_commands = false for dev mode).
+            command_validator: mgmt_validator,
+            require_signed_commands: fwd_config.security.mgmt.require_signed_commands,
+            // N.10 — replay-protection cache. Off by default; wire in once
+            // trust-anchor enforcement is stable in production deployments.
             command_replay_cache: None,
-            // N.12 — sign control responses with the daemon's identity
-            // key when wired. Off by default to keep the bare-digest
-            // legacy behaviour; flip to `Some(signer)` once the daemon
-            // identity is provisioned.
+            // N.12 — sign control responses with the daemon identity key. Off by
+            // default to preserve bare-DigestSha256 back-compat; flip once the
+            // daemon identity is provisioned.
             command_response_signer: None,
         },
     ));
@@ -1409,6 +1408,60 @@ fn parse_bind_addr(bind: &str, label: &str) -> Option<std::net::SocketAddr> {
 /// Parse a URI-style NDN name like `/ndn/test` into a `Name`.
 fn parse_name(uri: &str) -> Name {
     uri.parse().unwrap_or_else(|_| Name::root())
+}
+
+/// Load management-command trust anchors from the PIB path in `cfg`.
+///
+/// Returns `None` when `trust_anchor_pib` is not set. Returns an error
+/// (causing startup failure) if the PIB path is present but unreachable,
+/// or if it contains no trust anchors — operators must either populate
+/// the PIB or set `require_signed_commands = false` to opt out.
+///
+/// The resulting [`ndn_security::Validator`] uses `TrustSchema::accept_all`
+/// so any command Interest signed by a key whose cert is in the anchor set
+/// is accepted; namespace constraints are the operator's trust-policy concern
+/// at identity-issuance time, not the forwarder's.
+fn load_mgmt_validator(
+    cfg: &ndn_config::MgmtSecurityConfig,
+) -> Result<Option<Arc<ndn_security::Validator>>> {
+    let Some(pib_path_str) = &cfg.trust_anchor_pib else {
+        if cfg.require_signed_commands {
+            tracing::warn!(
+                "[security.mgmt] require_signed_commands=true but no trust_anchor_pib set; \
+                 all management commands will be rejected. \
+                 Add trust_anchor_pib or set require_signed_commands=false for dev mode."
+            );
+        }
+        return Ok(None);
+    };
+    let pib_path = PathBuf::from(pib_path_str);
+    let pib = ndn_security::FilePib::open(&pib_path).map_err(|e| {
+        anyhow::anyhow!(
+            "[security.mgmt] cannot open trust_anchor_pib '{}': {e}. \
+             Run `ndn-sec --pib {pib_path_str} keygen --anchor /your/identity` to create one.",
+            pib_path.display()
+        )
+    })?;
+    let anchors = pib.trust_anchors().map_err(|e| {
+        anyhow::anyhow!(
+            "[security.mgmt] failed to load anchors from '{}': {e}",
+            pib_path.display()
+        )
+    })?;
+    if anchors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "[security.mgmt] trust_anchor_pib '{}' contains no trust anchors. \
+             Run `ndn-sec --pib {pib_path_str} anchor add /your/identity` to add one.",
+            pib_path.display()
+        ));
+    }
+    let schema = ndn_security::TrustSchema::accept_all();
+    let validator = ndn_security::Validator::new(schema);
+    for anchor in anchors {
+        tracing::info!(name = %anchor.name, "mgmt: loaded trust anchor");
+        validator.add_trust_anchor(anchor);
+    }
+    Ok(Some(Arc::new(validator)))
 }
 
 /// Build a content store from config.
