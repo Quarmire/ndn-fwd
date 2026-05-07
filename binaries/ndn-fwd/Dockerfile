@@ -28,6 +28,11 @@ FROM rust:slim AS builder
 
 WORKDIR /build
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy only workspace manifests first (cache-friendly: only re-compiles deps
 # when Cargo.toml / Cargo.lock changes, not when source changes).
 COPY Cargo.toml Cargo.lock ./
