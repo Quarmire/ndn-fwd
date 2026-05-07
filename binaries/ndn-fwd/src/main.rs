@@ -675,6 +675,86 @@ async fn main() -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     let _ = &auto_ether_ifaces;
 
+    // ── NLSR routing protocol ─────────────────────────────────────────────────
+    if fwd_config.routing.nlsr.enabled {
+        let nlsr_toml = &fwd_config.routing.nlsr;
+        let network: Name = nlsr_toml
+            .network
+            .parse()
+            .unwrap_or_else(|_| "/ndn".parse().unwrap());
+        let own_router: Name = nlsr_toml.router.parse().unwrap_or_else(|_| {
+            tracing::warn!(router = %nlsr_toml.router, "NLSR: invalid router name");
+            Name::root()
+        });
+        let lsa_prefix = ndn_routing::NlsrConfig::default_lsa_prefix(&network);
+        let neighbors = nlsr_toml
+            .neighbors
+            .iter()
+            .map(|n| ndn_routing::NeighborConfig {
+                name: n.name.parse().unwrap_or_else(|_| Name::root()),
+                face_uri: n.face_uri.clone(),
+                link_cost: n.link_cost,
+            })
+            .collect();
+        let name_prefixes: Vec<Name> = nlsr_toml
+            .name_prefixes
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let nlsr_cfg = ndn_routing::NlsrConfig {
+            own_router: own_router.clone(),
+            network,
+            lsa_prefix,
+            neighbors,
+            name_prefixes,
+            lsa_refresh_secs: nlsr_toml.lsa_refresh_secs,
+            adj_lsa_build_interval_secs: nlsr_toml.adj_lsa_build_interval_secs,
+            routing_calc_interval_secs: nlsr_toml.routing_calc_interval_secs,
+            hello_interval_secs: nlsr_toml.hello_interval_secs,
+            hello_retries: nlsr_toml.hello_retries,
+            hello_timeout_secs: nlsr_toml.hello_timeout_secs,
+            sync_interest_lifetime_ms: nlsr_toml.sync_interest_lifetime_ms,
+            permissive_validation: nlsr_toml.permissive_validation,
+            max_faces_per_prefix: nlsr_toml.max_faces_per_prefix,
+        };
+        // Pre-create UDP faces to NLSR neighbors so they exist when NLSR starts.
+        // This avoids a race where NLSR's first Hello fires before post-build
+        // face creation spawns have run.
+        for n in &nlsr_toml.neighbors {
+            let uri = &n.face_uri;
+            let addr_str = uri
+                .strip_prefix("udp4://")
+                .or_else(|| uri.strip_prefix("udp://"))
+                .unwrap_or(uri);
+            let peer: std::net::SocketAddr = match addr_str.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(uri=%uri, error=%e, "NLSR: skipping pre-connect for neighbor with unparseable URI");
+                    continue;
+                }
+            };
+            let face_id = builder.alloc_face_id();
+            let local: std::net::SocketAddr = if peer.is_ipv4() {
+                "0.0.0.0:0".parse().unwrap()
+            } else {
+                "[::]:0".parse().unwrap()
+            };
+            match ndn_faces::net::UdpFace::bind(local, peer, face_id).await {
+                Ok(face) => {
+                    tracing::info!(face = face_id.0, remote = %peer, "NLSR: pre-connected neighbor face");
+                    builder = builder.face(face);
+                }
+                Err(e) => {
+                    tracing::warn!(remote=%peer, error=%e, "NLSR: failed to pre-connect neighbor face");
+                }
+            }
+        }
+
+        let nlsr = ndn_routing::NlsrProtocol::new(nlsr_cfg);
+        builder = builder.routing_protocol_dyn(nlsr);
+        tracing::info!(router = %own_router, "NLSR routing protocol enabled");
+    }
+
     let (engine, shutdown) = builder.build().await?;
 
     // Apply static FIB routes from config.
@@ -720,8 +800,36 @@ async fn main() -> Result<()> {
 
     for (face_idx, face_cfg) in face_configs.iter().enumerate() {
         match face_cfg {
-            ndn_config::FaceConfig::Udp { bind, .. } => {
-                if let Some(addr) =
+            ndn_config::FaceConfig::Udp { bind, remote } => {
+                // Pre-connected face when remote is specified.
+                if let Some(remote_addr) = remote {
+                    let peer: std::net::SocketAddr = match remote_addr.parse() {
+                        Ok(a) => a,
+                        Err(e) => {
+                            tracing::error!(addr = %remote_addr, error = %e, "invalid UDP remote address");
+                            continue;
+                        }
+                    };
+                    let face_id = engine.faces().alloc_id();
+                    let local: std::net::SocketAddr = if peer.is_ipv4() {
+                        "0.0.0.0:0".parse().unwrap()
+                    } else {
+                        "[::]:0".parse().unwrap()
+                    };
+                    let eng = engine.clone();
+                    tokio::spawn(async move {
+                        match ndn_faces::net::UdpFace::bind(local, peer, face_id).await {
+                            Ok(face) => {
+                                let c = CancellationToken::new();
+                                tracing::info!(face = face_id.0, remote = %peer, "udp pre-connected face created");
+                                eng.add_face_with_persistency(face, c, ndn_transport::FacePersistency::Persistent);
+                            }
+                            Err(e) => {
+                                tracing::error!(remote = %peer, error = %e, "failed to create UDP face");
+                            }
+                        }
+                    });
+                } else if let Some(addr) =
                     parse_bind_addr(bind.as_deref().unwrap_or("0.0.0.0:6363"), "UDP")
                 {
                     let eng = engine.clone();
