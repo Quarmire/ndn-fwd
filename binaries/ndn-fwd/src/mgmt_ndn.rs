@@ -2839,7 +2839,6 @@ const MAX_DATASET_PAYLOAD_LEN: usize = 8000;
 /// `<interest>/v=<version>/seg=<n>`. The last segment carries
 /// `FinalBlockId = seg=<last>` so the consumer can stop fetching.
 fn build_segmented_dataset(base_name: &Name, version: u64, content: &[u8]) -> Vec<bytes::Bytes> {
-    use ndn_packet::NameComponent;
     use ndn_packet::encode::DataBuilder;
 
     let total = content.len();
@@ -2863,17 +2862,14 @@ fn build_segmented_dataset(base_name: &Name, version: u64, content: &[u8]) -> Ve
             let mut builder = DataBuilder::new(seg_name, chunk)
                 .freshness(std::time::Duration::ZERO);
             if seg == last_seg {
-                let last_seg_comp = NameComponent::new(
-                    ndn_packet::tlv_type::SEGMENT,
-                    bytes::Bytes::copy_from_slice(&seg_to_nni(last_seg as u64)),
-                );
-                builder = builder.final_block_id(last_seg_comp.value);
+                builder = builder.final_block_id_typed_seg(last_seg as u64);
             }
             builder.sign_digest_sha256()
         })
         .collect()
 }
 
+#[cfg(test)]
 /// NDN NonNegativeInteger: 1, 2, 4, or 8 bytes big-endian (shortest form).
 fn seg_to_nni(v: u64) -> Vec<u8> {
     let be = v.to_be_bytes();
@@ -3309,7 +3305,8 @@ mod e04_tests {
 
         let mi = data.meta_info().expect("must carry MetaInfo");
         let fb = mi.final_block_id.as_ref().expect("FinalBlockId required");
-        assert_eq!(fb.as_ref(), &[0u8]);
+        // FinalBlockId must be a full SegmentNameComponent TLV: type=0x32 len value
+        assert_eq!(fb.as_ref(), &[0x32u8, 0x01, 0x00]);
     }
 
     /// E.04 — payloads larger than `MAX_DATASET_PAYLOAD_LEN` produce
@@ -3333,10 +3330,15 @@ mod e04_tests {
             let fb = data.meta_info().and_then(|mi| mi.final_block_id.clone());
             if i == segments.len() - 1 {
                 let fb = fb.expect("last segment must carry FinalBlockId");
+                // FinalBlockId must be a full SegmentNameComponent TLV:
+                // type=0x32, length byte, then the NNI value of the last segment.
+                let last_nni = seg_to_nni((segments.len() - 1) as u64);
+                let mut expected = vec![0x32u8, last_nni.len() as u8];
+                expected.extend_from_slice(&last_nni);
                 assert_eq!(
                     fb.as_ref(),
-                    seg_to_nni((segments.len() - 1) as u64).as_slice(),
-                    "FinalBlockId value must be the last segment's NNI bytes"
+                    expected.as_slice(),
+                    "FinalBlockId must be a SegmentNameComponent TLV for the last segment"
                 );
             } else {
                 assert!(fb.is_none(), "non-final segment must not carry FinalBlockId");
