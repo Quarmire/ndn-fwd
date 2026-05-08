@@ -1042,6 +1042,16 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── WebTransport listener (issue #14) ────────────────────────────────────
+    #[cfg(feature = "webtransport")]
+    if let Some(wt_cfg) = fwd_config.listeners.webtransport.clone()
+        && wt_cfg.enabled
+    {
+        let eng = engine.clone();
+        let c = cancel.clone();
+        tokio::spawn(async move { run_wt_listener(wt_cfg, eng, c).await });
+    }
+
     // ── Face system: create auto-enumerated multicast faces ───────────────────
     //
     // When discovery was enabled, `auto_ether_pre_alloc` / `auto_udp_pre_alloc`
@@ -1301,6 +1311,84 @@ async fn main() -> Result<()> {
 
     shutdown.shutdown().await;
     Ok(())
+}
+
+// ─── WebTransport listener (issue #14) ───────────────────────────────────────
+
+#[cfg(feature = "webtransport")]
+async fn run_wt_listener(
+    cfg: ndn_config::WebTransportListenerConfig,
+    engine: ForwarderEngine,
+    cancel: CancellationToken,
+) {
+    use ndn_face_webtransport::{WebTransportListener, WtTlsConfig};
+
+    let bind_addr: std::net::SocketAddr = match cfg.listen.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(target: "face.wt", listen=%cfg.listen, error=%e, "wt-listener: invalid bind address");
+            return;
+        }
+    };
+
+    // Convert toml::Value cert_source → ndn_acme::CertSource (JSON shape).
+    let cert_source: ndn_acme::CertSource = match serde_json::to_string(&cfg.cert_source)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
+        Some(s) => s,
+        None => {
+            tracing::error!(target: "face.wt", "wt-listener: cert_source could not be parsed");
+            return;
+        }
+    };
+
+    // Cloudflare is the only DNS provider wired in phase 2.  Operators using
+    // SelfSignedDev/Pem don't need one; ACME requires it.
+    let dns_provider: Option<std::sync::Arc<dyn ndn_acme::DnsProvider>> =
+        Some(std::sync::Arc::new(ndn_acme::CloudflareDnsProvider::new()));
+
+    let material = match cert_source.resolve(dns_provider).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(target: "face.wt", error=%e, "wt-listener: cert resolve failed");
+            return;
+        }
+    };
+
+    let tls = WtTlsConfig::Pem {
+        cert_chain_pem: material.cert_chain_pem,
+        private_key_pem: material.private_key_pem,
+    };
+
+    let listener = match WebTransportListener::bind(bind_addr, tls).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(target: "face.wt", addr=%bind_addr, error=%e, "wt-listener: bind failed");
+            return;
+        }
+    };
+    tracing::info!(target: "face.wt", addr=%listener.local_addr(), "WebTransport listener ready");
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            r = async {
+                let id = engine.faces().alloc_id();
+                listener.accept(id).await.map(|f| (id, f))
+            } => match r {
+                Ok((id, face)) => {
+                    let peer = face.remote_addr().to_string();
+                    let conn_cancel = cancel.child_token();
+                    engine.add_face(face, conn_cancel);
+                    tracing::info!(target: "face.wt", face=%id, peer=%peer, "wt-listener: accepted session");
+                }
+                Err(e) => tracing::warn!(target: "face.wt", error=%e, "wt-listener: accept error"),
+            },
+        }
+    }
+
+    tracing::info!(target: "face.wt", "WebTransport listener stopped");
 }
 
 // ─── WebSocket listener ──────────────────────────────────────────────────────
