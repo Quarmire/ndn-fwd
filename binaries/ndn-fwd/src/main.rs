@@ -676,6 +676,8 @@ async fn main() -> Result<()> {
     let _ = &auto_ether_ifaces;
 
     // ── NLSR routing protocol ─────────────────────────────────────────────────
+    // FIB entry for the Hello responder CallbackFace; registered post-build.
+    let mut nlsr_hello_fib: Option<(Name, ndn_transport::FaceId)> = None;
     if fwd_config.routing.nlsr.enabled {
         let nlsr_toml = &fwd_config.routing.nlsr;
         let network: Name = nlsr_toml
@@ -687,6 +689,7 @@ async fn main() -> Result<()> {
             Name::root()
         });
         let lsa_prefix = ndn_routing::NlsrConfig::default_lsa_prefix(&network);
+        let sync_prefix = ndn_routing::NlsrConfig::default_sync_prefix(&network);
         let neighbors = nlsr_toml
             .neighbors
             .iter()
@@ -701,10 +704,13 @@ async fn main() -> Result<()> {
             .iter()
             .filter_map(|s| s.parse().ok())
             .collect();
-        let nlsr_cfg = ndn_routing::NlsrConfig {
+        let mut nlsr_cfg = ndn_routing::NlsrConfig {
             own_router: own_router.clone(),
             network,
             lsa_prefix,
+            sync_prefix,
+            sync_face: None,  // set below after private face creation
+            hello_face: None, // set below; private face keeps Hello Data away from engine reader
             neighbors,
             name_prefixes,
             lsa_refresh_secs: nlsr_toml.lsa_refresh_secs,
@@ -717,9 +723,21 @@ async fn main() -> Result<()> {
             permissive_validation: nlsr_toml.permissive_validation,
             max_faces_per_prefix: nlsr_toml.max_faces_per_prefix,
         };
-        // Pre-create UDP faces to NLSR neighbors so they exist when NLSR starts.
-        // This avoids a race where NLSR's first Hello fires before post-build
-        // face creation spawns have run.
+        // Set up three NLSR faces per neighbor:
+        //
+        //   1. Private Hello face (NOT engine-registered): ndn-rs sends Hello
+        //      Interests via this socket and reads Hello Data responses
+        //      exclusively.  If this face were engine-registered, the engine's
+        //      run_face_reader would race on recv_bytes() and steal Hello Data,
+        //      causing every Hello to time out.
+        //
+        //   2. Private sync face (NOT engine-registered): PSync + LSA I/O uses
+        //      a separate socket so face_recv_demux has exclusive recv ownership.
+        //
+        //   3. CallbackFace (engine-registered): responds to incoming Hello
+        //      Interests from remote NLSR nodes that arrive on our listening
+        //      face.  Registered in the engine FIB at /<own_router>/nlsr/INFO
+        //      after the engine is built (see post-build FIB block below).
         for n in &nlsr_toml.neighbors {
             let uri = &n.face_uri;
             let addr_str = uri
@@ -733,24 +751,65 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            let face_id = builder.alloc_face_id();
             let local: std::net::SocketAddr = if peer.is_ipv4() {
                 "0.0.0.0:0".parse().unwrap()
             } else {
                 "[::]:0".parse().unwrap()
             };
-            match ndn_faces::net::UdpFace::bind(local, peer, face_id).await {
-                Ok(face) => {
-                    tracing::info!(face = face_id.0, remote = %peer, "NLSR: pre-connected neighbor face");
-                    builder = builder.face(face);
+            // Face 1: private Hello face — NOT added to the engine.
+            if nlsr_cfg.hello_face.is_none() {
+                match ndn_faces::net::UdpFace::bind(local, peer, ndn_transport::FaceId(u32::MAX - 1)).await {
+                    Ok(face) => {
+                        tracing::info!(remote = %peer, "NLSR: private Hello face created (not in engine table)");
+                        nlsr_cfg.hello_face = Some(std::sync::Arc::new(face) as std::sync::Arc<dyn ndn_transport::ErasedFace>);
+                    }
+                    Err(e) => {
+                        tracing::warn!(remote=%peer, error=%e, "NLSR: failed to create private Hello face");
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(remote=%peer, error=%e, "NLSR: failed to pre-connect neighbor face");
+            }
+            // Face 2: private sync face — NOT added to the engine.
+            if nlsr_cfg.sync_face.is_none() {
+                match ndn_faces::net::UdpFace::bind(local, peer, ndn_transport::FaceId(u32::MAX)).await {
+                    Ok(face) => {
+                        tracing::info!(remote = %peer, "NLSR: private sync face created (not in engine table)");
+                        nlsr_cfg.sync_face = Some(std::sync::Arc::new(face) as std::sync::Arc<dyn ndn_transport::ErasedFace>);
+                    }
+                    Err(e) => {
+                        tracing::warn!(remote=%peer, error=%e, "NLSR: failed to create private sync face; will fall back to engine face");
+                    }
                 }
             }
         }
 
         let nlsr = ndn_routing::NlsrProtocol::new(nlsr_cfg);
+
+        // Face 3: CallbackFace for incoming Hello Interests from remote NLSR nodes.
+        //
+        // Remote NLSR sends Hello Interest to /<own_router>/nlsr/INFO/<requester>.
+        // These arrive on our listening face (port 6363) and enter the engine pipeline.
+        // The engine routes them to this CallbackFace via the FIB entry added after build.
+        //
+        // C++ equivalent: HelloProtocol::processInterest in NLSR/src/hello-protocol.cpp:111.
+        let hello_proto = nlsr.hello_protocol();
+        let hello_cb_id = builder.alloc_face_id();
+        let hello_cb_face = ndn_faces::CallbackFace::new(hello_cb_id, move |interest| {
+            let hello = hello_proto.clone();
+            let name = (*interest.name).clone();
+            Box::pin(async move {
+                let data_wire = hello.handle_incoming_interest(&name)?;
+                ndn_packet::Data::decode(data_wire).ok()
+            })
+        });
+        builder = builder.face(hello_cb_face);
+        // Store for post-build FIB registration.
+        // Prefix: /<own_router>/nlsr/INFO
+        let hello_fib_prefix = own_router
+            .clone()
+            .append(b"nlsr" as &[u8])
+            .append(b"INFO" as &[u8]);
+        nlsr_hello_fib = Some((hello_fib_prefix, hello_cb_id));
+
         builder = builder.routing_protocol_dyn(nlsr);
         tracing::info!(router = %own_router, "NLSR routing protocol enabled");
     }
@@ -773,6 +832,15 @@ async fn main() -> Result<()> {
         ndn_transport::FaceId(MGMT_FACE_ID),
         0,
     );
+
+    // Register Hello responder: route incoming /<own_router>/nlsr/INFO Interests
+    // to the CallbackFace that calls HelloProtocol::handle_incoming_interest().
+    // Without this entry, C++ NLSR's Hello Interests get Nacked (NoRoute) and
+    // the adjacency never forms.
+    if let Some((hello_prefix, hello_cb_id)) = nlsr_hello_fib {
+        engine.fib().add_nexthop(&hello_prefix, hello_cb_id, 0);
+        tracing::info!(prefix = %hello_prefix, face = hello_cb_id.0, "NLSR: Hello responder registered in FIB");
+    }
 
     // ── Startup face listeners from config ──────────────────────────────────
     //
