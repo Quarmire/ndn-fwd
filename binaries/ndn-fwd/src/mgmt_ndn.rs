@@ -35,6 +35,7 @@ use ndn_discovery::{
 };
 use ndn_engine::stages::ErasedStrategy;
 use ndn_engine::{ForwarderEngine, RibRoute};
+use tracing::Instrument as _;
 use ndn_faces::local::InProcHandle;
 use ndn_packet::{Interest, Name, NameComponent, encode::encode_data_unsigned};
 use ndn_routing::DvrConfig;
@@ -2403,8 +2404,8 @@ async fn security_ca_enroll(
         Err(e) => return ControlResponse::error(status::SERVER_ERROR, e.to_string()),
     };
 
-    let public_key = match pib.get_signer(&identity_name) {
-        Ok(s) => s.public_key_bytes().to_vec(),
+    let signer: std::sync::Arc<dyn ndn_security::Signer> = match pib.get_signer(&identity_name) {
+        Ok(s) => std::sync::Arc::new(s),
         Err(e) => return ControlResponse::error(status::SERVER_ERROR, e.to_string()),
     };
 
@@ -2419,13 +2420,14 @@ async fn security_ca_enroll(
     let pib_path = pib.root().to_owned();
     let identity_name_echo = identity_name.clone();
 
-    tokio::spawn(async move {
+    tokio::spawn(
+      async move {
         let result = run_enrollment(
             app_handle,
             face_id,
             &ca_name,
             &identity_name,
-            &public_key,
+            signer,
             &challenge_type,
             &challenge_param,
         )
@@ -2459,7 +2461,9 @@ async fn security_ca_enroll(
         }
 
         drop(engine_clone); // keep engine alive until task completes
-    });
+      }
+      .instrument(tracing::info_span!(target: "mgmt.security", "mgmt_request", verb = "enroll")),
+    );
 
     let echo = ControlParameters {
         name: Some(identity_name_echo),
@@ -2475,7 +2479,7 @@ async fn run_enrollment(
     _face_id: ndn_transport::FaceId,
     ca_prefix: &Name,
     identity_name: &Name,
-    public_key: &[u8],
+    signer: std::sync::Arc<dyn ndn_security::Signer>,
     challenge_type: &str,
     challenge_param: &str,
 ) -> Result<ndn_security::Certificate, String> {
@@ -2506,11 +2510,11 @@ async fn run_enrollment(
     // ── NEW ──────────────────────────────────────────────────────────────────
     let mut session = EnrollmentSession::new(
         identity_name.clone(),
-        public_key.to_vec(),
+        std::sync::Arc::clone(&signer),
         86400, // 24h default; CA will cap to its max_validity
     );
 
-    let new_body = session.new_request_body().map_err(|e| e.to_string())?;
+    let new_body = session.new_request_body().await.map_err(|e| e.to_string())?;
     let new_name = ca_prefix.clone().append(b"CA").append(b"NEW");
     let new_interest = encode_interest(&new_name, Some(&new_body));
     handle
@@ -2538,12 +2542,16 @@ async fn run_enrollment(
         .challenge_request_body(challenge_type, challenge_params)
         .map_err(|e| e.to_string())?;
 
-    let request_id = session.request_id().unwrap_or("").to_owned();
+    // CHALLENGE name includes request-id as binary component (L2 / requester-request.cpp:217).
+    let request_id_raw = session
+        .request_id_bytes()
+        .map(|b| b.to_vec())
+        .unwrap_or_default();
     let chal_name = ca_prefix
         .clone()
         .append(b"CA")
         .append(b"CHALLENGE")
-        .append(request_id.as_bytes());
+        .append(&request_id_raw);
     let chal_interest = encode_interest(&chal_name, Some(&chal_body));
     handle
         .send(chal_interest)
@@ -2560,18 +2568,38 @@ async fn run_enrollment(
         .handle_challenge_response(&chal_body_content)
         .map_err(|e| e.to_string())?;
 
-    if session.is_complete() {
-        session
-            .into_certificate()
-            .ok_or_else(|| "no cert after completion".to_owned())
-    } else if session.needs_another_round() {
-        let msg = session
-            .challenge_status_message()
-            .unwrap_or("another round required");
-        Err(format!("multi-round challenge not supported: {msg}"))
-    } else {
-        Err("enrollment did not complete".to_owned())
+    if !session.is_complete() {
+        if session.needs_another_round() {
+            let msg = session
+                .challenge_status_message()
+                .unwrap_or("another round required");
+            return Err(format!("multi-round challenge not supported: {msg}"));
+        }
+        return Err("enrollment did not complete".to_owned());
     }
+
+    // ── CERT FETCH ────────────────────────────────────────────────────────────
+    // Issued cert is returned by name only; fetch via a separate Interest (L6).
+    let cert_name = session
+        .issued_cert_name()
+        .ok_or_else(|| "no issued cert name after completion".to_owned())?
+        .clone();
+
+    let cert_interest = encode_interest(&cert_name, None);
+    handle
+        .send(cert_interest)
+        .await
+        .map_err(|e| format!("cert fetch send: {e}"))?;
+
+    let cert_resp = tokio::time::timeout(TIMEOUT, handle.recv())
+        .await
+        .map_err(|_| "cert fetch timeout")?
+        .ok_or("cert fetch: face closed")?;
+
+    let cert_content =
+        extract_data_content(&cert_resp).ok_or("cert fetch: malformed Data")?;
+    ndn_cert::ca::deserialize_cert(&cert_content)
+        .ok_or_else(|| "could not decode issued certificate".to_owned())
 }
 
 /// Extract the Content TLV value from a Data packet (best-effort).
