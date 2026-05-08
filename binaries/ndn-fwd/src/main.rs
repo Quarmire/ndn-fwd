@@ -154,6 +154,11 @@ fn parse_args() -> CliArgs {
 /// file. The file appender is non-blocking so log writes never stall the
 /// forwarder.
 ///
+/// When built with `--features console`, a `console-subscriber` layer is
+/// added so `tokio-console` can attach.  Requires `--cfg tokio_unstable` at
+/// build time (tokio's instrumentation is not stable API).  The bind address
+/// is configurable via `TOKIO_CONSOLE_BIND` (default `127.0.0.1:6669`).
+///
 /// Returns an optional guard that must be held for the lifetime of the
 /// process — dropping it flushes the file appender.
 fn init_tracing(
@@ -235,12 +240,20 @@ fn init_tracing(
                     ring: Arc::clone(ring),
                 })
         });
-        tracing_subscriber::registry()
+        #[cfg(feature = "console")]
+        let registry = tracing_subscriber::registry()
             .with(filter_layer)
             .with(stderr_layer)
             .with(file_layer)
             .with(ring_layer)
-            .init();
+            .with(console_subscriber::spawn());
+        #[cfg(not(feature = "console"))]
+        let registry = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(stderr_layer)
+            .with(file_layer)
+            .with(ring_layer);
+        registry.init();
 
         Some(guard)
     } else {
@@ -254,11 +267,18 @@ fn init_tracing(
                     ring: Arc::clone(ring),
                 })
         });
-        tracing_subscriber::registry()
+        #[cfg(feature = "console")]
+        let registry = tracing_subscriber::registry()
             .with(filter_layer)
             .with(stderr_layer)
             .with(ring_layer)
-            .init();
+            .with(console_subscriber::spawn());
+        #[cfg(not(feature = "console"))]
+        let registry = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(stderr_layer)
+            .with(ring_layer);
+        registry.init();
 
         None
     }
