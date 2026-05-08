@@ -1,6 +1,11 @@
 # Multi-stage Docker image for the ndn-fwd NDN forwarder.
 #
-# Build:
+# Uses cargo-chef for dependency layer caching.  The cacher stage compiles
+# all external crates once per Cargo.toml/Cargo.lock change.  A source-only
+# change skips dependency recompilation and only rebuilds workspace crates,
+# reducing incremental build time from ~10 min to ~2–3 min.
+#
+# Build (from repo root):
 #   docker build -f binaries/ndn-fwd/Dockerfile -t ndn-fwd .
 #
 # Run with default config:
@@ -11,43 +16,47 @@
 #     -v /path/to/ndn-fwd.toml:/etc/ndn-fwd/config.toml:ro \
 #     ndn-fwd
 #
-# Run with TLS certificates (for websocket-tls):
-#   docker run --rm -p 6363:6363/udp -p 6363:6363/tcp -p 9696:9696/tcp \
-#     -v /path/to/ndn-fwd.toml:/etc/ndn-fwd/config.toml:ro \
-#     -v /path/to/cert.pem:/etc/ndn-fwd/cert.pem:ro \
-#     -v /path/to/key.pem:/etc/ndn-fwd/key.pem:ro \
-#     ndn-fwd
-#
 # Exposes:
 #   6363/udp  — NDN UDP face
 #   6363/tcp  — NDN TCP face
 #   9696/tcp  — WebSocket face (wss:// when websocket-tls feature is enabled)
 
-# ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM rust:slim AS builder
+# ── Stage 1: chef base ────────────────────────────────────────────────────────
+FROM rust:slim AS chef
 
-WORKDIR /build
+RUN cargo install cargo-chef --locked
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libdbus-1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only workspace manifests first (cache-friendly: only re-compiles deps
-# when Cargo.toml / Cargo.lock changes, not when source changes).
-COPY Cargo.toml Cargo.lock ./
+WORKDIR /build
 
-# Copy every crate manifest (needed for workspace member resolution).
-COPY binaries/ binaries/
-COPY crates/ crates/
-COPY tools/ tools/
-COPY bindings/ bindings/
-COPY examples/ examples/
+# ── Stage 2: planner ──────────────────────────────────────────────────────────
+# Scans workspace Cargo.toml files and produces recipe.json.  No compilation.
+# Runs on every source change but the output only changes when
+# Cargo.toml / Cargo.lock changes, so the cacher stage stays cached.
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Build only the ndn-fwd binary in release mode.
+# ── Stage 3: cacher ───────────────────────────────────────────────────────────
+# Compiles external dependencies only.  Cached as long as recipe.json is
+# unchanged (i.e. Cargo.toml / Cargo.lock are unchanged).
+FROM chef AS cacher
+COPY --from=planner /build/recipe.json recipe.json
+RUN cargo chef cook --release --bin ndn-fwd --recipe-path recipe.json
+
+# ── Stage 4: builder ──────────────────────────────────────────────────────────
+# Compiles workspace crates.  External deps are already compiled in /build/target
+# from the cacher stage, so only ndn-rs crates are recompiled here.
+FROM chef AS builder
+COPY . .
+COPY --from=cacher /build/target target
 RUN cargo build --release --bin ndn-fwd
 
-# ── Stage 2: runtime image ────────────────────────────────────────────────────
+# ── Stage 5: runtime image ────────────────────────────────────────────────────
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,17 +64,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the compiled binary.
 COPY --from=builder /build/target/release/ndn-fwd /usr/local/bin/ndn-fwd
-
-# Copy the default configuration.
 COPY binaries/ndn-fwd/ndn-fwd.default.toml /etc/ndn-fwd/config.toml
 
-# Certificate directory — mount TLS certs here at runtime.
-RUN mkdir -p /etc/ndn-fwd/certs
-
-# Runtime socket directory.
-RUN mkdir -p /run/ndn-fwd
+RUN mkdir -p /etc/ndn-fwd/certs /run/ndn-fwd
 
 EXPOSE 6363/udp 6363/tcp 9696/tcp
 
