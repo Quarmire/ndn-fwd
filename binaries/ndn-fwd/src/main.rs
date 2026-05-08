@@ -342,10 +342,14 @@ async fn main() -> Result<()> {
             _ => Arc::new(ndn_store::DefaultAdmissionPolicy),
         };
 
-    let security_profile = match fwd_config.security.profile.as_str() {
-        "disabled" => ndn_security::SecurityProfile::Disabled,
-        "accept-signed" => ndn_security::SecurityProfile::AcceptSigned,
-        _ => ndn_security::SecurityProfile::Default,
+    let security_profile = if !fwd_config.security.validator_enabled {
+        ndn_security::SecurityProfile::Disabled
+    } else {
+        match fwd_config.security.profile.as_str() {
+            "disabled" => ndn_security::SecurityProfile::Disabled,
+            "accept-signed" => ndn_security::SecurityProfile::AcceptSigned,
+            _ => ndn_security::SecurityProfile::Default,
+        }
     };
 
     let mut builder = EngineBuilder::new(engine_config)
