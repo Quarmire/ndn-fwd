@@ -105,6 +105,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RingMakeWriter {
 struct CliArgs {
     config_path: Option<PathBuf>,
     log_level: Option<String>,
+    list_modules: bool,
 }
 
 /// Parse `argv` into CLI arguments.
@@ -112,6 +113,7 @@ fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let mut config_path = None;
     let mut log_level = None;
+    let mut list_modules = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -127,6 +129,9 @@ fn parse_args() -> CliArgs {
                     log_level = Some(l.clone());
                 }
             }
+            "--modules" => {
+                list_modules = true;
+            }
             _ => {}
         }
         i += 1;
@@ -134,6 +139,7 @@ fn parse_args() -> CliArgs {
     CliArgs {
         config_path,
         log_level,
+        list_modules,
     }
 }
 
@@ -180,7 +186,7 @@ fn init_tracing(
     let _ = APPLY_FILTER.set(Box::new(move |s: &str| {
         let new_filter = EnvFilter::new(s);
         if let Err(e) = filter_handle.reload(new_filter) {
-            tracing::warn!(error = %e, "failed to reload log filter");
+            tracing::warn!(target: "engine", error = %e, "failed to reload log filter");
         }
         if let Some(m) = LOG_FILTER.get()
             && let Ok(mut guard) = m.lock()
@@ -262,6 +268,13 @@ fn init_tracing(
 async fn main() -> Result<()> {
     let cli = parse_args();
 
+    if cli.list_modules {
+        for target in ndn_engine::observability::targets::enumerate() {
+            println!("{target}");
+        }
+        return Ok(());
+    }
+
     // Load config or use defaults (before tracing init so we have the
     // logging section available).
     let fwd_config = if let Some(ref path) = cli.config_path {
@@ -274,6 +287,7 @@ async fn main() -> Result<()> {
     let _log_guard = init_tracing(&fwd_config.logging, cli.log_level.as_deref());
 
     tracing::warn!(
+        target: "engine",
         "NOTICE: ndn-rs is primarily AI-authored and not yet proven spec-compliant. \
          See docs/notes/spec-compliance-audit-2026-04-20.md and \
          testbed/EXPECTED_FAILURES.md for known issues. Do not use as a reference \
@@ -281,12 +295,12 @@ async fn main() -> Result<()> {
     );
 
     if let Some(ref path) = cli.config_path {
-        tracing::info!(path = %path.display(), "loading config");
+        tracing::info!(target: "engine", path = %path.display(), "loading config");
     } else {
-        tracing::info!("no config file specified, using defaults");
+        tracing::info!(target: "engine", "no config file specified, using defaults");
     }
     if let Some(ref file) = fwd_config.logging.file {
-        tracing::info!(path = %file, "logging to file");
+        tracing::info!(target: "engine", path = %file, "logging to file");
     }
 
     // Resolve CS capacity: prefer [cs] section, fall back to engine.cs_capacity_mb.
@@ -350,6 +364,7 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!(
+                    target: "security",
                     data = %rule_cfg.data,
                     key = %rule_cfg.key,
                     error = %e,
@@ -392,6 +407,7 @@ async fn main() -> Result<()> {
         if fwd_config.face_system.ether.auto_multicast {
             let list = ndn_faces::iface::list_interfaces();
             tracing::debug!(
+                target: "face.system",
                 total = list.len(),
                 "interface enumeration for ether auto_multicast"
             );
@@ -413,6 +429,7 @@ async fn main() -> Result<()> {
         if fwd_config.face_system.udp.auto_multicast {
             let list = ndn_faces::iface::list_interfaces();
             tracing::debug!(
+                target: "face.system",
                 total = list.len(),
                 "interface enumeration for udp auto_multicast"
             );
@@ -558,7 +575,7 @@ async fn main() -> Result<()> {
             // Capture the shared config handle before moving `nd` into Arc.
             mgmt_discovery_cfg = Some(nd.core.config_handle());
             protocols.push(std::sync::Arc::new(nd));
-            tracing::info!(node=%node_name, "UDP neighbor discovery enabled");
+            tracing::info!(target: "discovery", node=%node_name, "UDP neighbor discovery enabled");
         }
 
         // ── Ethernet neighbor discovery (Linux only) ───────────────────────────
@@ -580,10 +597,10 @@ async fn main() -> Result<()> {
                             disc_cfg.clone(),
                         );
                         protocols.push(std::sync::Arc::new(ether_nd));
-                        tracing::info!(iface=%iface, node=%node_name, "Ethernet neighbor discovery enabled");
+                        tracing::info!(target: "discovery", iface=%iface, node=%node_name, "Ethernet neighbor discovery enabled");
                     }
                     Err(e) => {
-                        tracing::warn!(iface=%iface, error=%e, "failed to get interface MAC, skipping Ethernet ND");
+                        tracing::warn!(target: "discovery", iface=%iface, error=%e, "failed to get interface MAC, skipping Ethernet ND");
                     }
                 }
             }
@@ -599,10 +616,10 @@ async fn main() -> Result<()> {
                             disc_cfg.clone(),
                         );
                         protocols.push(std::sync::Arc::new(ether_nd));
-                        tracing::info!(iface=%iface_name, node=%node_name, "Ethernet neighbor discovery enabled (auto)");
+                        tracing::info!(target: "discovery", iface=%iface_name, node=%node_name, "Ethernet neighbor discovery enabled (auto)");
                     }
                     Err(e) => {
-                        tracing::warn!(iface=%iface_name, error=%e, "failed to get interface MAC, skipping auto Ethernet ND");
+                        tracing::warn!(target: "discovery", iface=%iface_name, error=%e, "failed to get interface MAC, skipping auto Ethernet ND");
                     }
                 }
             }
@@ -610,6 +627,7 @@ async fn main() -> Result<()> {
         #[cfg(not(target_os = "linux"))]
         if use_ether {
             tracing::warn!(
+                target: "discovery",
                 "Ethernet neighbor discovery is only supported on Linux; ignoring discovery_transport=ether/both"
             );
         }
@@ -634,10 +652,10 @@ async fn main() -> Result<()> {
             match prefix_str.parse::<ndn_packet::Name>() {
                 Ok(prefix) => {
                     sd.publish(ndn_discovery::ServiceRecord::new(prefix, node_name.clone()));
-                    tracing::info!(prefix=%prefix_str, "discovery: registered served prefix");
+                    tracing::info!(target: "discovery", prefix=%prefix_str, "discovery: registered served prefix");
                 }
                 Err(e) => {
-                    tracing::warn!(prefix=%prefix_str, error=%e, "discovery: invalid served_prefix, skipping");
+                    tracing::warn!(target: "discovery", prefix=%prefix_str, error=%e, "discovery: invalid served_prefix, skipping");
                 }
             }
         }
@@ -653,7 +671,7 @@ async fn main() -> Result<()> {
         builder = builder.discovery(composite);
         discovery_sd = Some(sd);
         discovery_claimed = claimed;
-        tracing::info!(node=%node_name, transport=%disc_transport, "discovery enabled");
+        tracing::info!(target: "discovery", node=%node_name, transport=%disc_transport, "discovery enabled");
     } else {
         pre_allocated_multicast = Vec::new();
         pre_allocated_ether_mc = Vec::new();
@@ -685,7 +703,7 @@ async fn main() -> Result<()> {
             .parse()
             .unwrap_or_else(|_| "/ndn".parse().unwrap());
         let own_router: Name = nlsr_toml.router.parse().unwrap_or_else(|_| {
-            tracing::warn!(router = %nlsr_toml.router, "NLSR: invalid router name");
+            tracing::warn!(target: "routing.nlsr", router = %nlsr_toml.router, "NLSR: invalid router name");
             Name::root()
         });
         let lsa_prefix = ndn_routing::NlsrConfig::default_lsa_prefix(&network);
@@ -747,7 +765,7 @@ async fn main() -> Result<()> {
             let peer: std::net::SocketAddr = match addr_str.parse() {
                 Ok(a) => a,
                 Err(e) => {
-                    tracing::warn!(uri=%uri, error=%e, "NLSR: skipping pre-connect for neighbor with unparseable URI");
+                    tracing::warn!(target: "routing.nlsr", uri=%uri, error=%e, "NLSR: skipping pre-connect for neighbor with unparseable URI");
                     continue;
                 }
             };
@@ -760,11 +778,11 @@ async fn main() -> Result<()> {
             if nlsr_cfg.hello_face.is_none() {
                 match ndn_faces::net::UdpFace::bind(local, peer, ndn_transport::FaceId(u32::MAX - 1)).await {
                     Ok(face) => {
-                        tracing::info!(remote = %peer, "NLSR: private Hello face created (not in engine table)");
+                        tracing::info!(target: "routing.nlsr", remote = %peer, "NLSR: private Hello face created (not in engine table)");
                         nlsr_cfg.hello_face = Some(std::sync::Arc::new(face) as std::sync::Arc<dyn ndn_transport::ErasedFace>);
                     }
                     Err(e) => {
-                        tracing::warn!(remote=%peer, error=%e, "NLSR: failed to create private Hello face");
+                        tracing::warn!(target: "routing.nlsr", remote=%peer, error=%e, "NLSR: failed to create private Hello face");
                     }
                 }
             }
@@ -772,11 +790,11 @@ async fn main() -> Result<()> {
             if nlsr_cfg.sync_face.is_none() {
                 match ndn_faces::net::UdpFace::bind(local, peer, ndn_transport::FaceId(u32::MAX)).await {
                     Ok(face) => {
-                        tracing::info!(remote = %peer, "NLSR: private sync face created (not in engine table)");
+                        tracing::info!(target: "routing.nlsr", remote = %peer, "NLSR: private sync face created (not in engine table)");
                         nlsr_cfg.sync_face = Some(std::sync::Arc::new(face) as std::sync::Arc<dyn ndn_transport::ErasedFace>);
                     }
                     Err(e) => {
-                        tracing::warn!(remote=%peer, error=%e, "NLSR: failed to create private sync face; will fall back to engine face");
+                        tracing::warn!(target: "routing.nlsr", remote=%peer, error=%e, "NLSR: failed to create private sync face; will fall back to engine face");
                     }
                 }
             }
@@ -811,7 +829,7 @@ async fn main() -> Result<()> {
         nlsr_hello_fib = Some((hello_fib_prefix, hello_cb_id));
 
         builder = builder.routing_protocol_dyn(nlsr);
-        tracing::info!(router = %own_router, "NLSR routing protocol enabled");
+        tracing::info!(target: "routing.nlsr", router = %own_router, "NLSR routing protocol enabled");
     }
 
     let (engine, shutdown) = builder.build().await?;
@@ -822,7 +840,7 @@ async fn main() -> Result<()> {
         engine
             .fib()
             .add_nexthop(&name, ndn_transport::FaceId(route.face as u32), route.cost);
-        tracing::info!(prefix = %route.prefix, face = route.face, cost = route.cost, "route added");
+        tracing::info!(target: "engine", prefix = %route.prefix, face = route.face, cost = route.cost, "route added");
     }
 
     // Register the management prefix in the FIB so the pipeline routes
@@ -839,7 +857,7 @@ async fn main() -> Result<()> {
     // the adjacency never forms.
     if let Some((hello_prefix, hello_cb_id)) = nlsr_hello_fib {
         engine.fib().add_nexthop(&hello_prefix, hello_cb_id, 0);
-        tracing::info!(prefix = %hello_prefix, face = hello_cb_id.0, "NLSR: Hello responder registered in FIB");
+        tracing::info!(target: "routing.nlsr", prefix = %hello_prefix, face = hello_cb_id.0, "NLSR: Hello responder registered in FIB");
     }
 
     // ── Startup face listeners from config ──────────────────────────────────
@@ -851,7 +869,7 @@ async fn main() -> Result<()> {
 
     let face_configs: std::borrow::Cow<'_, [ndn_config::FaceConfig]> =
         if fwd_config.faces.is_empty() {
-            tracing::info!("no [[face]] in config, using defaults: udp+tcp on 0.0.0.0:6363");
+            tracing::info!(target: "face.system", "no [[face]] in config, using defaults: udp+tcp on 0.0.0.0:6363");
             std::borrow::Cow::Owned(vec![
                 ndn_config::FaceConfig::Udp {
                     bind: Some("0.0.0.0:6363".into()),
@@ -874,7 +892,7 @@ async fn main() -> Result<()> {
                     let peer: std::net::SocketAddr = match remote_addr.parse() {
                         Ok(a) => a,
                         Err(e) => {
-                            tracing::error!(addr = %remote_addr, error = %e, "invalid UDP remote address");
+                            tracing::error!(target: "face.udp", addr = %remote_addr, error = %e, "invalid UDP remote address");
                             continue;
                         }
                     };
@@ -889,11 +907,11 @@ async fn main() -> Result<()> {
                         match ndn_faces::net::UdpFace::bind(local, peer, face_id).await {
                             Ok(face) => {
                                 let c = CancellationToken::new();
-                                tracing::info!(face = face_id.0, remote = %peer, "udp pre-connected face created");
+                                tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, "udp pre-connected face created");
                                 eng.add_face_with_persistency(face, c, ndn_transport::FacePersistency::Persistent);
                             }
                             Err(e) => {
-                                tracing::error!(remote = %peer, error = %e, "failed to create UDP face");
+                                tracing::error!(target: "face.udp", remote = %peer, error = %e, "failed to create UDP face");
                             }
                         }
                     });
@@ -931,7 +949,7 @@ async fn main() -> Result<()> {
                 let group_addr: std::net::Ipv4Addr = match group.parse() {
                     Ok(a) => a,
                     Err(e) => {
-                        tracing::error!(group=%group, error=%e, "invalid multicast group address");
+                        tracing::error!(target: "face.udp", group=%group, error=%e, "invalid multicast group address");
                         continue;
                     }
                 };
@@ -952,21 +970,21 @@ async fn main() -> Result<()> {
                                 c,
                                 ndn_transport::FacePersistency::Permanent,
                             );
-                            tracing::info!(group=%group_addr, port=%port, iface=%iface, face=%id, "multicast UDP face created");
+                            tracing::info!(target: "face.udp", group=%group_addr, port=%port, iface=%iface, face=%id, "multicast UDP face created");
                         }
                         Err(e) => {
-                            tracing::error!(group=%group_addr, port=%port, error=%e, "failed to create multicast UDP face");
+                            tracing::error!(target: "face.udp", group=%group_addr, port=%port, error=%e, "failed to create multicast UDP face");
                         }
                     }
                 });
             }
             ndn_config::FaceConfig::Unix { .. } => {
                 // Unix faces are handled by the face listener below.
-                tracing::warn!("unix face config ignored (use [management] face_socket)");
+                tracing::warn!(target: "face.system", "unix face config ignored (use [management] face_socket)");
             }
             ndn_config::FaceConfig::WebSocket { bind, .. } => {
                 let Some(bind_str) = bind.as_deref() else {
-                    tracing::error!("websocket face requires 'bind' address");
+                    tracing::error!(target: "face.ws", "websocket face requires 'bind' address");
                     continue;
                 };
                 if let Some(addr) = parse_bind_addr(bind_str, "WebSocket") {
@@ -985,17 +1003,17 @@ async fn main() -> Result<()> {
                         Ok(face) => {
                             let c = cancel.child_token();
                             engine.add_face(face, c);
-                            tracing::info!(port=%path, baud=%baud, face=%id, "serial face opened");
+                            tracing::info!(target: "face.system", port=%path, baud=%baud, face=%id, "serial face opened");
                         }
                         Err(e) => {
-                            tracing::error!(port=%path, error=%e, "failed to open serial face");
+                            tracing::error!(target: "face.system", port=%path, error=%e, "failed to open serial face");
                         }
                     }
                 }
                 #[cfg(not(feature = "serial"))]
                 {
                     let _ = (path, baud);
-                    tracing::warn!("serial face support not compiled in");
+                    tracing::warn!(target: "face.system", "serial face support not compiled in");
                 }
             }
             ndn_config::FaceConfig::EtherMulticast { interface } => {
@@ -1016,17 +1034,17 @@ async fn main() -> Result<()> {
                                 c,
                                 ndn_transport::FacePersistency::Permanent,
                             );
-                            tracing::info!(iface=%interface, face=%id, "multicast ethernet face opened");
+                            tracing::info!(target: "face.eth", iface=%interface, face=%id, "multicast ethernet face opened");
                         }
                         Err(e) => {
-                            tracing::error!(iface=%interface, error=%e, "failed to open multicast ethernet face");
+                            tracing::error!(target: "face.eth", iface=%interface, error=%e, "failed to open multicast ethernet face");
                         }
                     }
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
                     let _ = interface;
-                    tracing::warn!("ether-multicast face only supported on Linux");
+                    tracing::warn!(target: "face.eth", "ether-multicast face only supported on Linux");
                 }
             }
         }
@@ -1050,10 +1068,10 @@ async fn main() -> Result<()> {
                     c,
                     ndn_transport::FacePersistency::Permanent,
                 );
-                tracing::info!(iface=%iface_name, face=%id, "auto multicast ethernet face opened");
+                tracing::info!(target: "face.eth", iface=%iface_name, face=%id, "auto multicast ethernet face opened");
             }
             Err(e) => {
-                tracing::error!(iface=%iface_name, error=%e, "auto multicast ethernet face failed");
+                tracing::error!(target: "face.eth", iface=%iface_name, error=%e, "auto multicast ethernet face failed");
             }
         }
     }
@@ -1070,10 +1088,10 @@ async fn main() -> Result<()> {
                         c,
                         ndn_transport::FacePersistency::Permanent,
                     );
-                    tracing::info!(iface=%iface_info.name, face=%id, "auto multicast ethernet face opened");
+                    tracing::info!(target: "face.eth", iface=%iface_info.name, face=%id, "auto multicast ethernet face opened");
                 }
                 Err(e) => {
-                    tracing::error!(iface=%iface_info.name, error=%e, "auto multicast ethernet face failed");
+                    tracing::error!(target: "face.eth", iface=%iface_info.name, error=%e, "auto multicast ethernet face failed");
                 }
             }
         }
@@ -1081,6 +1099,7 @@ async fn main() -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     if !auto_ether_ifaces.is_empty() {
         tracing::warn!(
+            target: "face.eth",
             count = auto_ether_ifaces.len(),
             "ether auto_multicast: EtherMulticast faces only supported on Linux, skipping"
         );
@@ -1103,10 +1122,10 @@ async fn main() -> Result<()> {
                         c,
                         ndn_transport::FacePersistency::Permanent,
                     );
-                    tracing::info!(iface=%iface_name, addr=%addr, face=%id, "auto multicast UDP face opened");
+                    tracing::info!(target: "face.udp", iface=%iface_name, addr=%addr, face=%id, "auto multicast UDP face opened");
                 }
                 Err(e) => {
-                    tracing::error!(iface=%iface_name, addr=%addr, error=%e, "auto multicast UDP face failed");
+                    tracing::error!(target: "face.udp", iface=%iface_name, addr=%addr, error=%e, "auto multicast UDP face failed");
                 }
             }
         });
@@ -1128,10 +1147,10 @@ async fn main() -> Result<()> {
                             c,
                             ndn_transport::FacePersistency::Permanent,
                         );
-                        tracing::info!(iface=%iface_name, addr=%addr, face=%id, "auto multicast UDP face opened");
+                        tracing::info!(target: "face.udp", iface=%iface_name, addr=%addr, face=%id, "auto multicast UDP face opened");
                     }
                     Err(e) => {
-                        tracing::error!(iface=%iface_name, addr=%addr, error=%e, "auto multicast UDP face failed");
+                        tracing::error!(target: "face.udp", iface=%iface_name, addr=%addr, error=%e, "auto multicast UDP face failed");
                     }
                 }
             });
@@ -1177,10 +1196,10 @@ async fn main() -> Result<()> {
                                                 watcher_cancel2.child_token(),
                                                 ndn_transport::FacePersistency::Permanent,
                                             );
-                                            tracing::info!(iface=%iface_name, face=%id, "hotplug: multicast ethernet face added");
+                                            tracing::info!(target: "face.eth", iface=%iface_name, face=%id, "hotplug: multicast ethernet face added");
                                         }
                                         Err(e) => {
-                                            tracing::warn!(iface=%iface_name, error=%e, "hotplug: failed to open multicast ethernet face");
+                                            tracing::warn!(target: "face.eth", iface=%iface_name, error=%e, "hotplug: failed to open multicast ethernet face");
                                         }
                                     }
                                 }
@@ -1206,10 +1225,10 @@ async fn main() -> Result<()> {
                                                     Ok(face) => {
                                                         let face = if watcher_udp_ad_hoc { face.ad_hoc() } else { face };
                                                         eng.add_face_with_persistency(face, cancel3, ndn_transport::FacePersistency::Permanent);
-                                                        tracing::info!(iface=%name2, addr=%addr, face=%id, "hotplug: multicast UDP face added");
+                                                        tracing::info!(target: "face.udp", iface=%name2, addr=%addr, face=%id, "hotplug: multicast UDP face added");
                                                     }
                                                     Err(e) => {
-                                                        tracing::warn!(iface=%name2, addr=%addr, error=%e, "hotplug: failed to open multicast UDP face");
+                                                        tracing::warn!(target: "face.udp", iface=%name2, addr=%addr, error=%e, "hotplug: failed to open multicast UDP face");
                                                     }
                                                 }
                                             });
@@ -1228,7 +1247,7 @@ async fn main() -> Result<()> {
                                         && let Some(tok) = watcher_engine.face_token(face_id)
                                     {
                                         tok.cancel();
-                                        tracing::info!(iface=%iface_name, face=%face_id, "hotplug: face removed");
+                                        tracing::info!(target: "face.system", iface=%iface_name, face=%face_id, "hotplug: face removed");
                                     }
                                 }
                             }
@@ -1239,12 +1258,12 @@ async fn main() -> Result<()> {
         });
     }
 
-    tracing::info!("engine running");
+    tracing::info!(target: "engine", "engine running");
 
     // ── NDN management ────────────────────────────────────────────────────────
 
     let face_socket = fwd_config.management.face_socket.clone();
-    tracing::info!(socket = %face_socket, prefix = "/localhost/nfd", "NDN management active");
+    tracing::info!(target: "engine", socket = %face_socket, prefix = "/localhost/nfd", "NDN management active");
 
     let ndn_handler_task = tokio::spawn(mgmt_ndn::run_ndn_mgmt_handler(
         mgmt_handle,
@@ -1282,7 +1301,7 @@ async fn main() -> Result<()> {
     // Wait for Ctrl-C.
     tokio::signal::ctrl_c().await?;
 
-    tracing::info!("shutting down");
+    tracing::info!(target: "engine", "shutting down");
     cancel.cancel();
 
     let _ = ndn_handler_task.await;
@@ -1304,13 +1323,13 @@ async fn run_ws_listener(
     let listener = match tokio::net::TcpListener::bind(bind_addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!(addr=%bind_addr, error=%e, "ws-listener: bind failed");
+            tracing::error!(target: "face.ws", addr=%bind_addr, error=%e, "ws-listener: bind failed");
             return;
         }
     };
 
     let local = listener.local_addr().unwrap_or(bind_addr);
-    tracing::info!(addr=%local, "WebSocket listener ready");
+    tracing::info!(target: "face.ws", addr=%local, "WebSocket listener ready");
 
     loop {
         let (stream, peer) = tokio::select! {
@@ -1318,7 +1337,7 @@ async fn run_ws_listener(
             r = listener.accept() => match r {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(error=%e, "ws-listener: accept error");
+                    tracing::warn!(target: "face.ws", error=%e, "ws-listener: accept error");
                     continue;
                 }
             },
@@ -1330,7 +1349,7 @@ async fn run_ws_listener(
             {
                 Ok(ws) => ws,
                 Err(e) => {
-                    tracing::warn!(peer=%peer, error=%e, "ws-listener: handshake failed");
+                    tracing::warn!(target: "face.ws", peer=%peer, error=%e, "ws-listener: handshake failed");
                     continue;
                 }
             };
@@ -1344,10 +1363,10 @@ async fn run_ws_listener(
         );
         let conn_cancel = cancel.child_token();
         engine.add_face(face, conn_cancel);
-        tracing::info!(face=%face_id, peer=%peer, "ws-listener: accepted connection");
+        tracing::info!(target: "face.ws", face=%face_id, peer=%peer, "ws-listener: accepted connection");
     }
 
-    tracing::info!("WebSocket listener stopped");
+    tracing::info!(target: "face.ws", "WebSocket listener stopped");
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1388,12 +1407,14 @@ fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
             Ok((mgr, generated)) => {
                 if generated {
                     tracing::info!(
+                        target: "security",
                         identity = %identity_uri,
                         pib = %pib_path.display(),
                         "auto-initialized new security identity"
                     );
                 } else {
                     tracing::info!(
+                        target: "security",
                         identity = %identity_uri,
                         pib = %pib_path.display(),
                         "loaded existing security identity from PIB"
@@ -1421,6 +1442,7 @@ fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
     match SecurityManager::from_pib(&pib, &identity) {
         Ok(mgr) => {
             tracing::info!(
+                target: "security",
                 identity = %identity_uri,
                 pib = %pib_path.display(),
                 "loaded security identity from PIB"
@@ -1491,6 +1513,7 @@ fn recover_from_pib_error(
         eprintln!();
     } else {
         tracing::error!(
+            target: "security",
             error = %error,
             identity = %identity_uri,
             pib = %pib_path.display(),
@@ -1531,6 +1554,7 @@ fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) -> S
 
             if let Some(id) = configured_identity {
                 tracing::warn!(
+                    target: "security",
                     ephemeral_identity = %name_str,
                     configured_identity = %id,
                     "PIB error — using ephemeral identity; \
@@ -1538,6 +1562,7 @@ fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) -> S
                 );
             } else {
                 tracing::warn!(
+                    target: "security",
                     ephemeral_identity = %name_str,
                     "no [security] identity configured — using ephemeral in-memory key; \
                      add `identity = \"/your/name\"` to the [security] config to persist signing"
@@ -1550,7 +1575,7 @@ fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) -> S
             }
         }
         Err(e) => {
-            tracing::error!(error = %e, "failed to generate ephemeral identity; starting unsigned");
+            tracing::error!(target: "security", error = %e, "failed to generate ephemeral identity; starting unsigned");
             SecurityInit {
                 mgr: SecurityManager::new(),
                 pib_path: None,
@@ -1575,7 +1600,7 @@ fn parse_bind_addr(bind: &str, label: &str) -> Option<std::net::SocketAddr> {
     match bind.parse() {
         Ok(a) => Some(a),
         Err(e) => {
-            tracing::error!(bind=%bind, error=%e, "invalid {label} bind address");
+            tracing::error!(target: "engine", bind=%bind, error=%e, "invalid {label} bind address");
             None
         }
     }
@@ -1603,6 +1628,7 @@ fn load_mgmt_validator(
     let Some(pib_path_str) = &cfg.trust_anchor_pib else {
         if cfg.require_signed_commands {
             tracing::warn!(
+                target: "security",
                 "[security.mgmt] require_signed_commands=true but no trust_anchor_pib set; \
                  all management commands will be rejected. \
                  Add trust_anchor_pib or set require_signed_commands=false for dev mode."
@@ -1634,7 +1660,7 @@ fn load_mgmt_validator(
     let schema = ndn_security::TrustSchema::accept_all();
     let validator = ndn_security::Validator::new(schema);
     for anchor in anchors {
-        tracing::info!(name = %anchor.name, "mgmt: loaded trust anchor");
+        tracing::info!(target: "security", name = %anchor.name, "mgmt: loaded trust anchor");
         validator.add_trust_anchor(anchor);
     }
     Ok(Some(Arc::new(validator)))
@@ -1645,12 +1671,13 @@ fn build_cs(cfg: &CsConfig) -> Arc<dyn ErasedContentStore> {
     let cap = cfg.capacity_mb * 1024 * 1024;
     match cfg.variant.as_str() {
         "null" => {
-            tracing::info!("content store disabled (variant=null)");
+            tracing::info!(target: "engine", "content store disabled (variant=null)");
             Arc::new(NullCs)
         }
         "sharded-lru" => {
             let n = cfg.shards.unwrap_or(4);
             tracing::info!(
+                target: "engine",
                 variant = "sharded-lru",
                 shards = n,
                 capacity_mb = cfg.capacity_mb,
@@ -1662,6 +1689,7 @@ fn build_cs(cfg: &CsConfig) -> Arc<dyn ErasedContentStore> {
         }
         _ => {
             tracing::info!(
+                target: "engine",
                 variant = "lru",
                 capacity_mb = cfg.capacity_mb,
                 "content store"

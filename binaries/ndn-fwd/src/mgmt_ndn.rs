@@ -100,6 +100,7 @@ fn set_recv_buf_size(socket: &tokio::net::UdpSocket, size: usize) {
     };
     if ret != 0 {
         tracing::warn!(
+            target: "face.udp",
             error=%std::io::Error::last_os_error(),
             "udp-listener: failed to set SO_RCVBUF (continuing with default)"
         );
@@ -131,12 +132,12 @@ pub async fn run_face_listener(path: &str, engine: ForwarderEngine, cancel: Canc
     let listener = match ndn_faces::local::IpcListener::bind(path) {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!(path = %path, error = %e, "face-listener: bind failed");
+            tracing::error!(target: "face.system", path = %path, error = %e, "face-listener: bind failed");
             return;
         }
     };
 
-    tracing::info!(path = %listener.uri(), "NDN face listener ready");
+    tracing::info!(target: "face.system", path = %listener.uri(), "NDN face listener ready");
 
     loop {
         let face_id = engine.faces().alloc_id();
@@ -145,13 +146,13 @@ pub async fn run_face_listener(path: &str, engine: ForwarderEngine, cancel: Canc
             r = listener.accept(face_id) => match r {
                 Ok(f)  => f,
                 Err(e) => {
-                    tracing::warn!(error = %e, "face-listener: accept error");
+                    tracing::warn!(target: "face.system", error = %e, "face-listener: accept error");
                     continue;
                 }
             },
         };
 
-        tracing::debug!(face = %face_id, "face-listener: accepted management connection");
+        tracing::debug!(target: "face.system", face = %face_id, "face-listener: accepted management connection");
         // Per-connection child token so that closing one connection only
         // cancels that connection's tasks, not the whole listener.
         let conn_cancel = cancel.child_token();
@@ -159,7 +160,7 @@ pub async fn run_face_listener(path: &str, engine: ForwarderEngine, cancel: Canc
     }
 
     listener.cleanup();
-    tracing::info!("NDN face listener stopped");
+    tracing::info!(target: "face.system", "NDN face listener stopped");
 }
 
 // ─── UDP listener ────────────────────────────────────────────────────────────
@@ -191,13 +192,13 @@ pub async fn run_udp_listener(
             Arc::new(s)
         }
         Err(e) => {
-            tracing::error!(addr=%bind_addr, error=%e, "udp-listener: bind failed");
+            tracing::error!(target: "face.udp", addr=%bind_addr, error=%e, "udp-listener: bind failed");
             return;
         }
     };
 
     let local = socket.local_addr().unwrap_or(bind_addr);
-    tracing::info!(addr=%local, "UDP listener ready");
+    tracing::info!(target: "face.udp", addr=%local, "UDP listener ready");
 
     // Deduplicate faces by the full remote address (IP + port).  This correctly
     // handles both NDN forwarder-to-forwarder traffic (source port is 6363) and
@@ -214,12 +215,12 @@ pub async fn run_udp_listener(
                 let (n, src) = match r {
                     Ok(pair) => pair,
                     Err(e) => {
-                        tracing::warn!(error=%e, "udp-listener: recv error");
+                        tracing::warn!(target: "face.udp", error=%e, "udp-listener: recv error");
                         continue;
                     }
                 };
 
-                tracing::debug!(src=%src, len=n, "udp-listener: recv packet");
+                tracing::debug!(target: "face.udp", src=%src, len=n, "udp-listener: recv packet");
                 let raw = bytes::Bytes::copy_from_slice(&buf[..n]);
 
                 let face_id = if let Some(&id) = peers.get(&src) {
@@ -238,7 +239,7 @@ pub async fn run_udp_listener(
                     let peer_cancel = cancel.child_token();
                     engine.add_face_send_only(face, peer_cancel);
                     peers.insert(src, face_id);
-                    tracing::info!(face=%face_id, peer=%src, "udp-listener: new face");
+                    tracing::info!(target: "face.udp", face=%face_id, peer=%src, "udp-listener: new face");
                     face_id
                 };
 
@@ -257,7 +258,7 @@ pub async fn run_udp_listener(
         }
     }
 
-    tracing::info!("UDP listener stopped");
+    tracing::info!(target: "face.udp", "UDP listener stopped");
 }
 
 // ─── TCP listener ────────────────────────────────────────────────────────────
@@ -272,13 +273,13 @@ pub async fn run_tcp_listener(
     let listener = match tokio::net::TcpListener::bind(bind_addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!(addr=%bind_addr, error=%e, "tcp-listener: bind failed");
+            tracing::error!(target: "face.tcp", addr=%bind_addr, error=%e, "tcp-listener: bind failed");
             return;
         }
     };
 
     let local = listener.local_addr().unwrap_or(bind_addr);
-    tracing::info!(addr=%local, "TCP listener ready");
+    tracing::info!(target: "face.tcp", addr=%local, "TCP listener ready");
 
     loop {
         let (stream, peer) = tokio::select! {
@@ -286,7 +287,7 @@ pub async fn run_tcp_listener(
             r = listener.accept() => match r {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!(error=%e, "tcp-listener: accept error");
+                    tracing::warn!(target: "face.tcp", error=%e, "tcp-listener: accept error");
                     continue;
                 }
             },
@@ -296,10 +297,10 @@ pub async fn run_tcp_listener(
         let face = ndn_faces::net::tcp_face_from_stream(face_id, stream);
         let conn_cancel = cancel.child_token();
         engine.add_face(face, conn_cancel);
-        tracing::info!(face=%face_id, peer=%peer, "tcp-listener: accepted connection");
+        tracing::info!(target: "face.tcp", face=%face_id, peer=%peer, "tcp-listener: accepted connection");
     }
 
-    tracing::info!("TCP listener stopped");
+    tracing::info!(target: "face.tcp", "TCP listener stopped");
 }
 
 // ─── Management handler ───────────────────────────────────────────────────────
@@ -466,6 +467,7 @@ pub(crate) async fn authorize_command(
     if !require_signed {
         if interest.sig_info().is_none() {
             tracing::warn!(
+                target: "mgmt.security",
                 name = %interest.name,
                 "nfd-mgmt: unsigned command accepted (require_signed_commands=false; \
                  enable in config to enforce E.01 / NFD command-authenticator parity)"
@@ -561,13 +563,14 @@ pub async fn run_ndn_mgmt_handler(
         let interest = match Interest::decode(raw) {
             Ok(i) => i,
             Err(e) => {
-                tracing::warn!(error = %e, "nfd-mgmt: malformed Interest; skipping");
+                tracing::warn!(target: "engine", error = %e, "nfd-mgmt: malformed Interest; skipping");
                 continue;
             }
         };
 
         let source_face = engine.source_face_id(&interest);
         tracing::debug!(
+            target: "engine",
             source_face = ?source_face,
             name = %interest.name,
             "nfd-mgmt: received command"
@@ -620,7 +623,7 @@ pub async fn run_ndn_mgmt_handler(
         let params = match resolve_control_parameters(params_in_name, params_in_app) {
             Ok(opt) => opt.unwrap_or_default(),
             Err(reason) => {
-                tracing::warn!(name = %interest.name, %reason, "nfd-mgmt: rejecting (N.11)");
+                tracing::warn!(target: "engine", name = %interest.name, %reason, "nfd-mgmt: rejecting (N.11)");
                 let resp = ControlResponse::error(status::BAD_PARAMS, reason);
                 send_response(&handle, &interest.name, &resp, mgmt_handles.command_response_signer.as_deref()).await;
                 continue;
@@ -654,7 +657,7 @@ pub async fn run_ndn_mgmt_handler(
         }
     }
 
-    tracing::info!("NFD management handler stopped");
+    tracing::info!(target: "engine", "NFD management handler stopped");
 }
 
 // ─── Command dispatch ─────────────────────────────────────────────────────────
@@ -785,7 +788,7 @@ fn rib_register(
     );
     engine.rib().apply_to_fib(&name, &engine.fib());
 
-    tracing::info!(prefix = %name, face = face_id.0, cost, origin = orig, "rib/register");
+    tracing::info!(target: "mgmt.rib", prefix = %name, face = face_id.0, cost, origin = orig, "rib/register");
 
     let echo = ControlParameters {
         name: Some(name),
@@ -824,7 +827,7 @@ fn rib_unregister(
     }
     engine.rib().apply_to_fib(&name, &engine.fib());
 
-    tracing::info!(prefix = %name, face = face_id.0, "rib/unregister");
+    tracing::info!(target: "mgmt.rib", prefix = %name, face = face_id.0, "rib/unregister");
 
     let echo = ControlParameters {
         name: Some(name),
@@ -905,7 +908,7 @@ fn routing_disable(params: ControlParameters, engine: &ForwarderEngine) -> Contr
         None => return ControlResponse::error(status::BAD_PARAMS, "Origin is required"),
     };
     if engine.routing().disable(origin) {
-        tracing::info!(origin, "routing/disable");
+        tracing::info!(target: "mgmt.rib", origin, "routing/disable");
         let echo = ControlParameters {
             origin: Some(origin),
             ..Default::default()
@@ -990,6 +993,7 @@ fn routing_dvr_config(
         }
     }
     tracing::info!(
+        target: "routing.dvr",
         update_interval_ms = cfg.update_interval.as_millis(),
         route_ttl_ms = cfg.route_ttl.as_millis(),
         "routing/dvr-config updated"
@@ -1127,7 +1131,7 @@ fn discovery_config_set(
                 _ => {}
             }
         }
-        tracing::info!(params = %query, "discovery/config updated");
+        tracing::info!(target: "discovery", params = %query, "discovery/config updated");
     }
     discovery_status(discovery_cfg)
 }
@@ -1197,7 +1201,7 @@ async fn faces_create_udp(addr_str: &str, engine: &ForwarderEngine) -> ControlRe
             let local_uri = face.local_uri().unwrap_or_default();
             let cancel = CancellationToken::new();
             engine.add_face_with_persistency(face, cancel, FacePersistency::Persistent);
-            tracing::info!(face = face_id.0, remote = %peer, "faces/create udp4");
+            tracing::info!(target: "mgmt.face", face = face_id.0, remote = %peer, "faces/create udp4");
 
             let echo = ControlParameters {
                 face_id: Some(face_id.0 as u64),
@@ -1208,7 +1212,7 @@ async fn faces_create_udp(addr_str: &str, engine: &ForwarderEngine) -> ControlRe
             ControlResponse::ok("OK", echo)
         }
         Err(e) => {
-            tracing::warn!(error = %e, remote = %peer, "faces/create udp4 failed");
+            tracing::warn!(target: "mgmt.face", error = %e, remote = %peer, "faces/create udp4 failed");
             ControlResponse::error(
                 status::SERVER_ERROR,
                 format!("UDP face creation failed: {e}"),
@@ -1235,7 +1239,7 @@ async fn faces_create_tcp(addr_str: &str, engine: &ForwarderEngine) -> ControlRe
             let local_uri = face.local_uri().unwrap_or_default();
             let cancel = CancellationToken::new();
             engine.add_face_with_persistency(face, cancel, FacePersistency::Persistent);
-            tracing::info!(face = face_id.0, remote = %peer, "faces/create tcp4");
+            tracing::info!(target: "mgmt.face", face = face_id.0, remote = %peer, "faces/create tcp4");
 
             let echo = ControlParameters {
                 face_id: Some(face_id.0 as u64),
@@ -1246,7 +1250,7 @@ async fn faces_create_tcp(addr_str: &str, engine: &ForwarderEngine) -> ControlRe
             ControlResponse::ok("OK", echo)
         }
         Err(e) => {
-            tracing::warn!(error = %e, remote = %peer, "faces/create tcp4 failed");
+            tracing::warn!(target: "mgmt.face", error = %e, remote = %peer, "faces/create tcp4 failed");
             ControlResponse::error(
                 status::SERVER_ERROR,
                 format!("TCP face creation failed: {e}"),
@@ -1288,7 +1292,7 @@ fn faces_create_shm(
             // (app exits), the child cancel token fires and the face is
             // fully cleaned up (SHM region unlinked, FIB routes removed).
             engine.add_face(face, cancel);
-            tracing::info!(face = face_id.0, shm = shm_name, mtu = ?mtu, "faces/create shm");
+            tracing::info!(target: "mgmt.face", face = face_id.0, shm = shm_name, mtu = ?mtu, "faces/create shm");
 
             let echo = ControlParameters {
                 face_id: Some(face_id.0 as u64),
@@ -1299,7 +1303,7 @@ fn faces_create_shm(
             ControlResponse::ok("OK", echo)
         }
         Err(e) => {
-            tracing::warn!(error = %e, shm = shm_name, "faces/create shm failed");
+            tracing::warn!(target: "mgmt.face", error = %e, shm = shm_name, "faces/create shm failed");
             ControlResponse::error(status::SERVER_ERROR, format!("SHM creation failed: {e}"))
         }
     }
@@ -1358,7 +1362,7 @@ fn faces_destroy(
         engine.faces().remove(face_id);
     }
 
-    tracing::info!(face = face_id.0, "faces/destroy");
+    tracing::info!(target: "mgmt.face", face = face_id.0, "faces/destroy");
 
     let echo = ControlParameters {
         face_id: Some(face_id.0 as u64),
@@ -1478,7 +1482,7 @@ fn fib_add_nexthop(
     let cost = params.cost.unwrap_or(0) as u32;
 
     engine.fib().add_nexthop(&name, face_id, cost);
-    tracing::info!(prefix = %name, face = face_id.0, cost, "fib/add-nexthop");
+    tracing::info!(target: "mgmt.fib", prefix = %name, face = face_id.0, cost, "fib/add-nexthop");
 
     let echo = ControlParameters {
         name: Some(name),
@@ -1505,7 +1509,7 @@ fn fib_remove_nexthop(
     };
 
     engine.fib().remove_nexthop(&name, face_id);
-    tracing::info!(prefix = %name, face = face_id.0, "fib/remove-nexthop");
+    tracing::info!(target: "mgmt.fib", prefix = %name, face = face_id.0, "fib/remove-nexthop");
 
     let echo = ControlParameters {
         name: Some(name),
@@ -1602,6 +1606,7 @@ fn strategy_set(params: ControlParameters, engine: &ForwarderEngine) -> ControlR
     engine.strategy_table().insert(&prefix, strategy);
 
     tracing::info!(
+        target: "mgmt.strategy",
         prefix = %prefix,
         strategy = %strategy_name,
         "strategy-choice/set"
@@ -1628,7 +1633,7 @@ fn strategy_unset(params: ControlParameters, engine: &ForwarderEngine) -> Contro
 
     engine.strategy_table().remove(&prefix);
 
-    tracing::info!(prefix = %prefix, "strategy-choice/unset");
+    tracing::info!(target: "mgmt.strategy", prefix = %prefix, "strategy-choice/unset");
 
     let echo = ControlParameters {
         name: Some(prefix),
@@ -1671,7 +1676,7 @@ fn cs_config(params: ControlParameters, engine: &ForwarderEngine) -> ControlResp
     // If capacity is provided, update it at runtime.
     if let Some(new_cap) = params.capacity {
         cs.set_capacity(new_cap as usize);
-        tracing::info!(capacity = new_cap, "cs capacity updated");
+        tracing::info!(target: "mgmt.cs", capacity = new_cap, "cs capacity updated");
     }
 
     let cap = cs.capacity();
@@ -1731,7 +1736,7 @@ fn handle_status(
             ControlResponse::ok_empty(text)
         }
         b"shutdown" => {
-            tracing::info!("status/shutdown requested");
+            tracing::info!(target: "engine", "status/shutdown requested");
             cancel.cancel();
             ControlResponse::ok_empty("OK")
         }
@@ -1910,10 +1915,10 @@ fn service_announce(
 
     if let Some(face) = owner_face {
         sd.publish_with_owner(record, face);
-        tracing::info!(prefix = %prefix, owner_face = ?face, "service/announce (owned by face)");
+        tracing::info!(target: "discovery", prefix = %prefix, owner_face = ?face, "service/announce (owned by face)");
     } else {
         sd.publish(record);
-        tracing::info!(prefix = %prefix, "service/announce (permanent — no FIB route found)");
+        tracing::info!(target: "discovery", prefix = %prefix, "service/announce (permanent — no FIB route found)");
     }
 
     let echo = ControlParameters {
@@ -1930,7 +1935,7 @@ fn service_withdraw(params: ControlParameters, sd: &ServiceDiscoveryProtocol) ->
     };
 
     sd.withdraw(&prefix);
-    tracing::info!(prefix = %prefix, "service/withdraw");
+    tracing::info!(target: "discovery", prefix = %prefix, "service/withdraw");
 
     let echo = ControlParameters {
         name: Some(prefix),
@@ -2153,7 +2158,7 @@ fn security_identity_generate(params: ControlParameters, pib: &FilePib) -> Contr
     };
     match pib.generate_ed25519(&name) {
         Ok(_signer) => {
-            tracing::info!(name = %name, "security/identity-generate: generated Ed25519 key");
+            tracing::info!(target: "mgmt.security", name = %name, "security/identity-generate: generated Ed25519 key");
             let echo = ControlParameters {
                 name: Some(name),
                 ..Default::default()
@@ -2183,7 +2188,7 @@ fn security_key_delete(params: ControlParameters, pib: &FilePib) -> ControlRespo
     };
     match pib.delete_key(&name) {
         Ok(()) => {
-            tracing::info!(name = %name, "security/key-delete");
+            tracing::info!(target: "mgmt.security", name = %name, "security/key-delete");
             let echo = ControlParameters {
                 name: Some(name),
                 ..Default::default()
@@ -2259,7 +2264,7 @@ fn security_schema_rule_add(
     let validator = require_validator!(engine);
     let rule_str = rule.to_string();
     validator.add_schema_rule(rule);
-    tracing::info!(rule = %rule_str, "security/schema-rule-add");
+    tracing::info!(target: "mgmt.security", rule = %rule_str, "security/schema-rule-add");
     ControlResponse::ok_empty(format!("added rule: {rule_str}"))
 }
 
@@ -2284,7 +2289,7 @@ fn security_schema_rule_remove(
     match validator.remove_schema_rule(idx) {
         Some(rule) => {
             let rule_str = rule.to_string();
-            tracing::info!(index = idx, rule = %rule_str, "security/schema-rule-remove");
+            tracing::info!(target: "mgmt.security", index = idx, rule = %rule_str, "security/schema-rule-remove");
             ControlResponse::ok_empty(format!("removed rule[{idx}]: {rule_str}"))
         }
         None => ControlResponse::error(status::NOT_FOUND, format!("rule index {idx} out of range")),
@@ -2331,7 +2336,7 @@ fn security_schema_set(params: ControlParameters, engine: &ForwarderEngine) -> C
     let validator = require_validator!(engine);
     let rule_count = new_schema.rules().len();
     validator.set_schema(new_schema);
-    tracing::info!(rules = rule_count, "security/schema-set");
+    tracing::info!(target: "mgmt.security", rules = rule_count, "security/schema-set");
     ControlResponse::ok_empty(format!("schema replaced with {rule_count} rule(s)"))
 }
 
@@ -2368,7 +2373,7 @@ fn security_ca_token_add(params: ControlParameters) -> ControlResponse {
     let mut token_bytes = [0u8; 16];
     let _ = getrandom::getrandom(&mut token_bytes);
     let token: String = token_bytes.iter().map(|b| format!("{b:02x}")).collect();
-    tracing::info!(token = %token, description = %description, "security/ca-token-add");
+    tracing::info!(target: "mgmt.security", token = %token, description = %description, "security/ca-token-add");
     let echo = ControlParameters {
         // Return the token in the `uri` field (repurposed as a generic string slot).
         uri: Some(format!("token={token} description={description}")),
@@ -2449,16 +2454,18 @@ async fn security_ca_enroll(
                 match ndn_security::FilePib::open(&pib_path) {
                     Ok(pib) => match pib.store_cert(&identity_name, &cert) {
                         Ok(()) => tracing::info!(
+                            target: "mgmt.security",
                             name = %identity_name,
                             "ca-enroll: certificate installed"
                         ),
-                        Err(e) => tracing::error!(error = %e, "ca-enroll: failed to store cert"),
+                        Err(e) => tracing::error!(target: "mgmt.security", error = %e, "ca-enroll: failed to store cert"),
                     },
-                    Err(e) => tracing::error!(error = %e, "ca-enroll: failed to open PIB"),
+                    Err(e) => tracing::error!(target: "mgmt.security", error = %e, "ca-enroll: failed to open PIB"),
                 }
             }
             Err(e) => {
                 tracing::error!(
+                    target: "mgmt.security",
                     ca = %ca_name,
                     error = %e,
                     "ca-enroll: enrollment failed"
@@ -2506,6 +2513,7 @@ async fn run_enrollment(
         .ok_or("PROBE: face closed")?;
 
     tracing::debug!(
+        target: "mgmt.security",
         bytes = probe_resp.len(),
         "ca-enroll: PROBE response received"
     );
@@ -2722,6 +2730,7 @@ async fn security_yubikey_generate(params: ControlParameters, pib: &FilePib) -> 
 
         let pubkey_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&pub_bytes);
         tracing::info!(
+            target: "mgmt.security",
             name = %key_name,
             pubkey_len = pub_bytes.len(),
             "security/yubikey-generate: P-256 key generated in PIV slot 9a"
@@ -2749,6 +2758,10 @@ async fn security_yubikey_generate(params: ControlParameters, pib: &FilePib) -> 
 
 fn handle_log(verb_name: &[u8], params: ControlParameters) -> ControlResponse {
     match verb_name {
+        v if v == verb::MODULES => {
+            let body = ndn_engine::observability::targets::enumerate().join("\n");
+            ControlResponse::ok_empty(body)
+        }
         v if v == verb::GET_RECENT => {
             // `params.count` carries the last sequence number the client has seen.
             // We return only entries with seq > after_seq, plus the current max_seq
@@ -2789,7 +2802,7 @@ fn handle_log(verb_name: &[u8], params: ControlParameters) -> ControlResponse {
             }
             if let Some(apply) = crate::APPLY_FILTER.get() {
                 apply(&filter_str);
-                tracing::info!(filter = %filter_str, "log/set-filter: filter updated");
+                tracing::info!(target: "mgmt.log", filter = %filter_str, "log/set-filter: filter updated");
                 ControlResponse::ok_empty(filter_str)
             } else {
                 ControlResponse::error(status::NOT_FOUND, "filter reload not initialised")
@@ -2808,7 +2821,7 @@ async fn send_response(
     let content = resp.encode();
     let data = build_mgmt_response_wire(name, &content, signer);
     if let Err(e) = handle.send(data).await {
-        tracing::warn!(error = %e, "nfd-mgmt: failed to send Data response");
+        tracing::warn!(target: "engine", error = %e, "nfd-mgmt: failed to send Data response");
     }
 }
 
@@ -2905,7 +2918,7 @@ async fn send_dataset(handle: &InProcHandle, name: &Name, content: bytes::Bytes)
         .unwrap_or(0);
     for wire in build_segmented_dataset(name, version, &content) {
         if let Err(e) = handle.send(wire).await {
-            tracing::warn!(error = %e, "nfd-mgmt: failed to send dataset segment");
+            tracing::warn!(target: "engine", error = %e, "nfd-mgmt: failed to send dataset segment");
             return;
         }
     }
