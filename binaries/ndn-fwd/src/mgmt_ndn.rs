@@ -428,7 +428,7 @@ pub(crate) fn check_sig_time(
 pub(crate) fn is_extended_module(module: &[u8]) -> bool {
     use ndn_config::nfd_command::module as m;
     let standard: [&[u8]; 6] = [m::FACES, m::FIB, m::RIB, m::CS, m::STRATEGY, m::STATUS];
-    !standard.iter().any(|s| *s == module)
+    !standard.contains(&module)
 }
 
 /// Audit E.03 — effective auth gate for a parsed command. Extended modules
@@ -1032,7 +1032,6 @@ fn discovery_status(discovery_cfg: Option<&Arc<RwLock<DiscoveryConfig>>>) -> Con
         HelloStrategyKind::Backoff => "backoff",
         HelloStrategyKind::Reactive => "reactive",
         HelloStrategyKind::Passive => "passive",
-        HelloStrategyKind::Swim => "swim",
     };
     let prefix_ann_str = match cfg.prefix_announcement {
         PrefixAnnouncementMode::Static => "static",
@@ -1048,8 +1047,6 @@ fn discovery_status(discovery_cfg: Option<&Arc<RwLock<DiscoveryConfig>>>) -> Con
          liveness_timeout_ms: {}\n\
          liveness_miss_count: {}\n\
          probe_timeout_ms: {}\n\
-         swim_indirect_fanout: {}\n\
-         gossip_fanout: {}\n\
          prefix_announcement: {prefix_ann_str}\n\
          auto_create_faces: {}\n\
          tick_interval_ms: {}\n",
@@ -1059,8 +1056,6 @@ fn discovery_status(discovery_cfg: Option<&Arc<RwLock<DiscoveryConfig>>>) -> Con
         cfg.liveness_timeout.as_millis(),
         cfg.liveness_miss_count,
         cfg.probe_timeout.as_millis(),
-        cfg.swim_indirect_fanout,
-        cfg.gossip_fanout,
         cfg.auto_create_faces,
         cfg.tick_interval.as_millis(),
     );
@@ -1113,16 +1108,6 @@ fn discovery_config_set(
                 "probe_timeout_ms" => {
                     if let Ok(ms) = val.parse::<u64>() {
                         cfg.probe_timeout = Duration::from_millis(ms);
-                    }
-                }
-                "swim_indirect_fanout" => {
-                    if let Ok(v) = val.parse::<u32>() {
-                        cfg.swim_indirect_fanout = v;
-                    }
-                }
-                "gossip_fanout" => {
-                    if let Ok(v) = val.parse::<u32>() {
-                        cfg.gossip_fanout = v;
                     }
                 }
                 "auto_create_faces" => {

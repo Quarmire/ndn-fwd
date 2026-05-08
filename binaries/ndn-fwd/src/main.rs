@@ -382,8 +382,8 @@ async fn main() -> Result<()> {
     //
     // If [discovery] node_name is set, build CompositeDiscovery(ND + SD) and
     // attach it to the engine.  Multicast face IDs are pre-allocated here so
-    // they can be handed to UdpNeighborDiscovery / EtherNeighborDiscovery before
-    // build(); the actual face sockets are created after build() in the face loop.
+    // they can be handed to EtherNeighborDiscovery before build(); the actual
+    // face sockets are created after build() in the face loop.
     //
     // `discovery_sd` is kept alive alongside the engine so the management
     // handler can call publish()/withdraw() at runtime (Task 6).
@@ -399,7 +399,7 @@ async fn main() -> Result<()> {
     let auto_udp_pre_alloc: Vec<(ndn_transport::FaceId, String, std::net::Ipv4Addr)>;
     // Runtime-mutable handles shared between protocols and the management handler.
     // Initialized to None; set in the discovery wiring block when applicable.
-    let mut mgmt_discovery_cfg: Option<Arc<RwLock<ndn_discovery::DiscoveryConfig>>> = None;
+    let mgmt_discovery_cfg: Option<Arc<RwLock<ndn_discovery::DiscoveryConfig>>> = None;
     // DVR is not yet wired in the router binary (future work); always None for now.
     let mgmt_dvr_cfg: Option<Arc<RwLock<ndn_routing::DvrConfig>>> = None;
 
@@ -474,13 +474,11 @@ async fn main() -> Result<()> {
         let use_ether = disc_transport == "ether" || disc_transport == "both";
 
         // Pre-allocate a FaceId for each UDP multicast face in config.
-        let mut multicast_ids: Vec<ndn_transport::FaceId> = Vec::new();
         let mut mc_map: Vec<(ndn_transport::FaceId, usize)> = Vec::new();
         if use_udp {
             for (idx, face_cfg) in fwd_config.faces.iter().enumerate() {
                 if matches!(face_cfg, ndn_config::FaceConfig::Multicast { .. }) {
                     let id = builder.alloc_face_id();
-                    multicast_ids.push(id);
                     mc_map.push((id, idx));
                 }
             }
@@ -488,12 +486,10 @@ async fn main() -> Result<()> {
         pre_allocated_multicast = mc_map;
 
         // Pre-allocate FaceIds for auto-enumerated UDP multicast interfaces.
-        // These IDs are added to multicast_ids so UdpNeighborDiscovery listens on them.
         let mut auto_udp_ids: Vec<(ndn_transport::FaceId, String, std::net::Ipv4Addr)> = Vec::new();
         if use_udp {
             for (iface_name, addr) in &auto_udp_ifaces {
                 let id = builder.alloc_face_id();
-                multicast_ids.push(id);
                 auto_udp_ids.push((id, iface_name.clone(), *addr));
             }
         }
@@ -541,45 +537,17 @@ async fn main() -> Result<()> {
         if let Some(v) = fwd_config.discovery.liveness_miss_count {
             disc_cfg.liveness_miss_count = v;
         }
-        if let Some(v) = fwd_config.discovery.swim_indirect_fanout {
-            disc_cfg.swim_indirect_fanout = v;
-        }
-        if let Some(v) = fwd_config.discovery.gossip_fanout {
-            disc_cfg.gossip_fanout = v;
-        }
-
         let mut protocols: Vec<std::sync::Arc<dyn ndn_discovery::DiscoveryProtocol>> = Vec::new();
 
-        // ── UDP neighbor discovery ─────────────────────────────────────────────
+        // ── Neighbor liveness probe ────────────────────────────────────────────
         if use_udp {
-            // Determine the UDP unicast listen port so it can be advertised in
-            // hellos.  Peers use this port to create a true unicast face instead
-            // of pointing at the multicast source port (which would send data as
-            // multicast).  Default to 6363 (the IANA-assigned NDN port).
-            let unicast_port: u16 = fwd_config
-                .faces
-                .iter()
-                .find_map(|f| match f {
-                    ndn_config::FaceConfig::Udp { bind, remote: None } => bind
-                        .as_deref()
-                        .unwrap_or("0.0.0.0:6363")
-                        .parse::<std::net::SocketAddr>()
-                        .ok()
-                        .map(|a| a.port()),
-                    _ => None,
-                })
-                .unwrap_or(6363);
-
-            let nd = ndn_discovery::UdpNeighborDiscovery::new_multi(
-                multicast_ids,
+            let nd = ndn_discovery::NeighborProbeProtocol::new(
                 node_name.clone(),
-                disc_cfg.clone(),
-            )
-            .with_unicast_port(unicast_port);
-            // Capture the shared config handle before moving `nd` into Arc.
-            mgmt_discovery_cfg = Some(nd.core.config_handle());
+                disc_cfg.hello_interval_base,
+                disc_cfg.liveness_miss_count as u8,
+            );
             protocols.push(std::sync::Arc::new(nd));
-            tracing::info!(target: "discovery", node=%node_name, "UDP neighbor discovery enabled");
+            tracing::info!(target: "discovery", node=%node_name, "neighbor liveness probe enabled");
         }
 
         // ── Ethernet neighbor discovery (Linux only) ───────────────────────────
