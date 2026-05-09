@@ -37,6 +37,9 @@ use ndn_store::{ErasedContentStore, LruCs, NullCs, ShardedCs};
 // NDN-native management: face listener + Interest/Data handler.
 mod mgmt_ndn;
 
+// Embedded NDNCERT CA used by the dioxus-demo scenario.
+mod demo_ca;
+
 // ─── Runtime filter reload ────────────────────────────────────────────────────
 
 type FilterFn = Box<dyn Fn(&str) + Send + Sync + 'static>;
@@ -349,7 +352,23 @@ async fn main() -> Result<()> {
     // E.01 — load management command validator from trust_anchor_pib if set.
     // Aborts on startup if the PIB is missing or empty (fail-fast per spec).
     let mgmt_validator = load_mgmt_validator(&fwd_config.security.mgmt)?;
-    let localhop_validator = load_localhop_validator(&fwd_config.security.mgmt)?;
+    let mut localhop_validator = load_localhop_validator(&fwd_config.security.mgmt)?;
+
+    // Demo NDNCERT CA: prepare the in-process face and ephemeral CA
+    // identity *before* engine build so the face can be attached, and
+    // splice the CA's self-signed cert into the /localhop validator
+    // anchor set so register Interests signed by issued certs are
+    // accepted with no on-disk PIB.
+    let demo_ca_artifacts = if fwd_config.demo_ca.enabled {
+        let (face, spawn) = demo_ca::prepare(&fwd_config.demo_ca)?;
+        localhop_validator = Some(demo_ca::install_localhop_anchor(
+            &spawn.keychain,
+            localhop_validator,
+        )?);
+        Some((face, spawn))
+    } else {
+        None
+    };
     let pib: Option<Arc<FilePib>> = security_init
         .pib_path
         .as_ref()
@@ -379,6 +398,14 @@ async fn main() -> Result<()> {
         .admission_policy(admission)
         .security_profile(security_profile)
         .security(security_init.mgr);
+
+    let demo_ca_spawn = match demo_ca_artifacts {
+        Some((face, spawn)) => {
+            builder = builder.face(face);
+            Some(spawn)
+        }
+        None => None,
+    };
 
     // Apply static trust schema rules from [[security.rule]] config entries.
     for rule_cfg in &fwd_config.security.rules {
@@ -843,6 +870,22 @@ async fn main() -> Result<()> {
         ndn_transport::FaceId(MGMT_FACE_ID),
         0,
     );
+
+    // Demo NDNCERT CA: register the configured prefix in the FIB
+    // pointing at the in-process CA face, then spawn the producer
+    // task. The CA's anchor was already merged into the localhop
+    // validator above (pre-build), so issued certs are accepted by
+    // /localhop/nfd/rib/register.
+    if let Some(spawn) = demo_ca_spawn {
+        engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
+        tracing::info!(
+            target: "demo_ca",
+            prefix = %spawn.prefix,
+            face = spawn.face_id.0,
+            "demo CA FIB entry installed"
+        );
+        demo_ca::spawn(spawn, &engine)?;
+    }
 
     // Register Hello responder: route incoming /<own_router>/nlsr/INFO Interests
     // to the CallbackFace that calls HelloProtocol::handle_incoming_interest().
