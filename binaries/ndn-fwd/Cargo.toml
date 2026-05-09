@@ -15,7 +15,7 @@ spsc-shm    = ["ndn-faces/spsc-shm"]
 websocket   = ["ndn-faces/websocket", "dep:tokio-tungstenite"]
 serial      = ["ndn-faces/serial"]
 l2          = ["ndn-faces/l2"]
-webtransport = ["dep:ndn-face-webtransport", "dep:ndn-acme"]
+webtransport = ["dep:ndn-face-webtransport", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
 yubikey-piv = ["ndn-security/yubikey-piv"]
 # Enable tokio-console task inspector.
 # Requires RUSTFLAGS="--cfg tokio_unstable" at build time (tokio requirement).
@@ -29,6 +29,8 @@ ndn-app          = { workspace = true }
 ndn-faces        = { workspace = true }
 ndn-face-webtransport = { workspace = true, optional = true }
 ndn-acme              = { workspace = true, optional = true }
+rustls-pemfile        = { workspace = true, optional = true }
+sha2                  = { version = "0.10", optional = true }
 ndn-strategy     = { workspace = true }
 ndn-store        = { workspace = true }
 ndn-security     = { workspace = true }

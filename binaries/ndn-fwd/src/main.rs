@@ -1284,6 +1284,10 @@ async fn main() -> Result<()> {
             // with no validator rejects all commands (fail-secure; operator must
             // provide anchors or set require_signed_commands = false for dev mode).
             command_validator: mgmt_validator,
+            // Localhop registration is opt-in: a separate validator with its
+            // own trust anchors, mirroring NFD's `m_localhopValidator`. None
+            // here means /localhop/nfd/... is rejected with STATUS 403.
+            localhop_command_validator: None,
             require_signed_commands: fwd_config.security.mgmt.require_signed_commands,
             // N.10 — replay-protection cache. Off by default; wire in once
             // trust-anchor enforcement is stable in production deployments.
@@ -1355,6 +1359,21 @@ async fn run_wt_listener(
             return;
         }
     };
+
+    {
+        use sha2::{Digest, Sha256};
+        if let Some(Ok(leaf)) =
+            rustls_pemfile::certs(&mut material.cert_chain_pem.as_slice()).next()
+        {
+            let digest = Sha256::digest(leaf.as_ref());
+            let hex = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            tracing::info!(
+                target: "face.wt",
+                cert_sha256 = %hex,
+                "WebTransport leaf cert SHA-256 (pass to browser as ?cert=<hex> or via --ignore-certificate-errors-spki-list)"
+            );
+        }
+    }
 
     let tls = WtTlsConfig::Pem {
         cert_chain_pem: material.cert_chain_pem,

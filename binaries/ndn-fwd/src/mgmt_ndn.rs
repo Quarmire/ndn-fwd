@@ -321,6 +321,12 @@ pub struct MgmtHandles {
     /// commands run unauthenticated — current default for backward
     /// compatibility while operators populate trust anchors.
     pub command_validator: Option<Arc<ndn_security::Validator>>,
+    /// Validator for `/localhop/nfd/...` commands (mirrors NFD's
+    /// `RibManager::m_localhopValidator`, see `daemon/mgmt/rib-manager.cpp:60`).
+    /// `None` means localhop registration is disabled and any
+    /// `/localhop/nfd/...` Interest is rejected with `STATUS 403` —
+    /// equivalent to NFD's `m_isLocalhopEnabled = false`.
+    pub localhop_command_validator: Option<Arc<ndn_security::Validator>>,
     /// When `true`, an unsigned or invalid command Interest is rejected
     /// with `status::UNAUTHORIZED`; when `false` (default), a warning is
     /// logged but the command proceeds. Operators flip this to `true`
@@ -586,16 +592,48 @@ pub async fn run_ndn_mgmt_handler(
             }
         };
 
-        // E.01 / I.07 — gate command dispatch on the operator's
-        // command-authentication policy (NFD command-authenticator).
-        // E.03 — extended (ndn-rs-only) modules unconditionally require
-        // signed commands; the operator-level flag only relaxes the
-        // standard NFD modules.
-        let effective_required =
-            effective_require_signed(&parsed.module, mgmt_handles.require_signed_commands);
+        // NFD `daemon/mgmt/rib-manager.cpp:340-355` selects between
+        // `m_localhostValidator` and `m_localhopValidator` based on the
+        // top-level prefix. `/localhop/...` always requires a signed
+        // Interest validated against the localhop trust anchors; if no
+        // localhop validator is wired, registration is disabled and the
+        // Interest is rejected (mirrors `m_isLocalhopEnabled = false`).
+        let is_localhop_command = interest
+            .name
+            .components()
+            .first()
+            .is_some_and(|c| c.value.as_ref() == b"localhop");
+        let (active_validator, effective_required) = if is_localhop_command {
+            match mgmt_handles.localhop_command_validator.as_deref() {
+                Some(v) => (Some(v), true),
+                None => {
+                    let resp = ControlResponse::error(
+                        status::UNAUTHORIZED,
+                        "localhop registration disabled (no trust anchor configured)",
+                    );
+                    send_response(
+                        &handle,
+                        &interest.name,
+                        &resp,
+                        mgmt_handles.command_response_signer.as_deref(),
+                    )
+                    .await;
+                    continue;
+                }
+            }
+        } else {
+            // E.01 / I.07 — operator's command-authentication policy.
+            // E.03 — ndn-rs-only modules unconditionally require signing;
+            // standard modules use the operator's global flag.
+            let req = effective_require_signed(
+                &parsed.module,
+                mgmt_handles.require_signed_commands,
+            );
+            (mgmt_handles.command_validator.as_deref(), req)
+        };
         if let Err(reason) = authorize_command(
             &interest,
-            mgmt_handles.command_validator.as_deref(),
+            active_validator,
             effective_required,
             mgmt_handles.command_replay_cache.as_ref(),
         )
