@@ -884,6 +884,18 @@ async fn main() -> Result<()> {
             face = spawn.face_id.0,
             "demo CA FIB entry installed"
         );
+        if let Some(ns) = &spawn.cert_namespace {
+            // Cost +1 so that LPM still prefers a more-specific
+            // browser-registered prefix (e.g. /demo/<random> →
+            // browser face) when one exists.
+            engine.fib().add_nexthop(ns, spawn.face_id, 1);
+            tracing::info!(
+                target: "demo_ca",
+                namespace = %ns,
+                face = spawn.face_id.0,
+                "demo CA cert-fetch namespace FIB entry installed"
+            );
+        }
         demo_ca::spawn(spawn, &engine)?;
     }
 

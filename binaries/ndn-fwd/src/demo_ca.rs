@@ -31,6 +31,12 @@ pub(crate) struct DemoCaSpawn {
     pub handle: InProcHandle,
     pub face_id: FaceId,
     pub prefix: Name,
+    /// Parent namespace under which the CA issues certs (per
+    /// `HierarchicalPolicy`: `/demo/CA` → `/demo`). Registered in the
+    /// FIB at the same face as `prefix` so the cert-fetch round trip
+    /// (NDNCERT 0.3 §5) reaches the CA. `None` when the CA prefix has
+    /// no usable parent (e.g. a single-component prefix).
+    pub cert_namespace: Option<Name>,
     pub keychain: KeyChain,
 }
 
@@ -52,12 +58,32 @@ pub(crate) fn prepare(cfg: &DemoCaConfig) -> Result<(InProcFace, DemoCaSpawn)> {
     let face_id = FaceId(DEMO_CA_FACE_ID);
     let (face, handle) = InProcFace::new(face_id, 64);
 
+    // Compute the issuance namespace by stripping a trailing `CA`
+    // component if present, mirroring `ndn_cert::HierarchicalPolicy`.
+    // For `/demo/CA` this yields `/demo`. We register both prefixes
+    // at the CA face so cert-fetch Interests for issued certs (which
+    // sit under `/demo/<requester>/KEY/...`, NOT under `/demo/CA`)
+    // reach the producer. Browser-registered prefixes like
+    // `/demo/<random>` win via longest-prefix-match.
+    let cert_namespace = {
+        let comps = prefix.components();
+        match comps.last() {
+            Some(last) if last.value.as_ref() == b"CA" && comps.len() > 1 => Some(
+                ndn_packet::Name::from_components(
+                    comps[..comps.len() - 1].iter().cloned(),
+                ),
+            ),
+            _ => None,
+        }
+    };
+
     Ok((
         face,
         DemoCaSpawn {
             handle,
             face_id,
             prefix,
+            cert_namespace,
             keychain,
         },
     ))
