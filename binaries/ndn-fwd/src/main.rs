@@ -864,9 +864,19 @@ async fn main() -> Result<()> {
     }
 
     // Register the management prefix in the FIB so the pipeline routes
-    // /localhost/ndn-ctl/... Interests to the management AppFace.
+    // /localhost/nfd/... Interests to the management AppFace.
     engine.fib().add_nexthop(
         &mgmt_ndn::mgmt_prefix(),
+        ndn_transport::FaceId(MGMT_FACE_ID),
+        0,
+    );
+    // Mirror NFD `daemon/mgmt/rib-manager.cpp:60-89` — the rib module
+    // is also reachable under `/localhop/nfd` for cert-authenticated
+    // remote registration. Without this entry the pipeline NACKs
+    // every signed `/localhop/nfd/rib/register` with NoRoute before
+    // the management handler runs.
+    engine.fib().add_nexthop(
+        &mgmt_ndn::mgmt_localhop_prefix(),
         ndn_transport::FaceId(MGMT_FACE_ID),
         0,
     );

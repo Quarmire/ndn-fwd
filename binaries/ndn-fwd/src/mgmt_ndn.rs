@@ -123,6 +123,21 @@ pub fn mgmt_prefix() -> Name {
     ])
 }
 
+/// Build the `/localhop/nfd` name prefix.
+///
+/// NFD `daemon/mgmt/rib-manager.cpp:60-89` registers the rib module
+/// under both `/localhost/nfd` and `/localhop/nfd`; `/localhop`
+/// commands are validated against the localhop trust anchor set so
+/// remote requesters with appropriate certs can register prefixes.
+/// Without this FIB entry the pipeline NACKs the Interest with
+/// NoRoute before the management handler ever runs.
+pub fn mgmt_localhop_prefix() -> Name {
+    Name::from_components([
+        NameComponent::generic(Bytes::from_static(b"localhop")),
+        NameComponent::generic(Bytes::from_static(b"nfd")),
+    ])
+}
+
 // ─── Face listener ────────────────────────────────────────────────────────────
 
 /// Accept NDN face connections on `path` and register each as a dynamic face.
