@@ -1118,6 +1118,25 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { run_wt_listener(wt_cfg, eng, c).await });
     }
 
+    // ── WebRTC listener (Phase 5) ────────────────────────────────────────────
+    //
+    // Polls the configured signaling relay for incoming SDP
+    // offers, accepts each one as a `WebRtcFace`, and registers
+    // the face with the engine. The listener does not allocate
+    // session ids — operators do, by listing them in
+    // `[listeners.webrtc].session_ids`. New rendezvous identifiers
+    // get added to the config (or distributed via a future
+    // operator API) and are picked up the next time the listener
+    // is restarted.
+    if let Some(rtc_cfg) = fwd_config.listeners.webrtc.clone()
+        && rtc_cfg.enabled
+        && !rtc_cfg.session_ids.is_empty()
+    {
+        let eng = engine.clone();
+        let c = cancel.clone();
+        tokio::spawn(async move { run_webrtc_listener(rtc_cfg, eng, c).await });
+    }
+
     // ── Face system: create auto-enumerated multicast faces ───────────────────
     //
     // When discovery was enabled, `auto_ether_pre_alloc` / `auto_udp_pre_alloc`
@@ -1382,6 +1401,87 @@ async fn main() -> Result<()> {
 
     shutdown.shutdown().await;
     Ok(())
+}
+
+// ─── WebRTC listener (Phase 5) ───────────────────────────────────────────────
+//
+// One long-running task per ndn-fwd. For each configured
+// session-id we spawn a per-session loop that calls
+// `WebRtcListener::accept_one`, and on success registers the
+// resulting face with the engine. After a face accepts and is
+// registered, the loop calls `accept_one` again with the same
+// id — re-accepting after the peer disconnects, so the same
+// session-id can serve a stream of inbound peers (one at a time).
+async fn run_webrtc_listener(
+    cfg: ndn_config::WebRtcListenerConfig,
+    engine: ForwarderEngine,
+    cancel: CancellationToken,
+) {
+    use ndn_face_webrtc::IceServers;
+    use ndn_rtc_signaling_relay::WebRtcListener;
+    use std::time::Duration;
+
+    let servers: IceServers = cfg
+        .ice_servers
+        .as_ref()
+        .and_then(|v| serde_json::to_string(v).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    tracing::info!(
+        target: "face.webrtc",
+        signaling = %cfg.signaling_url,
+        sessions = ?cfg.session_ids,
+        "WebRTC listener starting"
+    );
+
+    for session_id in cfg.session_ids {
+        let listener = WebRtcListener::new(cfg.signaling_url.clone(), servers.clone());
+        let eng = engine.clone();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            // Each session loops accept_one → register → wait for
+            // disconnect → accept_one again. The tokio::select on
+            // cancel covers the case where the operator wants to
+            // shut down between accepts.
+            loop {
+                if c.is_cancelled() {
+                    return;
+                }
+                let accept = tokio::select! {
+                    biased;
+                    _ = c.cancelled() => return,
+                    r = listener.accept_one(&session_id, Duration::from_secs(60)) => r,
+                };
+                match accept {
+                    Ok(mut face) => {
+                        let face_id = eng.faces().alloc_id();
+                        face.set_id(face_id);
+                        tracing::info!(
+                            target: "face.webrtc",
+                            session = %session_id,
+                            face = face_id.0,
+                            "accepted WebRTC peer"
+                        );
+                        eng.add_face(face, c.clone());
+                        // Give the just-registered face time to
+                        // run; the next accept_one starts a fresh
+                        // rendezvous slot for the same id.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "face.webrtc",
+                            session = %session_id,
+                            error = %e,
+                            "WebRTC accept failed; retrying after 5s"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        });
+    }
 }
 
 // ─── WebTransport listener (issue #14) ───────────────────────────────────────
