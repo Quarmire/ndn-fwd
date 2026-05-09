@@ -1427,19 +1427,22 @@ async fn run_wt_listener(
         }
     };
 
-    {
+    let cert_sha256_hex: Option<String> = {
         use sha2::{Digest, Sha256};
-        if let Some(Ok(leaf)) =
-            rustls_pemfile::certs(&mut material.cert_chain_pem.as_slice()).next()
-        {
-            let digest = Sha256::digest(leaf.as_ref());
-            let hex = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
-            tracing::info!(
-                target: "face.wt",
-                cert_sha256 = %hex,
-                "WebTransport leaf cert SHA-256 (pass to browser as ?cert=<hex> or via --ignore-certificate-errors-spki-list)"
-            );
-        }
+        rustls_pemfile::certs(&mut material.cert_chain_pem.as_slice())
+            .next()
+            .and_then(|r| r.ok())
+            .map(|leaf| {
+                let digest = Sha256::digest(leaf.as_ref());
+                digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            })
+    };
+    if let Some(ref hex) = cert_sha256_hex {
+        tracing::info!(
+            target: "face.wt",
+            cert_sha256 = %hex,
+            "WebTransport leaf cert SHA-256 (pass to browser as ?cert=<hex> or via --ignore-certificate-errors-spki-list)"
+        );
     }
 
     let tls = WtTlsConfig::Pem {
@@ -1455,6 +1458,25 @@ async fn run_wt_listener(
         }
     };
     tracing::info!(target: "face.wt", addr=%listener.local_addr(), "WebTransport listener ready");
+
+    // Print a copy-paste-ready connect URL — Chrome's WebTransport
+    // requires `?cert=<spki-hash>` for self-signed certs (per
+    // https://www.w3.org/TR/webtransport/#dom-webtransportoptions-servercertificatehashes).
+    // Doing the assembly here saves the operator from hand-splicing the
+    // hash from the previous log line every restart.
+    if let Some(ref hex) = cert_sha256_hex {
+        let port = listener.local_addr().port();
+        let host = match listener.local_addr().ip() {
+            std::net::IpAddr::V4(v4) if v4.is_unspecified() => "127.0.0.1".to_string(),
+            std::net::IpAddr::V6(v6) if v6.is_unspecified() => "127.0.0.1".to_string(),
+            other => other.to_string(),
+        };
+        tracing::info!(
+            target: "face.wt",
+            url = %format!("https://{host}:{port}/ndn?cert={hex}"),
+            "wt-listener: open this URL in the browser (cert hash baked in)"
+        );
+    }
 
     loop {
         tokio::select! {
