@@ -36,6 +36,7 @@ ndn-store        = { workspace = true }
 ndn-security     = { workspace = true }
 ndn-cert         = { workspace = true }
 ndn-identity     = { workspace = true }
+dashmap          = { workspace = true }
 ndn-config       = { workspace = true }
 ndn-routing      = { workspace = true }
 getrandom        = "0.2"

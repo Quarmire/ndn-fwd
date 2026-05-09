@@ -89,22 +89,37 @@ pub(crate) fn prepare(cfg: &DemoCaConfig) -> Result<(InProcFace, DemoCaSpawn)> {
     ))
 }
 
-/// Install the demo CA's anchor onto the localhop validator.
+/// Install the demo CA's anchor onto the localhop validator and share
+/// the CA's `cert_cache` with it.
 ///
-/// Mirrors NFD `daemon/mgmt/rib-manager.cpp:340-355` — when the localhop
-/// validator has at least one anchor, `/localhop/nfd/rib/register`
+/// Mirrors NFD `daemon/mgmt/rib-manager.cpp:340-355` — when the
+/// localhop validator has at least one anchor, `/localhop/nfd/rib/register`
 /// dispatches through it. The demo CA's self-signed cert is the anchor
 /// for every cert it issues, so issued certs implicitly chain to a
 /// `/localhop`-trusted root.
 ///
+/// **Cache sharing**: in a real testbed deployment the validator would
+/// fetch each requester's cert from the network (via `CertFetcher`).
+/// In this demo the CA runs in the same process as the validator, so
+/// we wire the validator to the CA's `Arc<CertCache>` directly:
+/// every time the CA issues a cert via
+/// `SecurityManager::certify`, the validator sees it on its very next
+/// `cert_cache.get(...)`. This is end-to-end spec-correct (the
+/// signature chain is the same as the network-fetched version) and
+/// avoids a round-trip cert-fetch on the management hot path.
+///
 /// Returns a fresh validator if `existing` is `None`, or amends the
-/// existing one in place and returns the same `Arc`.
+/// existing one in place and returns the same `Arc`. When `existing`
+/// is `Some`, the cache is NOT replaced — the operator's pre-built
+/// validator already has its own cache; we only add the anchor and
+/// pre-load the CA's cert cache by inserting any certs the CA's
+/// manager already holds.
 pub(crate) fn install_localhop_anchor(
     keychain: &KeyChain,
     existing: Option<Arc<Validator>>,
 ) -> Result<Arc<Validator>> {
-    let anchor = keychain
-        .manager_arc()
+    let manager = keychain.manager_arc();
+    let anchor = manager
         .trust_anchor(keychain.key_name())
         .ok_or_else(|| {
             anyhow::anyhow!("[demo_ca] keychain produced no self-signed trust anchor")
@@ -114,7 +129,15 @@ pub(crate) fn install_localhop_anchor(
         Some(v) => v,
         None => {
             let schema = ndn_security::TrustSchema::accept_all();
-            Arc::new(ndn_security::Validator::new(schema))
+            // Build the validator with the CA's shared cert_cache so
+            // newly-issued certs are visible without a network fetch.
+            Arc::new(ndn_security::Validator::with_chain(
+                schema,
+                manager.cert_cache_arc(),
+                Arc::new(dashmap::DashMap::new()),
+                None,
+                10,
+            ))
         }
     };
     validator.add_trust_anchor(anchor.clone());
