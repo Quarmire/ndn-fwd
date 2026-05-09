@@ -349,6 +349,7 @@ async fn main() -> Result<()> {
     // E.01 — load management command validator from trust_anchor_pib if set.
     // Aborts on startup if the PIB is missing or empty (fail-fast per spec).
     let mgmt_validator = load_mgmt_validator(&fwd_config.security.mgmt)?;
+    let localhop_validator = load_localhop_validator(&fwd_config.security.mgmt)?;
     let pib: Option<Arc<FilePib>> = security_init
         .pib_path
         .as_ref()
@@ -1284,10 +1285,11 @@ async fn main() -> Result<()> {
             // with no validator rejects all commands (fail-secure; operator must
             // provide anchors or set require_signed_commands = false for dev mode).
             command_validator: mgmt_validator,
-            // Localhop registration is opt-in: a separate validator with its
-            // own trust anchors, mirroring NFD's `m_localhopValidator`. None
-            // here means /localhop/nfd/... is rejected with STATUS 403.
-            localhop_command_validator: None,
+            // Localhop registration is opt-in via [security.mgmt]
+            // localhop_trust_anchor_pib, mirroring NFD's `m_localhopValidator`.
+            // None here means /localhop/nfd/... is rejected with STATUS 403,
+            // equivalent to NFD's `m_isLocalhopEnabled = false`.
+            localhop_command_validator: localhop_validator,
             require_signed_commands: fwd_config.security.mgmt.require_signed_commands,
             // N.10 — replay-protection cache. Off by default; wire in once
             // trust-anchor enforcement is stable in production deployments.
@@ -1760,6 +1762,52 @@ fn load_mgmt_validator(
     let validator = ndn_security::Validator::new(schema);
     for anchor in anchors {
         tracing::info!(target: "security", name = %anchor.name, "mgmt: loaded trust anchor");
+        validator.add_trust_anchor(anchor);
+    }
+    Ok(Some(Arc::new(validator)))
+}
+
+/// Load the validator for `/localhop/nfd/...` registration commands.
+///
+/// Mirrors NFD `daemon/mgmt/rib-manager.cpp:85` `enableLocalhop`:
+/// returns `Some(validator)` when the operator has populated a PIB at
+/// `[security.mgmt] localhop_trust_anchor_pib`. Returns `None` (localhop
+/// disabled) when the field is unset.
+///
+/// The schema is `accept_all` — name-pattern enforcement is reserved for
+/// per-route policy in a follow-up. The current cut requires only that
+/// the Interest carries a key-backed signature whose KeyLocator name's
+/// cert is in the trust-anchor set, which is what NFD's "rib register
+/// command" rule demands at minimum.
+fn load_localhop_validator(
+    cfg: &ndn_config::MgmtSecurityConfig,
+) -> Result<Option<Arc<ndn_security::Validator>>> {
+    let Some(pib_path_str) = &cfg.localhop_trust_anchor_pib else {
+        return Ok(None);
+    };
+    let pib_path = PathBuf::from(pib_path_str);
+    let pib = ndn_security::FilePib::open(&pib_path).map_err(|e| {
+        anyhow::anyhow!(
+            "[security.mgmt] cannot open localhop_trust_anchor_pib '{}': {e}",
+            pib_path.display()
+        )
+    })?;
+    let anchors = pib.trust_anchors().map_err(|e| {
+        anyhow::anyhow!(
+            "[security.mgmt] failed to load anchors from '{}': {e}",
+            pib_path.display()
+        )
+    })?;
+    if anchors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "[security.mgmt] localhop_trust_anchor_pib '{}' contains no trust anchors",
+            pib_path.display()
+        ));
+    }
+    let schema = ndn_security::TrustSchema::accept_all();
+    let validator = ndn_security::Validator::new(schema);
+    for anchor in anchors {
+        tracing::info!(target: "security", name = %anchor.name, "localhop: loaded trust anchor");
         validator.add_trust_anchor(anchor);
     }
     Ok(Some(Arc::new(validator)))
