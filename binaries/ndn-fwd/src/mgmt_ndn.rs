@@ -3101,6 +3101,97 @@ mod e01_tests {
         );
     }
 
+    // ── D.01 – D.03 — `/localhop/nfd/...` registration witnesses ──────────────
+    //
+    // Mirrors the dioxus-demo flow from
+    // docs/notes/localhop-prefix-registration-2026-05-09.md and the NFD
+    // reference at `daemon/mgmt/rib-manager.cpp:340-355`. Each test pins one
+    // contractual property of the management handler's localhop branch:
+    // unsigned → reject, signed-with-cached-cert → accept, no-validator →
+    // reject (mapping to STATUS=403 "localhop registration disabled" on the
+    // wire). The wire-level wrapper in `run_ndn_mgmt_handler` turns each
+    // outcome into the corresponding `ControlResponse`; we exercise the
+    // gating function directly so the witness runs with `cargo test -p
+    // ndn-fwd` instead of needing a full docker-compose harness.
+
+    /// D.01 — unsigned `/localhop/nfd/...` Interests are rejected when
+    /// a localhop validator is wired.
+    #[tokio::test]
+    async fn d01_localhop_unsigned_rejected() {
+        let cmd_name: Name = "/localhop/nfd/rib/register".parse().unwrap();
+        let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
+        let validator = Validator::new(open_schema());
+        // require_signed=true matches the unconditional gating that
+        // `run_ndn_mgmt_handler` applies to every /localhop command.
+        let result = authorize_command(&interest, Some(&validator), true, None).await;
+        assert!(
+            result.is_err(),
+            "unsigned /localhop command must not authorize"
+        );
+    }
+
+    /// D.02 — `/localhop/nfd/...` signed by a key whose cert is in the
+    /// validator's `cert_cache` (the dioxus-demo path: CA inserts on
+    /// issuance, validator reads from the shared `Arc<CertCache>`)
+    /// passes authorization.
+    #[tokio::test]
+    async fn d02_localhop_signed_accepted() {
+        use ndn_security::cert_cache::Certificate;
+        use ndn_security::signer::{Ed25519Signer, Signer as _};
+
+        let seed = [7u8; 32];
+        let key_name: Name = "/demo/browser/d02/KEY/k1".parse().unwrap();
+        let signer = Ed25519Signer::from_seed(&seed, key_name.clone());
+        let pubkey = signer.public_key_bytes();
+
+        let cmd_name: Name = "/localhop/nfd/rib/register".parse().unwrap();
+        let wire = InterestBuilder::new(cmd_name)
+            .app_parameters(bytes::Bytes::from_static(b"params"))
+            .sign_sync(
+                ndn_packet::SignatureType::SignatureEd25519,
+                Some(&key_name),
+                |region| signer.sign_sync(region).expect("ed25519 sign"),
+            );
+        let interest = Interest::decode(wire).unwrap();
+
+        let validator = Validator::new(open_schema());
+        validator.cert_cache().insert(Certificate {
+            name: Arc::new(key_name),
+            public_key: bytes::Bytes::copy_from_slice(&pubkey),
+            valid_from: 0,
+            valid_until: u64::MAX,
+            issuer: None,
+            signed_region: None,
+            sig_value: None,
+            sig_type: ndn_packet::SignatureType::SignatureEd25519,
+        });
+
+        let result = authorize_command(&interest, Some(&validator), true, None).await;
+        assert!(
+            result.is_ok(),
+            "signed /localhop command with cached cert must authorize, got: {result:?}"
+        );
+    }
+
+    /// D.03 — no localhop validator wired (operator skipped both
+    /// `[security.mgmt] localhop_trust_anchor_pib` and `[demo_ca]`) →
+    /// every `/localhop/nfd/...` command is rejected. The wire-level
+    /// path in `run_ndn_mgmt_handler` returns
+    /// `STATUS_UNAUTHORIZED("localhop registration disabled (no trust
+    /// anchor configured)")`; here we assert the gating function
+    /// returns `Err` with a reason that names the missing validator.
+    #[tokio::test]
+    async fn d03_localhop_disabled_without_anchor() {
+        let cmd_name: Name = "/localhop/nfd/rib/register".parse().unwrap();
+        let interest = Interest::decode(encode_interest(&cmd_name, None)).unwrap();
+        let result = authorize_command(&interest, None, true, None).await;
+        let reason = result.expect_err("no validator must reject the command");
+        assert!(
+            reason.contains("no validator"),
+            "rejection reason must explain why; got: {reason}"
+        );
+    }
+
     /// Audit N.10 — end-to-end replay protection.
     /// Build a signed command Interest with an explicit SignatureTime,
     /// run `authorize_command` twice with the same wire bytes through a
