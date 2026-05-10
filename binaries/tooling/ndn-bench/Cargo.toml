@@ -1,0 +1,26 @@
+[package]
+name = "ndn-bench"
+description = "NDN forwarder benchmarking tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.scope]
+# See `docs/notes/scope-policy.md`.
+classification = "tooling"
+
+[[bin]]
+name = "ndn-bench"
+path = "src/main.rs"
+
+[dependencies]
+ndn-app       = { workspace = true }
+ndn-faces     = { workspace = true }
+ndn-engine    = { workspace = true }
+ndn-packet    = { workspace = true, features = ["std"] }
+ndn-transport = { workspace = true }
+bytes         = { workspace = true, features = ["std"] }
+tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tracing    = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow     = { workspace = true }

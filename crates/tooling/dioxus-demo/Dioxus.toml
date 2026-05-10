@@ -1,0 +1,16 @@
+[application]
+name = "dioxus-demo"
+
+[web.app]
+title = "ndn-rs in the browser"
+
+[web.watcher]
+watch_path = ["src", "assets"]
+
+[web.resource]
+style = ["assets/style.css"]
+script = []
+
+[web.resource.dev]
+style = []
+script = []
