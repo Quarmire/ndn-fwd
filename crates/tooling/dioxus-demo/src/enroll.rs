@@ -141,8 +141,7 @@ pub async fn enroll_with_challenge(
     // signer themselves. Callers that *do* want to manage the seed
     // (e.g. JoinClient persisting to IdbPib) should call
     // [`enroll_with_signer`] directly.
-    let keychain = KeyChain::ephemeral(identity_name.to_string())
-        .map_err(EnrollError::Trust)?;
+    let keychain = KeyChain::ephemeral(identity_name.to_string()).map_err(EnrollError::Trust)?;
     let signer = keychain.signer().map_err(EnrollError::Trust)?;
     enroll_with_signer(engine, ca_prefix, signer, challenge).await
 }
@@ -201,7 +200,9 @@ pub async fn enroll_with_signer(
         .clone()
         .append("CA")
         .append("CHALLENGE")
-        .append_component(ndn_packet::NameComponent::generic(Bytes::copy_from_slice(&request_id)));
+        .append_component(ndn_packet::NameComponent::generic(Bytes::copy_from_slice(
+            &request_id,
+        )));
     let challenge_wire =
         build_signed_interest(&signer, challenge_name.clone(), &challenge_params).await?;
     let challenge_pending_key = pending_key_from_wire(&challenge_wire)?;
@@ -249,7 +250,10 @@ async fn build_signed_interest(
     name: Name,
     app_params: &[u8],
 ) -> Result<Bytes, EnrollError> {
-    let key_locator = signer.cert_name().cloned().or_else(|| Some(signer.key_name().clone()));
+    let key_locator = signer
+        .cert_name()
+        .cloned()
+        .or_else(|| Some(signer.key_name().clone()));
     let sig_type = signer.sig_type();
     let signer = Arc::clone(signer);
     let wire = InterestBuilder::new(name)

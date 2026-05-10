@@ -102,42 +102,29 @@ fn FacePanel(
                         // cert chains to the localhop trust anchor, so
                         // /localhop/nfd/rib/register signed with this
                         // identity is accepted by ndn-fwd.
-                        let ca_prefix: Name = "/demo/CA"
+                        let ca_prefix: Name = "/demo/CA".parse().expect("static demo CA prefix");
+                        let ident_name: Name = format!("/demo/browser/{}", random_short_id())
                             .parse()
-                            .expect("static demo CA prefix");
-                        let ident_name: Name =
-                            format!("/demo/browser/{}", random_short_id())
-                                .parse()
-                                .expect("synthesised identity name");
-                        let identity = match crate::enroll::enroll(
-                            &engine,
-                            &ca_prefix,
-                            &ident_name,
-                        )
-                        .await
+                            .expect("synthesised identity name");
+                        let identity = match crate::enroll::enroll(&engine, &ca_prefix, &ident_name)
+                            .await
                         {
                             Ok(id) => {
                                 #[cfg(target_arch = "wasm32")]
                                 web_sys::console::log_1(
-                                    &format!("NDNCERT issued cert: {}", id.cert_name)
-                                        .into(),
+                                    &format!("NDNCERT issued cert: {}", id.cert_name).into(),
                                 );
                                 id
                             }
                             Err(e) => {
                                 #[cfg(target_arch = "wasm32")]
-                                web_sys::console::error_1(
-                                    &format!("enroll failed: {e}").into(),
-                                );
+                                web_sys::console::error_1(&format!("enroll failed: {e}").into());
                                 tracing::warn!("enroll failed: {e}");
                                 return;
                             }
                         };
 
-                        match engine
-                            .register_producer_signed(prefix, &identity)
-                            .await
-                        {
+                        match engine.register_producer_signed(prefix, &identity).await {
                             Ok(counter) => {
                                 #[cfg(target_arch = "wasm32")]
                                 web_sys::console::log_1(
@@ -148,9 +135,8 @@ fn FacePanel(
                                     let mut last = 0u64;
                                     loop {
                                         rt.sleep(std::time::Duration::from_millis(200)).await;
-                                        let cur = counter.load(
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        );
+                                        let cur =
+                                            counter.load(std::sync::atomic::Ordering::Relaxed);
                                         if cur != last {
                                             counter_sig.set(cur);
                                             last = cur;
@@ -317,10 +303,7 @@ fn ProducerPanel(
 
 fn view_from_response(resp: &DataResponse) -> DataView {
     let data = &resp.data;
-    let content_type = data
-        .meta_info()
-        .map(|m| m.content_type.code())
-        .unwrap_or(0);
+    let content_type = data.meta_info().map(|m| m.content_type.code()).unwrap_or(0);
     let freshness = data.meta_info().and_then(|m| m.freshness_period);
     let payload_len = data.content().map(|b| b.len()).unwrap_or(0);
     let sig_type = data

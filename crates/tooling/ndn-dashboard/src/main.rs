@@ -13,9 +13,9 @@
 
 #![allow(non_snake_case)]
 
-pub mod app_shared;
 #[cfg(feature = "desktop")]
 mod app;
+pub mod app_shared;
 // On web, `mod app` is a thin re-export of app_shared so that view modules
 // that `use crate::app::*` continue to compile without changes.
 #[cfg(all(feature = "web", not(feature = "desktop")))]
@@ -24,11 +24,11 @@ pub mod app {
 }
 #[cfg(feature = "web")]
 mod app_web;
-pub mod forwarder_profile;
 #[cfg(target_arch = "wasm32")]
 mod browser_engine;
 #[cfg(feature = "desktop")]
 mod forwarder_proc;
+pub mod forwarder_profile;
 pub mod settings;
 mod styles;
 #[cfg(feature = "desktop")]

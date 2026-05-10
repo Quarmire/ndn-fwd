@@ -207,7 +207,11 @@ impl TransitPeer {
             .map_err(|e| JsValue::from_str(&format!("finalize: {e}")))?;
 
         let runtime = default_runtime();
-        let adapter = Arc::new(WebRtcFaceAdapter::new(FaceId(1), face, Arc::clone(&runtime)));
+        let adapter = Arc::new(WebRtcFaceAdapter::new(
+            FaceId(1),
+            face,
+            Arc::clone(&runtime),
+        ));
         *self.face.borrow_mut() = Some(Arc::clone(&adapter));
 
         // Spawn the recv pump that reads Data back from the host
@@ -239,14 +243,8 @@ impl TransitPeer {
 
     /// Express an Interest over the WebRTC channel and resolve
     /// to the matching Data's `content` bytes.
-    pub async fn express(
-        &self,
-        name: String,
-        lifetime_ms: u32,
-    ) -> Result<Uint8Array, JsValue> {
-        let parsed: Name = name
-            .parse()
-            .map_err(|_| JsValue::from_str("bad name"))?;
+    pub async fn express(&self, name: String, lifetime_ms: u32) -> Result<Uint8Array, JsValue> {
+        let parsed: Name = name.parse().map_err(|_| JsValue::from_str("bad name"))?;
         let key = parsed.to_string();
         let lifetime = Duration::from_millis(lifetime_ms as u64);
         let wire = encode_interest(&parsed, lifetime);

@@ -87,9 +87,7 @@ impl SharedClient {
         name: String,
         lifetime_ms: u32,
     ) -> Result<Uint8Array, JsValue> {
-        let parsed: Name = name
-            .parse()
-            .map_err(|_| JsValue::from_str("bad name"))?;
+        let parsed: Name = name.parse().map_err(|_| JsValue::from_str("bad name"))?;
         let key = parsed.to_string();
         let lifetime = Duration::from_millis(lifetime_ms as u64);
         let wire = encode_interest(&parsed, lifetime);

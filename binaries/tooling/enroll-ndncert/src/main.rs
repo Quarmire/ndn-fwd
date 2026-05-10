@@ -56,8 +56,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_default()
         .as_millis() as u64;
     let key_name: Name = format!("{requester_name}/KEY/v={ts_ms}").parse()?;
-    let ec_signer = EcdsaP256Signer::from_seed(&seed, key_name.clone())
-        .context("ecdsa key init")?;
+    let ec_signer =
+        EcdsaP256Signer::from_seed(&seed, key_name.clone()).context("ecdsa key init")?;
     let signer: Arc<dyn Signer> = Arc::new(ec_signer);
 
     let mut consumer = Consumer::connect(&face_socket)
@@ -83,9 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("NEW request failed")?;
 
-    let new_content = new_data
-        .content()
-        .context("NEW response has no content")?;
+    let new_content = new_data.content().context("NEW response has no content")?;
     session.handle_new_response(new_content)?;
 
     let request_id_bytes = session
@@ -93,7 +91,10 @@ async fn main() -> anyhow::Result<()> {
         .context("no request_id from CA after NEW")?
         .to_vec();
 
-    eprintln!("NEW complete — request_id={}", hex_encode(&request_id_bytes));
+    eprintln!(
+        "NEW complete — request_id={}",
+        hex_encode(&request_id_bytes)
+    );
 
     // ── Step 2a: CHALLENGE round 1 (trigger — no code, selects "pin") ────────
     let trigger_params = session.challenge_request_body("pin", serde_json::Map::new())?;
@@ -231,9 +232,7 @@ async fn finish(
                 .map(|n| n.to_string())
                 .unwrap_or_default();
             if !issuer_str.starts_with(ca_prefix_str.as_str()) {
-                bail!(
-                    "cert issuer {issuer_str} does not chain to CA prefix {ca_prefix_str}"
-                );
+                bail!("cert issuer {issuer_str} does not chain to CA prefix {ca_prefix_str}");
             }
             (issuer_str, true)
         }
@@ -261,7 +260,10 @@ fn parse_args(args: &[String]) -> anyhow::Result<(String, String, String, Option
         match args[i].as_str() {
             "--face-socket" => {
                 i += 1;
-                face_socket = args.get(i).context("--face-socket requires a value")?.clone();
+                face_socket = args
+                    .get(i)
+                    .context("--face-socket requires a value")?
+                    .clone();
             }
             "--ca-prefix" => {
                 i += 1;

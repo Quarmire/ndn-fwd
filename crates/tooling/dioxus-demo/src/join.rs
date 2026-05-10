@@ -219,7 +219,9 @@ impl JoinClient {
 
         // 3. Run NDNCERT with the token challenge, handing in the
         //    signer we just minted (so we own the seed end-to-end).
-        join_log(&format!("enrolling under {identity_name} via token challenge"));
+        join_log(&format!(
+            "enrolling under {identity_name} via token challenge"
+        ));
         let signer_dyn: Arc<dyn Signer> = signer.clone();
         let identity = enroll_with_signer(
             &engine,

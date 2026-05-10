@@ -65,15 +65,20 @@ thread_local! {
 /// accepting tab ports — every tab connecting after this point can
 /// express against `<prefix>/counter` and observe the worker's CS.
 #[wasm_bindgen]
-pub async fn worker_main(
-    upstream_url: String,
-    producers: String,
-) -> Result<(), JsValue> {
+pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
     worker_log(&format!(
         "starting; upstream={} producers={}",
-        if upstream_url.is_empty() { "<none>" } else { &upstream_url },
-        if producers.is_empty() { "<none>" } else { &producers },
+        if upstream_url.is_empty() {
+            "<none>"
+        } else {
+            &upstream_url
+        },
+        if producers.is_empty() {
+            "<none>"
+        } else {
+            &producers
+        },
     ));
 
     let runtime = default_runtime();
@@ -81,14 +86,10 @@ pub async fn worker_main(
     let upstream: Option<Arc<dyn ErasedFace>> = if upstream_url.is_empty() {
         None
     } else {
-        let face = BrowserWebTransportFace::connect(
-            FaceId(1),
-            &upstream_url,
-            &[],
-            Arc::clone(&runtime),
-        )
-        .await
-        .map_err(|e| JsValue::from_str(&format!("upstream connect: {e:?}")))?;
+        let face =
+            BrowserWebTransportFace::connect(FaceId(1), &upstream_url, &[], Arc::clone(&runtime))
+                .await
+                .map_err(|e| JsValue::from_str(&format!("upstream connect: {e:?}")))?;
         Some(Arc::new(face) as Arc<dyn ErasedFace>)
     };
 

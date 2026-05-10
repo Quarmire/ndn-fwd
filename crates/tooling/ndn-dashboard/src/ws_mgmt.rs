@@ -6,15 +6,15 @@
 
 #![cfg(feature = "web")]
 
-use anyhow::{anyhow, Result};
-use bytes::{Bytes, BytesMut, BufMut};
-use gloo_net::websocket::{futures::WebSocket, Message};
+use anyhow::{Result, anyhow};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
+use gloo_net::websocket::{Message, futures::WebSocket};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use ndn_tlv::{TlvWriter, write_varu64};
 use ndn_packet::Name;
+use ndn_tlv::{TlvWriter, write_varu64};
 
 /// NFD management TLV types (subset needed for control commands).
 mod tlv_type {
@@ -103,7 +103,8 @@ impl WsMgmtClient {
         let wire = Self::encode_mgmt_interest(module, verb, nonce, params);
 
         // Send as binary WebSocket frame
-        ws.send(Message::Bytes(wire.to_vec())).await
+        ws.send(Message::Bytes(wire.to_vec()))
+            .await
             .map_err(|e| anyhow!("WebSocket send failed: {:?}", e))?;
 
         // Read response (simplified: next message is our response)
@@ -113,9 +114,7 @@ impl WsMgmtClient {
                     let resp = Self::parse_mgmt_response(&data)?;
                     Ok(resp)
                 }
-                Ok(Message::Text(text)) => {
-                    Err(anyhow!("unexpected text response: {}", text))
-                }
+                Ok(Message::Text(text)) => Err(anyhow!("unexpected text response: {}", text)),
                 Err(e) => {
                     self.ws = None;
                     Err(anyhow!("WebSocket recv error: {:?}", e))
@@ -156,16 +155,9 @@ impl WsMgmtClient {
     // ── TLV encoding ───────────────────────────────────────────────────
 
     /// Encode an NFD management Interest as TLV wire bytes.
-    fn encode_mgmt_interest(
-        module: &str,
-        verb: &str,
-        nonce: u32,
-        params: Option<&[u8]>,
-    ) -> Bytes {
+    fn encode_mgmt_interest(module: &str, verb: &str, nonce: u32, params: Option<&[u8]>) -> Bytes {
         // Build name: /localhost/nfd/{module}/{verb}
-        let components: Vec<&[u8]> = vec![
-            b"localhost", b"nfd", module.as_bytes(), verb.as_bytes(),
-        ];
+        let components: Vec<&[u8]> = vec![b"localhost", b"nfd", module.as_bytes(), verb.as_bytes()];
 
         // Pre-compute name TLV size
         let mut name_value_size = 0usize;
@@ -181,7 +173,9 @@ impl WsMgmtClient {
             None => 0,
         };
 
-        let interest_value_size = 1 + varu64_size(name_value_size as u64) + name_value_size
+        let interest_value_size = 1
+            + varu64_size(name_value_size as u64)
+            + name_value_size
             + nonce_tlv_size
             + lifetime_tlv_size
             + params_tlv_size;
@@ -254,8 +248,13 @@ fn put_varu64(buf: &mut BytesMut, val: u64) {
 
 /// Compute the wire size of a VarNumber encoding.
 fn varu64_size(val: u64) -> usize {
-    if val < 253 { 1 }
-    else if val <= 0xFFFF { 3 }
-    else if val <= 0xFFFF_FFFF { 5 }
-    else { 9 }
+    if val < 253 {
+        1
+    } else if val <= 0xFFFF {
+        3
+    } else if val <= 0xFFFF_FFFF {
+        5
+    } else {
+        9
+    }
 }

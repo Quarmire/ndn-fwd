@@ -81,9 +81,19 @@ pub fn push_toast(msg: impl Into<String>, level: ToastLevel) {
 pub enum DashCmd {
     FaceCreate(String),
     FaceDestroy(u64),
-    RouteAdd { prefix: String, face_id: u64, cost: u64 },
-    RouteRemove { prefix: String, face_id: u64 },
-    StrategySet { prefix: String, strategy: String },
+    RouteAdd {
+        prefix: String,
+        face_id: u64,
+        cost: u64,
+    },
+    RouteRemove {
+        prefix: String,
+        face_id: u64,
+    },
+    StrategySet {
+        prefix: String,
+        strategy: String,
+    },
     StrategyUnset(String),
     CsCapacity(u64),
     CsErase(String),
@@ -96,7 +106,11 @@ pub enum DashCmd {
     ReplaySession,
     SecurityGenerate(String),
     SecurityKeyDelete(String),
-    SecurityEnroll { ca_prefix: String, challenge_type: String, challenge_param: String },
+    SecurityEnroll {
+        ca_prefix: String,
+        challenge_type: String,
+        challenge_param: String,
+    },
     SecurityTokenAdd(String),
     YubikeyDetect,
     YubikeyGeneratePiv(String),

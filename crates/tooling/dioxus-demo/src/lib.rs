@@ -39,9 +39,9 @@ pub mod shared_client;
 // TransitPeer entrypoints + the WebRTC Face-trait adapter that lets
 // the engine treat a wasm WebRtcFace like any other Face.
 #[cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
-pub mod webrtc_adapter;
-#[cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
 pub mod transit;
+#[cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
+pub mod webrtc_adapter;
 
 // Critical-path #4 onboarding-link client — JoinClient wasm-bindgen
 // entrypoint that drives NDNCERT TokenChallenge enrollment + IdbPib

@@ -3,7 +3,17 @@ use crate::app::AppCtx;
 #[cfg(feature = "desktop")]
 use crate::tool_runner::fmt_bytes;
 #[cfg(not(feature = "desktop"))]
-fn fmt_bytes(b: u64) -> String { if b > 1_000_000_000 { format!("{:.1} GB", b as f64 / 1e9) } else if b > 1_000_000 { format!("{:.1} MB", b as f64 / 1e6) } else if b > 1000 { format!("{:.1} KB", b as f64 / 1e3) } else { format!("{b} B") } }
+fn fmt_bytes(b: u64) -> String {
+    if b > 1_000_000_000 {
+        format!("{:.1} GB", b as f64 / 1e9)
+    } else if b > 1_000_000 {
+        format!("{:.1} MB", b as f64 / 1e6)
+    } else if b > 1000 {
+        format!("{:.1} KB", b as f64 / 1e3)
+    } else {
+        format!("{b} B")
+    }
+}
 use crate::types::ThroughputSample;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};

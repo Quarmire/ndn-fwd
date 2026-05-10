@@ -124,7 +124,10 @@ pub fn AppWeb() -> Element {
         let mode = crate::forwarder_profile::resolve_web(&query);
 
         #[cfg(feature = "browser-engine")]
-        if matches!(mode, crate::forwarder_profile::ConnectionMode::BrowserEngine) {
+        if matches!(
+            mode,
+            crate::forwarder_profile::ConnectionMode::BrowserEngine
+        ) {
             crate::browser_engine::init();
             conn_state.set(ConnState::Connected);
             error_msg.set(None);
@@ -169,7 +172,9 @@ pub fn AppWeb() -> Element {
             *LAST_LOG_SEQ.write() = 0;
 
             // Initial poll
-            if let Err(e) = poll_all_web(&mut client, &status, &faces, &routes, &cs, &strategies).await {
+            if let Err(e) =
+                poll_all_web(&mut client, &status, &faces, &routes, &cs, &strategies).await
+            {
                 conn_state.set(ConnState::Disconnected);
                 error_msg.set(Some(e));
                 continue;
@@ -191,7 +196,9 @@ pub fn AppWeb() -> Element {
                 }
 
                 // Poll
-                if let Err(e) = poll_all_web(&mut client, &status, &faces, &routes, &cs, &strategies).await {
+                if let Err(e) =
+                    poll_all_web(&mut client, &status, &faces, &routes, &cs, &strategies).await
+                {
                     conn_state.set(ConnState::Disconnected);
                     error_msg.set(Some(e));
                     break 'session;
@@ -201,15 +208,19 @@ pub fn AppWeb() -> Element {
     });
 
     // Stub coroutines for features not available on web
-    let router_cmd = use_coroutine(|mut _rx: UnboundedReceiver<crate::app::RouterCmd>| async move {
-        // No subprocess management on web — coroutine exists only to satisfy AppCtx type
-        futures::future::pending::<()>().await;
-    });
+    let router_cmd = use_coroutine(
+        |mut _rx: UnboundedReceiver<crate::app::RouterCmd>| async move {
+            // No subprocess management on web — coroutine exists only to satisfy AppCtx type
+            futures::future::pending::<()>().await;
+        },
+    );
 
-    let tool_cmd = use_coroutine(|mut _rx: UnboundedReceiver<crate::app::ToolCmd>| async move {
-        // No embedded tools on web
-        futures::future::pending::<()>().await;
-    });
+    let tool_cmd = use_coroutine(
+        |mut _rx: UnboundedReceiver<crate::app::ToolCmd>| async move {
+            // No embedded tools on web
+            futures::future::pending::<()>().await;
+        },
+    );
 
     let ctx = AppCtx {
         conn: conn_state,
@@ -248,7 +259,11 @@ pub fn AppWeb() -> Element {
     // Sidebar security dot
     let sec_dot_class = {
         let keys = security_keys.read();
-        if keys.is_empty() { "sec-dot sec-dot-gray" } else { "sec-dot sec-dot-green" }
+        if keys.is_empty() {
+            "sec-dot sec-dot-gray"
+        } else {
+            "sec-dot sec-dot-green"
+        }
     };
 
     // Views that are NOT available on web
@@ -450,34 +465,42 @@ async fn poll_all_web(
     Ok(())
 }
 
-async fn run_cmd_web(
-    cmd: DashCmd,
-    client: &mut WsMgmtClient,
-    error_msg: &Signal<Option<String>>,
-) {
+async fn run_cmd_web(cmd: DashCmd, client: &mut WsMgmtClient, error_msg: &Signal<Option<String>>) {
     let result = match cmd {
         DashCmd::FaceCreate(uri) => {
-            client.send_cmd("faces", "create", Some(uri.as_bytes())).await
+            client
+                .send_cmd("faces", "create", Some(uri.as_bytes()))
+                .await
         }
         DashCmd::FaceDestroy(id) => {
             let params = id.to_string();
-            client.send_cmd("faces", "destroy", Some(params.as_bytes())).await
+            client
+                .send_cmd("faces", "destroy", Some(params.as_bytes()))
+                .await
         }
-        DashCmd::RouteAdd { prefix, face_id, cost } => {
+        DashCmd::RouteAdd {
+            prefix,
+            face_id,
+            cost,
+        } => {
             let params = format!("{}\0{}\0{}", prefix, face_id, cost);
-            client.send_cmd("rib", "register", Some(params.as_bytes())).await
+            client
+                .send_cmd("rib", "register", Some(params.as_bytes()))
+                .await
         }
         DashCmd::RouteRemove { prefix, face_id } => {
             let params = format!("{}\0{}", prefix, face_id);
-            client.send_cmd("rib", "unregister", Some(params.as_bytes())).await
+            client
+                .send_cmd("rib", "unregister", Some(params.as_bytes()))
+                .await
         }
         DashCmd::StrategySet { prefix, strategy } => {
             let params = format!("{}\0{}", prefix, strategy);
-            client.send_cmd("strategy-choice", "set", Some(params.as_bytes())).await
+            client
+                .send_cmd("strategy-choice", "set", Some(params.as_bytes()))
+                .await
         }
-        DashCmd::Shutdown => {
-            client.send_cmd("status", "shutdown", None).await
-        }
+        DashCmd::Shutdown => client.send_cmd("status", "shutdown", None).await,
         DashCmd::Reconnect => return, // Handled by the coroutine loop
         _ => {
             // Other commands not yet implemented for web

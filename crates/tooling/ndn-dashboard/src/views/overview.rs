@@ -2,7 +2,17 @@ use crate::app::{AppCtx, DashCmd};
 #[cfg(feature = "desktop")]
 use crate::tool_runner::fmt_bytes;
 #[cfg(not(feature = "desktop"))]
-fn fmt_bytes(b: u64) -> String { if b > 1_000_000_000 { format!("{:.1} GB", b as f64 / 1e9) } else if b > 1_000_000 { format!("{:.1} MB", b as f64 / 1e6) } else if b > 1000 { format!("{:.1} KB", b as f64 / 1e3) } else { format!("{b} B") } }
+fn fmt_bytes(b: u64) -> String {
+    if b > 1_000_000_000 {
+        format!("{:.1} GB", b as f64 / 1e9)
+    } else if b > 1_000_000 {
+        format!("{:.1} MB", b as f64 / 1e6)
+    } else if b > 1000 {
+        format!("{:.1} KB", b as f64 / 1e3)
+    } else {
+        format!("{b} B")
+    }
+}
 use crate::types::ThroughputSample;
 #[cfg(feature = "desktop")]
 use crate::views::modals::{FaceCreateModal, RouteAddModal};
@@ -635,7 +645,10 @@ fn render_cs_sparkline(hist: &VecDeque<f64>) -> Element {
 }
 
 #[cfg(feature = "desktop")]
-fn overview_modals(mut show_face_modal: Signal<bool>, mut show_route_modal: Signal<bool>) -> Element {
+fn overview_modals(
+    mut show_face_modal: Signal<bool>,
+    mut show_route_modal: Signal<bool>,
+) -> Element {
     use crate::views::modals::{FaceCreateModal, RouteAddModal};
     rsx! {
         if *show_face_modal.read() {

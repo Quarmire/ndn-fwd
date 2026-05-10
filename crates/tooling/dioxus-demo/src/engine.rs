@@ -169,9 +169,13 @@ impl Engine {
 
         let upstream_face_id = upstream.as_ref().map(|f| f.id());
         if let Some(up_id) = upstream_face_id {
-            engine
-                .fib()
-                .set_nexthops(&Name::root(), vec![FibNexthop { face_id: up_id, cost: 1 }]);
+            engine.fib().set_nexthops(
+                &Name::root(),
+                vec![FibNexthop {
+                    face_id: up_id,
+                    cost: 1,
+                }],
+            );
         }
 
         let pending: Arc<PendingMap> = Arc::new(Mutex::new(HashMap::new()));
@@ -323,10 +327,7 @@ impl Engine {
     /// Register a producer + send the legacy `/localhost/nfd/rib/register`
     /// Interest upstream. Tab-side use: the demo CA's host forwarder
     /// sees the route announcement.
-    pub async fn register_producer(
-        &self,
-        prefix: Name,
-    ) -> Result<Arc<AtomicU64>, EngineError> {
+    pub async fn register_producer(&self, prefix: Name) -> Result<Arc<AtomicU64>, EngineError> {
         let counter = self.register_producer_local(prefix.clone()).await;
 
         // Splice ControlParameters into the Interest name (legacy NFD form,
@@ -509,7 +510,11 @@ fn encode_data_digest_sha256(name: &Name, content: &[u8], freshness: Duration) -
 
     let mut sig_info = TlvWriter::new();
     sig_info.write_nested(tlv_type::SIGNATURE_INFO, |w| {
-        write_nni(w, tlv_type::SIGNATURE_TYPE, SignatureType::DigestSha256.code());
+        write_nni(
+            w,
+            tlv_type::SIGNATURE_TYPE,
+            SignatureType::DigestSha256.code(),
+        );
     });
     let sig_info_bytes = sig_info.finish();
 

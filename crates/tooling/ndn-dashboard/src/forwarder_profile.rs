@@ -351,16 +351,40 @@ mod tests {
     #[test]
     fn cli_parse_accepts_project_and_binary_names() {
         // ndn-rs / ndn-fwd → NdnFwd
-        assert_eq!(ForwarderProfile::from_cli("ndn-rs"), Some(ForwarderProfile::NdnFwd));
-        assert_eq!(ForwarderProfile::from_cli("ndn-fwd"), Some(ForwarderProfile::NdnFwd));
-        assert_eq!(ForwarderProfile::from_cli("NDN-FWD"), Some(ForwarderProfile::NdnFwd));
+        assert_eq!(
+            ForwarderProfile::from_cli("ndn-rs"),
+            Some(ForwarderProfile::NdnFwd)
+        );
+        assert_eq!(
+            ForwarderProfile::from_cli("ndn-fwd"),
+            Some(ForwarderProfile::NdnFwd)
+        );
+        assert_eq!(
+            ForwarderProfile::from_cli("NDN-FWD"),
+            Some(ForwarderProfile::NdnFwd)
+        );
         // ndn-cxx / NFD → Nfd
-        assert_eq!(ForwarderProfile::from_cli("ndn-cxx"), Some(ForwarderProfile::Nfd));
-        assert_eq!(ForwarderProfile::from_cli("nfd"), Some(ForwarderProfile::Nfd));
+        assert_eq!(
+            ForwarderProfile::from_cli("ndn-cxx"),
+            Some(ForwarderProfile::Nfd)
+        );
+        assert_eq!(
+            ForwarderProfile::from_cli("nfd"),
+            Some(ForwarderProfile::Nfd)
+        );
         // ndnd / YaNFD → YaNfd
-        assert_eq!(ForwarderProfile::from_cli("ndnd"), Some(ForwarderProfile::YaNfd));
-        assert_eq!(ForwarderProfile::from_cli("yanfd"), Some(ForwarderProfile::YaNfd));
-        assert_eq!(ForwarderProfile::from_cli("ya-nfd"), Some(ForwarderProfile::YaNfd));
+        assert_eq!(
+            ForwarderProfile::from_cli("ndnd"),
+            Some(ForwarderProfile::YaNfd)
+        );
+        assert_eq!(
+            ForwarderProfile::from_cli("yanfd"),
+            Some(ForwarderProfile::YaNfd)
+        );
+        assert_eq!(
+            ForwarderProfile::from_cli("ya-nfd"),
+            Some(ForwarderProfile::YaNfd)
+        );
         assert_eq!(ForwarderProfile::from_cli("garbage"), None);
     }
 
@@ -374,7 +398,10 @@ mod tests {
     #[test]
     fn resolve_static_combinations() {
         let r = resolve_static(Some("nfd"), Some(PathBuf::from("/tmp/foo.sock")));
-        assert_eq!(r, Some((ForwarderProfile::Nfd, PathBuf::from("/tmp/foo.sock"))));
+        assert_eq!(
+            r,
+            Some((ForwarderProfile::Nfd, PathBuf::from("/tmp/foo.sock")))
+        );
 
         let r = resolve_static(Some("nfd"), None).unwrap();
         assert_eq!(r.0, ForwarderProfile::Nfd);

@@ -133,4 +133,3 @@ pub fn find_binary_for(profile: ForwarderProfile) -> Option<PathBuf> {
 
     None
 }
-

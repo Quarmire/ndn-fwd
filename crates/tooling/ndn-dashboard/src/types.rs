@@ -1198,4 +1198,3 @@ impl From<ndn_config::RibEntry> for RibEntryInfo {
         }
     }
 }
-
