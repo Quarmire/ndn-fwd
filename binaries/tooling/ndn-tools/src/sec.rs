@@ -160,12 +160,11 @@ fn cmd_keygen(
     let pib = FilePib::new(pib_path)?;
 
     // With --skip-if-exists: if a key already exists for this identity, do nothing.
-    if skip_if_exists {
-        if let Ok(existing_pib) = FilePib::open(pib_path) {
-            if find_cert_name(&existing_pib, &key_name).is_some() {
-                return Ok(());
-            }
-        }
+    if skip_if_exists
+        && let Ok(existing_pib) = FilePib::open(pib_path)
+        && find_cert_name(&existing_pib, &key_name).is_some()
+    {
+        return Ok(());
     }
 
     // Build cert name per Certificate Format v2:
@@ -217,8 +216,9 @@ fn cmd_keygen(
 fn cmd_certdump(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name = find_cert_name(&pib, &identity)
-        .ok_or_else(|| anyhow::anyhow!("No key for {name_str}. Run `ndn-sec keygen {name_str}` first."))?;
+    let cert_name = find_cert_name(&pib, &identity).ok_or_else(|| {
+        anyhow::anyhow!("No key for {name_str}. Run `ndn-sec keygen {name_str}` first.")
+    })?;
     let cert = pib
         .get_cert(&cert_name)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -263,8 +263,8 @@ fn cmd_list(pib_path: &PathBuf) -> anyhow::Result<()> {
 fn cmd_delete(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name = find_cert_name(&pib, &identity)
-        .ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
+    let cert_name =
+        find_cert_name(&pib, &identity).ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
     pib.delete_key(&cert_name)?;
     println!("Deleted {name_str} from PIB.");
     Ok(())
@@ -273,9 +273,12 @@ fn cmd_delete(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
 fn cmd_anchor_add(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name = find_cert_name(&pib, &identity)
-        .ok_or_else(|| anyhow::anyhow!("No certificate for {name_str}. Run `ndn-sec keygen {name_str}` first."))?;
-    let cert = pib.get_cert(&cert_name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cert_name = find_cert_name(&pib, &identity).ok_or_else(|| {
+        anyhow::anyhow!("No certificate for {name_str}. Run `ndn-sec keygen {name_str}` first.")
+    })?;
+    let cert = pib
+        .get_cert(&cert_name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     pib.add_trust_anchor(&cert_name, &cert)?;
     println!("Marked {name_str} as a trust anchor.");
     Ok(())
@@ -284,8 +287,8 @@ fn cmd_anchor_add(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
 fn cmd_anchor_remove(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name = find_cert_name(&pib, &identity)
-        .ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
+    let cert_name =
+        find_cert_name(&pib, &identity).ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
     pib.remove_trust_anchor(&cert_name)?;
     println!("Removed {name_str} from trust anchors.");
     Ok(())
@@ -351,12 +354,12 @@ fn build_cert_name(identity: &Name) -> Name {
     identity
         .clone()
         .append("KEY")
-        .append_component(ndn_packet::NameComponent::generic(
-            Bytes::copy_from_slice(keyid.as_bytes()),
-        ))
-        .append_component(ndn_packet::NameComponent::generic(
-            Bytes::from_static(b"self"),
-        ))
+        .append_component(ndn_packet::NameComponent::generic(Bytes::copy_from_slice(
+            keyid.as_bytes(),
+        )))
+        .append_component(ndn_packet::NameComponent::generic(Bytes::from_static(
+            b"self",
+        )))
         .append_version(0)
 }
 
