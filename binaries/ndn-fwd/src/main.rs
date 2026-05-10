@@ -906,7 +906,7 @@ async fn main() -> Result<()> {
                 "demo CA cert-fetch namespace FIB entry installed"
             );
         }
-        demo_ca::spawn(spawn, &engine)?;
+        demo_ca::spawn(spawn, fwd_config.demo_ca.tokens.clone(), &engine)?;
     }
 
     // Register Hello responder: route incoming /<own_router>/nlsr/INFO Interests

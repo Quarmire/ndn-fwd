@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use ndn_app::Producer;
-use ndn_cert::NopChallenge;
+use ndn_cert::{ChallengeHandler, NopChallenge, TokenChallenge, TokenStore};
 use ndn_config::DemoCaConfig;
 use ndn_engine::ForwarderEngine;
 use ndn_faces::local::{InProcFace, InProcHandle};
@@ -151,15 +151,43 @@ pub(crate) fn install_localhop_anchor(
 
 /// Spawn the NDNCERT CA on the engine. Must be called *after* the FIB
 /// entry for `prefix` → demo CA face has been added.
-pub(crate) fn spawn(prep: DemoCaSpawn, _engine: &ForwarderEngine) -> Result<()> {
+///
+/// Challenge selection:
+/// - Empty `tokens` → `NopChallenge` (auto-approve, demo only).
+/// - Non-empty `tokens` → `TokenChallenge` populated with the
+///   pre-provisioned tokens. Each token is consumed on first use;
+///   the operator shares URLs of the form
+///   `https://<host>/?join=<token>` with users.
+pub(crate) fn spawn(
+    prep: DemoCaSpawn,
+    tokens: Vec<String>,
+    _engine: &ForwarderEngine,
+) -> Result<()> {
     let identity = ndn_identity::NdnIdentity::from_keychain_public(prep.keychain);
+
+    let challenge: Box<dyn ChallengeHandler> = if tokens.is_empty() {
+        tracing::info!(
+            target: "demo_ca",
+            "NopChallenge — every NEW request auto-approved (demo / trusted-face only)",
+        );
+        Box::new(NopChallenge::new())
+    } else {
+        let store = TokenStore::new();
+        store.add_many(tokens);
+        tracing::info!(
+            target: "demo_ca",
+            count = store.len(),
+            "TokenChallenge — invite-token gated enrollment",
+        );
+        Box::new(TokenChallenge::new(store))
+    };
 
     let ca = NdncertCa::builder()
         .name(prep.prefix.to_string())
         .map_err(|e| anyhow::anyhow!("[demo_ca] invalid prefix: {e}"))?
-        .info("ndn-rs demo NDNCERT CA (auto-approve)")
+        .info("ndn-rs demo NDNCERT CA")
         .signing_identity(&identity)
-        .challenge(NopChallenge::new())
+        .challenge_box(challenge)
         .build()
         .map_err(|e| anyhow::anyhow!("[demo_ca] CA build failed: {e}"))?;
 
