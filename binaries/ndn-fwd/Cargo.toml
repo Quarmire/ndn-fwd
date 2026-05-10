@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[package.metadata.scope]
+# See `docs/notes/scope-policy.md`.
+classification = "spec"
+
 [[bin]]
 name = "ndn-fwd"
 path = "src/main.rs"
