@@ -705,10 +705,8 @@ impl NeighborInfo {
                             // "2.5s" — strip trailing 's'
                             last_seen_s = v.trim_end_matches('s').parse().ok();
                         }
-                        "rtt" => {
-                            if v != "None" {
-                                rtt_us = v.trim_end_matches("us").parse().ok();
-                            }
+                        "rtt" if v != "None" => {
+                            rtt_us = v.trim_end_matches("us").parse().ok();
                         }
                         _ => {}
                     }

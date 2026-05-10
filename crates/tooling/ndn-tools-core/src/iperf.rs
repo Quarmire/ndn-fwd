@@ -313,11 +313,7 @@ pub async fn run_server(params: IperfServerParams, tx: mpsc::Sender<ToolEvent>) 
                 let elapsed = start.elapsed();
                 let tp = format_throughput(bytes, interval_dur);
                 let bps = throughput_bps(bytes, interval_dur);
-                let rtt_avg_us = if rtt_count > 0 {
-                    rtt_sum / rtt_count
-                } else {
-                    0
-                };
+                let rtt_avg_us = rtt_sum.checked_div(rtt_count).unwrap_or(0);
                 let rtt_str = if rtt_count > 0 {
                     format!("rtt={:.0}us", rtt_sum as f64 / rtt_count as f64)
                 } else {
@@ -612,11 +608,7 @@ async fn run_reverse_consumer(
                 idx += 1;
                 let (bytes, pkts, rtt_sum, rtt_count) = c2.drain();
                 let bps = throughput_bps(bytes, interval_dur);
-                let rtt_avg_us = if rtt_count > 0 {
-                    rtt_sum / rtt_count
-                } else {
-                    0
-                };
+                let rtt_avg_us = rtt_sum.checked_div(rtt_count).unwrap_or(0);
                 let rtt_str = if rtt_count > 0 {
                     format!("rtt={:.0}us", rtt_sum as f64 / rtt_count as f64)
                 } else {
@@ -961,11 +953,7 @@ pub async fn run_client(params: IperfClientParams, tx: mpsc::Sender<ToolEvent>) 
                 let (bytes, pkts, rtt_sum, rtt_count) = c2.drain();
                 let elapsed = start.elapsed();
                 let bps = throughput_bps(bytes, interval_dur);
-                let rtt_avg_us = if rtt_count > 0 {
-                    rtt_sum / rtt_count
-                } else {
-                    0
-                };
+                let rtt_avg_us = rtt_sum.checked_div(rtt_count).unwrap_or(0);
                 let rtt_str = if rtt_count > 0 {
                     format!("rtt={:.0}us", rtt_sum as f64 / rtt_count as f64)
                 } else {
