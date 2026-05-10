@@ -1062,9 +1062,6 @@ impl SchemaRuleInfo {
 // dashboard's display-oriented structs.  Desktop only — the web build uses
 // WsMgmtClient and parses responses differently.
 #[cfg(feature = "desktop")]
-use ndn_config;
-
-#[cfg(feature = "desktop")]
 impl From<ndn_config::FaceStatus> for FaceInfo {
     fn from(fs: ndn_config::FaceStatus) -> Self {
         let persistency = fs.persistency_str().to_owned();

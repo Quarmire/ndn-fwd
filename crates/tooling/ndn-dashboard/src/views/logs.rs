@@ -757,7 +757,7 @@ fn LogWindowApp(pane_id: usize) -> Element {
 pub fn Logs() -> Element {
     // Use GlobalSignals so split layout survives tab switches.
     let mut div_drag = use_signal(|| false);
-    let mut next_pane_id = use_signal(|| 2usize); // pane 0 and 1 are always the split panes
+    let next_pane_id = use_signal(|| 2usize); // pane 0 and 1 are always the split panes
 
     let split_mode = SplitMode::from_u8(*LOG_SPLIT_MODE.read());
     let split_ratio = *LOG_SPLIT_RATIO.read();

@@ -5,9 +5,6 @@ use dioxus::prelude::*;
 use futures::StreamExt as _;
 use ndn_ipc::MgmtClient;
 
-// Re-export shared types so views that `use crate::app::*` keep working.
-pub use crate::app_shared::*;
-
 use crate::forwarder_proc;
 use crate::tool_runner::{
     TOOL_INSTANCES, TOOL_RESULTS, ToolCmd, ToolInstanceState, ToolParams, ToolResultEntry,

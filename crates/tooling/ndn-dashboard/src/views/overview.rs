@@ -14,8 +14,6 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 use crate::types::ThroughputSample;
-#[cfg(feature = "desktop")]
-use crate::views::modals::{FaceCreateModal, RouteAddModal};
 use crate::views::traffic::{render_pps_bars, render_throughput_bars, sum_face_histories};
 use dioxus::prelude::*;
 use std::collections::HashSet;
