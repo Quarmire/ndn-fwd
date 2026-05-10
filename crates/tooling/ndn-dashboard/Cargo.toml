@@ -38,6 +38,19 @@ web = [
   "ndn-tlv/std",
   "getrandom/js",
 ]
+# In-page ndn-engine (Phase 7). Activated by `?engine=local` query
+# string at runtime; the dashboard hosts a `ForwarderEngine` inside
+# the browser tab instead of speaking WebSocket to a remote
+# forwarder. Requires `web`.
+browser-engine = [
+  "web",
+  "dep:ndn-engine",
+  "dep:ndn-runtime",
+  "dep:ndn-transport",
+  "dep:wasm-bindgen-futures",
+  "dep:web-time",
+  "dep:tokio-util",
+]
 
 [dependencies]
 ndn-config = { workspace = true, optional = true }
@@ -66,6 +79,15 @@ ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"]
 gloo-net     = { version = "0.6", optional = true }
 gloo-storage = { version = "0.3", optional = true }
 gloo-timers  = { version = "0.3", optional = true }
+
+# Browser-engine-only dependencies (optional, activated by
+# "browser-engine" feature on wasm32 web target).
+ndn-engine    = { workspace = true, optional = true }
+ndn-runtime   = { workspace = true, optional = true }
+ndn-transport = { workspace = true, optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-time      = { version = "1", optional = true }
+tokio-util    = { workspace = true, features = ["rt"], optional = true }
 
 [dependencies.web-sys]
 version = "0.3"

@@ -465,7 +465,8 @@ pub fn App() -> Element {
                         match cmd {
                             RouterCmd::Start(config_path) => {
                                 if proc.is_none() {
-                                    match forwarder_proc::find_binary() {
+                                    let prof = crate::forwarder_profile::selected_profile();
+                                    match forwarder_proc::find_binary_for(prof) {
                                         Some(bin) => {
                                             match forwarder_proc::RouterProc::start(&bin, config_path.as_deref()).await {
                                                 Ok(p) => {
@@ -483,7 +484,11 @@ pub fn App() -> Element {
                                                 Err(e) => tracing::error!("start router: {e}"),
                                             }
                                         }
-                                        None => tracing::warn!("ndn-fwd binary not found in PATH"),
+                                        None => tracing::warn!(
+                                            forwarder = %prof.human_label(),
+                                            binary = prof.binary_name(),
+                                            "forwarder binary not found in PATH",
+                                        ),
                                     }
                                 }
                             }
@@ -1461,7 +1466,12 @@ fn default_socket_path() -> String {
     #[cfg(windows)]
     return r"\\.\pipe\ndn".to_string();
     #[cfg(not(windows))]
-    "/run/nfd/nfd.sock".to_string()
+    {
+        crate::forwarder_profile::selected()
+            .1
+            .display()
+            .to_string()
+    }
 }
 
 // ── Polling ───────────────────────────────────────────────────────────────────

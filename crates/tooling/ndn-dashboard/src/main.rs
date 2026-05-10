@@ -24,6 +24,9 @@ pub mod app {
 }
 #[cfg(feature = "web")]
 mod app_web;
+pub mod forwarder_profile;
+#[cfg(target_arch = "wasm32")]
+mod browser_engine;
 #[cfg(feature = "desktop")]
 mod forwarder_proc;
 pub mod settings;
@@ -47,6 +50,27 @@ fn main() {
                     .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
             )
             .init();
+
+        // Resolve forwarder profile from CLI flags before launching the
+        // Dioxus runtime. Hand-rolled rather than pulling clap; the
+        // surface is two flags. Unknown args fall through to Dioxus.
+        let (cli_fwd, cli_sock) = parse_forwarder_args();
+        let resolved = forwarder_profile::resolve_static(cli_fwd.as_deref(), cli_sock.clone())
+            .or_else(forwarder_profile::auto_detect)
+            .unwrap_or_else(|| {
+                (
+                    forwarder_profile::ForwarderProfile::NdnFwd,
+                    forwarder_profile::ForwarderProfile::NdnFwd
+                        .default_socket()
+                        .to_path_buf(),
+                )
+            });
+        tracing::info!(
+            forwarder = %resolved.0.human_label(),
+            socket = %resolved.1.display(),
+            "selected forwarder profile"
+        );
+        forwarder_profile::install_selected(resolved.0, resolved.1);
     }
 
     #[cfg(feature = "desktop")]
@@ -54,4 +78,23 @@ fn main() {
 
     #[cfg(feature = "web")]
     dioxus::launch(app_web::AppWeb);
+}
+
+#[cfg(feature = "desktop")]
+fn parse_forwarder_args() -> (Option<String>, Option<std::path::PathBuf>) {
+    let mut fwd = None;
+    let mut sock = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if let Some(v) = a.strip_prefix("--forwarder=") {
+            fwd = Some(v.to_string());
+        } else if a == "--forwarder" {
+            fwd = args.next();
+        } else if let Some(v) = a.strip_prefix("--socket=") {
+            sock = Some(std::path::PathBuf::from(v));
+        } else if a == "--socket" {
+            sock = args.next().map(std::path::PathBuf::from);
+        }
+    }
+    (fwd, sock)
 }

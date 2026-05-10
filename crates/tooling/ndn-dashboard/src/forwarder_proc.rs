@@ -102,28 +102,30 @@ pub fn write_temp_config(toml: &str) -> std::io::Result<std::path::PathBuf> {
 
 // ── Binary discovery ──────────────────────────────────────────────────────────
 
-/// Search `$PATH` and the directory containing this executable for `ndn-fwd`.
-pub fn find_binary() -> Option<PathBuf> {
-    #[cfg(windows)]
-    const NAME: &str = "ndn-fwd.exe";
-    #[cfg(not(windows))]
-    const NAME: &str = "ndn-fwd";
+use crate::forwarder_profile::ForwarderProfile;
+
+/// Search `$PATH` and the directory containing this executable for the
+/// forwarder binary that matches `profile`. `None` for profiles that
+/// don't have a launchable binary in this context.
+pub fn find_binary_for(profile: ForwarderProfile) -> Option<PathBuf> {
+    let name = profile.binary_name();
 
     // 1. $PATH
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(NAME);
+            let candidate = dir.join(name);
             if candidate.exists() {
                 return Some(candidate);
             }
         }
     }
 
-    // 2. Adjacent to the running executable
+    // 2. Adjacent to the running executable (most useful for ndn-rs;
+    //    NFD/ndnd/YaNFD are typically system-installed).
     if let Ok(exe) = std::env::current_exe()
         && let Some(parent) = exe.parent()
     {
-        let adjacent = parent.join(NAME);
+        let adjacent = parent.join(name);
         if adjacent.exists() {
             return Some(adjacent);
         }
@@ -131,3 +133,4 @@ pub fn find_binary() -> Option<PathBuf> {
 
     None
 }
+

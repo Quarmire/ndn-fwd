@@ -32,7 +32,30 @@ use crate::{
 };
 
 fn default_ws_url() -> String {
-    "ws://localhost:9696".to_string()
+    let query = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default();
+    match crate::forwarder_profile::resolve_web(&query) {
+        crate::forwarder_profile::ConnectionMode::WebSocket { url, profile } => {
+            tracing::info!(
+                forwarder = %profile.human_label(),
+                url,
+                "selected forwarder profile (web)",
+            );
+            url
+        }
+        crate::forwarder_profile::ConnectionMode::BrowserEngine => {
+            // Fall through to ws default; the in-page engine path is
+            // wired separately via `?engine=local` in the
+            // `app_web_engine` module (stub today). Keeping a usable
+            // ws URL avoids a hard error if the engine path isn't
+            // built in.
+            tracing::info!("?engine=local requested — browser-engine path is stubbed");
+            "ws://localhost:9696".to_string()
+        }
+        // Spawn / Attach are desktop-only; not reachable on wasm32.
+        _ => "ws://localhost:9696".to_string(),
+    }
 }
 
 /// Web-specific App component.
@@ -48,10 +71,10 @@ pub fn AppWeb() -> Element {
     let mut conn_state: Signal<ConnState> = use_signal(|| ConnState::Disconnected);
     let mut ws_url: Signal<String> = use_signal(default_ws_url);
     let status: Signal<Option<ForwarderStatus>> = use_signal(|| None);
-    let faces: Signal<Vec<FaceInfo>> = use_signal(Vec::new);
-    let routes: Signal<Vec<FibEntry>> = use_signal(Vec::new);
+    let mut faces: Signal<Vec<FaceInfo>> = use_signal(Vec::new);
+    let mut routes: Signal<Vec<FibEntry>> = use_signal(Vec::new);
     let rib_entries: Signal<Vec<RibEntryInfo>> = use_signal(Vec::new);
-    let cs: Signal<Option<CsInfo>> = use_signal(|| None);
+    let mut cs: Signal<Option<CsInfo>> = use_signal(|| None);
     let strategies: Signal<Vec<StrategyEntry>> = use_signal(Vec::new);
     let counters: Signal<Vec<FaceCounter>> = use_signal(Vec::new);
     let measurements: Signal<Vec<MeasurementEntry>> = use_signal(Vec::new);
@@ -88,9 +111,44 @@ pub fn AppWeb() -> Element {
         }
     });
 
-    // ── WebSocket management coroutine ──────────────────────────────────────
-    // Mirrors the desktop cmd coroutine but uses WsMgmtClient over WebSocket.
+    // ── Engine / WebSocket management coroutine ─────────────────────────────
+    // Two paths gated on connection mode:
+    //   - `?engine=local` (browser-engine feature): start the in-page
+    //     `ForwarderEngine`, set Connected, poll via direct introspection.
+    //   - else: speak NFD-mgmt over WebSocket (the original WS path).
     let cmd = use_coroutine(move |mut rx: UnboundedReceiver<DashCmd>| async move {
+        // Decide the mode once per coroutine spawn. Reconnect spins this loop.
+        let query = web_sys::window()
+            .and_then(|w| w.location().search().ok())
+            .unwrap_or_default();
+        let mode = crate::forwarder_profile::resolve_web(&query);
+
+        #[cfg(feature = "browser-engine")]
+        if matches!(mode, crate::forwarder_profile::ConnectionMode::BrowserEngine) {
+            crate::browser_engine::init();
+            conn_state.set(ConnState::Connected);
+            error_msg.set(None);
+            loop {
+                gloo_timers::future::TimeoutFuture::new(1_500).await;
+                while let Ok(Some(cmd_msg)) = rx.try_next() {
+                    // Reconnect is a no-op for the in-page engine; other
+                    // commands route through the engine API directly when
+                    // implemented (see browser_engine.rs).
+                    let _ = cmd_msg;
+                }
+                faces.set(crate::browser_engine::introspect_faces());
+                routes.set(
+                    crate::browser_engine::introspect_fib()
+                        .into_iter()
+                        .collect(),
+                );
+                cs.set(Some(crate::browser_engine::introspect_cs()));
+            }
+        }
+
+        // Suppress unused-variable warning when browser-engine is off.
+        let _ = mode;
+
         loop {
             conn_state.set(ConnState::Connecting);
             let url = ws_url.peek().clone();
