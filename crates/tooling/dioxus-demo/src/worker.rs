@@ -139,14 +139,16 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
     };
 
     // Audit N.12 parity with native — when no persisted identity
-    // exists yet, fall back to an ephemeral in-memory Ed25519 signer
-    // for mgmt-response signing.  Mirrors ndn-fwd's `make_ephemeral`
-    // path so a fresh-tab wasm engine still produces signed responses
-    // (better than DigestSha256, even if the key doesn't survive the
-    // worker dying).  Replaced by the IdbPib signer on later loads.
+    // exists yet, fall back to an ephemeral in-memory ECDSA-P256
+    // signer for mgmt-response signing.  Same choice ndn-fwd makes:
+    // ECDSA is the lowest common denominator (ndn-cxx's `KeyType`
+    // enum has no Ed25519).  An IdbPib-persisted Ed25519 SafeBag
+    // takes precedence — `build_signer` returns whichever algorithm
+    // the SafeBag carries — but the auto-init fallback picks the
+    // interop-safe default.
     let signer = match signer {
         Some(s) => Some(s),
-        None => match ndn_security::KeyChain::ephemeral("/dioxus-demo/ephemeral") {
+        None => match ndn_security::KeyChain::ephemeral_ecdsa("/dioxus-demo/ephemeral") {
             Ok(kc) => {
                 let key_name = kc.key_name().clone();
                 let arc_mgr = kc.into_manager_arc();
