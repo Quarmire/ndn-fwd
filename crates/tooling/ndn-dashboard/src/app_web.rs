@@ -435,38 +435,95 @@ async fn poll_all_web(
     cs: &Signal<Option<CsInfo>>,
     strategies: &Signal<Vec<StrategyEntry>>,
 ) -> Result<(), String> {
-    // Each call goes through the WebSocket as a TLV-encoded management Interest.
-    // The WsMgmtClient returns raw response bytes; full response parsing will be
-    // added incrementally as the web build matures.
+    use ndn_config::nfd_dataset;
 
-    if let Ok(resp) = client.status_general().await {
-        if resp.is_ok() {
-            // TODO: parse ForwarderStatus from resp.body
-        }
+    // ── status/general — ControlResponse text encodes `faces=N fib=N pit=N cs=N`.
+    if let Ok(resp) = client.status_general().await
+        && resp.is_ok()
+    {
+        let mut status_sig = *status;
+        status_sig.set(Some(ForwarderStatus::parse(&resp.status_text)));
     }
 
-    if let Ok(resp) = client.list_faces().await {
-        if resp.is_ok() {
-            // TODO: parse Vec<FaceInfo> from resp.body
-        }
+    // ── faces/list — dataset of FaceStatus TLVs.
+    if let Ok(resp) = client.list_faces().await
+        && resp.is_ok()
+    {
+        let entries = nfd_dataset::FaceStatus::decode_all(&resp.body);
+        let mapped: Vec<FaceInfo> = entries
+            .into_iter()
+            .map(|fs| FaceInfo {
+                face_id: fs.face_id,
+                remote_uri: Some(fs.uri.clone()),
+                local_uri: if fs.local_uri.is_empty() {
+                    None
+                } else {
+                    Some(fs.local_uri.clone())
+                },
+                persistency: fs.persistency_str().to_string(),
+                kind: None,
+                face_scope: fs.face_scope,
+                link_type: fs.link_type,
+                mtu: fs.mtu,
+                n_in_interests: fs.n_in_interests,
+                n_out_interests: fs.n_out_interests,
+                n_in_data: fs.n_in_data,
+                n_out_data: fs.n_out_data,
+                n_in_bytes: fs.n_in_bytes,
+                n_out_bytes: fs.n_out_bytes,
+                n_in_nacks: fs.n_in_nacks,
+                n_out_nacks: fs.n_out_nacks,
+            })
+            .collect();
+        let mut faces_sig = *faces;
+        faces_sig.set(mapped);
     }
 
-    if let Ok(resp) = client.list_fib().await {
-        if resp.is_ok() {
-            // TODO: parse Vec<FibEntry> from resp.body
-        }
+    // ── fib/list — dataset of FibEntry TLVs.
+    if let Ok(resp) = client.list_fib().await
+        && resp.is_ok()
+    {
+        let entries = nfd_dataset::FibEntry::decode_all(&resp.body);
+        let mapped: Vec<FibEntry> = entries
+            .into_iter()
+            .map(|fe| FibEntry {
+                prefix: fe.name.to_string(),
+                nexthops: fe
+                    .nexthops
+                    .iter()
+                    .map(|nh| NextHop {
+                        face_id: nh.face_id,
+                        cost: nh.cost as u32,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let mut routes_sig = *routes;
+        routes_sig.set(mapped);
     }
 
-    if let Ok(resp) = client.cs_info().await {
-        if resp.is_ok() {
-            // TODO: parse CsInfo from resp.body
-        }
+    // ── cs/info — ControlResponse text encodes counters.
+    if let Ok(resp) = client.cs_info().await
+        && resp.is_ok()
+    {
+        let mut cs_sig = *cs;
+        cs_sig.set(CsInfo::parse(&resp.status_text));
     }
 
-    if let Ok(resp) = client.list_strategy().await {
-        if resp.is_ok() {
-            // TODO: parse Vec<StrategyEntry> from resp.body
-        }
+    // ── strategy-choice/list — dataset of StrategyChoice TLVs.
+    if let Ok(resp) = client.list_strategy().await
+        && resp.is_ok()
+    {
+        let entries = nfd_dataset::StrategyChoice::decode_all(&resp.body);
+        let mapped: Vec<StrategyEntry> = entries
+            .into_iter()
+            .map(|sc| StrategyEntry {
+                prefix: sc.name.to_string(),
+                strategy: sc.strategy.to_string(),
+            })
+            .collect();
+        let mut strategies_sig = *strategies;
+        strategies_sig.set(mapped);
     }
 
     Ok(())

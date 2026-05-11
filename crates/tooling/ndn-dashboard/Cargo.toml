@@ -34,6 +34,7 @@ web = [
   "dep:web-sys",
   "dep:gloo-storage",
   "dep:gloo-timers",
+  "dep:ndn-config",
   "ndn-packet/std-wasm",
   "ndn-tlv/std",
   "getrandom/js",
