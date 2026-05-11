@@ -189,6 +189,26 @@ impl Engine {
             to_engine_tx.clone(),
         );
 
+        // Mount NFD-compatible management — `/localhost/nfd/...` Interests
+        // now reach a real dispatcher inside the wasm engine (status,
+        // rib/list, faces/list, fib/list, etc.).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mgmt_cancel = CancellationToken::new();
+            let mgmt_config = Arc::new(ndn_config::ForwarderConfig::default());
+            let mgmt_handles = ndn_mgmt::MgmtHandles {
+                security_is_ephemeral: true,
+                command_validator: None,
+                localhop_command_validator: None,
+                require_signed_commands: false,
+                command_replay_cache: None,
+                command_response_signer: None,
+                log_inspector: None,
+            };
+            let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
+            runtime.spawn(Box::pin(fut));
+        }
+
         Self {
             inner: engine,
             _shutdown: shutdown,
