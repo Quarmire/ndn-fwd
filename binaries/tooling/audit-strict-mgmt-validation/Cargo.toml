@@ -1,0 +1,24 @@
+[package]
+name = "audit-strict-mgmt-validation"
+description = "Audit witness — fetch a mgmt response from a running ndn-fwd and validate it against the daemon's trust anchor via the same Validator path ndn-cxx's ValidatorConfig would use"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.scope]
+classification = "tooling"
+
+[[bin]]
+name = "audit-strict-mgmt-validation"
+path = "src/main.rs"
+
+[dependencies]
+ndn-faces    = { workspace = true }
+ndn-packet   = { workspace = true, features = ["std"] }
+ndn-security = { workspace = true }
+ndn-transport = { workspace = true }
+bytes        = { workspace = true, features = ["std"] }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+tracing-subscriber = { workspace = true }
