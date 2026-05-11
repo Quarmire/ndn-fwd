@@ -283,12 +283,29 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
         let pib_path = expand_tilde(&cli.pib);
         let pib = ndn_security::FilePib::open(&pib_path)
             .with_context(|| format!("Cannot open PIB at '{}'", pib_path.display()))?;
-        let key_name: ndn_packet::Name = identity_str
+        let identity: ndn_packet::Name = identity_str
             .parse()
             .map_err(|e| anyhow::anyhow!("bad identity name: {e}"))?;
-        let signer = pib
-            .get_signer(&key_name)
-            .with_context(|| format!("Key '{key_name}' not found in PIB"))?;
+        // Resolve identity → key.  `ndn-sec keygen <identity>` stores the key
+        // under the Certificate Format v2 name
+        // `<identity>/KEY/<keyid>/<issuer>/<version>`, so an exact-name lookup
+        // on the bare identity misses.  Try the exact name first (in case the
+        // caller passed a full cert name), then fall back to scanning the PIB
+        // for any key whose name extends `<identity>/KEY/`.
+        let signer = match pib.get_signer(&identity) {
+            Ok(s) => s,
+            Err(_) => {
+                let identity_with_key = identity.clone().append(b"KEY");
+                let key_name = pib
+                    .list_keys()
+                    .with_context(|| "could not enumerate keys in PIB")?
+                    .into_iter()
+                    .find(|k| k.has_prefix(&identity_with_key))
+                    .ok_or_else(|| anyhow::anyhow!("no key for identity '{identity}' in PIB"))?;
+                pib.get_signer(&key_name)
+                    .with_context(|| format!("Key '{key_name}' not found in PIB"))?
+            }
+        };
         mgmt = mgmt.with_signer(Arc::new(signer));
     }
 
