@@ -93,13 +93,22 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
         Some(Arc::new(face) as Arc<dyn ErasedFace>)
     };
 
-    // Try to open the per-origin IdbPib and seed the engine's validator
-    // from persisted trust anchors. Idempotent — first run finds no
-    // anchors and stays in permissive mode; subsequent loads after an
-    // enrollment flow has populated anchors install a real Validator.
-    let validator: Option<Arc<ndn_security::Validator>> =
-        match ndn_pib_idb::IdbPib::open("dioxus-demo").await {
-            Ok(pib) => match pib.build_validator().await {
+    // Open the per-origin IdbPib once and pull both:
+    //  - a Validator seeded from persisted trust anchors, and
+    //  - a Signer reconstructed from the first persisted SafeBag.
+    //
+    // Both are idempotent — a fresh first-run page finds neither and
+    // the engine boots permissive + DigestSha256-signed.  After an
+    // enrollment flow has populated trust anchors / SafeBag, the same
+    // worker_main call upgrades to full signature enforcement on both
+    // directions: inbound Data validated by the validator, outbound
+    // mgmt responses signed by the persisted identity.
+    let (validator, signer): (
+        Option<Arc<ndn_security::Validator>>,
+        Option<Arc<dyn ndn_security::Signer>>,
+    ) = match ndn_pib_idb::IdbPib::open("dioxus-demo").await {
+        Ok(pib) => {
+            let v = match pib.build_validator().await {
                 Ok(Some(v)) => {
                     worker_log("loaded validator from IdbPib trust anchors");
                     Some(Arc::new(v))
@@ -109,17 +118,61 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
                     worker_log(&format!("IdbPib build_validator: {e}"));
                     None
                 }
-            },
+            };
+            let s = match pib.build_signer().await {
+                Ok(Some(s)) => {
+                    worker_log(&format!("loaded signer from IdbPib: {}", s.key_name()));
+                    Some(s)
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    worker_log(&format!("IdbPib build_signer: {e}"));
+                    None
+                }
+            };
+            (v, s)
+        }
+        Err(e) => {
+            worker_log(&format!("IdbPib open: {e}"));
+            (None, None)
+        }
+    };
+
+    // Audit N.12 parity with native — when no persisted identity
+    // exists yet, fall back to an ephemeral in-memory Ed25519 signer
+    // for mgmt-response signing.  Mirrors ndn-fwd's `make_ephemeral`
+    // path so a fresh-tab wasm engine still produces signed responses
+    // (better than DigestSha256, even if the key doesn't survive the
+    // worker dying).  Replaced by the IdbPib signer on later loads.
+    let signer = match signer {
+        Some(s) => Some(s),
+        None => match ndn_security::KeyChain::ephemeral("/dioxus-demo/ephemeral") {
+            Ok(kc) => {
+                let key_name = kc.key_name().clone();
+                let arc_mgr = kc.into_manager_arc();
+                match arc_mgr.get_signer_sync(&key_name) {
+                    Ok(s) => {
+                        worker_log(&format!("ephemeral signer: {}", key_name));
+                        Some(s)
+                    }
+                    Err(e) => {
+                        worker_log(&format!("ephemeral signer fetch: {e}"));
+                        None
+                    }
+                }
+            }
             Err(e) => {
-                worker_log(&format!("IdbPib open: {e}"));
+                worker_log(&format!("ephemeral keychain: {e}"));
                 None
             }
-        };
+        },
+    };
 
-    let engine = Arc::new(Engine::new_with_validator(
+    let engine = Arc::new(Engine::new_with_security(
         Arc::clone(&runtime),
         upstream,
         validator,
+        signer,
     ));
 
     for raw in producers.split(',') {

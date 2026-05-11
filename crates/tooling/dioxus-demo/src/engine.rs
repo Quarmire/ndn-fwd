@@ -28,7 +28,7 @@ use bytes::Bytes;
 use ndn_engine::{
     FibNexthop, ForwarderEngine, ShutdownHandle, WasmEngineBuilder, WasmEngineConfig,
 };
-use ndn_security::Validator;
+use ndn_security::{Signer, Validator};
 use ndn_packet::lp::LpPacket;
 use ndn_packet::{Data, Interest, Name, SignatureType};
 use ndn_runtime::Runtime;
@@ -150,19 +150,29 @@ impl Engine {
     /// engine is producer-only / cache-only — typical for the
     /// SharedWorker entrypoint that hosts the engine for tabs.
     pub fn new(runtime: Arc<dyn Runtime>, upstream: Option<Arc<dyn ErasedFace>>) -> Self {
-        Self::new_with_validator(runtime, upstream, None)
+        Self::new_with_security(runtime, upstream, None, None)
     }
 
-    /// Same as [`Self::new`] but installs a real [`Validator`] on the
-    /// engine.  Callers that have an `IdbPib` open can build one via
-    /// [`ndn_pib_idb::IdbPib::build_validator`] and pass it here so the
-    /// in-page engine enforces signature checks against persisted
-    /// trust anchors.  `None` keeps the engine in permissive mode.
-    pub fn new_with_validator(
+    /// Construct the engine with an optional [`Validator`] (for
+    /// inbound Data verification) and an optional [`Signer`] (for
+    /// mgmt-response Data signing).  Both come from `IdbPib` in the
+    /// SharedWorker flow; both default to `None` in test harnesses.
+    ///
+    /// - `validator = Some(v)` → engine's `ValidationStage` enforces
+    ///   signatures against the validator's trust anchors.
+    /// - `signer = Some(s)` → mgmt responses on `/localhost/nfd/...`
+    ///   are signed by `s` with a real `KeyLocator` rather than the
+    ///   fallback `DigestSha256`.
+    pub fn new_with_security(
         runtime: Arc<dyn Runtime>,
         upstream: Option<Arc<dyn ErasedFace>>,
         validator: Option<Arc<Validator>>,
+        mgmt_response_signer: Option<Arc<dyn Signer>>,
     ) -> Self {
+        // Suppress unused-variable warnings on non-wasm builds where
+        // mount_management is gated out.
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = &mgmt_response_signer;
         let mut builder =
             WasmEngineBuilder::new(WasmEngineConfig::default()).with_runtime(Arc::clone(&runtime));
         if let Some(face) = upstream.as_ref() {
@@ -219,7 +229,11 @@ impl Engine {
                 localhop_command_validator: None,
                 require_signed_commands: false,
                 command_replay_cache: None,
-                command_response_signer: None,
+                // N.12 — sign control responses with the persisted
+                // identity when one exists (worker_main passes a
+                // Signer reconstructed from IdbPib's SafeBag).
+                // Falls back to DigestSha256 when None.
+                command_response_signer: mgmt_response_signer,
                 log_inspector: None,
             };
             let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);

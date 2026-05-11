@@ -65,7 +65,7 @@ impl SharedClient {
                     .ok()
                     .and_then(|lp| lp.fragment)
                     .unwrap_or(raw);
-                if let Ok(data) = Data::decode(inner) {
+                if let Ok(data) = Data::decode(inner.clone()) {
                     // Longest-prefix match against pending Interests so
                     // dataset responses (Data named `<base>/v=.../seg=N`)
                     // satisfy the bare `<base>` Interest the witness or
@@ -87,8 +87,12 @@ impl SharedClient {
                         && let Some(tx) = pending_lock.remove(&k)
                     {
                         drop(pending_lock);
-                        let payload = data.content().cloned().unwrap_or_default();
-                        let _ = tx.send(payload);
+                        // Deliver the full Data wire so callers can
+                        // either decode it themselves (e.g. a witness
+                        // verifying SignatureInfo) or use the
+                        // express_interest convenience that strips out
+                        // the Content for them.
+                        let _ = tx.send(inner);
                     }
                 }
             }
@@ -101,6 +105,27 @@ impl SharedClient {
     /// matching Data, and resolve to its `content` bytes. Rejects with
     /// "timeout" when no Data arrives.
     pub async fn express_interest(
+        &self,
+        name: String,
+        lifetime_ms: u32,
+    ) -> Result<Uint8Array, JsValue> {
+        let wire = self.express_interest_wire(name, lifetime_ms).await?;
+        // Decode the full Data wire and extract just the Content for
+        // back-compat with callers that only want the payload.
+        let bytes = bytes::Bytes::copy_from_slice(&wire.to_vec());
+        let data = Data::decode(bytes)
+            .map_err(|e| JsValue::from_str(&format!("decode Data: {e:?}")))?;
+        let payload = data.content().cloned().unwrap_or_default();
+        let arr = Uint8Array::new_with_length(payload.len() as u32);
+        arr.copy_from(&payload);
+        Ok(arr)
+    }
+
+    /// Like [`Self::express_interest`] but returns the **full Data
+    /// wire** (post-NDNLPv2 unwrap) — Name + MetaInfo + Content +
+    /// SignatureInfo + SignatureValue.  Witnesses that need to
+    /// verify the signature on the mgmt response use this.
+    pub async fn express_interest_wire(
         &self,
         name: String,
         lifetime_ms: u32,
