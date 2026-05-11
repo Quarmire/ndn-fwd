@@ -43,6 +43,13 @@ pub mod transit;
 #[cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
 pub mod webrtc_adapter;
 
+// WebRTC ↔ SharedWorker tab-side bridge — the worker-bridge pattern
+// (`crates/extension/ndn-face-webrtc/docs/worker-bridge.md`). Lets a
+// peer browser reach producers / mgmt running inside a SharedWorker
+// even though `RTCPeerConnection` isn't exposed to workers per W3C.
+#[cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
+pub mod transit_bridge;
+
 // Critical-path #4 onboarding-link client — JoinClient wasm-bindgen
 // entrypoint that drives NDNCERT TokenChallenge enrollment + IdbPib
 // persistence so a "click the URL → enrolled in <30s" UX works and
