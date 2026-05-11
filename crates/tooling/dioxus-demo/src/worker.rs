@@ -93,7 +93,34 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
         Some(Arc::new(face) as Arc<dyn ErasedFace>)
     };
 
-    let engine = Arc::new(Engine::new(Arc::clone(&runtime), upstream));
+    // Try to open the per-origin IdbPib and seed the engine's validator
+    // from persisted trust anchors. Idempotent — first run finds no
+    // anchors and stays in permissive mode; subsequent loads after an
+    // enrollment flow has populated anchors install a real Validator.
+    let validator: Option<Arc<ndn_security::Validator>> =
+        match ndn_pib_idb::IdbPib::open("dioxus-demo").await {
+            Ok(pib) => match pib.build_validator().await {
+                Ok(Some(v)) => {
+                    worker_log("loaded validator from IdbPib trust anchors");
+                    Some(Arc::new(v))
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    worker_log(&format!("IdbPib build_validator: {e}"));
+                    None
+                }
+            },
+            Err(e) => {
+                worker_log(&format!("IdbPib open: {e}"));
+                None
+            }
+        };
+
+    let engine = Arc::new(Engine::new_with_validator(
+        Arc::clone(&runtime),
+        upstream,
+        validator,
+    ));
 
     for raw in producers.split(',') {
         let trimmed = raw.trim();

@@ -28,6 +28,7 @@ use bytes::Bytes;
 use ndn_engine::{
     FibNexthop, ForwarderEngine, ShutdownHandle, WasmEngineBuilder, WasmEngineConfig,
 };
+use ndn_security::Validator;
 use ndn_packet::lp::LpPacket;
 use ndn_packet::{Data, Interest, Name, SignatureType};
 use ndn_runtime::Runtime;
@@ -149,10 +150,26 @@ impl Engine {
     /// engine is producer-only / cache-only — typical for the
     /// SharedWorker entrypoint that hosts the engine for tabs.
     pub fn new(runtime: Arc<dyn Runtime>, upstream: Option<Arc<dyn ErasedFace>>) -> Self {
+        Self::new_with_validator(runtime, upstream, None)
+    }
+
+    /// Same as [`Self::new`] but installs a real [`Validator`] on the
+    /// engine.  Callers that have an `IdbPib` open can build one via
+    /// [`ndn_pib_idb::IdbPib::build_validator`] and pass it here so the
+    /// in-page engine enforces signature checks against persisted
+    /// trust anchors.  `None` keeps the engine in permissive mode.
+    pub fn new_with_validator(
+        runtime: Arc<dyn Runtime>,
+        upstream: Option<Arc<dyn ErasedFace>>,
+        validator: Option<Arc<Validator>>,
+    ) -> Self {
         let mut builder =
             WasmEngineBuilder::new(WasmEngineConfig::default()).with_runtime(Arc::clone(&runtime));
         if let Some(face) = upstream.as_ref() {
             builder = builder.add_face(Arc::clone(face));
+        }
+        if let Some(v) = validator.as_ref() {
+            builder = builder.with_validator(Arc::clone(v));
         }
         let (engine, shutdown) = builder.build().expect("WasmEngineBuilder build");
 
