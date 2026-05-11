@@ -66,9 +66,27 @@ impl SharedClient {
                     .and_then(|lp| lp.fragment)
                     .unwrap_or(raw);
                 if let Ok(data) = Data::decode(inner) {
-                    let key = data.name.to_string();
-                    if let Some(tx) = pending_pump.lock().await.remove(&key) {
-                        // The witness wants the Content of the Data.
+                    // Longest-prefix match against pending Interests so
+                    // dataset responses (Data named `<base>/v=.../seg=N`)
+                    // satisfy the bare `<base>` Interest the witness or
+                    // mgmt client issued.
+                    let mut pending_lock = pending_pump.lock().await;
+                    let best: Option<String> = pending_lock
+                        .keys()
+                        .filter_map(|k| {
+                            let n: Name = k.parse().ok()?;
+                            if data.name.has_prefix(&n) {
+                                Some((n.len(), k.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .max_by_key(|(len, _)| *len)
+                        .map(|(_, k)| k);
+                    if let Some(k) = best
+                        && let Some(tx) = pending_lock.remove(&k)
+                    {
+                        drop(pending_lock);
                         let payload = data.content().cloned().unwrap_or_default();
                         let _ = tx.send(payload);
                     }
@@ -121,6 +139,11 @@ impl SharedClient {
 /// Minimal Interest encoder mirroring the one in `crate::engine` —
 /// duplicated here to keep this module self-contained and avoid
 /// pulling the engine module into the SharedClient build path.
+///
+/// Always sets `CanBePrefix` and `MustBeFresh` so dataset responses
+/// (NFD `*/list` verbs) — whose Data names carry a `/v=/seg=` suffix
+/// and FreshnessPeriod=0 — can satisfy this Interest. Exact-name
+/// producers are unaffected.
 fn encode_interest(name: &Name, lifetime: Duration) -> Bytes {
     use ndn_packet::tlv_type;
     use ndn_tlv::TlvWriter;
@@ -135,6 +158,8 @@ fn encode_interest(name: &Name, lifetime: Duration) -> Bytes {
                 w.write_tlv(comp.typ, &comp.value);
             }
         });
+        w.write_tlv(tlv_type::CAN_BE_PREFIX, &[]);
+        w.write_tlv(tlv_type::MUST_BE_FRESH, &[]);
         w.write_tlv(tlv_type::NONCE, &nonce);
         let (buf, len) = nni_bytes(lifetime_ms);
         w.write_tlv(tlv_type::INTEREST_LIFETIME, &buf[..len]);
