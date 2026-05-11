@@ -271,8 +271,6 @@ async fn main() -> anyhow::Result<()> {
 // ─── NFD transport (primary) ────────────────────────────────────────────────
 
 async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
-    use std::sync::Arc;
-
     use anyhow::Context as _;
 
     let mut mgmt = MgmtClient::connect(&cli.socket)
@@ -306,7 +304,9 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                     .with_context(|| format!("Key '{key_name}' not found in PIB"))?
             }
         };
-        mgmt = mgmt.with_signer(Arc::new(signer));
+        // `signer` is already `Arc<dyn Signer>` (FilePib::get_signer
+        // returns trait objects since 2026-05-11); pass through.
+        mgmt = mgmt.with_signer(signer);
     }
 
     match &cli.command {
