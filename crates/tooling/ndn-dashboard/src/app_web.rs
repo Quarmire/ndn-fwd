@@ -123,40 +123,47 @@ pub fn AppWeb() -> Element {
             .unwrap_or_default();
         let mode = crate::forwarder_profile::resolve_web(&query);
 
+        // Build a client appropriate for the resolved connection mode.
+        // BrowserEngine takes the local-transport branch (in-page
+        // engine + `mount_management`); everything else falls through
+        // to the WebSocket transport.  The poll/cmd loop below is
+        // identical for both — the dashboard speaks NFD mgmt over a
+        // single client type.
         #[cfg(feature = "browser-engine")]
-        if matches!(
+        let local_engine_mode = matches!(
             mode,
             crate::forwarder_profile::ConnectionMode::BrowserEngine
-        ) {
-            crate::browser_engine::init();
-            conn_state.set(ConnState::Connected);
-            error_msg.set(None);
-            loop {
-                gloo_timers::future::TimeoutFuture::new(1_500).await;
-                while let Ok(Some(cmd_msg)) = rx.try_next() {
-                    // Reconnect is a no-op for the in-page engine; other
-                    // commands route through the engine API directly when
-                    // implemented (see browser_engine.rs).
-                    let _ = cmd_msg;
-                }
-                faces.set(crate::browser_engine::introspect_faces());
-                routes.set(
-                    crate::browser_engine::introspect_fib()
-                        .into_iter()
-                        .collect(),
-                );
-                cs.set(Some(crate::browser_engine::introspect_cs()));
-            }
-        }
-
-        // Suppress unused-variable warning when browser-engine is off.
+        );
+        #[cfg(not(feature = "browser-engine"))]
+        let local_engine_mode = false;
         let _ = mode;
 
         loop {
             conn_state.set(ConnState::Connecting);
-            let url = ws_url.peek().clone();
 
-            let mut client = WsMgmtClient::new(&url);
+            let mut client = {
+                #[cfg(feature = "browser-engine")]
+                if local_engine_mode {
+                    let handle = crate::browser_engine::init();
+                    match handle.take_mgmt_channels().await {
+                        Some(channels) => WsMgmtClient::new_local(channels),
+                        None => {
+                            // The in-page engine's mgmt channels can only
+                            // be taken once; on reconnect we already
+                            // own them, so signal Connected and idle.
+                            conn_state.set(ConnState::Connected);
+                            error_msg.set(None);
+                            futures::future::pending::<()>().await;
+                            unreachable!();
+                        }
+                    }
+                } else {
+                    WsMgmtClient::new(&ws_url.peek().clone())
+                }
+                #[cfg(not(feature = "browser-engine"))]
+                WsMgmtClient::new(&ws_url.peek().clone())
+            };
+
             match client.connect().await {
                 Ok(()) => {}
                 Err(e) => {

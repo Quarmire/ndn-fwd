@@ -45,6 +45,8 @@ web = [
 browser-engine = [
   "web",
   "dep:ndn-engine",
+  "dep:ndn-mgmt",
+  "dep:ndn-config",
   "dep:ndn-runtime",
   "dep:ndn-transport",
   "dep:wasm-bindgen-futures",
@@ -83,6 +85,7 @@ gloo-timers  = { version = "0.3", optional = true }
 # Browser-engine-only dependencies (optional, activated by
 # "browser-engine" feature on wasm32 web target).
 ndn-engine    = { workspace = true, optional = true }
+ndn-mgmt      = { workspace = true, optional = true }
 ndn-runtime   = { workspace = true, optional = true }
 ndn-transport = { workspace = true, optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }

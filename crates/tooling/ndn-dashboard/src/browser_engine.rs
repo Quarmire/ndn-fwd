@@ -46,6 +46,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::types::{CsInfo, FaceInfo, FibEntry, NextHop};
 
+/// Channel pair an `ndn_mgmt::MgmtHandles`-backed client uses to speak
+/// the NFD management protocol against the in-page engine over the
+/// dashboard's internal app face.
+pub struct LocalMgmtChannels {
+    /// Sender for app→engine packets (Interests).
+    pub to_engine: mpsc::Sender<Bytes>,
+    /// Receiver for engine→app packets (Data).
+    pub from_engine: mpsc::Receiver<Bytes>,
+}
+
 fn elog(msg: &str) {
     web_sys::console::log_1(&format!("[browser-engine] {msg}").into());
 }
@@ -65,10 +75,15 @@ struct EngineInner {
     _shutdown: ShutdownHandle,
     app_face_id: FaceId,
     runtime: Arc<dyn Runtime>,
-    /// Held to prevent the AppFace recv side from observing
-    /// channel-closed; the dashboard reuses this sender when it
-    /// later wants to publish into the engine.
-    _to_engine_keepalive: mpsc::Sender<Bytes>,
+    /// App→engine sender used by the dashboard's local mgmt client.
+    /// Cloned out via [`EngineHandle::mgmt_tx`]; kept here as the
+    /// keepalive so the engine's AppFace `recv` never observes a
+    /// closed channel before the dashboard takes a handle.
+    to_engine_tx: mpsc::Sender<Bytes>,
+    /// Engine→app receiver — taken once by the local mgmt client.
+    /// Wrapped in `Mutex<Option<_>>` so `take` works through a
+    /// shared `Arc`. After the take, further callers see `None`.
+    from_engine_rx: Mutex<Option<mpsc::Receiver<Bytes>>>,
 }
 
 /// Internal app-face — bridges the engine's pipeline with future
@@ -111,7 +126,7 @@ pub fn init() -> EngineHandle {
         .expect("WasmEngineBuilder build");
 
     let (to_engine_tx, to_engine_rx) = mpsc::channel::<Bytes>(64);
-    let (from_engine_tx, _from_engine_rx) = mpsc::channel::<Bytes>(64);
+    let (from_engine_tx, from_engine_rx) = mpsc::channel::<Bytes>(64);
     let app_face_id = engine.faces().alloc_id();
     let app_face = AppFace {
         id: app_face_id,
@@ -120,13 +135,35 @@ pub fn init() -> EngineHandle {
     };
     engine.add_face(app_face, CancellationToken::new());
 
+    // Mount NFD-compatible management on the engine so the dashboard
+    // (and any other in-page consumer) can issue `/localhost/nfd/...`
+    // Interests through its app face. `mount_management` returns the
+    // handler future; we spawn it on the engine's runtime so it
+    // shares the same task scheduler as the pipeline.
+    {
+        let mgmt_cancel = CancellationToken::new();
+        let mgmt_config = Arc::new(ndn_config::ForwarderConfig::default());
+        let mgmt_handles = ndn_mgmt::MgmtHandles {
+            security_is_ephemeral: true,
+            command_validator: None,
+            localhop_command_validator: None,
+            require_signed_commands: false,
+            command_replay_cache: None,
+            command_response_signer: None,
+            log_inspector: None,
+        };
+        let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
+        runtime.spawn(Box::pin(fut));
+    }
+
     let handle = EngineHandle {
         inner: Arc::new(EngineInner {
             engine,
             _shutdown: shutdown,
             app_face_id,
             runtime,
-            _to_engine_keepalive: to_engine_tx,
+            to_engine_tx,
+            from_engine_rx: Mutex::new(Some(from_engine_rx)),
         }),
     };
     elog(&format!(
@@ -154,6 +191,18 @@ impl EngineHandle {
     }
     pub fn app_face_id(&self) -> FaceId {
         self.inner.app_face_id
+    }
+
+    /// Take the (Sender, Receiver) pair that wraps the in-page engine's
+    /// app face. Single-consumer — the first caller wins; subsequent
+    /// calls return `None`. The dashboard's `WsMgmtClient::new_local`
+    /// is the canonical caller.
+    pub async fn take_mgmt_channels(&self) -> Option<LocalMgmtChannels> {
+        let rx = self.inner.from_engine_rx.lock().await.take()?;
+        Some(LocalMgmtChannels {
+            to_engine: self.inner.to_engine_tx.clone(),
+            from_engine: rx,
+        })
     }
 }
 
