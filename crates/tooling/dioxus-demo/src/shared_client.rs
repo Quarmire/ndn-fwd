@@ -113,8 +113,8 @@ impl SharedClient {
         // Decode the full Data wire and extract just the Content for
         // back-compat with callers that only want the payload.
         let bytes = bytes::Bytes::copy_from_slice(&wire.to_vec());
-        let data = Data::decode(bytes)
-            .map_err(|e| JsValue::from_str(&format!("decode Data: {e:?}")))?;
+        let data =
+            Data::decode(bytes).map_err(|e| JsValue::from_str(&format!("decode Data: {e:?}")))?;
         let payload = data.content().cloned().unwrap_or_default();
         let arr = Uint8Array::new_with_length(payload.len() as u32);
         arr.copy_from(&payload);

@@ -46,7 +46,6 @@ use ndn_transport::{Face, FaceError, FaceId, FaceKind};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
-
 /// Channel pair an `ndn_mgmt::MgmtHandles`-backed client uses to speak
 /// the NFD management protocol against the in-page engine over the
 /// dashboard's internal app face.
@@ -206,4 +205,3 @@ impl EngineHandle {
         })
     }
 }
-

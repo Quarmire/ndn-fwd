@@ -68,10 +68,7 @@ pub struct TransitBridge {
 #[wasm_bindgen]
 impl TransitBridge {
     #[wasm_bindgen(constructor)]
-    pub fn new(
-        worker_url: String,
-        worker_name: Option<String>,
-    ) -> Result<TransitBridge, JsValue> {
+    pub fn new(worker_url: String, worker_name: Option<String>) -> Result<TransitBridge, JsValue> {
         console_error_panic_hook::set_once();
         let runtime = default_runtime();
         let worker_face = SharedWorkerProxyFace::connect(

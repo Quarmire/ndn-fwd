@@ -87,7 +87,9 @@ async fn main() -> Result<()> {
     // ── 1. Load the daemon's trust anchor from its PIB ────────────────────
     let pib = FilePib::open(&pib_path)
         .with_context(|| format!("opening PIB at {}", pib_path.display()))?;
-    let anchors = pib.trust_anchors().context("reading trust anchors from PIB")?;
+    let anchors = pib
+        .trust_anchors()
+        .context("reading trust anchors from PIB")?;
     if anchors.is_empty() {
         bail!(
             "daemon PIB at {} has no trust anchors — ndn-fwd's auto-init should \
