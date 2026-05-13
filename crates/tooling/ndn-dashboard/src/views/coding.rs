@@ -32,8 +32,9 @@ fn field_label(code: Option<u8>) -> &'static str {
 }
 
 async fn fetch_policies() -> Result<Vec<ControlParameters>, String> {
-    let path = crate::forwarder_profile::selected_profile().1;
-    let client = MgmtClient::connect(&path).await.map_err(|e| e.to_string())?;
+    let path = crate::forwarder_profile::selected().1;
+    let path = path.to_string_lossy().into_owned();
+    let client = MgmtClient::connect(path).await.map_err(|e| e.to_string())?;
     client.coding_list().await.map_err(|e| e.to_string())
 }
 

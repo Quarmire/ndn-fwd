@@ -1,3 +1,4 @@
+pub mod coding;
 #[cfg(feature = "desktop")]
 pub mod config;
 pub mod cs;
@@ -6,6 +7,7 @@ pub mod dashboard_config;
 pub mod faces;
 pub mod fleet;
 pub mod logs;
+pub mod rate_limit;
 #[cfg(feature = "desktop")]
 pub mod modals;
 pub mod onboarding;
@@ -26,6 +28,8 @@ pub mod traffic;
 pub enum View {
     Overview,
     Strategy,
+    Coding,
+    RateLimit,
     Logs,
     Session,
     Security,
@@ -42,6 +46,8 @@ impl View {
         match self {
             View::Overview => "Overview",
             View::Strategy => "Strategy",
+            View::Coding => "Coding",
+            View::RateLimit => "Rate Limit",
             View::Logs => "Logs",
             View::Session => "Session",
             View::Security => "Security",
@@ -57,6 +63,8 @@ impl View {
     pub const NAV: &'static [View] = &[
         View::Overview,
         View::Strategy,
+        View::Coding,
+        View::RateLimit,
         View::Logs,
         View::Session,
         View::Security,

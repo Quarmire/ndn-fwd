@@ -1459,6 +1459,8 @@ fn render_view(view: View) -> Element {
     match view {
         View::Overview => rsx! { Overview {} },
         View::Strategy => rsx! { Strategy {} },
+        View::Coding => rsx! { crate::views::coding::Coding {} },
+        View::RateLimit => rsx! { crate::views::rate_limit::RateLimit {} },
         View::Logs => rsx! {}, // rendered via full-height branch in App
         View::Session => rsx! { Session {} },
         View::Security => rsx! { Security {} },
