@@ -236,6 +236,7 @@ impl Engine {
                 command_response_signer: mgmt_response_signer,
                 log_inspector: None,
                 coding_handler: None,
+                rate_limit_handler: None,
             };
             let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
             runtime.spawn(Box::pin(fut));

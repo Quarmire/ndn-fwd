@@ -152,6 +152,7 @@ pub fn init() -> EngineHandle {
             command_response_signer: None,
             log_inspector: None,
             coding_handler: None,
+            rate_limit_handler: None,
         };
         let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
         runtime.spawn(Box::pin(fut));
