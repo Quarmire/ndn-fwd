@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             // Measure the overhead of the InProcFace channel send path.
             // InProcFace::new creates (engine-side face, app-side handle).
             // The "engine" receives via face.recv(); the "app" sends via handle.
-            let (face, handle) = InProcFace::new(FaceId(worker as u32), 128);
+            let (face, handle) = InProcFace::new(FaceId(worker), 128);
             use ndn_transport::Face;
             let _face_id = face.id(); // confirm the face is alive
 

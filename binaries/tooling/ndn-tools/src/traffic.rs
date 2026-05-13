@@ -206,13 +206,13 @@ async fn main() -> Result<()> {
     });
 
     for i in 0..concurrency {
-        let (face, handle) = InProcFace::new(FaceId((i + 1) as u32), buf_size);
+        let (face, handle) = InProcFace::new(FaceId(i + 1), buf_size);
         consumer_handles.push(handle);
         builder = builder.face(face);
     }
 
     // Producer face (echo mode only).
-    let producer_face_id = FaceId((concurrency + 1) as u32);
+    let producer_face_id = FaceId(concurrency + 1);
     let mut producer_handle: Option<InProcHandle> = None;
     if echo_mode {
         let (face, handle) = InProcFace::new(producer_face_id, buf_size);
