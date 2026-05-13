@@ -15,7 +15,7 @@
 //!   `client.conf` and validates with whatever's in
 //!   `validator-config-file`, neither of which it ships defaults
 //!   for.  Forcing it into strict mode requires writing a `client.conf`
-//!   + a `validator.conf` per test run, which only proves the
+//!   plus a `validator.conf` per test run, which only proves the
 //!   wrapping config does what we already know it should.
 //! - ndn-cxx's actual signature verifier is OpenSSL's
 //!   `EVP_DigestVerify` over ECDSA-P256 + SHA-256 — bit-for-bit
@@ -61,10 +61,10 @@ fn arg(name: &str) -> Result<String> {
     }
     let mut prev: Option<String> = None;
     for a in std::env::args().skip(1) {
-        if let Some(p) = prev.take() {
-            if p == format!("--{name}") {
-                return Ok(a);
-            }
+        if let Some(p) = prev.take()
+            && p == format!("--{name}")
+        {
+            return Ok(a);
         }
         prev = Some(a);
     }
