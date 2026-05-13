@@ -13,12 +13,22 @@ classification = "tooling"
 name = "ndn-dashboard"
 path = "src/main.rs"
 
+# Library target. Carries no production code on its own — exists so
+# `cargo build`/`wasm-pack build` can produce a `cdylib` exposing the
+# witness-export surface (`src/witness_export.rs`) for the browser-side
+# witness in `testbed/tests/browser/wsmgmt_wire.spec.ts`. Empty when the
+# `witness-export` feature is off, so the bin build is unaffected.
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = ["desktop"]
 desktop = [
   "dep:tray-icon",
   "dep:dirs-next",
   "dep:which",
+  "dep:arboard",
   "dep:ndn-ipc",
   "dep:ndn-tools-core",
   "dep:ndn-config",
@@ -50,9 +60,23 @@ browser-engine = [
   "dep:ndn-config",
   "dep:ndn-runtime",
   "dep:ndn-transport",
+  "dep:ndn-coding",
+  "dep:ndn-ratelimit",
   "dep:wasm-bindgen-futures",
   "dep:web-time",
   "dep:tokio-util",
+]
+# Browser-side witness surface (Tier-1 §2c, native counterpart is
+# `crates/spec/ndn-mgmt/tests/web_wire_e2e.rs`). Exposes the
+# dashboard's `WsMgmtClient` to JS via `wasm-bindgen` so Playwright
+# can drive `/localhost/nfd/{module}/{verb}` against a real `ndn-fwd`
+# over a real browser WebSocket. Off by default; enabled only when
+# `testbed/tests/browser/build-dashboard-witness.sh` runs.
+witness-export = [
+  "web",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
+  "dep:ndn-config",
 ]
 
 [dependencies]
@@ -75,6 +99,7 @@ serde_json = { workspace = true }
 tray-icon      = { version = "0.21", optional = true }
 dirs-next      = { version = "2", optional = true }
 which          = { version = "6", optional = true }
+arboard        = { version = "3", optional = true }
 ndn-ipc        = { workspace = true, optional = true }
 ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"], optional = true }
 
@@ -89,6 +114,9 @@ ndn-engine    = { workspace = true, optional = true }
 ndn-mgmt      = { workspace = true, optional = true }
 ndn-runtime   = { workspace = true, optional = true }
 ndn-transport = { workspace = true, optional = true }
+ndn-coding    = { workspace = true, optional = true }
+ndn-ratelimit = { workspace = true, optional = true }
+wasm-bindgen        = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-time      = { version = "1", optional = true }
 tokio-util    = { workspace = true, features = ["rt"], optional = true }

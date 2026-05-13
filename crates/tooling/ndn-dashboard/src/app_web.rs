@@ -101,15 +101,7 @@ pub fn AppWeb() -> Element {
     let mut show_onboarding: Signal<bool> = use_signal(|| !is_onboarded());
     let mut show_gear_menu: Signal<bool> = use_signal(|| false);
 
-    // Theme
-    use_effect(move || {
-        let dark = *DARK_MODE.read();
-        if dark {
-            let _ = document::eval("document.documentElement.classList.remove('light-mode')");
-        } else {
-            let _ = document::eval("document.documentElement.classList.add('light-mode')");
-        }
-    });
+    // Theme class is bound reactively on the layout root below — no JS.
 
     // ── Engine / WebSocket management coroutine ─────────────────────────────
     // Two paths gated on connection mode:
@@ -214,20 +206,8 @@ pub fn AppWeb() -> Element {
         }
     });
 
-    // Stub coroutines for features not available on web
-    let router_cmd = use_coroutine(
-        |mut _rx: UnboundedReceiver<crate::app::RouterCmd>| async move {
-            // No subprocess management on web — coroutine exists only to satisfy AppCtx type
-            futures::future::pending::<()>().await;
-        },
-    );
-
-    let tool_cmd = use_coroutine(
-        |mut _rx: UnboundedReceiver<crate::app::ToolCmd>| async move {
-            // No embedded tools on web
-            futures::future::pending::<()>().await;
-        },
-    );
+    // router_cmd / tool_cmd are desktop-only fields on AppCtx — no
+    // subprocess substrate on web means no stub coroutines either.
 
     let ctx = AppCtx {
         conn: conn_state,
@@ -257,9 +237,7 @@ pub fn AppWeb() -> Element {
         face_throughput,
         discovery_status,
         dvr_status,
-        router_cmd,
         cmd,
-        tool_cmd,
     };
     use_context_provider(move || ctx);
 
@@ -273,8 +251,10 @@ pub fn AppWeb() -> Element {
         }
     };
 
-    // Views that are NOT available on web
-    let web_hidden_views = [View::Tools, View::Session];
+    // Views that are NOT available on web. Coding/RateLimit are
+    // desktop-only until the WsMgmtClient-backed variants land
+    // (docs/notes/dashboard-correctness-floor-2026-05-13.md §1d).
+    let web_hidden_views = [View::Tools, View::Session, View::Coding, View::RateLimit];
 
     rsx! {
         document::Style { "{CSS}" }
@@ -285,7 +265,8 @@ pub fn AppWeb() -> Element {
             }
         }
 
-        div { class: "layout",
+        div {
+            class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
             // ── Sidebar ───────────────────────────────────────────────────
             nav { class: "sidebar",
                 div { class: "sidebar-logo",
@@ -415,8 +396,10 @@ fn render_view_web(view: View) -> Element {
             }
         },
         View::Radio => rsx! { Radio {} },
-        // Desktop-only views render a placeholder on web
-        View::Tools | View::Session => rsx! {
+        // Desktop-only views render a placeholder on web.
+        // Coding/RateLimit will move to web once their fetch path is
+        // ported off `ndn-ipc::MgmtClient` (§1d).
+        View::Tools | View::Session | View::Coding | View::RateLimit => rsx! {
             div { class: "placeholder",
                 style: "padding:2rem;color:var(--text2);",
                 "This feature requires the desktop version of the dashboard."
@@ -530,50 +513,162 @@ async fn poll_all_web(
 }
 
 async fn run_cmd_web(cmd: DashCmd, client: &mut WsMgmtClient, error_msg: &Signal<Option<String>>) {
+    use ndn_config::ControlParameters;
+    use ndn_packet::Name;
+
     let result = match cmd {
         DashCmd::FaceCreate(uri) => {
-            client
-                .send_cmd("faces", "create", Some(uri.as_bytes()))
-                .await
+            let params = ControlParameters {
+                uri: Some(uri),
+                ..Default::default()
+            };
+            client.send_cmd("faces", "create", Some(&params)).await
         }
         DashCmd::FaceDestroy(id) => {
-            let params = id.to_string();
-            client
-                .send_cmd("faces", "destroy", Some(params.as_bytes()))
-                .await
+            let params = ControlParameters {
+                face_id: Some(id),
+                ..Default::default()
+            };
+            client.send_cmd("faces", "destroy", Some(&params)).await
         }
         DashCmd::RouteAdd {
             prefix,
             face_id,
             cost,
         } => {
-            let params = format!("{}\0{}\0{}", prefix, face_id, cost);
-            client
-                .send_cmd("rib", "register", Some(params.as_bytes()))
-                .await
+            let name: Name = match prefix.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid prefix '{prefix}': {e:?}")));
+                    return;
+                }
+            };
+            let params = ControlParameters {
+                name: Some(name),
+                // face_id == 0 means "use the requesting face" — leave
+                // it unset so the forwarder resolves it from the PIT.
+                face_id: (face_id != 0).then_some(face_id),
+                cost: Some(cost),
+                ..Default::default()
+            };
+            client.send_cmd("rib", "register", Some(&params)).await
         }
         DashCmd::RouteRemove { prefix, face_id } => {
-            let params = format!("{}\0{}", prefix, face_id);
-            client
-                .send_cmd("rib", "unregister", Some(params.as_bytes()))
-                .await
+            let name: Name = match prefix.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid prefix '{prefix}': {e:?}")));
+                    return;
+                }
+            };
+            let params = ControlParameters {
+                name: Some(name),
+                face_id: (face_id != 0).then_some(face_id),
+                ..Default::default()
+            };
+            client.send_cmd("rib", "unregister", Some(&params)).await
         }
         DashCmd::StrategySet { prefix, strategy } => {
-            let params = format!("{}\0{}", prefix, strategy);
+            let name: Name = match prefix.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid prefix '{prefix}': {e:?}")));
+                    return;
+                }
+            };
+            let strategy_name: Name = match strategy.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid strategy '{strategy}': {e:?}")));
+                    return;
+                }
+            };
+            let params = ControlParameters {
+                name: Some(name),
+                strategy: Some(strategy_name),
+                ..Default::default()
+            };
             client
-                .send_cmd("strategy-choice", "set", Some(params.as_bytes()))
+                .send_cmd("strategy-choice", "set", Some(&params))
                 .await
         }
+        DashCmd::StrategyUnset(prefix) => {
+            let name: Name = match prefix.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid prefix '{prefix}': {e:?}")));
+                    return;
+                }
+            };
+            let params = ControlParameters {
+                name: Some(name),
+                ..Default::default()
+            };
+            client
+                .send_cmd("strategy-choice", "unset", Some(&params))
+                .await
+        }
+        DashCmd::CsCapacity(capacity) => {
+            let params = ControlParameters {
+                capacity: Some(capacity),
+                ..Default::default()
+            };
+            client.send_cmd("cs", "config", Some(&params)).await
+        }
+        DashCmd::CsErase(prefix) => {
+            let name: Name = match prefix.parse() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid prefix '{prefix}': {e:?}")));
+                    return;
+                }
+            };
+            let params = ControlParameters {
+                name: Some(name),
+                ..Default::default()
+            };
+            client.send_cmd("cs", "erase", Some(&params)).await
+        }
         DashCmd::Shutdown => client.send_cmd("status", "shutdown", None).await,
-        DashCmd::Reconnect => return, // Handled by the coroutine loop
-        _ => {
-            // Other commands not yet implemented for web
-            tracing::warn!("Command not yet supported on web: {:?}", cmd);
+        DashCmd::Reconnect => return,
+        DashCmd::RefreshConfig => client.send_cmd("config", "get", None).await,
+        // The remaining DashCmd variants (recording, security, yubikey,
+        // discovery/dvr config, schema) are desktop-only flows that
+        // don't have a web equivalent yet. Surface the gap as an error
+        // instead of a silent warn so the user sees why nothing happened.
+        other => {
+            error_msg
+                .to_owned()
+                .set(Some(format!("Command not supported on web: {other:?}")));
             return;
         }
     };
 
-    if let Err(e) = result {
-        error_msg.to_owned().set(Some(e.to_string()));
+    match result {
+        Ok(resp) if resp.is_ok() => {
+            // Clear any prior error on success.
+            error_msg.to_owned().set(None);
+        }
+        Ok(resp) => {
+            error_msg.to_owned().set(Some(format!(
+                "mgmt {}: {}",
+                resp.status_code, resp.status_text
+            )));
+        }
+        Err(e) => {
+            error_msg.to_owned().set(Some(e.to_string()));
+        }
     }
 }

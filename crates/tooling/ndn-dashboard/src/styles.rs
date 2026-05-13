@@ -1,6 +1,7 @@
 /// Global stylesheet injected into the Dioxus desktop window.
 /// Colors are defined as CSS custom properties so light/dark mode can be
-/// toggled by adding/removing the `light-mode` class on `<html>`.
+/// toggled by adding/removing the `light-mode` class on the layout root
+/// element (Rust-managed via a reactive Dioxus signal; no JS).
 pub const CSS: &str = "
 *{box-sizing:border-box;margin:0;padding:0}
 html{height:100%}
@@ -38,7 +39,7 @@ html{height:100%}
 }
 
 /* ── Light mode overrides ────────────────────────────────────────── */
-html.light-mode{
+.light-mode{
   --bg:#ffffff;
   --surface:#f6f8fa;
   --surface2:#f0f3f6;
@@ -139,8 +140,8 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .packet-bubble{position:absolute;top:4px;background:var(--accent-solid);color:#fff;border-radius:3px;padding:2px 8px;font-size:10px;font-family:monospace;white-space:nowrap;animation:packet-fly 2.8s ease-in-out infinite}
 .packet-bubble.data{background:var(--green-bg);color:var(--green);animation-delay:.9s}
 .packet-bubble.nack{background:var(--red-bg);color:var(--red);animation-delay:1.8s}
-html.light-mode .packet-bubble.data{background:var(--green);color:#fff}
-html.light-mode .packet-bubble.nack{background:var(--red);color:#fff}
+.light-mode .packet-bubble.data{background:var(--green);color:#fff}
+.light-mode .packet-bubble.nack{background:var(--red);color:#fff}
 /* ── Trust chain ────────────────────────────────────────────────── */
 .trust-chain{display:flex;align-items:center;gap:0;margin:16px 0;flex-wrap:wrap}
 .chain-node{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;text-align:center;min-width:110px;transition:border-color .2s}
@@ -150,7 +151,7 @@ html.light-mode .packet-bubble.nack{background:var(--red);color:#fff}
 .chain-arrow{font-size:18px;color:var(--border);padding:0 4px;flex-shrink:0}
 /* ── Education snippets ────────────────────────────────────────── */
 .edu-card{background:linear-gradient(135deg,#0c2d6b1a,#1a472a1a);border:1px solid #1f4f8a44;border-radius:8px;padding:14px 16px;margin-bottom:16px;position:relative;overflow:hidden}
-html.light-mode .edu-card{background:linear-gradient(135deg,#cce5ff22,#ccffd822);border-color:#0969da33}
+.light-mode .edu-card{background:linear-gradient(135deg,#cce5ff22,#ccffd822);border-color:#0969da33}
 .edu-dismiss{position:absolute;top:8px;right:10px;background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:0;line-height:1}
 .edu-dismiss:hover{color:var(--text)}
 @keyframes sig-glow{0%,100%{box-shadow:0 0 0 0 transparent}50%{box-shadow:0 0 8px 3px #3fb95044}}
@@ -223,7 +224,7 @@ html.light-mode .edu-card{background:linear-gradient(135deg,#cce5ff22,#ccffd822)
 .mini-stat-sub{font-size:11px;color:var(--text-muted);margin-top:3px}
 /* ── Modals ────────────────────────────────────────────────── */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:500;display:flex;align-items:center;justify-content:center}
-html.light-mode .modal-overlay{background:rgba(0,0,0,.45)}
+.light-mode .modal-overlay{background:rgba(0,0,0,.45)}
 .modal-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:520px;max-width:92vw;max-height:86vh;overflow-y:auto;animation:slide-up .2s ease}
 .modal-card-wide{width:620px}
 .modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
@@ -277,10 +278,10 @@ input[type=range]:focus{outline:none;border-color:transparent}
 .toast-warning{border-color:var(--yellow);background:var(--yellow-bg)}
 .toast-error{border-color:var(--red);background:var(--red-bg)}
 .toast-info{border-color:var(--accent);background:var(--accent-bg)}
-html.light-mode .toast-success{background:var(--green-bg)}
-html.light-mode .toast-warning{background:var(--yellow-bg)}
-html.light-mode .toast-error{background:var(--red-bg)}
-html.light-mode .toast-info{background:var(--accent-bg)}
+.light-mode .toast-success{background:var(--green-bg)}
+.light-mode .toast-warning{background:var(--yellow-bg)}
+.light-mode .toast-error{background:var(--red-bg)}
+.light-mode .toast-info{background:var(--accent-bg)}
 .toast-body{display:flex;align-items:flex-start;gap:8px;flex:1;min-width:0}
 .toast-icon{font-size:13px;flex-shrink:0;line-height:1.5}
 .toast-msg{font-size:12px;color:var(--text);line-height:1.5;word-break:break-word}

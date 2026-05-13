@@ -1,3 +1,7 @@
+// `coding` and `rate_limit` currently call into `ndn-ipc::MgmtClient`
+// (Unix-socket only). Wiring them through `WsMgmtClient` for the web
+// build is tracked in docs/notes/dashboard-correctness-floor-2026-05-13.md §1d.
+#[cfg(feature = "desktop")]
 pub mod coding;
 #[cfg(feature = "desktop")]
 pub mod config;
@@ -12,6 +16,7 @@ pub mod modals;
 pub mod onboarding;
 pub mod overview;
 pub mod radio;
+#[cfg(feature = "desktop")]
 pub mod rate_limit;
 pub mod routes;
 pub mod routing;

@@ -263,14 +263,20 @@ pub fn LogPane(pane_id: usize) -> Element {
     });
 
     // ── Auto-scroll to bottom when new entries arrive ─────────────────────────
+    // Captures a `MountedData` handle to a zero-height sentinel rendered as
+    // the last child of the list. Whenever `filtered` changes, schedule a
+    // `scroll_to` on the sentinel — the browser scrolls the list so the
+    // sentinel is visible, which is "at the bottom" by construction.
+    // Pure Dioxus/web-sys path; no `document::eval`.
     let list_id = format!("log-list-{pane_id}");
-    let list_id2 = list_id.clone();
+    let mut bottom_sentinel: Signal<Option<std::rc::Rc<MountedData>>> = use_signal(|| None);
     use_effect(move || {
         let _ = filtered.read(); // subscribe — re-run when filtered changes
-        document::eval(&format!(
-            "var el=document.getElementById('{list_id2}');\
-             if(el)el.scrollTop=el.scrollHeight;"
-        ));
+        if let Some(sentinel) = bottom_sentinel.read().clone() {
+            spawn(async move {
+                let _ = sentinel.scroll_to(ScrollBehavior::Instant).await;
+            });
+        }
     });
 
     // ── Snapshot values for rsx (avoids holding guards across the block) ──────
@@ -580,6 +586,12 @@ pub fn LogPane(pane_id: usize) -> Element {
                                 if col_tgt { span { class: "log-target", title: "{entry.target}", "{entry.target}" } }
                                 span { class: "log-msg", "{entry.message}" }
                             }
+                        }
+                        // Zero-height sentinel; `scroll_to` on it makes the
+                        // browser scroll the list to keep it visible.
+                        div {
+                            style: "height:0;",
+                            onmounted: move |e| bottom_sentinel.set(Some(e.data())),
                         }
                     }
                 }

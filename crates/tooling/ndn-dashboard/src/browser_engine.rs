@@ -37,7 +37,8 @@
 
 #![cfg(all(target_arch = "wasm32", feature = "browser-engine"))]
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use bytes::Bytes;
 use ndn_engine::{ForwarderEngine, ShutdownHandle, WasmEngineBuilder, WasmEngineConfig};
@@ -120,8 +121,24 @@ pub fn init() -> EngineHandle {
         return h.clone();
     }
     let runtime: Arc<dyn Runtime> = default_runtime();
+
+    // ── Rate-limit table + engine hook ──────────────────────────────
+    // Empty table at boot; the dashboard can install cells at runtime
+    // via `/localhost/nfd/rate-limit/set`. The same `Arc` is shared
+    // between the pipeline hook (which consults the table on every
+    // packet) and the mgmt handler (which mutates the table).
+    let rl_table: ndn_ratelimit::SharedPolicyTable =
+        Arc::new(ndn_ratelimit::RateLimitPolicyTable::new());
+    let rl_hook: ndn_engine::SharedRateLimitHook = Arc::new(
+        ndn_ratelimit::EngineRateLimitHook::new(Arc::clone(&rl_table)),
+    );
+    let rl_handler = Arc::new(ndn_ratelimit::RateLimitMgmtHandler::new(Arc::clone(
+        &rl_table,
+    )));
+
     let (engine, shutdown) = WasmEngineBuilder::new(WasmEngineConfig::default())
         .with_runtime(Arc::clone(&runtime))
+        .with_rate_limit_hook(Some(Arc::clone(&rl_hook)))
         .build()
         .expect("WasmEngineBuilder build");
 
@@ -135,6 +152,16 @@ pub fn init() -> EngineHandle {
     };
     engine.add_face(app_face, CancellationToken::new());
 
+    // ── Coding policy table + handler ───────────────────────────────
+    // Same shape as rate-limit: empty table at boot, populated at
+    // runtime via `/localhost/nfd/coding/set`. The in-page engine
+    // doesn't ship FEC encode/decode stages yet (the pipeline hook
+    // wiring is a follow-up), but installing the handler now means
+    // mgmt verbs answer correctly instead of `STATUS 404`.
+    let coding_table: ndn_coding::SharedPolicyTable =
+        Arc::new(ndn_coding::CodingPolicyTable::new());
+    let coding_handler = Arc::new(ndn_coding::CodingMgmtHandler::new(coding_table));
+
     // Mount NFD-compatible management on the engine so the dashboard
     // (and any other in-page consumer) can issue `/localhost/nfd/...`
     // Interests through its app face. `mount_management` returns the
@@ -143,16 +170,33 @@ pub fn init() -> EngineHandle {
     {
         let mgmt_cancel = CancellationToken::new();
         let mgmt_config = Arc::new(ndn_config::ForwarderConfig::default());
+        // N.10 — replay-protection cache. Cheap to keep enabled; only
+        // touched when a signed command actually validates, which is
+        // never in the default in-page config (no trust anchors).
+        // Wiring it in now means signed-command support is a one-line
+        // flip when the dashboard grows a trust-anchor flow.
+        let replay_cache: ndn_mgmt::CommandReplayCache = Arc::new(StdMutex::new(HashMap::new()));
         let mgmt_handles = ndn_mgmt::MgmtHandles {
+            // The in-page engine has no persistent identity (no FilePib
+            // on wasm). Marks the security identity as ephemeral so the
+            // `security/identity/status` verb reports it correctly.
             security_is_ephemeral: true,
+            // No trust anchors in the page — commands run unauthenticated.
+            // Operators who care about isolation should run the engine
+            // out-of-process and connect over WebSocket.
             command_validator: None,
             localhop_command_validator: None,
             require_signed_commands: false,
-            command_replay_cache: None,
+            command_replay_cache: Some(replay_cache),
+            // No daemon identity to sign responses with; falls back to
+            // DigestSha256 which all ndn-rs clients accept.
             command_response_signer: None,
+            // `log/*` verbs need a tracing_subscriber reload handle the
+            // page doesn't own. Wiring an in-page log inspector is
+            // tracked separately.
             log_inspector: None,
-            coding_handler: None,
-            rate_limit_handler: None,
+            coding_handler: Some(coding_handler as Arc<dyn ndn_mgmt::CodingHandler>),
+            rate_limit_handler: Some(rl_handler as Arc<dyn ndn_mgmt::RateLimitMgmtBackend>),
         };
         let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
         runtime.spawn(Box::pin(fut));

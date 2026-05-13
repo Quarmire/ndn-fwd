@@ -409,15 +409,7 @@ pub fn App() -> Element {
     let mut show_start_modal: Signal<bool> = use_signal(|| false);
     let mut show_gear_menu: Signal<bool> = use_signal(|| false);
 
-    // Apply initial theme on mount and reactively on change.
-    use_effect(move || {
-        let dark = *DARK_MODE.read();
-        if dark {
-            let _ = document::eval("document.documentElement.classList.remove('light-mode')");
-        } else {
-            let _ = document::eval("document.documentElement.classList.add('light-mode')");
-        }
-    });
+    // Theme class is bound reactively on the layout root below — no JS.
 
     // Shared channel: router_cmd → tool_cmd server lifecycle commands.
     // Defined before both coroutines so each can capture its end.
@@ -1237,7 +1229,8 @@ pub fn App() -> Element {
 
         ToastOverlay {}
 
-        div { class: "layout",
+        div {
+            class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
             // ── Sidebar navigation ─────────────────────────────────────────
             nav { class: "sidebar",
                 div { class: "sidebar-logo",
@@ -1331,11 +1324,6 @@ pub fn App() -> Element {
                         onclick: move |_| {
                             let next = !*DARK_MODE.read();
                             *DARK_MODE.write() = next;
-                            if next {
-                                let _ = document::eval("document.documentElement.classList.remove('light-mode')");
-                            } else {
-                                let _ = document::eval("document.documentElement.classList.add('light-mode')");
-                            }
                         },
                         if *DARK_MODE.read() { "☀" } else { "🌙" }
                     }

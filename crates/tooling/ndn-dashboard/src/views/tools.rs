@@ -991,12 +991,16 @@ fn ResultRow(
                         onclick: move |e| {
                             e.stop_propagation();
                             let text = format_result_text(entry_id);
-                            let eval = document::eval(&format!(
-                                "navigator.clipboard.writeText({:?}).catch(()=>{{}})",
-                                text
-                            ));
-                            let _ = eval;
-                            crate::app::push_toast("Copied to clipboard", crate::app::ToastLevel::Success);
+                            match arboard::Clipboard::new().and_then(|mut c| c.set_text(text)) {
+                                Ok(()) => crate::app::push_toast(
+                                    "Copied to clipboard",
+                                    crate::app::ToastLevel::Success,
+                                ),
+                                Err(err) => crate::app::push_toast(
+                                    format!("Clipboard error: {err}"),
+                                    crate::app::ToastLevel::Error,
+                                ),
+                            }
                         },
                         "\u{1f4cb}"
                     }

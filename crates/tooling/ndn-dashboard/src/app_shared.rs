@@ -121,6 +121,10 @@ pub enum DashCmd {
     SchemaSet(String),
 }
 
+// Desktop-only: there is no `ndn-fwd` subprocess to manage on web.
+// (Also declared in `app.rs`; the duplication predates the workspace
+// split and is left alone here to keep #5 scope tight.)
+#[cfg(feature = "desktop")]
 #[derive(Debug)]
 pub enum RouterCmd {
     Start(Option<String>),
@@ -161,11 +165,11 @@ impl ConnState {
 #[cfg(feature = "desktop")]
 use crate::tool_runner::ToolCmd;
 
-// Stub for web builds where tool_runner doesn't exist
-#[cfg(not(feature = "desktop"))]
-#[derive(Debug)]
-pub enum ToolCmd {}
-
+/// Shared context provided to every view. Coroutine fields that drive
+/// out-of-process subprocesses (`router_cmd` — `ndn-fwd` lifecycle;
+/// `tool_cmd` — ping/iperf/peek/put runners) are desktop-only since the
+/// web build has no subprocess substrate. Views that need them are
+/// already cfg-gated to desktop in `views/mod.rs`.
 #[derive(Clone, Copy)]
 pub struct AppCtx {
     #[allow(dead_code)]
@@ -197,7 +201,9 @@ pub struct AppCtx {
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
     pub discovery_status: Signal<Option<DiscoveryStatus>>,
     pub dvr_status: Signal<Option<DvrStatus>>,
-    pub router_cmd: Coroutine<RouterCmd>,
     pub cmd: Coroutine<DashCmd>,
+    #[cfg(feature = "desktop")]
+    pub router_cmd: Coroutine<RouterCmd>,
+    #[cfg(feature = "desktop")]
     pub tool_cmd: Coroutine<ToolCmd>,
 }
