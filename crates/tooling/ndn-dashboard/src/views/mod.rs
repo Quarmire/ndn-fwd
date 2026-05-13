@@ -7,12 +7,12 @@ pub mod dashboard_config;
 pub mod faces;
 pub mod fleet;
 pub mod logs;
-pub mod rate_limit;
 #[cfg(feature = "desktop")]
 pub mod modals;
 pub mod onboarding;
 pub mod overview;
 pub mod radio;
+pub mod rate_limit;
 pub mod routes;
 pub mod routing;
 pub mod security;
