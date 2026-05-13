@@ -50,7 +50,11 @@ pub struct PingClientParams {
 /// Emits [`ToolEvent`]s to `tx` until the router disconnects, `tx` is dropped,
 /// or the task is cancelled.
 pub async fn run_server(params: PingServerParams, tx: mpsc::Sender<ToolEvent>) -> Result<()> {
-    let prefix: Name = params.prefix.parse()?;
+    let parent: Name = params.prefix.parse()?;
+    // H.02 — match ndn-cxx ndnping: server registers `<prefix>/ping`,
+    // not the bare prefix, so an ndn-cxx ndnping client at the same
+    // `<prefix>` interoperates without re-tuning the FIB.
+    let prefix = parent.clone().append("ping");
     let client = if params.conn.use_shm {
         ForwarderClient::connect(&params.conn.face_socket).await?
     } else {

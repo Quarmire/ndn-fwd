@@ -7,7 +7,7 @@
 //! Registers a prefix and responds to ping Interests with empty Data packets.
 //!
 //! ```text
-//! ndn-ping server [--prefix /ping] [--freshness 0] [--sign]
+//! ndn-ping server [--prefix /ndn] [--freshness 0] [--sign]
 //! ```
 //!
 //! ## Client mode
@@ -16,7 +16,7 @@
 //! Prints per-packet timing and a final summary.
 //!
 //! ```text
-//! ndn-ping client [--prefix /ping] [--count 0] [--interval 1000]
+//! ndn-ping client [--prefix /ndn] [--count 0] [--interval 1000]
 //!                  [--lifetime 4000]
 //! ```
 
@@ -65,7 +65,7 @@ enum Command {
         conn: ConnectOpts,
 
         /// Name prefix to register.
-        #[arg(long, default_value = "/ping")]
+        #[arg(long, default_value = "/ndn")]
         prefix: String,
 
         /// Data freshness period in milliseconds (0 = omit).
@@ -82,7 +82,7 @@ enum Command {
         conn: ConnectOpts,
 
         /// Name prefix to ping.
-        #[arg(long, default_value = "/ping")]
+        #[arg(long, default_value = "/ndn")]
         prefix: String,
 
         /// Number of pings (0 = unlimited).

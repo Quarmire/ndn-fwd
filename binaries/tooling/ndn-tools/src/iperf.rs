@@ -1,6 +1,15 @@
 //! `ndn-iperf` — NDN bandwidth measurement tool.
 //!
 //! See `ndn_tools_core::iperf` for the embedded library implementation.
+//!
+//! # Proprietary tool (audit H.03)
+//!
+//! `ndn-iperf` is ndn-rs-specific: there is no ndn-cxx `ndniperf`
+//! equivalent and no NDN-WG specification of the wire convention.
+//! The default `/iperf` prefix, the segment naming, and the
+//! `--sign-mode` parameter are local to this implementation.
+//! Two `ndn-iperf` peers interoperate; cross-implementation use
+//! against ndn-cxx tools is not expected.
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
