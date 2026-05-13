@@ -1,8 +1,21 @@
-//! `ndn-bench` — throughput and latency benchmarking for the NDN forwarder.
+//! `ndn-bench` — `InProcFace` channel-overhead microbenchmark.
 //!
-//! Embeds an engine with an `AppFace`, drives a controlled Interest/Data
-//! exchange loop, and reports per-packet latency percentiles and aggregate
-//! throughput.
+//! # Scope (audit H.09)
+//!
+//! This binary measures the round-trip overhead of the
+//! `InProcHandle ↔ InProcFace` mpsc channel only.  It does **not**
+//! wire the `InProcFace` to a `ForwarderEngine` pipeline, and it
+//! does **not** emit signed Data packets — the payload is a fixed
+//! 3-byte dummy TLV (`\x05\x01\x00`).  The reported throughput is
+//! therefore an upper bound on what the engine could push through a
+//! single in-process face, not a measurement of:
+//!
+//! - end-to-end NDN forwarding throughput,
+//! - signing throughput (Ed25519, RSA, ECDSA, …), or
+//! - Content Store admission overhead.
+//!
+//! For real benchmarks against the engine, drive `ndn-iperf`
+//! through a wired-up `ForwarderEngine` instead.
 //!
 //! Usage: ndn-bench [--interests <n>] [--concurrency <c>] [--name <prefix>]
 
