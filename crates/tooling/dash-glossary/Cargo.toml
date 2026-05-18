@@ -1,0 +1,17 @@
+[package]
+name = "dash-glossary"
+description = "CI guard: every EduGloss callsite in ndn-dashboard has a matching glossary.toml entry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.scope]
+classification = "tooling"
+
+[[bin]]
+name = "dash-glossary"
+path = "src/main.rs"
+
+[dependencies]
+serde      = { workspace = true, features = ["derive"] }
+toml       = "0.8"
