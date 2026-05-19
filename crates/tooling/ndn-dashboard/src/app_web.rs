@@ -655,11 +655,18 @@ async fn poll_all_web(
         && resp.is_ok()
     {
         let parsed = ValidationStats::parse(&resp.status_text);
+        // Same shape as the desktop poll — derive per-sec from the
+        // delta against the previous sample when totals are present;
+        // fall back to legacy `*_per_sec` fields otherwise.
+        let rate = validation_stats
+            .peek()
+            .and_then(|prev| parsed.rate_against(&prev))
+            .unwrap_or((parsed.verified_per_sec, parsed.rejected_per_sec));
         let mut vs = *validation_stats;
         vs.set(Some(parsed));
         let mut hist = *validation_history;
         let mut h = hist.write();
-        h.push_back((parsed.verified_per_sec, parsed.rejected_per_sec));
+        h.push_back(rate);
         if h.len() > 60 {
             h.pop_front();
         }

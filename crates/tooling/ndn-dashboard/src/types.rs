@@ -1139,18 +1139,31 @@ impl MgmtAccessPolicySnapshot {
 
 // ── Validation stats — §7 / §4.3 LiveValidationChart feed ───────────────────
 //
-// Parsed from the `security/validation-stats` response body
-// (`validator_present=<bool>\nverified_per_sec=<u64>\nrejected_per_sec=<u64>`).
-// Counter fields are zero today across all forwarders — the wire is
-// pinned, but `ndn_security::Validator` doesn't yet expose its
-// decision-loop counters. The dashboard renders an explicit
-// "no live data" chip on the chart while `validator_present=false`.
+// Parsed from the `security/validation-stats` response body. Two wire
+// shapes coexist:
+//   - Phase-B-A legacy: `verified_per_sec=<u64>` + `rejected_per_sec=<u64>`
+//     (always zero — the forwarder didn't expose real counters yet).
+//   - Phase-B-B current: `verified_total=<u64>` + `rejected_total=<u64>`
+//     + `probe_unix_ns=<u64>` (monotonic counters + sample timestamp).
+//     The dashboard derives per-second rates from consecutive polls.
+//
+// Both shapes are emitted by current forwarders for forward-compat;
+// the dashboard prefers `*_total` when present and falls back to
+// the legacy fields otherwise.
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ValidationStats {
     pub validator_present: bool,
     pub verified_per_sec: u64,
     pub rejected_per_sec: u64,
+    /// Monotonic verified-count since forwarder boot. `None` ⇒ the
+    /// connected forwarder is pre-Phase-B-B and doesn't expose totals.
+    pub verified_total: Option<u64>,
+    pub rejected_total: Option<u64>,
+    /// Sampling timestamp (Unix-epoch ns). Lets the dashboard compute
+    /// `(delta_total) / (delta_probe_secs)` for the rate. `None` if
+    /// the forwarder didn't emit the field.
+    pub probe_unix_ns: Option<u64>,
 }
 
 impl ValidationStats {
@@ -1162,11 +1175,42 @@ impl ValidationStats {
                     "validator_present" => out.validator_present = v == "true",
                     "verified_per_sec" => out.verified_per_sec = v.parse().unwrap_or(0),
                     "rejected_per_sec" => out.rejected_per_sec = v.parse().unwrap_or(0),
+                    "verified_total" => out.verified_total = v.parse().ok(),
+                    "rejected_total" => out.rejected_total = v.parse().ok(),
+                    "probe_unix_ns" => out.probe_unix_ns = v.parse().ok(),
                     _ => {}
                 }
             }
         }
         out
+    }
+
+    /// Compute the per-second rate of `(verified, rejected)` between
+    /// two consecutive `ValidationStats` samples. Returns `None`
+    /// when either sample lacks the totals/probe fields, or when the
+    /// time delta is zero/backward. The dashboard's
+    /// `LiveValidationChart` consumes the result.
+    pub fn rate_against(&self, prev: &Self) -> Option<(u64, u64)> {
+        let (cur_v, cur_r, cur_t) = (
+            self.verified_total?,
+            self.rejected_total?,
+            self.probe_unix_ns?,
+        );
+        let (prev_v, prev_r, prev_t) = (
+            prev.verified_total?,
+            prev.rejected_total?,
+            prev.probe_unix_ns?,
+        );
+        if cur_t <= prev_t {
+            return None;
+        }
+        let delta_secs = (cur_t - prev_t) as f64 / 1_000_000_000.0;
+        if delta_secs <= 0.0 {
+            return None;
+        }
+        let dv = cur_v.saturating_sub(prev_v) as f64;
+        let dr = cur_r.saturating_sub(prev_r) as f64;
+        Some(((dv / delta_secs) as u64, (dr / delta_secs) as u64))
     }
 }
 
@@ -1539,6 +1583,89 @@ mod tests {
         assert!(!stats.validator_present);
         assert_eq!(stats.verified_per_sec, 0);
         assert_eq!(stats.rejected_per_sec, 0);
+    }
+
+    #[test]
+    fn validation_stats_parses_totals_and_probe_ts() {
+        // Phase B step B forwarders emit monotonic totals + a probe
+        // timestamp so the dashboard derives per-second rates client-
+        // side. Pre-Phase-B-B fields stay on the wire for fwd-compat.
+        let text = "validator_present=true\n\
+                    verified_per_sec=0\n\
+                    rejected_per_sec=0\n\
+                    verified_total=42\n\
+                    rejected_total=7\n\
+                    probe_unix_ns=1700000000000000000\n";
+        let stats = ValidationStats::parse(text);
+        assert!(stats.validator_present);
+        assert_eq!(stats.verified_total, Some(42));
+        assert_eq!(stats.rejected_total, Some(7));
+        assert_eq!(stats.probe_unix_ns, Some(1_700_000_000_000_000_000));
+    }
+
+    #[test]
+    fn validation_stats_rate_against_computes_per_second() {
+        let prev = ValidationStats {
+            validator_present: true,
+            verified_per_sec: 0,
+            rejected_per_sec: 0,
+            verified_total: Some(100),
+            rejected_total: Some(10),
+            probe_unix_ns: Some(1_700_000_000_000_000_000),
+        };
+        let cur = ValidationStats {
+            validator_present: true,
+            verified_per_sec: 0,
+            rejected_per_sec: 0,
+            verified_total: Some(160),                      // +60
+            rejected_total: Some(13),                       // +3
+            probe_unix_ns: Some(1_700_000_003_000_000_000), // +3s
+        };
+        // 60 / 3s = 20/s; 3 / 3s = 1/s.
+        assert_eq!(cur.rate_against(&prev), Some((20, 1)));
+    }
+
+    #[test]
+    fn validation_stats_rate_against_returns_none_when_no_totals() {
+        let prev = ValidationStats {
+            validator_present: true,
+            verified_per_sec: 0,
+            rejected_per_sec: 0,
+            verified_total: None,
+            rejected_total: None,
+            probe_unix_ns: None,
+        };
+        let cur = ValidationStats {
+            validator_present: true,
+            verified_per_sec: 0,
+            rejected_per_sec: 0,
+            verified_total: Some(1),
+            rejected_total: Some(0),
+            probe_unix_ns: Some(1_700_000_000_000_000_000),
+        };
+        // Missing prev totals → can't derive a rate. The caller
+        // falls back to the legacy `*_per_sec` fields.
+        assert_eq!(cur.rate_against(&prev), None);
+    }
+
+    #[test]
+    fn validation_stats_rate_against_rejects_zero_or_backward_delta() {
+        let s = ValidationStats {
+            validator_present: true,
+            verified_per_sec: 0,
+            rejected_per_sec: 0,
+            verified_total: Some(1),
+            rejected_total: Some(0),
+            probe_unix_ns: Some(1_700_000_000_000_000_000),
+        };
+        // Equal timestamps → no rate.
+        assert_eq!(s.rate_against(&s), None);
+        // Backward time → no rate.
+        let future = ValidationStats {
+            probe_unix_ns: Some(1_699_999_999_000_000_000),
+            ..s
+        };
+        assert_eq!(future.rate_against(&s), None);
     }
 
     #[test]

@@ -1717,16 +1717,23 @@ async fn poll_all(
         mgmt_signed_commands_required.set(Some(parsed.require_signed_commands));
         mgmt_access_policy.set(Some(parsed));
     }
-    // §4.3 LiveValidationChart feed — `validation-stats` is
-    // read-exempt from the SECURITY signed-command gate. Counter
-    // fields are zero today across all forwarders (Validator
-    // counter plumbing tracked as a Phase B follow-up); the chart
-    // surfaces this explicitly via the `validator_present` flag.
+    // §4.3 LiveValidationChart feed — read-exempt from the SECURITY
+    // signed-command gate. Phase B step B forwarders return real
+    // `verified_total` + `rejected_total` + `probe_unix_ns` fields;
+    // we derive the per-second rate from the delta against the
+    // previous sample (computed in `ValidationStats::rate_against`).
+    // Pre-Phase-B-B forwarders only emit `*_per_sec=0`; the chart
+    // falls back to those zeros and keeps showing the "no live data"
+    // chip the kickoff designed.
     if let Ok(r) = client.security_validation_stats().await {
         let parsed = ValidationStats::parse(&r.status_text);
+        let rate = validation_stats
+            .peek()
+            .and_then(|prev| parsed.rate_against(&prev))
+            .unwrap_or((parsed.verified_per_sec, parsed.rejected_per_sec));
         validation_stats.set(Some(parsed));
         let mut hist = validation_history.write();
-        hist.push_back((parsed.verified_per_sec, parsed.rejected_per_sec));
+        hist.push_back(rate);
         if hist.len() > 60 {
             hist.pop_front();
         }
