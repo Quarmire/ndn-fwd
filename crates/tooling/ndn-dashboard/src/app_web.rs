@@ -244,15 +244,8 @@ pub fn AppWeb() -> Element {
     };
     use_context_provider(move || ctx);
 
-    // Sidebar security dot
-    let sec_dot_class = {
-        let keys = security_keys.read();
-        if keys.is_empty() {
-            "sec-dot sec-dot-gray"
-        } else {
-            "sec-dot sec-dot-green"
-        }
-    };
+    // §3.2 sec_dot + §3.1 IdentityChip derive from AppCtx via the
+    // shared components; the prior keys-presence heuristic is gone.
 
     // Views that are NOT available on web. Coding/RateLimit are
     // desktop-only until the WsMgmtClient-backed variants land
@@ -280,7 +273,7 @@ pub fn AppWeb() -> Element {
                     style: "display:flex;align-items:center;justify-content:space-between;",
                     span { "NDN Dashboard" }
                     span { class: "badge badge-sm", style: "font-size:0.6rem;", "WEB" }
-                    span { class: "{sec_dot_class}" }
+                    crate::security_surfaces::SecDot {}
                 }
                 for view in View::NAV {
                     {
@@ -340,6 +333,7 @@ pub fn AppWeb() -> Element {
                         class: "{conn_state.read().badge_class()}",
                         "{conn_state.read().label()}"
                     }
+                    crate::security_surfaces::IdentityChip {}
                     input {
                         r#type: "text",
                         placeholder: "WebSocket URL (ws://host:port)",

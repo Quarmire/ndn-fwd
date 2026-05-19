@@ -33,6 +33,7 @@ pub mod forwarder_profile;
 mod security_chains;
 mod security_gate;
 mod security_state;
+mod security_surfaces;
 pub mod settings;
 mod signed_data_chain;
 mod styles;

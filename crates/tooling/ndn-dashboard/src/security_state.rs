@@ -140,6 +140,171 @@ pub struct PostureInput<'a> {
     pub now_unix_s: Option<u64>,
 }
 
+// ── §3 surfaces — chip + sidebar dot ────────────────────────────────
+//
+// The §3.1 IdentityChip and the §3.2 sec_dot are always-rendered
+// reflections of the operator's current trust posture. Both derive
+// from `derive_chip_state` so the chip's label and the dot's tooltip
+// can't drift from each other.
+
+/// Discrete state the chip renders. Priority when multiple apply
+/// (most-acute first): Expired → UnsignedMgmt → Ephemeral →
+/// ExpiringSoon → Hardened. The §3.1 design table lists these
+/// explicitly; this enum is that list compiled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChipState {
+    /// Persistent identity + valid cert + signed mgmt. Green padlock.
+    Hardened { identity_name: String },
+    /// Ephemeral in-memory identity. Yellow open padlock.
+    Ephemeral,
+    /// `require_signed_commands == false` — anyone with socket
+    /// access can issue mgmt. Red. Overrides Ephemeral so the
+    /// operator sees the worse state.
+    UnsignedMgmt,
+    /// Active cert expires within `days` (0..=7). Amber padlock.
+    ExpiringSoon { identity_name: String, days: u32 },
+    /// Active cert past its `valid_until`. Red exclamation.
+    Expired {
+        identity_name: String,
+        days_ago: i64,
+    },
+}
+
+impl ChipState {
+    /// Short label rendered next to the icon.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Hardened { identity_name } => identity_name.clone(),
+            Self::Ephemeral => "EPHEMERAL".into(),
+            Self::UnsignedMgmt => "UNSIGNED MGMT".into(),
+            Self::ExpiringSoon { days, .. } => format!("EXPIRES {days}d"),
+            Self::Expired { .. } => "EXPIRED".into(),
+        }
+    }
+    /// Unicode icon prefix.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Hardened { .. } => "🔐",
+            Self::Ephemeral => "🔓",
+            Self::UnsignedMgmt => "‼",
+            Self::ExpiringSoon { .. } => "🔐",
+            Self::Expired { .. } => "⏰",
+        }
+    }
+    /// CSS class for the chip background (uses existing palette
+    /// variables via `var(--green)` etc. defined in `styles.rs`).
+    pub fn css_class(&self) -> &'static str {
+        match self {
+            Self::Hardened { .. } => "id-chip id-chip-green",
+            Self::Ephemeral => "id-chip id-chip-yellow",
+            Self::UnsignedMgmt => "id-chip id-chip-red",
+            Self::ExpiringSoon { .. } => "id-chip id-chip-amber",
+            Self::Expired { .. } => "id-chip id-chip-red",
+        }
+    }
+}
+
+/// Inputs to [`derive_chip_state`]. Same shape as [`PostureInput`]
+/// extended with the live mgmt-policy view.
+#[derive(Debug, Clone, Copy)]
+pub struct ChipInput<'a> {
+    pub identity_name: &'a str,
+    pub identity_is_ephemeral: bool,
+    pub cert_valid_until_unix_s: Option<u64>,
+    pub now_unix_s: Option<u64>,
+    /// `Some(false)` means the forwarder's mgmt-access policy is
+    /// explicitly unsigned (UnsignedMgmt state); `Some(true)` is
+    /// signed; `None` means we don't know yet (no policy-get poll
+    /// landed). When unknown, this dimension contributes nothing to
+    /// the chip state — Ephemeral / Hardened are reported as-is.
+    pub mgmt_signed_commands_required: Option<bool>,
+}
+
+const EXPIRING_SOON_DAYS: u64 = 7;
+
+/// Compute the chip state from the live AppCtx-shaped view. Pure
+/// function — unit-tested below.
+pub fn derive_chip_state(input: ChipInput<'_>) -> ChipState {
+    // Expired wins over everything — the cert is already invalid.
+    if let Some(expiry) = input.cert_valid_until_unix_s
+        && let Some(now) = input.now_unix_s
+        && expiry < now
+    {
+        return ChipState::Expired {
+            identity_name: input.identity_name.to_string(),
+            days_ago: ((now - expiry) / 86_400) as i64,
+        };
+    }
+    // UnsignedMgmt next — explicit policy says any localhost client
+    // can issue mgmt commands. Render red even when a persistent
+    // identity exists per §3.1.
+    if input.mgmt_signed_commands_required == Some(false) {
+        return ChipState::UnsignedMgmt;
+    }
+    // Ephemeral — in-memory key, no persistence.
+    if input.identity_is_ephemeral || input.identity_name.is_empty() {
+        return ChipState::Ephemeral;
+    }
+    // ExpiringSoon — persistent identity, valid cert that expires
+    // within EXPIRING_SOON_DAYS.
+    if let Some(expiry) = input.cert_valid_until_unix_s
+        && let Some(now) = input.now_unix_s
+        && expiry >= now
+    {
+        let remaining = expiry - now;
+        let days = (remaining / 86_400) as u32;
+        if days <= EXPIRING_SOON_DAYS as u32 {
+            return ChipState::ExpiringSoon {
+                identity_name: input.identity_name.to_string(),
+                days,
+            };
+        }
+    }
+    ChipState::Hardened {
+        identity_name: input.identity_name.to_string(),
+    }
+}
+
+/// Sidebar `sec_dot` rendering — glyph + colour-class + tooltip per
+/// the §3.2 state table. Derived from [`ChipState`] so the chip and
+/// the dot stay coupled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecDotView {
+    pub glyph: &'static str,
+    pub css_class: &'static str,
+    pub tooltip: String,
+}
+
+pub fn derive_sec_dot(state: &ChipState) -> SecDotView {
+    match state {
+        ChipState::Hardened { .. } => SecDotView {
+            glyph: "🔒",
+            css_class: "sec-dot sec-dot-green",
+            tooltip: "Trust posture: hardened".into(),
+        },
+        ChipState::UnsignedMgmt => SecDotView {
+            glyph: "🔓",
+            css_class: "sec-dot sec-dot-red",
+            tooltip: "Mgmt unsigned — anyone on socket can issue commands".into(),
+        },
+        ChipState::Ephemeral => SecDotView {
+            glyph: "⚠",
+            css_class: "sec-dot sec-dot-yellow",
+            tooltip: "Ephemeral mode — research only".into(),
+        },
+        ChipState::Expired { days_ago, .. } => SecDotView {
+            glyph: "⏰",
+            css_class: "sec-dot sec-dot-red",
+            tooltip: format!("Cert expired {days_ago} days ago"),
+        },
+        ChipState::ExpiringSoon { days, .. } => SecDotView {
+            glyph: "🔐",
+            css_class: "sec-dot sec-dot-amber",
+            tooltip: format!("Cert expires in {days} days"),
+        },
+    }
+}
+
 // ── Per-session gate-acceptance memory ───────────────────────────────
 //
 // §6 transition rules: "Accepted this session" is a Signal<bool> keyed
@@ -219,6 +384,94 @@ mod tests {
         match p {
             SecurityPosture::IdentityExpired { days_ago, .. } => assert_eq!(days_ago, 5),
             other => panic!("expected IdentityExpired, got {other:?}"),
+        }
+    }
+
+    fn chip_input(name: &str, ephemeral: bool, signed: Option<bool>) -> ChipInput<'_> {
+        ChipInput {
+            identity_name: name,
+            identity_is_ephemeral: ephemeral,
+            cert_valid_until_unix_s: None,
+            now_unix_s: None,
+            mgmt_signed_commands_required: signed,
+        }
+    }
+
+    #[test]
+    fn chip_state_priority_expired_beats_unsigned() {
+        let state = derive_chip_state(ChipInput {
+            identity_name: "/lab/alice",
+            identity_is_ephemeral: false,
+            cert_valid_until_unix_s: Some(1_700_000_000),
+            now_unix_s: Some(1_700_000_000 + 3 * 86_400),
+            mgmt_signed_commands_required: Some(false),
+        });
+        assert!(matches!(state, ChipState::Expired { days_ago: 3, .. }));
+    }
+
+    #[test]
+    fn chip_state_unsigned_beats_ephemeral() {
+        let state = derive_chip_state(chip_input("/lab/alice", true, Some(false)));
+        assert_eq!(state, ChipState::UnsignedMgmt);
+    }
+
+    #[test]
+    fn chip_state_ephemeral_when_ephemeral_signed_unknown() {
+        let state = derive_chip_state(chip_input("/lab/alice", true, None));
+        assert_eq!(state, ChipState::Ephemeral);
+    }
+
+    #[test]
+    fn chip_state_hardened_when_persistent_no_expiry() {
+        let state = derive_chip_state(chip_input("/lab/alice", false, Some(true)));
+        assert!(matches!(state, ChipState::Hardened { .. }));
+    }
+
+    #[test]
+    fn chip_state_expiring_soon_window() {
+        let state = derive_chip_state(ChipInput {
+            identity_name: "/lab/alice",
+            identity_is_ephemeral: false,
+            cert_valid_until_unix_s: Some(1_700_000_000 + 3 * 86_400),
+            now_unix_s: Some(1_700_000_000),
+            mgmt_signed_commands_required: Some(true),
+        });
+        assert!(matches!(state, ChipState::ExpiringSoon { days: 3, .. }));
+    }
+
+    #[test]
+    fn chip_state_hardened_when_cert_far_off() {
+        let state = derive_chip_state(ChipInput {
+            identity_name: "/lab/alice",
+            identity_is_ephemeral: false,
+            cert_valid_until_unix_s: Some(1_700_000_000 + 90 * 86_400),
+            now_unix_s: Some(1_700_000_000),
+            mgmt_signed_commands_required: Some(true),
+        });
+        assert!(matches!(state, ChipState::Hardened { .. }));
+    }
+
+    #[test]
+    fn sec_dot_renders_for_every_chip_state() {
+        let states = [
+            ChipState::Hardened {
+                identity_name: "/lab/alice".into(),
+            },
+            ChipState::Ephemeral,
+            ChipState::UnsignedMgmt,
+            ChipState::ExpiringSoon {
+                identity_name: "/lab/alice".into(),
+                days: 3,
+            },
+            ChipState::Expired {
+                identity_name: "/lab/alice".into(),
+                days_ago: 5,
+            },
+        ];
+        for s in &states {
+            let dot = derive_sec_dot(s);
+            assert!(!dot.tooltip.is_empty(), "tooltip empty for {s:?}");
+            assert!(dot.css_class.starts_with("sec-dot"));
         }
     }
 

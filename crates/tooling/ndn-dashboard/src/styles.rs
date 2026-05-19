@@ -253,13 +253,28 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 /* ── Theme toggle ──────────────────────────────────────────── */
 .theme-toggle{background:none;border:1px solid var(--border);color:var(--text-muted);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:14px;line-height:1;transition:all .15s;font-family:inherit;flex-shrink:0}
 .theme-toggle:hover{background:var(--border-subtle);color:var(--text);border-color:var(--accent)}
-/* ── Security health dot ───────────────────────────────────── */
-.sec-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0;margin-left:8px;cursor:default;transition:opacity .15s}
+/* ── §3.2 Security sidebar dot ─────────────────────────────── */
+/* Glyph-style dot (was a plain colour dot pre-§3.2). Width auto so the
+   emoji isn't clipped; preserves the original .sec-dot-* colour modifier
+   classes so callers that haven't migrated to the typed ChipState still
+   render. */
+.sec-dot{display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;flex-shrink:0;margin-left:8px;cursor:default;transition:opacity .15s;min-width:14px;color:var(--text)}
 .sec-dot:hover{opacity:.7}
-.sec-dot-green{background:var(--green)}
-.sec-dot-yellow{background:var(--yellow)}
-.sec-dot-red{background:var(--red)}
-.sec-dot-gray{background:var(--text-faint)}
+.sec-dot-green{color:var(--green)}
+.sec-dot-yellow{color:var(--yellow)}
+.sec-dot-amber{color:var(--yellow)}
+.sec-dot-red{color:var(--red)}
+.sec-dot-gray{color:var(--text-faint)}
+
+/* ── §3.1 Identity chip ────────────────────────────────────── */
+.id-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;border:1px solid transparent;background:var(--surface2);color:var(--text);cursor:default;transition:opacity .15s}
+.id-chip:hover{opacity:.85}
+.id-chip-green{background:var(--green-bg);color:var(--green);border-color:var(--green)}
+.id-chip-yellow{background:var(--yellow-bg);color:var(--yellow);border-color:var(--yellow)}
+.id-chip-amber{background:var(--yellow-bg);color:var(--yellow);border-color:var(--yellow)}
+.id-chip-red{background:var(--red-bg);color:var(--red);border-color:var(--red)}
+.id-chip-icon{font-size:12px;line-height:1}
+.id-chip-label{letter-spacing:.02em;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* ── Sidebar bottom + gear ─────────────────────────────────── */
 .sidebar-spacer{flex:1}
 .sidebar-bottom{padding:12px 14px;border-top:1px solid var(--border);position:relative}

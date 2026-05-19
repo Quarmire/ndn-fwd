@@ -1175,44 +1175,10 @@ pub fn App() -> Element {
     };
     use_context_provider(move || ctx);
 
-    // Derive security health from keys for the sidebar dot
-    let sec_dot_class = {
-        let keys = security_keys.read();
-        if keys.is_empty() {
-            "sec-dot sec-dot-gray"
-        } else {
-            let (cls, _) = keys[0].expiry_badge();
-            match cls {
-                "badge badge-green" => "sec-dot sec-dot-green",
-                "badge badge-yellow" => "sec-dot sec-dot-yellow",
-                "badge badge-red" => "sec-dot sec-dot-red",
-                _ => "sec-dot sec-dot-gray",
-            }
-        }
-    };
-    let sec_dot_tooltip = {
-        let keys = security_keys.read();
-        if keys.is_empty() {
-            "No identity configured — go to Security tab".to_string()
-        } else {
-            let k = &keys[0];
-            let (_, _expiry_label) = k.expiry_badge();
-            let cert_status = if k.has_cert { "issued" } else { "none" };
-            let days = k
-                .days_to_expiry()
-                .map(|d| {
-                    if d < 0 {
-                        "EXPIRED".to_string()
-                    } else if d == 0 {
-                        "expires today".to_string()
-                    } else {
-                        format!("{d}d remaining")
-                    }
-                })
-                .unwrap_or_else(|| "permanent".to_string());
-            format!("{}\nCert: {}\nExpiry: {}", k.name, cert_status, days)
-        }
-    };
+    // §3.2 sidebar sec_dot + §3.1 IdentityChip derive themselves
+    // from AppCtx via `crate::security_surfaces::{SecDot, IdentityChip}`;
+    // the prior key-driven heuristic is gone in favour of the typed
+    // ChipState.
 
     rsx! {
         document::Style { "{CSS}" }
@@ -1246,10 +1212,8 @@ pub fn App() -> Element {
                 div { class: "sidebar-logo",
                     style: "display:flex;align-items:center;justify-content:space-between;",
                     span { "NDN Dashboard" }
-                    span {
-                        class: "{sec_dot_class}",
-                        "data-tooltip": "{sec_dot_tooltip}",
-                    }
+                    // §3.2 — glyph + tooltip per ChipState.
+                    crate::security_surfaces::SecDot {}
                 }
                 for view in View::NAV {
                     {
@@ -1307,6 +1271,9 @@ pub fn App() -> Element {
                         class: "{conn_state.read().badge_class()}",
                         "{conn_state.read().label()}"
                     }
+                    // §3.1 IdentityChip — always-rendered next to the
+                    // connection badge.
+                    crate::security_surfaces::IdentityChip {}
                     input {
                         r#type: "text",
                         placeholder: "Socket path",
