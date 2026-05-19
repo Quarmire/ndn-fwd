@@ -5,7 +5,8 @@
 use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 use crate::edu_gloss::EduGloss;
 use crate::types::{
-    AnchorInfo, MgmtAccessPolicySnapshot, SchemaRuleInfo, SecurityKeyInfo, ValidationStats,
+    AnchorInfo, FailureDiagnosis, MgmtAccessPolicySnapshot, SchemaRuleApplied, SchemaRuleInfo,
+    SecurityKeyInfo, TrustChainStep, TrustValidationResult, TrustVerdict, ValidationStats,
 };
 use crate::views::onboarding::encode_did_ndn;
 use dioxus::prelude::*;
@@ -124,6 +125,16 @@ pub fn Security() -> Element {
                 TAB_YUBIKEY    => rsx! { YubikeyTab {} },
                 TAB_MGMT_ACCESS=> rsx! { MgmtAccessTab {} },
                 _              => rsx! {},
+            }
+
+            // §4.2 sidesheet — overlay, anchored to the right.
+            // Opens when CertCard's [Trace ↑] fires
+            // `DashCmd::SecurityValidateTrace`. The component reads
+            // `ctx.trust_validation` directly; rendering only mounts
+            // when `trust_inspector_open` is true so the panel
+            // doesn't clip other views when collapsed.
+            if *ctx.trust_inspector_open.read() {
+                TrustPathInspector {}
             }
         }
     }
@@ -417,8 +428,10 @@ fn plural(n: usize) -> &'static str {
 
 #[component]
 fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
+    let ctx = use_context::<AppCtx>();
     let name = info.name.clone();
     let name_for_delete = name.clone();
+    let name_for_trace = name.clone();
     let kid = info.key_id().to_owned();
     let (badge_class, badge_label) = info.expiry_badge();
     let has_cert = info.has_cert;
@@ -478,11 +491,12 @@ fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
                 }
                 button {
                     class: "btn btn-secondary btn-sm",
-                    "data-tooltip": "Phase C — §4.2 TrustPathInspector sidesheet renders here",
-                    onclick: move |_| push_toast(
-                        "Phase C: §4.2 TrustPathInspector — trace ↑ not wired yet",
-                        ToastLevel::Info,
-                    ),
+                    "data-tooltip": "§4.2 TrustPathInspector — walk the chain from this cert up to an anchor",
+                    onclick: move |_| {
+                        ctx.cmd.send(DashCmd::SecurityValidateTrace(name_for_trace.clone()));
+                        let mut open = ctx.trust_inspector_open;
+                        open.set(true);
+                    },
                     "Trace ↑"
                 }
                 button {
@@ -2028,6 +2042,262 @@ fn BoolRow(
                     }
                 }
             }
+        }
+    }
+}
+
+// ── §4.2 TrustPathInspector ──────────────────────────────────────────────────
+//
+// Right-hand sidesheet that opens when an operator clicks [Trace ↑]
+// on a CertCard. Renders the §7 `TrustValidationResult` portable
+// shape (`verdict` / `chain` / `schema_rules_applied` /
+// `failure_diagnosis` / `challenge_attestations`). v1 forwarders
+// only check anchor-set membership — the chain + schema-rule lists
+// land empty until `ndn_security::Validator` exposes a trace API.
+// Render path is stable so once the wire goes live the sidesheet
+// re-paints without changes here.
+
+#[component]
+fn TrustPathInspector() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let result = ctx.trust_validation.read().clone();
+
+    rsx! {
+        // Backdrop — soft dim, click-to-close. Not a modal: the
+        // background stays interactive (the click handler only
+        // fires on the backdrop itself, not its children).
+        div {
+            style: "position:fixed;inset:0;background:rgba(0,0,0,.30);z-index:60;",
+            onclick: move |_| {
+                let mut open = ctx.trust_inspector_open;
+                open.set(false);
+            },
+            // Sidesheet — fixed to the right edge.
+            div {
+                style: "position:absolute;top:0;right:0;bottom:0;width:min(520px,95vw);\
+                        background:var(--surface);border-left:1px solid var(--border);\
+                        box-shadow:-4px 0 16px rgba(0,0,0,.3);overflow-y:auto;\
+                        padding:18px 20px;",
+                onclick: move |e| {
+                    // Swallow clicks so the backdrop's close handler doesn't fire.
+                    e.stop_propagation();
+                },
+
+                TrustPathHeader { result: result.clone() }
+
+                match result {
+                    None => rsx! {
+                        div { class: "empty",
+                            "Walking the trust path… (the dashboard fires "
+                            span { class: "mono", "security/validate" }
+                            " and renders the response here)"
+                        }
+                    },
+                    Some((target, parsed)) => rsx! {
+                        TrustPathBody { target, result: parsed }
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TrustPathHeader(result: Option<(String, TrustValidationResult)>) -> Element {
+    let ctx = use_context::<AppCtx>();
+    let (verdict_chip_class, verdict_chip_label) = match result.as_ref() {
+        None => ("badge badge-gray", "polling…"),
+        Some((_, r)) if r.verdict.is_valid() => ("badge badge-green", "valid"),
+        Some(_) => ("badge badge-red", "invalid"),
+    };
+    rsx! {
+        div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;",
+            div {
+                div { style: "font-size:14px;font-weight:600;color:var(--text);",
+                    "Trust path inspector"
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-top:2px;",
+                    EduGloss { term: "Trust path" }
+                    " · §4.2"
+                }
+            }
+            div { style: "display:flex;gap:8px;align-items:center;",
+                span { class: "{verdict_chip_class}", "{verdict_chip_label}" }
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| {
+                        let mut open = ctx.trust_inspector_open;
+                        open.set(false);
+                    },
+                    "Close"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TrustPathBody(target: String, result: TrustValidationResult) -> Element {
+    rsx! {
+        // Target.
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:14px;",
+            div { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;",
+                "Target"
+            }
+            div { class: "mono", style: "font-size:11px;color:var(--text);margin-top:4px;word-break:break-all;",
+                "{target}"
+            }
+        }
+
+        // Verdict box.
+        VerdictBox { verdict: result.verdict.clone() }
+
+        // Chain steps.
+        ChainSteps { chain: result.chain.clone() }
+
+        // Schema rules applied.
+        SchemaRulesApplied { rules: result.schema_rules_applied.clone() }
+
+        // Failure diagnosis (only when invalid).
+        if let Some(diag) = result.failure_diagnosis.as_ref() {
+            FailureDiagnosisPanel { diagnosis: diag.clone() }
+        }
+
+        // Reserved challenge attestations.
+        ChallengeAttestationsPanel { count: result.challenge_attestations.len() }
+    }
+}
+
+#[component]
+fn VerdictBox(verdict: TrustVerdict) -> Element {
+    match verdict {
+        TrustVerdict::Valid => rsx! {
+            div { style: "border:1px solid var(--green,#3fb950)55;background:#00220022;border-radius:6px;padding:10px 12px;margin-bottom:14px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--green,#3fb950);",
+                    "✓ Valid"
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-top:4px;",
+                    "The cert chains back to an installed trust anchor and every link satisfies the active schema rules."
+                }
+            }
+        },
+        TrustVerdict::Invalid { failed_at, reason } => rsx! {
+            div { style: "border:1px solid var(--red,#f85149)55;background:#22000022;border-radius:6px;padding:10px 12px;margin-bottom:14px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--red,#f85149);",
+                    "✗ Invalid"
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-top:6px;",
+                    "Failed at "
+                    span { class: "mono", style: "color:var(--text);", "{failed_at}" }
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.5;",
+                    "Reason: {reason}"
+                }
+            }
+        },
+    }
+}
+
+#[component]
+fn ChainSteps(chain: Vec<TrustChainStep>) -> Element {
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:14px;",
+            div { style: "display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;",
+                span { "Chain steps" }
+                span { "{chain.len()} step(s)" }
+            }
+            if chain.is_empty() {
+                div { class: "empty",
+                    "No chain steps to render. v1 forwarders only check anchor-set membership; the full chain walk lands when "
+                    span { class: "mono", "ndn_security::Validator::trace" }
+                    " is plumbed."
+                }
+            } else {
+                for (i, step) in chain.iter().enumerate() {
+                    {
+                        let last = i + 1 == chain.len();
+                        rsx! {
+                            div { style: "padding:8px 0;border-top:1px solid var(--border-subtle);",
+                                div { style: "display:flex;gap:6px;align-items:flex-start;",
+                                    span { style: "font-size:14px;flex-shrink:0;",
+                                        if last { "⚓" } else { "🪪" }
+                                    }
+                                    div { style: "flex:1;",
+                                        div { class: "mono", style: "font-size:11px;color:var(--text);word-break:break-all;",
+                                            "{step.name}"
+                                        }
+                                        div { style: "font-size:10px;color:var(--text-muted);margin-top:2px;",
+                                            "signed by "
+                                            span { class: "mono", "{step.signed_by}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SchemaRulesApplied(rules: Vec<SchemaRuleApplied>) -> Element {
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:14px;",
+            div { style: "display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;",
+                span { "Schema rules applied" }
+                span { "{rules.len()} rule(s)" }
+            }
+            if rules.is_empty() {
+                div { style: "font-size:11px;color:var(--text-muted);",
+                    "No schema rules evaluated in this trace. v1 stub only checks anchor membership; per-step schema matching lands with the validator-trace API."
+                }
+            } else {
+                for r in rules.iter() {
+                    div { style: "padding:6px 0;border-top:1px solid var(--border-subtle);font-size:11px;display:flex;gap:6px;align-items:center;",
+                        if r.matches {
+                            span { class: "badge badge-green", "match" }
+                        } else {
+                            span { class: "badge badge-red", "no match" }
+                        }
+                        span { class: "mono", style: "color:var(--accent);", "{r.data_pattern}" }
+                        span { style: "color:var(--text-muted);", "=>" }
+                        span { class: "mono", style: "color:var(--green);", "{r.key_pattern}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FailureDiagnosisPanel(diagnosis: FailureDiagnosis) -> Element {
+    rsx! {
+        div { style: "border:1px solid var(--yellow,#f5c518)55;background:#2a240022;border-radius:6px;padding:10px;margin-bottom:14px;",
+            div { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;",
+                "Diagnosis"
+            }
+            div { style: "font-size:12px;color:var(--yellow,#f5c518);margin-top:4px;font-weight:600;",
+                "{diagnosis.kind}"
+            }
+            div { style: "font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.5;",
+                "{diagnosis.hint}"
+            }
+        }
+    }
+}
+
+#[component]
+fn ChallengeAttestationsPanel(count: usize) -> Element {
+    // Reserved field. Renders an empty collapsed panel today; the
+    // shape will populate once `ndn-cert-challenge-attestation` lands
+    // (see docs/notes/ndn-cert-challenge-attestation-NEXT.md).
+    rsx! {
+        div { style: "background:var(--surface2);border:1px dashed var(--border-subtle);border-radius:6px;padding:8px 10px;font-size:11px;color:var(--text-muted);",
+            "Challenge attestations: "
+            span { class: "mono", "{count}" }
+            " · reserved (populates with the in-progress challenge_attestation cert field)"
         }
     }
 }

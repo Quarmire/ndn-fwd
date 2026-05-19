@@ -97,6 +97,8 @@ pub fn AppWeb() -> Element {
     let mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>> = use_signal(|| None);
     let validation_stats: Signal<Option<ValidationStats>> = use_signal(|| None);
     let validation_history: Signal<VecDeque<(u64, u64)>> = use_signal(VecDeque::new);
+    let trust_validation: Signal<Option<(String, TrustValidationResult)>> = use_signal(|| None);
+    let trust_inspector_open: Signal<bool> = use_signal(|| false);
     let cs_hit_history: Signal<VecDeque<f64>> = use_signal(VecDeque::new);
     let face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>> =
         use_signal(HashMap::new);
@@ -246,6 +248,8 @@ pub fn AppWeb() -> Element {
         mgmt_access_policy,
         validation_stats,
         validation_history,
+        trust_validation,
+        trust_inspector_open,
         cs_hit_history,
         face_throughput,
         discovery_status,

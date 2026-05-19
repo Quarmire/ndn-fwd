@@ -173,6 +173,11 @@ pub enum DashCmd {
     /// handler appends a `security/policy-set` entry to the local
     /// `AuditLogChain` (the §11.10 audit bridge).
     SecurityPolicySet(MgmtAccessPolicySnapshot),
+    /// §4.2 TrustPathInspector — request a `security/validate` trace
+    /// for the given cert Name. Result lands in
+    /// `AppCtx.trust_validation`; sidesheet visibility is driven by
+    /// `AppCtx.trust_inspector_open`.
+    SecurityValidateTrace(String),
 }
 
 /// Commands sent to the router-management coroutine.
@@ -266,6 +271,14 @@ pub struct AppCtx {
     /// 60-sample (3-min @ 3 s) sparkline history of
     /// `(verified_per_sec, rejected_per_sec)`.
     pub validation_history: Signal<VecDeque<(u64, u64)>>,
+    /// §4.2 TrustPathInspector — last `security/validate` result
+    /// keyed by the cert Name the operator clicked. The sidesheet
+    /// reads `(target, result)` and renders the chain steps. `None`
+    /// until the first trace lands.
+    pub trust_validation: Signal<Option<(String, TrustValidationResult)>>,
+    /// §4.2 sidesheet open flag. Toggled by the Identities tab's
+    /// `[Trace ↑]` action (open) and the sidesheet's `[Close]`.
+    pub trust_inspector_open: Signal<bool>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     /// Per-face throughput rate history (60 samples × 3 s = 3 min window).
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
@@ -432,6 +445,8 @@ pub fn App() -> Element {
     let mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>> = use_signal(|| None);
     let validation_stats: Signal<Option<ValidationStats>> = use_signal(|| None);
     let validation_history: Signal<VecDeque<(u64, u64)>> = use_signal(VecDeque::new);
+    let trust_validation: Signal<Option<(String, TrustValidationResult)>> = use_signal(|| None);
+    let trust_inspector_open: Signal<bool> = use_signal(|| false);
 
     // Initialise the §11.10 audit chain once per process. The chain
     // dir is keyed by the selected forwarder profile so switching
@@ -690,7 +705,7 @@ pub fn App() -> Element {
                         if matches!(cmd_msg, DashCmd::Reconnect) {
                             break 'session;
                         }
-                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, validation_stats, validation_history).await;
+                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, validation_stats, validation_history, trust_validation).await;
                     }
                 }
             }
@@ -1226,6 +1241,8 @@ pub fn App() -> Element {
         mgmt_access_policy,
         validation_stats,
         validation_history,
+        trust_validation,
+        trust_inspector_open,
         cs_hit_history,
         face_throughput,
         discovery_status,
@@ -1928,6 +1945,7 @@ async fn run_cmd(
     mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
     validation_stats: Signal<Option<ValidationStats>>,
     validation_history: Signal<VecDeque<(u64, u64)>>,
+    mut trust_validation: Signal<Option<(String, TrustValidationResult)>>,
 ) {
     // Session recording: log before dispatch.
     if *recording.read()
@@ -1952,6 +1970,7 @@ async fn run_cmd(
         DashCmd::SchemaRuleRemove(_) => Some("Trust schema rule removed"),
         DashCmd::SchemaSet(_) => Some("Trust schema updated"),
         DashCmd::SecurityPolicySet(_) => Some("Mgmt access policy updated"),
+        DashCmd::SecurityValidateTrace(_) => None, // surfaces via the sidesheet, not a toast
         _ => None,
     };
 
@@ -2087,6 +2106,7 @@ async fn run_cmd(
                         mgmt_access_policy,
                         validation_stats,
                         validation_history,
+                        trust_validation,
                     ))
                     .await;
                     recording.set(was_recording);
@@ -2217,6 +2237,31 @@ async fn run_cmd(
             }
             Err(e) => Err(e.to_string()),
         },
+        DashCmd::SecurityValidateTrace(target) => {
+            // §4.2 — fire `security/validate` and stash the result
+            // for the sidesheet to render. We don't toast here
+            // because the sidesheet IS the UX; toasting would just
+            // be noise next to the rendered panel.
+            match target.parse::<ndn_packet::Name>() {
+                Ok(n) => match client.security_validate(&n).await {
+                    Ok(resp) if resp.is_ok() => {
+                        match TrustValidationResult::from_json(&resp.status_text) {
+                            Ok(parsed) => {
+                                trust_validation.set(Some((target, parsed)));
+                                Ok(())
+                            }
+                            Err(e) => Err(format!("validate response parse: {e}")),
+                        }
+                    }
+                    Ok(resp) => Err(format!(
+                        "validate rejected: {} {}",
+                        resp.status_code, resp.status_text
+                    )),
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(format!("invalid target name: {e}")),
+            }
+        }
         DashCmd::SecurityPolicySet(policy) => {
             let body = policy.to_json();
             match client.security_policy_set(&body).await {

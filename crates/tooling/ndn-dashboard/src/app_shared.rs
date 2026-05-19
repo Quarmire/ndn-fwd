@@ -126,6 +126,10 @@ pub enum DashCmd {
     /// handler appends a `security/policy-set` entry to the local
     /// `AuditLogChain` (the §11.10 audit bridge).
     SecurityPolicySet(MgmtAccessPolicySnapshot),
+    /// §4.2 TrustPathInspector trace. Result lands in
+    /// `AppCtx.trust_validation`; sidesheet visibility is driven by
+    /// `AppCtx.trust_inspector_open`.
+    SecurityValidateTrace(String),
 }
 
 // Desktop-only: there is no `ndn-fwd` subprocess to manage on web.
@@ -221,6 +225,10 @@ pub struct AppCtx {
     pub validation_stats: Signal<Option<ValidationStats>>,
     /// 60-sample (verified_per_sec, rejected_per_sec) sparkline history.
     pub validation_history: Signal<VecDeque<(u64, u64)>>,
+    /// §4.2 last `security/validate` result `(target_name, parsed)`.
+    pub trust_validation: Signal<Option<(String, TrustValidationResult)>>,
+    /// §4.2 sidesheet open flag.
+    pub trust_inspector_open: Signal<bool>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
     pub discovery_status: Signal<Option<DiscoveryStatus>>,

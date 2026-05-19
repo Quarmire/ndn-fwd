@@ -1170,6 +1170,81 @@ impl ValidationStats {
     }
 }
 
+// ── TrustValidationResult — §7 portable shape ────────────────────────────────
+//
+// Dashboard-side mirror of the JSON `security/validate` returns. The
+// wire is pinned (`/<operator>/nfd/security/validate` → JSON body); v1
+// validators populate `verdict` + `failure_diagnosis` but always emit
+// `chain`/`schema_rules_applied`/`challenge_attestations` as `[]`
+// until the validator's trace API lands. The §4.2 `TrustPathInspector`
+// renders this shape directly; field set is forward-stable.
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct TrustValidationResult {
+    pub verdict: TrustVerdict,
+    #[serde(default)]
+    pub chain: Vec<TrustChainStep>,
+    #[serde(default)]
+    pub schema_rules_applied: Vec<SchemaRuleApplied>,
+    #[serde(default)]
+    pub failure_diagnosis: Option<FailureDiagnosis>,
+    /// Reserved — populates with the `ndn-cert-challenge-attestation`
+    /// shape once that work lands. The dashboard sidesheet shows an
+    /// empty collapsed panel while this is `[]`.
+    #[serde(default)]
+    pub challenge_attestations: Vec<ChallengeAttestation>,
+}
+
+impl TrustValidationResult {
+    pub fn from_json(body: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(body)
+    }
+}
+
+/// `"Valid"` or `{ "Invalid": { failed_at, reason } }` — externally
+/// tagged enum that round-trips through serde's defaults.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub enum TrustVerdict {
+    Valid,
+    Invalid { failed_at: String, reason: String },
+}
+
+impl TrustVerdict {
+    pub fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct TrustChainStep {
+    pub name: String,
+    pub signed_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct SchemaRuleApplied {
+    pub data_pattern: String,
+    pub key_pattern: String,
+    pub matches: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct FailureDiagnosis {
+    pub kind: String,
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct ChallengeAttestation {
+    /// Free-form `kind` discriminator emitted by the issuance policy
+    /// (e.g. `"DeviceApproval"`, `"PinChallenge"`). Forward-compatible
+    /// with the in-progress `ndn-cert-challenge-attestation-NEXT.md`
+    /// design.
+    pub kind: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
 // ── Wire-type conversions (desktop only) ─────────────────────────────────────
 //
 // These `From` impls convert NFD TLV wire types (from `ndn_config`) into the
