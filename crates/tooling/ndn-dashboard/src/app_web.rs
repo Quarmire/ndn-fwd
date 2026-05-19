@@ -95,6 +95,8 @@ pub fn AppWeb() -> Element {
     let cert_valid_until_unix_s: Signal<Option<u64>> = use_signal(|| None);
     let mgmt_signed_commands_required: Signal<Option<bool>> = use_signal(|| None);
     let mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>> = use_signal(|| None);
+    let validation_stats: Signal<Option<ValidationStats>> = use_signal(|| None);
+    let validation_history: Signal<VecDeque<(u64, u64)>> = use_signal(VecDeque::new);
     let cs_hit_history: Signal<VecDeque<f64>> = use_signal(VecDeque::new);
     let face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>> =
         use_signal(HashMap::new);
@@ -242,6 +244,8 @@ pub fn AppWeb() -> Element {
         cert_valid_until_unix_s,
         mgmt_signed_commands_required,
         mgmt_access_policy,
+        validation_stats,
+        validation_history,
         cs_hit_history,
         face_throughput,
         discovery_status,

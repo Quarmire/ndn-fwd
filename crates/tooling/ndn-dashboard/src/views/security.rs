@@ -4,19 +4,21 @@
 
 use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 use crate::edu_gloss::EduGloss;
-use crate::types::{MgmtAccessPolicySnapshot, SchemaRuleInfo, SecurityKeyInfo};
+use crate::types::{
+    AnchorInfo, MgmtAccessPolicySnapshot, SchemaRuleInfo, SecurityKeyInfo, ValidationStats,
+};
 use crate::views::onboarding::encode_did_ndn;
 use dioxus::prelude::*;
+use std::collections::VecDeque;
 
 // ── Tab IDs ───────────────────────────────────────────────────────────────────
 
 const TAB_IDENTITIES: u8 = 0;
-const TAB_ANCHORS: u8 = 1;
+const TAB_TRUST: u8 = 1;
 const TAB_CHAIN: u8 = 2;
 const TAB_DID: u8 = 3;
 const TAB_CA: u8 = 4;
 const TAB_YUBIKEY: u8 = 5;
-const TAB_SCHEMA: u8 = 6;
 const TAB_MGMT_ACCESS: u8 = 7;
 
 // ── Root component ────────────────────────────────────────────────────────────
@@ -36,12 +38,11 @@ pub fn Security() -> Element {
 
     let tabs: &[(&str, u8)] = &[
         ("Identities", TAB_IDENTITIES),
-        ("Trust Anchors", TAB_ANCHORS),
+        ("Trust & Schema", TAB_TRUST),
         ("Cert Chain", TAB_CHAIN),
         ("DID", TAB_DID),
         ("CA / NDNCERT", TAB_CA),
         ("YubiKey", TAB_YUBIKEY),
-        ("Trust Schema", TAB_SCHEMA),
         ("Mgmt Access", TAB_MGMT_ACCESS),
     ];
 
@@ -116,12 +117,11 @@ pub fn Security() -> Element {
 
             match *active_tab.read() {
                 TAB_IDENTITIES => rsx! { IdentitiesTab { keys: keys.clone(), new_key_name } },
-                TAB_ANCHORS    => rsx! { AnchorsTab { anchors: anchors.clone() } },
+                TAB_TRUST      => rsx! { TrustTab { anchors: anchors.clone(), rules: schema.clone() } },
                 TAB_CHAIN      => rsx! { ChainTab { keys: keys.clone(), anchors: anchors.clone() } },
                 TAB_DID        => rsx! { DidTab { keys: keys.clone() } },
                 TAB_CA         => rsx! { CaTab {} },
                 TAB_YUBIKEY    => rsx! { YubikeyTab {} },
-                TAB_SCHEMA     => rsx! { SchemaTab { rules: schema.clone() } },
                 TAB_MGMT_ACCESS=> rsx! { MgmtAccessTab {} },
                 _              => rsx! {},
             }
@@ -657,33 +657,456 @@ fn now_unix_s_opt() -> Option<u64> {
     None
 }
 
-// ── Tab: Trust Anchors ────────────────────────────────────────────────────────
+// ── Tab: Trust & Schema — §4.3 ────────────────────────────────────────────────
+//
+// Phase B step 3 — combined view of installed trust anchors and the
+// active trust schema, with the §4.3 LiveValidationChart hanging
+// below. Anchors are read-only in v1 (no anchor-add/anchor-remove
+// mgmt verbs yet — buttons surface Phase C: §4.3 sub-flow toasts);
+// schema rules use the existing rule-add / rule-remove / set verbs
+// and each change appends a `SchemaJournalEntry` (the §2.4 journal
+// bridge initialised in `app::App` next to the §11.10 audit chain).
+// LiveValidationChart polls `security/validation-stats`; while
+// counters are zero across forwarders today, the explicit
+// `validator_present` flag drives a "no live data" chip so the
+// gap is surfaced rather than silently rendered as zeros.
 
 #[component]
-fn AnchorsTab(anchors: Vec<crate::types::AnchorInfo>) -> Element {
+fn TrustTab(anchors: Vec<AnchorInfo>, rules: Vec<SchemaRuleInfo>) -> Element {
+    let ctx = use_context::<AppCtx>();
+    let mut new_rule: Signal<String> = use_signal(String::new);
+    let mut bulk_rules: Signal<String> = use_signal(String::new);
+    let mut show_bulk: Signal<bool> = use_signal(|| false);
+    let mut raw_mode: Signal<bool> = use_signal(|| false);
+
+    let validation = *ctx.validation_stats.read();
+    let history = ctx.validation_history.read().clone();
+
     rsx! {
-        div { class: "section-title", "Trust Anchors" }
-        if anchors.is_empty() {
-            div { class: "empty",
-                "No trust anchors configured. Interests and Data packets are not verified."
-            }
-        } else {
-            table {
-                thead { tr { th { "Anchor Name" } } }
-                tbody {
-                    for a in anchors.iter() {
-                        tr { td { class: "mono", "{a.name}" } }
+        // Education card.
+        div { class: "edu-card",
+            div { style: "display:flex;gap:12px;align-items:flex-start;",
+                div { style: "font-size:28px;flex-shrink:0;", "⚓" }
+                div {
+                    div { style: "font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px;",
+                        EduGloss { term: "Trust anchor" }
+                        " · "
+                        EduGloss { term: "Schema rule" }
+                        " · live validation"
+                    }
+                    div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
+                        "Anchors are the roots of trust this forwarder accepts; schema rules say which key is allowed to sign data at each name. Every anchor or schema change here is appended to the dashboard's "
+                        EduGloss { term: "Schema journal" }
+                        " so the trust posture's history is reconstructable."
                     }
                 }
             }
         }
 
-        div { style: "margin-top:14px;padding-top:14px;border-top:1px solid var(--border-subtle);color:var(--text-muted);font-size:12px;",
-            "Trust anchors are loaded from the PIB at startup. Use "
-            span { class: "mono", "ndn-sec add-anchor" }
-            " to add new trust anchors, or enroll with a CA via the "
-            strong { "CA / NDNCERT" }
-            " tab."
+        TrustAnchorList { anchors: anchors.clone() }
+
+        TrustSchemaList {
+            rules: rules.clone(),
+            raw_mode: *raw_mode.read(),
+            new_rule: new_rule.read().clone(),
+            bulk_rules: bulk_rules.read().clone(),
+            show_bulk: *show_bulk.read(),
+            on_toggle_raw_mode: move |_: ()| {
+                let prev = *raw_mode.read();
+                raw_mode.set(!prev);
+            },
+            on_set_new_rule: move |s: String| new_rule.set(s),
+            on_set_bulk: move |s: String| bulk_rules.set(s),
+            on_toggle_show_bulk: move |_: ()| {
+                let prev = *show_bulk.read();
+                show_bulk.set(!prev);
+            },
+            on_add_rule: move |_: ()| {
+                let r = new_rule.peek().trim().to_string();
+                if !r.is_empty() {
+                    ctx.cmd.send(DashCmd::SchemaRuleAdd(r));
+                    new_rule.set(String::new());
+                }
+            },
+            on_remove_rule: move |idx: u64| {
+                ctx.cmd.send(DashCmd::SchemaRuleRemove(idx));
+            },
+            on_apply_bulk: move |_: ()| {
+                let body = bulk_rules.peek().clone();
+                ctx.cmd.send(DashCmd::SchemaSet(body));
+                show_bulk.set(false);
+                bulk_rules.set(String::new());
+            },
+            on_clear_all: move |_: ()| {
+                ctx.cmd.send(DashCmd::SchemaSet(String::new()));
+                show_bulk.set(false);
+                bulk_rules.set(String::new());
+            },
+        }
+
+        LiveValidationChart { stats: validation, history }
+    }
+}
+
+#[component]
+fn TrustAnchorList(anchors: Vec<AnchorInfo>) -> Element {
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--text);",
+                    EduGloss { term: "Trust anchor" }
+                    " list"
+                }
+                span { style: "font-size:10px;color:var(--text-muted);",
+                    if anchors.is_empty() { "none configured" } else { "{anchors.len()} configured" }
+                }
+            }
+            if anchors.is_empty() {
+                div { class: "empty",
+                    "No trust anchors configured. Interests and Data packets bypass the validator."
+                }
+            } else {
+                for a in anchors.iter() {
+                    div { style: "display:flex;gap:10px;padding:8px 0;border-top:1px solid var(--border-subtle);font-size:12px;align-items:flex-start;",
+                        span { style: "font-size:16px;", "⚓" }
+                        div { style: "flex:1;",
+                            div { class: "mono", style: "color:var(--text);word-break:break-all;", "{a.name}" }
+                            div { style: "font-size:10px;color:var(--text-muted);margin-top:2px;",
+                                "Source attribution will surface here once "
+                                span { class: "mono", "security/anchor-list" }
+                                " is extended to carry it (Phase C wire-format follow-up)."
+                            }
+                        }
+                    }
+                }
+            }
+            // Action row — Phase C stubs per kickoff. Anchor add/remove
+            // mgmt verbs aren't wired yet; the affordances exist so
+            // the design intent is visible.
+            div { style: "display:flex;gap:8px;margin-top:12px;",
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| push_toast(
+                        "Phase C: §4.3 — anchor-add from file (mgmt verb pending)",
+                        ToastLevel::Info,
+                    ),
+                    "+ Add from file"
+                }
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| push_toast(
+                        "Phase C: §4.3 — anchor-add from name (mgmt verb pending)",
+                        ToastLevel::Info,
+                    ),
+                    "+ Add by name"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TrustSchemaList(
+    rules: Vec<SchemaRuleInfo>,
+    raw_mode: bool,
+    new_rule: String,
+    bulk_rules: String,
+    show_bulk: bool,
+    on_toggle_raw_mode: EventHandler<()>,
+    on_set_new_rule: EventHandler<String>,
+    on_set_bulk: EventHandler<String>,
+    on_toggle_show_bulk: EventHandler<()>,
+    on_add_rule: EventHandler<()>,
+    on_remove_rule: EventHandler<u64>,
+    on_apply_bulk: EventHandler<()>,
+    on_clear_all: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--text);",
+                    EduGloss { term: "Schema rule" }
+                    " list"
+                    if !rules.is_empty() {
+                        span { style: "margin-left:8px;", class: "badge badge-blue", "{rules.len()}" }
+                    }
+                }
+                div { style: "display:flex;gap:6px;",
+                    button {
+                        class: if raw_mode { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
+                        // §11.6 — guided editor is the default; raw-text
+                        // tab toggles into a textarea + bulk-edit form
+                        // for power users. Syntax highlighting on the
+                        // raw view is a follow-up.
+                        onclick: move |_| on_toggle_raw_mode.call(()),
+                        if raw_mode { "Guided" } else { "Raw" }
+                    }
+                }
+            }
+
+            if rules.is_empty() {
+                div { class: "empty",
+                    "No trust schema rules configured. All signed Data is accepted (security profile = disabled)."
+                }
+            } else if !raw_mode {
+                // Guided rendering — table per §11.6 default.
+                table {
+                    thead {
+                        tr {
+                            th { "Index" }
+                            th { "Data Pattern" }
+                            th { "" }
+                            th { "Key Pattern" }
+                            th { "Actions" }
+                        }
+                    }
+                    tbody {
+                        for rule in rules.iter() {
+                            {
+                                let idx = rule.index as u64;
+                                rsx! {
+                                    tr {
+                                        td { span { class: "badge badge-gray", "{rule.index}" } }
+                                        td { class: "mono", style: "color:var(--accent);", "{rule.data_pattern}" }
+                                        td { style: "color:var(--text-muted);padding:0 6px;", "=>" }
+                                        td { class: "mono", style: "color:var(--green);", "{rule.key_pattern}" }
+                                        td {
+                                            button {
+                                                class: "btn btn-secondary btn-sm",
+                                                "data-tooltip": "Phase C: guided schema-rule editor",
+                                                onclick: move |_| push_toast(
+                                                    "Phase C: §11.6 — guided schema-rule editor",
+                                                    ToastLevel::Info,
+                                                ),
+                                                "Edit"
+                                            }
+                                            button {
+                                                class: "btn btn-danger btn-sm",
+                                                style: "margin-left:4px;",
+                                                onclick: move |_| on_remove_rule.call(idx),
+                                                "Remove"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Raw-text rendering — §11.6 raw tab. Plain monospace
+                // dump of the rules; syntax highlighting is a later
+                // follow-up.
+                pre {
+                    style: "background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:10px;font-size:11px;color:var(--text);overflow:auto;",
+                    for r in rules.iter() {
+                        "[{r.index}] {r.data_pattern} => {r.key_pattern}\n"
+                    }
+                }
+            }
+
+            // Add-rule form.
+            div { style: "margin-top:14px;padding-top:12px;border-top:1px solid var(--border-subtle);",
+                div { style: "font-size:11px;color:var(--text-muted);margin-bottom:6px;",
+                    "Format: "
+                    span { class: "mono", "/data/<node>/<type> => /data/<node>/KEY/<id>" }
+                }
+                div { class: "form-row",
+                    div { class: "form-group", style: "flex:1;",
+                        input {
+                            r#type: "text",
+                            placeholder: "/sensor/<node>/<type> => /sensor/<node>/KEY/<id>",
+                            value: "{new_rule}",
+                            oninput: move |e| on_set_new_rule.call(e.value()),
+                            style: "width:100%;",
+                        }
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        disabled: new_rule.trim().is_empty(),
+                        onclick: move |_| on_add_rule.call(()),
+                        "Add rule"
+                    }
+                }
+            }
+
+            // Bulk-edit toggle + textarea.
+            div { style: "margin-top:14px;border:1px solid var(--border);border-radius:6px;overflow:hidden;",
+                div { style: "display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--surface);",
+                    div { style: "font-size:12px;font-weight:600;color:var(--text);", "Bulk replace" }
+                    button {
+                        class: "btn btn-secondary btn-sm",
+                        onclick: move |_| on_toggle_show_bulk.call(()),
+                        if show_bulk { "▲ Cancel" } else { "▼ Edit" }
+                    }
+                }
+                if show_bulk {
+                    div { style: "padding:12px;border-top:1px solid var(--border);",
+                        div { style: "font-size:11px;color:var(--text-muted);margin-bottom:8px;",
+                            "One rule per line. Empty input clears all rules. Replaces the entire schema."
+                        }
+                        textarea {
+                            style: "width:100%;height:120px;background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:8px;font-family:monospace;font-size:11px;color:var(--text);resize:vertical;",
+                            placeholder: "/sensor/<node>/<type> => /sensor/<node>/KEY/<id>\n/admin/<**rest> => /admin/KEY/<id>",
+                            value: "{bulk_rules}",
+                            oninput: move |e| on_set_bulk.call(e.value()),
+                        }
+                        div { style: "display:flex;gap:8px;margin-top:8px;",
+                            button {
+                                class: "btn btn-primary",
+                                onclick: move |_| on_apply_bulk.call(()),
+                                "Apply schema"
+                            }
+                            button {
+                                class: "btn btn-danger",
+                                onclick: move |_| on_clear_all.call(()),
+                                "Clear all rules"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn LiveValidationChart(stats: Option<ValidationStats>, history: VecDeque<(u64, u64)>) -> Element {
+    let present = stats.as_ref().map(|s| s.validator_present).unwrap_or(false);
+    let verified = stats.as_ref().map(|s| s.verified_per_sec).unwrap_or(0);
+    let rejected = stats.as_ref().map(|s| s.rejected_per_sec).unwrap_or(0);
+
+    // Surface the gap explicitly. When the validator isn't present
+    // (or the wire hasn't returned any data yet), counter values
+    // are guaranteed-zero. The chip says so plainly so an operator
+    // doesn't mistake "no telemetry yet" for "no traffic to
+    // validate".
+    let (chip_class, chip_label) = match stats.as_ref() {
+        None => ("badge badge-gray", "polling…"),
+        Some(s) if !s.validator_present => ("badge badge-yellow", "no validator wired"),
+        Some(_) if verified == 0 && rejected == 0 => {
+            ("badge badge-gray", "validator present · no traffic last 1s")
+        }
+        Some(_) => ("badge badge-green", "live"),
+    };
+
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--text);",
+                    "Live validation activity"
+                }
+                span { class: "{chip_class}", "{chip_label}" }
+            }
+            div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;",
+                CounterTile {
+                    label: "Verified / sec",
+                    value: verified,
+                    color: "var(--green,#3fb950)",
+                }
+                CounterTile {
+                    label: "Rejected / sec",
+                    value: rejected,
+                    color: "var(--red,#f85149)",
+                }
+            }
+            Sparkline { history }
+            if !present {
+                div { style: "margin-top:10px;padding:8px 10px;font-size:11px;color:var(--text-muted);background:var(--surface);border:1px dashed var(--border-subtle);border-radius:4px;line-height:1.5;",
+                    "v1 forwarders report "
+                    span { class: "mono", "validator_present=false" }
+                    " when no PIB/validator is wired, and counter plumbing on "
+                    span { class: "mono", "ndn_security::Validator" }
+                    " is a tracked Phase B follow-up. The chart re-paints as soon as the verbs return real data."
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CounterTile(label: &'static str, value: u64, color: String) -> Element {
+    rsx! {
+        div { style: "background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:10px;",
+            div { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;",
+                "{label}"
+            }
+            div { style: "font-size:20px;font-weight:600;color:{color};margin-top:4px;",
+                "{value}"
+            }
+        }
+    }
+}
+
+#[component]
+fn Sparkline(history: VecDeque<(u64, u64)>) -> Element {
+    let n = history.len();
+    if n == 0 {
+        return rsx! {
+            div { style: "height:48px;border:1px dashed var(--border-subtle);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-muted);",
+                "no samples yet"
+            }
+        };
+    }
+    let max = history
+        .iter()
+        .map(|(v, r)| (*v).max(*r))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    // Build inline SVG polylines.
+    let width = 320.0_f64;
+    let height = 48.0_f64;
+    let step = if n > 1 {
+        width / (n as f64 - 1.0)
+    } else {
+        width
+    };
+
+    let mut verified_path = String::new();
+    let mut rejected_path = String::new();
+    for (i, (v, r)) in history.iter().enumerate() {
+        let x = (i as f64) * step;
+        let yv = height - (*v as f64 / max as f64) * height;
+        let yr = height - (*r as f64 / max as f64) * height;
+        if i == 0 {
+            verified_path.push('M');
+            rejected_path.push('M');
+        } else {
+            verified_path.push('L');
+            rejected_path.push('L');
+        }
+        use std::fmt::Write as _;
+        let _ = write!(verified_path, " {x:.1} {yv:.1} ");
+        let _ = write!(rejected_path, " {x:.1} {yr:.1} ");
+    }
+
+    let max_label = max.to_string();
+    rsx! {
+        div { style: "position:relative;background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:6px;",
+            svg {
+                width: "100%",
+                height: "{height}",
+                view_box: "0 0 {width} {height}",
+                preserve_aspect_ratio: "none",
+                // Verified — green
+                path {
+                    d: "{verified_path}",
+                    fill: "none",
+                    stroke: "var(--green,#3fb950)",
+                    "stroke-width": "1.5",
+                }
+                // Rejected — red
+                path {
+                    d: "{rejected_path}",
+                    fill: "none",
+                    stroke: "var(--red,#f85149)",
+                    "stroke-width": "1.5",
+                }
+            }
+            div { style: "position:absolute;top:4px;right:8px;font-size:9px;color:var(--text-muted);",
+                "max {max_label}/s"
+            }
         }
     }
 }
@@ -1267,173 +1690,6 @@ fn YubikeyTab() -> Element {
             BootstrapStep { n: 3, step: "Router enrolls",     desc: "Router starts NDNCERT enrollment automatically on boot", first: false }
             BootstrapStep { n: 4, step: "Operator presses",   desc: "Press YubiKey button → 6-digit OTP emitted via USB HID", first: false }
             BootstrapStep { n: 5, step: "Certificate issued", desc: "CA verifies OTP against HOTP counter → cert issued", first: false }
-        }
-    }
-}
-
-// ── Tab: Trust Schema ─────────────────────────────────────────────────────────
-
-#[component]
-fn SchemaTab(rules: Vec<SchemaRuleInfo>) -> Element {
-    let ctx = use_context::<AppCtx>();
-    let mut new_rule: Signal<String> = use_signal(String::new);
-    let mut bulk_rules: Signal<String> = use_signal(String::new);
-    let mut show_bulk: Signal<bool> = use_signal(|| false);
-
-    rsx! {
-        div { class: "section-title", "Trust Schema" }
-
-        // Education card
-        div { class: "edu-card",
-            div { style: "display:flex;gap:12px;align-items:flex-start;",
-                div { style: "font-size:28px;flex-shrink:0;", "📐" }
-                div {
-                    div { style: "font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px;",
-                        "Local Trust Policy"
-                    }
-                    div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
-                        "The trust schema is a local policy that controls which "
-                        span { class: "mono", "(data name, signing key)" }
-                        " pairs this node accepts. "
-                        "Rules use pattern syntax: "
-                        span { class: "mono", "/literal/<capture>/<**multi>" }
-                        " where variables with the same name must match the same value. "
-                        "The default profile is "
-                        span { class: "mono", "\"disabled\"" }
-                        " — matching NFD's behaviour of not validating Data at the forwarder."
-                    }
-                }
-            }
-        }
-
-        // Active rules list
-        div { class: "section-title", style: "margin-top:16px;font-size:12px;",
-            "Active Rules"
-            if !rules.is_empty() {
-                span { style: "margin-left:8px;", class: "badge badge-blue", "{rules.len()}" }
-            }
-        }
-        if rules.is_empty() {
-            div { class: "empty",
-                "No trust schema rules configured. All signed Data is accepted (security profile = disabled)."
-            }
-        } else {
-            table {
-                thead {
-                    tr {
-                        th { "Index" }
-                        th { "Data Pattern" }
-                        th { "" }
-                        th { "Key Pattern" }
-                        th { "Actions" }
-                    }
-                }
-                tbody {
-                    for rule in rules.iter() {
-                        {
-                            let idx = rule.index as u64;
-                            rsx! {
-                                tr {
-                                    td { span { class: "badge badge-gray", "{rule.index}" } }
-                                    td { class: "mono", style: "color:var(--accent);", "{rule.data_pattern}" }
-                                    td { style: "color:var(--text-muted);padding:0 6px;", "=>" }
-                                    td { class: "mono", style: "color:var(--green);", "{rule.key_pattern}" }
-                                    td {
-                                        button {
-                                            class: "btn btn-danger btn-sm",
-                                            onclick: move |_| ctx.cmd.send(DashCmd::SchemaRuleRemove(idx)),
-                                            "Remove"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Add single rule form
-        div { style: "margin-top:16px;",
-            div { class: "section-title", style: "font-size:12px;", "Add Rule" }
-            div { style: "font-size:11px;color:var(--text-muted);margin-bottom:8px;",
-                "Format: "
-                span { class: "mono", "/data/<node>/<type> => /data/<node>/KEY/<id>" }
-            }
-            div { class: "form-row",
-                div { class: "form-group", style: "flex:1;",
-                    input {
-                        r#type: "text",
-                        placeholder: "/sensor/<node>/<type> => /sensor/<node>/KEY/<id>",
-                        value: "{new_rule}",
-                        oninput: move |e| new_rule.set(e.value()),
-                        style: "width:100%;",
-                    }
-                }
-                button {
-                    class: "btn btn-primary",
-                    disabled: new_rule.read().trim().is_empty(),
-                    onclick: move |_| {
-                        let r = new_rule.read().trim().to_string();
-                        if !r.is_empty() {
-                            ctx.cmd.send(DashCmd::SchemaRuleAdd(r));
-                            new_rule.set(String::new());
-                        }
-                    },
-                    "Add Rule"
-                }
-            }
-        }
-
-        // Bulk edit section
-        div { style: "margin-top:16px;border:1px solid var(--border);border-radius:6px;overflow:hidden;",
-            div { style: "display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--surface2);",
-                div { style: "font-size:12px;font-weight:600;color:var(--text);", "Bulk Edit / Replace Schema" }
-                button {
-                    class: "btn btn-secondary btn-sm",
-                    onclick: move |_| {
-                        let v = *show_bulk.read();
-                        show_bulk.set(!v);
-                    },
-                    if *show_bulk.read() { "▲ Cancel" } else { "▼ Edit" }
-                }
-            }
-            if *show_bulk.read() {
-                div { style: "padding:14px;border-top:1px solid var(--border);",
-                    div { style: "font-size:11px;color:var(--text-muted);margin-bottom:8px;",
-                        "Enter one rule per line in the form "
-                        span { class: "mono", "<data> => <key>" }
-                        ". This replaces the entire schema. Submit an empty text area to clear all rules."
-                    }
-                    textarea {
-                        style: "width:100%;height:120px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:8px;font-family:monospace;font-size:11px;color:var(--text);resize:vertical;",
-                        placeholder: "/sensor/<node>/<type> => /sensor/<node>/KEY/<id>\n/admin/<**rest> => /admin/KEY/<id>",
-                        value: "{bulk_rules}",
-                        oninput: move |e| bulk_rules.set(e.value()),
-                    }
-                    div { style: "display:flex;gap:8px;margin-top:8px;",
-                        button {
-                            class: "btn btn-primary",
-                            onclick: move |_| {
-                                let r = bulk_rules.read().clone();
-                                ctx.cmd.send(DashCmd::SchemaSet(r));
-                                show_bulk.set(false);
-                                bulk_rules.set(String::new());
-                            },
-                            "Apply Schema"
-                        }
-                        button {
-                            class: "btn btn-danger",
-                            onclick: move |_| {
-                                ctx.cmd.send(DashCmd::SchemaSet(String::new()));
-                                show_bulk.set(false);
-                                bulk_rules.set(String::new());
-                            },
-                            "Clear All Rules"
-                        }
-                    }
-                }
-            }
         }
     }
 }

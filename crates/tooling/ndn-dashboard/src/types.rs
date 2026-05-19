@@ -1137,6 +1137,39 @@ impl MgmtAccessPolicySnapshot {
     }
 }
 
+// ── Validation stats — §7 / §4.3 LiveValidationChart feed ───────────────────
+//
+// Parsed from the `security/validation-stats` response body
+// (`validator_present=<bool>\nverified_per_sec=<u64>\nrejected_per_sec=<u64>`).
+// Counter fields are zero today across all forwarders — the wire is
+// pinned, but `ndn_security::Validator` doesn't yet expose its
+// decision-loop counters. The dashboard renders an explicit
+// "no live data" chip on the chart while `validator_present=false`.
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValidationStats {
+    pub validator_present: bool,
+    pub verified_per_sec: u64,
+    pub rejected_per_sec: u64,
+}
+
+impl ValidationStats {
+    pub fn parse(text: &str) -> Self {
+        let mut out = Self::default();
+        for line in text.lines() {
+            if let Some((k, v)) = line.trim().split_once('=') {
+                match k {
+                    "validator_present" => out.validator_present = v == "true",
+                    "verified_per_sec" => out.verified_per_sec = v.parse().unwrap_or(0),
+                    "rejected_per_sec" => out.rejected_per_sec = v.parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+}
+
 // ── Wire-type conversions (desktop only) ─────────────────────────────────────
 //
 // These `From` impls convert NFD TLV wire types (from `ndn_config`) into the

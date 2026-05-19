@@ -486,6 +486,127 @@ pub fn audit_chain_snapshot() -> Vec<AuditLogEntry> {
     Vec::new()
 }
 
+// ── Process-global schema journal (desktop) ─────────────────────────
+//
+// Parallel to the audit-log chain above. Records §2.4 schema-journal
+// events: anchor / schema-rule adds + removes, each signed by the
+// dashboard's `DashboardSigner` (shared with the audit chain — same
+// principal, same ephemeral-per-process v1 caveat). Chain lives under
+// `<XDG>/ndn-dashboard/<forwarder-id>/schema/` (sibling of the audit
+// chain so a backup tool can grab both at once).
+
+#[cfg(feature = "desktop")]
+mod schema_globals {
+    use super::*;
+    use crate::signed_data_chain::FileStore;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    pub type SchemaChainBackend = FileStore;
+    pub type SchemaChainHandle = SchemaJournalChain<SchemaChainBackend>;
+
+    struct SchemaState {
+        signer: DashboardSigner,
+        chain: Mutex<SchemaChainHandle>,
+    }
+
+    static SCHEMA_STATE: OnceLock<SchemaState> = OnceLock::new();
+
+    /// Idempotent. Logs and falls back to an empty chain if the
+    /// backend can't open the dir.
+    pub fn init(dir: PathBuf, key_locator: Name) {
+        let _ = SCHEMA_STATE.get_or_init(|| {
+            let chain_root = Name::root()
+                .append(b"local")
+                .append(b"ndn-dashboard")
+                .append(b"schema");
+            let backend = FileStore::new(&dir);
+            let chain = SignedDataChainStore::open(chain_root, backend).unwrap_or_else(|e| {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    dir = %dir.display(),
+                    error = %e,
+                    "failed to open schema journal — using empty fallback"
+                );
+                let mem_root = Name::root()
+                    .append(b"local")
+                    .append(b"ndn-dashboard")
+                    .append(b"schema-fallback");
+                SignedDataChainStore::open(mem_root, FileStore::new(&dir))
+                    .expect("schema journal fallback open")
+            });
+            SchemaState {
+                signer: DashboardSigner::new_ephemeral(key_locator),
+                chain: Mutex::new(chain),
+            }
+        });
+    }
+
+    pub fn append(entry: SchemaJournalEntry) {
+        let Some(state) = SCHEMA_STATE.get() else {
+            tracing::warn!(
+                target: "dashboard.security",
+                subject = %entry.subject_name,
+                "schema journal not initialised — dropping entry"
+            );
+            return;
+        };
+        let mut guard = match state.chain.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    error = %e,
+                    "schema journal mutex poisoned — dropping entry"
+                );
+                return;
+            }
+        };
+        if let Err(e) = guard.append(entry, &state.signer) {
+            tracing::warn!(
+                target: "dashboard.security",
+                error = %e,
+                "schema journal append failed"
+            );
+        }
+    }
+
+    pub fn snapshot() -> Vec<SchemaJournalEntry> {
+        let Some(state) = SCHEMA_STATE.get() else {
+            return Vec::new();
+        };
+        let guard = match state.chain.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let n = guard.len();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            if let Ok(e) = guard.decode_entry(i) {
+                out.push(e);
+            }
+        }
+        out
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[allow(unused_imports)]
+pub use schema_globals::snapshot as schema_journal_snapshot;
+#[cfg(feature = "desktop")]
+pub use schema_globals::{append as append_schema_entry, init as init_schema_journal};
+
+#[cfg(not(feature = "desktop"))]
+pub fn init_schema_journal(_dir: std::path::PathBuf, _key_locator: Name) {}
+
+#[cfg(not(feature = "desktop"))]
+pub fn append_schema_entry(_entry: SchemaJournalEntry) {}
+
+#[cfg(not(feature = "desktop"))]
+pub fn schema_journal_snapshot() -> Vec<SchemaJournalEntry> {
+    Vec::new()
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 
 fn require_tag(actual: u64, expected: u64, field: &str) -> Result<(), ChainError> {

@@ -6,6 +6,7 @@ use futures::StreamExt as _;
 use ndn_ipc::MgmtClient;
 
 use crate::forwarder_proc;
+use crate::security_chains::SchemaJournalKind;
 use crate::tool_runner::{
     TOOL_INSTANCES, TOOL_RESULTS, ToolCmd, ToolInstanceState, ToolParams, ToolResultEntry,
     build_result_entry, chrono_now, next_result_id,
@@ -257,6 +258,14 @@ pub struct AppCtx {
     /// The §4.5 `MgmtAccessTab` reads this; `mgmt_signed_commands_required`
     /// is a derived view on the same data and stays in sync.
     pub mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
+    /// Live validator counters — §4.3 `LiveValidationChart` feed.
+    /// `None` until the first `security/validation-stats` poll
+    /// returns; the chart switches to its "no live data" placeholder
+    /// when the latest sample carries `validator_present=false`.
+    pub validation_stats: Signal<Option<ValidationStats>>,
+    /// 60-sample (3-min @ 3 s) sparkline history of
+    /// `(verified_per_sec, rejected_per_sec)`.
+    pub validation_history: Signal<VecDeque<(u64, u64)>>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     /// Per-face throughput rate history (60 samples × 3 s = 3 min window).
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
@@ -421,6 +430,8 @@ pub fn App() -> Element {
     let cert_valid_until_unix_s: Signal<Option<u64>> = use_signal(|| None);
     let mgmt_signed_commands_required: Signal<Option<bool>> = use_signal(|| None);
     let mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>> = use_signal(|| None);
+    let validation_stats: Signal<Option<ValidationStats>> = use_signal(|| None);
+    let validation_history: Signal<VecDeque<(u64, u64)>> = use_signal(VecDeque::new);
 
     // Initialise the §11.10 audit chain once per process. The chain
     // dir is keyed by the selected forwarder profile so switching
@@ -430,13 +441,13 @@ pub fn App() -> Element {
     // entries from prior processes remain on disk but won't
     // re-verify until v2 wires a stable dashboard signing key.
     use_hook(|| {
-        let dir = audit_chain_dir();
         let key_locator = ndn_packet::Name::root()
             .append(b"local")
             .append(b"ndn-dashboard")
             .append(b"KEY")
             .append(b"ephemeral");
-        crate::security_chains::init_audit_chain(dir, key_locator);
+        crate::security_chains::init_audit_chain(audit_chain_dir(), key_locator.clone());
+        crate::security_chains::init_schema_journal(schema_journal_dir(), key_locator);
     });
     let cs_hit_history: Signal<VecDeque<f64>> = use_signal(VecDeque::new);
     let face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>> =
@@ -652,6 +663,8 @@ pub fn App() -> Element {
                 cert_valid_until_unix_s,
                 mgmt_signed_commands_required,
                 mgmt_access_policy,
+                validation_stats,
+                validation_history,
             )
             .await
             {
@@ -667,7 +680,7 @@ pub fn App() -> Element {
             'session: loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy).await {
+                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, validation_stats, validation_history).await {
                             conn_state.set(ConnState::Disconnected);
                             error_msg.set(Some(e));
                             break 'session;
@@ -677,7 +690,7 @@ pub fn App() -> Element {
                         if matches!(cmd_msg, DashCmd::Reconnect) {
                             break 'session;
                         }
-                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy).await;
+                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, validation_stats, validation_history).await;
                     }
                 }
             }
@@ -1211,6 +1224,8 @@ pub fn App() -> Element {
         cert_valid_until_unix_s,
         mgmt_signed_commands_required,
         mgmt_access_policy,
+        validation_stats,
+        validation_history,
         cs_hit_history,
         face_throughput,
         discovery_status,
@@ -1492,11 +1507,20 @@ fn render_view(view: View) -> Element {
 /// `ndn-fwd`, `nfd`, and `yanfd` chains separate so toggling the
 /// `--forwarder=` flag doesn't replay another impl's history.
 fn audit_chain_dir() -> std::path::PathBuf {
+    dashboard_chain_dir_root().join("audit")
+}
+
+/// Sibling to [`audit_chain_dir`] for the §2.4 schema journal. Same
+/// per-forwarder keying so a backup tool can grab `audit/` + `schema/`
+/// in one shot.
+fn schema_journal_dir() -> std::path::PathBuf {
+    dashboard_chain_dir_root().join("schema")
+}
+
+fn dashboard_chain_dir_root() -> std::path::PathBuf {
     let profile = crate::forwarder_profile::selected_profile();
     let base = dirs_next::config_dir().unwrap_or_else(std::env::temp_dir);
-    base.join("ndn-dashboard")
-        .join(profile.machine_name())
-        .join("audit")
+    base.join("ndn-dashboard").join(profile.machine_name())
 }
 
 fn default_socket_path() -> String {
@@ -1540,6 +1564,8 @@ async fn poll_all(
     mut cert_valid_until_unix_s: Signal<Option<u64>>,
     mut mgmt_signed_commands_required: Signal<Option<bool>>,
     mut mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
+    mut validation_stats: Signal<Option<ValidationStats>>,
+    mut validation_history: Signal<VecDeque<(u64, u64)>>,
 ) -> Result<(), String> {
     match client.status().await {
         Ok(r) => status.set(Some(ForwarderStatus::parse(&r.status_text))),
@@ -1657,6 +1683,20 @@ async fn poll_all(
     {
         mgmt_signed_commands_required.set(Some(parsed.require_signed_commands));
         mgmt_access_policy.set(Some(parsed));
+    }
+    // §4.3 LiveValidationChart feed — `validation-stats` is
+    // read-exempt from the SECURITY signed-command gate. Counter
+    // fields are zero today across all forwarders (Validator
+    // counter plumbing tracked as a Phase B follow-up); the chart
+    // surfaces this explicitly via the `validator_present` flag.
+    if let Ok(r) = client.security_validation_stats().await {
+        let parsed = ValidationStats::parse(&r.status_text);
+        validation_stats.set(Some(parsed));
+        let mut hist = validation_history.write();
+        hist.push_back((parsed.verified_per_sec, parsed.rejected_per_sec));
+        if hist.len() > 60 {
+            hist.pop_front();
+        }
     }
     if let Ok(r) = client.security_anchor_list().await {
         security_anchors.set(AnchorInfo::parse_list(&r.status_text));
@@ -1886,6 +1926,8 @@ async fn run_cmd(
     cert_valid_until_unix_s: Signal<Option<u64>>,
     mgmt_signed_commands_required: Signal<Option<bool>>,
     mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
+    validation_stats: Signal<Option<ValidationStats>>,
+    validation_history: Signal<VecDeque<(u64, u64)>>,
 ) {
     // Session recording: log before dispatch.
     if *recording.read()
@@ -2043,6 +2085,8 @@ async fn run_cmd(
                         cert_valid_until_unix_s,
                         mgmt_signed_commands_required,
                         mgmt_access_policy,
+                        validation_stats,
+                        validation_history,
                     ))
                     .await;
                     recording.set(was_recording);
@@ -2123,21 +2167,56 @@ async fn run_cmd(
             .await
             .map(|_| ())
             .map_err(|e| e.to_string()),
-        DashCmd::SchemaRuleAdd(rule) => client
-            .security_schema_rule_add(&rule)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        DashCmd::SchemaRuleRemove(index) => client
-            .security_schema_rule_remove(index)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
-        DashCmd::SchemaSet(rules) => client
-            .security_schema_set(&rules)
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string()),
+        DashCmd::SchemaRuleAdd(rule) => match client.security_schema_rule_add(&rule).await {
+            Ok(_) => {
+                append_schema_journal(
+                    SchemaJournalKind::SchemaRuleAdd,
+                    rule,
+                    &identity_name,
+                    &identity_is_ephemeral,
+                );
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        },
+        DashCmd::SchemaRuleRemove(index) => {
+            // Capture the rule text before the remove call lands so
+            // the journal entry has a meaningful subject. If the index
+            // is out of range we still attempt the remove (the server
+            // will surface the error) and journal with "<unknown>".
+            let subject = schema_rules
+                .peek()
+                .iter()
+                .find(|r| r.index as u64 == index)
+                .map(|r| format!("{} => {}", r.data_pattern, r.key_pattern))
+                .unwrap_or_else(|| format!("<index={index}>"));
+            match client.security_schema_rule_remove(index).await {
+                Ok(_) => {
+                    append_schema_journal(
+                        SchemaJournalKind::SchemaRuleRemove,
+                        subject,
+                        &identity_name,
+                        &identity_is_ephemeral,
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        DashCmd::SchemaSet(rules) => match client.security_schema_set(&rules).await {
+            Ok(_) => {
+                let line_count = rules.lines().filter(|l| !l.trim().is_empty()).count();
+                let subject = format!("<bulk replace · {line_count} rule(s)>");
+                append_schema_journal(
+                    SchemaJournalKind::SchemaRuleAdd,
+                    subject,
+                    &identity_name,
+                    &identity_is_ephemeral,
+                );
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        },
         DashCmd::SecurityPolicySet(policy) => {
             let body = policy.to_json();
             match client.security_policy_set(&body).await {
@@ -2207,6 +2286,8 @@ async fn run_cmd(
                 cert_valid_until_unix_s,
                 mgmt_signed_commands_required,
                 mgmt_access_policy,
+                validation_stats,
+                validation_history,
             )
             .await;
         }
@@ -2245,6 +2326,25 @@ fn unix_ns_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+/// Emit a §2.4 schema-journal entry for the supplied event. Pulls
+/// the active initiator name from the same helper the §11.10 audit
+/// bridge uses so the two chains agree on "who did this".
+fn append_schema_journal(
+    kind: crate::security_chains::SchemaJournalKind,
+    subject_name: String,
+    identity_name: &Signal<String>,
+    identity_is_ephemeral: &Signal<bool>,
+) {
+    let initiator = active_identity_name_for_audit(identity_name, identity_is_ephemeral);
+    let entry = crate::security_chains::SchemaJournalEntry {
+        ts_unix_ns: unix_ns_now(),
+        kind,
+        subject_name,
+        initiator_name: initiator,
+    };
+    crate::security_chains::append_schema_entry(entry);
 }
 
 /// Parse the `identity-status` dataset response.

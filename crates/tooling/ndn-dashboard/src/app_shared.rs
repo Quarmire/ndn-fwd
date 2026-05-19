@@ -217,6 +217,10 @@ pub struct AppCtx {
     /// each poll cycle. `None` until the first response lands. The
     /// §4.5 `MgmtAccessTab` reads this on both desktop and web.
     pub mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
+    /// Live validator counters — §4.3 `LiveValidationChart` feed.
+    pub validation_stats: Signal<Option<ValidationStats>>,
+    /// 60-sample (verified_per_sec, rejected_per_sec) sparkline history.
+    pub validation_history: Signal<VecDeque<(u64, u64)>>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
     pub discovery_status: Signal<Option<DiscoveryStatus>>,
