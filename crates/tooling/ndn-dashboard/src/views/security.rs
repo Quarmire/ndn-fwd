@@ -10,6 +10,10 @@ use crate::types::{
     ValidationStats,
 };
 use crate::views::onboarding::encode_did_ndn;
+use crate::views::security_did::{
+    DidDocumentPanel, DidLensToggle, DidResolutionL2Frame, IdentityInspectorLens, ResolveAnyDidBox,
+    did_doc_view_for_identity,
+};
 use dioxus::prelude::*;
 use std::collections::VecDeque;
 
@@ -113,6 +117,12 @@ pub fn Security() -> Element {
                     }
                 }
             }
+
+            // ── §4.7.2 Resolve-any-DID search ─────────────────────────────────
+            // Fires DashCmd::SecurityValidateTrace against the underlying
+            // NDN name and opens the §4.2 sidesheet; the sidesheet adds a
+            // DID-layer (L2) frame on top of the cert-layer (L1) trace.
+            ResolveAnyDidBox {}
 
             // ── Tab bar ──────────────────────────────────────────────────────
             div { style: "display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;",
@@ -398,6 +408,11 @@ fn IdentityInspector(
     let active_certs = keys.iter().filter(|k| k.has_cert).count();
     let total_keys = keys.len();
 
+    // §4.7.1 — right-pane lens toggle. Defaults to the packet-level
+    // Keys & Certs view; flipping to DID Document re-frames the same
+    // data under the identity-level (DID) model.
+    let lens: Signal<IdentityInspectorLens> = use_signal(|| IdentityInspectorLens::KeysCerts);
+
     rsx! {
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;",
             // Header
@@ -418,25 +433,32 @@ fn IdentityInspector(
                         span { class: "badge badge-blue", "{active_certs} cert{plural(active_certs)}" }
                     }
                 }
+                DidLensToggle { lens }
             }
 
-            // Per-key CertCards
-            if keys.is_empty() {
-                div { class: "empty", "This identity has no keys." }
-            } else {
-                for k in keys.iter() {
-                    {
-                        let k_owned = k.clone();
-                        rsx! {
-                            CertCard {
-                                info: k_owned,
-                                on_delete: move |name: String| {
-                                    ctx.cmd.send(DashCmd::SecurityKeyDelete(name));
-                                },
+            match *lens.read() {
+                IdentityInspectorLens::KeysCerts => rsx! {
+                    if keys.is_empty() {
+                        div { class: "empty", "This identity has no keys." }
+                    } else {
+                        for k in keys.iter() {
+                            {
+                                let k_owned = k.clone();
+                                rsx! {
+                                    CertCard {
+                                        info: k_owned,
+                                        on_delete: move |name: String| {
+                                            ctx.cmd.send(DashCmd::SecurityKeyDelete(name));
+                                        },
+                                    }
+                                }
                             }
                         }
                     }
-                }
+                },
+                IdentityInspectorLens::DidDocument => rsx! {
+                    DidDocumentPanel { doc: did_doc_view_for_identity(&identity_name, &keys) }
+                },
             }
         }
     }
@@ -2227,6 +2249,10 @@ fn TrustPathBody(target: String, result: TrustValidationResult) -> Element {
                 "{target}"
             }
         }
+
+        // §4.7.3 — DID-layer (L2) wrap around the cert-layer (L1)
+        // failure diagnosis. Renders only on invalid+diagnosed.
+        DidResolutionL2Frame { result: result.clone() }
 
         // Verdict box.
         VerdictBox { verdict: result.verdict.clone() }

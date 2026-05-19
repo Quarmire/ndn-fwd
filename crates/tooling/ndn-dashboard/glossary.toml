@@ -109,3 +109,26 @@ term = "TOFU"
 gloss = "Trust-on-first-use — accept the fingerprint once after out-of-band verification, then refuse silent changes."
 extended = "Same trust model SSH host keys use; the dashboard journals the decision so it's reviewable later."
 wiki_anchor = "tofu"
+
+[[entries]]
+term = "Verification method"
+gloss = "A key entry inside a DID Document — what's allowed to sign as that DID."
+extended = "Each verification method has an id, a type (Ed25519VerificationKey2020, JsonWebKey2020, …), and a controller."
+wiki_anchor = "did-verification-methods"
+
+[[entries]]
+term = "Controller"
+gloss = "A DID authorized to update or deactivate another DID Document."
+extended = "Absent controller means the subject controls itself. In NDN the controller is typically the parent namespace's DID."
+wiki_anchor = "did-controllers"
+
+[[entries]]
+term = "Service endpoint"
+gloss = "A location (NDN prefix, URL, …) where this DID's data or interactions live."
+wiki_anchor = "did-service-endpoints"
+
+[[entries]]
+term = "Resolve DID"
+gloss = "Fetch and verify a DID Document — follow the KeyLocator, validate the chain, decode the document."
+extended = "The resolution trace shows each step (fetch / verify / decode); the dashboard's L2 framing wraps the L1 cert-chain trace."
+wiki_anchor = "did-resolution"

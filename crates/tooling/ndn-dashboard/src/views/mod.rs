@@ -21,6 +21,7 @@ pub mod rate_limit;
 pub mod routes;
 pub mod routing;
 pub mod security;
+pub mod security_did;
 #[cfg(feature = "desktop")]
 pub mod session;
 pub mod strategy;
