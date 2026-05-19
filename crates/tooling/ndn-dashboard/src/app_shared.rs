@@ -228,6 +228,10 @@ pub struct AppCtx {
     /// each poll cycle. `None` until the first response lands. The
     /// §4.5 `MgmtAccessTab` reads this on both desktop and web.
     pub mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
+    /// Whether the connected forwarder implements ndn-rs's `security/*`
+    /// mgmt extensions. `Some(false)` ⇒ NFD / YaNFD (the dashboard
+    /// degrades to `Unsupported` posture). `None` ⇒ unknown.
+    pub security_surface_supported: Signal<Option<bool>>,
     /// Live validator counters — §4.3 `LiveValidationChart` feed.
     pub validation_stats: Signal<Option<ValidationStats>>,
     /// 60-sample (verified_per_sec, rejected_per_sec) sparkline history.

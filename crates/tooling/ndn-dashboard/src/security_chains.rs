@@ -1054,4 +1054,120 @@ mod tests {
         let decoded = chain.decode_entry(0).unwrap();
         assert_eq!(decoded, entry);
     }
+
+    // ── Process-global helpers (desktop) ─────────────────────────────
+    //
+    // Pin the `init_audit_chain` → `append_audit_entry` →
+    // `audit_chain_snapshot` round-trip + the parallel schema_journal
+    // helpers. These are the call sites the dashboard's run_cmd uses
+    // (audit-bridge on policy-set; schema-journal on rule-add); the
+    // primitive tests above cover the inner chain but not the
+    // OnceLock-backed global path.
+    //
+    // The OnceLock is process-wide so these tests run in a child
+    // process via `assert_cmd` style isolation when they need a
+    // pristine global. For Phase-B-step-D scope we just smoke-test
+    // append→snapshot in this process; subsequent tests see the
+    // existing chain entries (harmless — we assert presence, not
+    // emptiness).
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn audit_global_append_round_trips_through_snapshot() {
+        // Use a unique-per-test temp dir to avoid colliding with the
+        // process default.
+        let dir = std::env::temp_dir().join(format!(
+            "ndn-dashboard-audit-witness-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kl = Name::root().append(b"witness").append(b"KEY").append(b"k0");
+        crate::security_chains::init_audit_chain(dir.clone(), kl);
+        let before = crate::security_chains::audit_chain_snapshot().len();
+        let entry = AuditLogEntry {
+            ts_unix_ns: 1_700_000_000_000_000_000,
+            outcome: AuditOutcome::Accepted,
+            subject: "security/policy-set".into(),
+            detail: "initiator=/witness/op fingerprint=00".into(),
+        };
+        crate::security_chains::append_audit_entry(entry.clone());
+        let after = crate::security_chains::audit_chain_snapshot();
+        assert!(
+            after.len() >= before + 1,
+            "snapshot length didn't grow: before={before} after={}",
+            after.len()
+        );
+        // The just-appended entry should be the last row (chains are
+        // append-only and snapshot returns oldest-first).
+        let last = after.last().expect("non-empty after append");
+        assert_eq!(last.subject, "security/policy-set");
+        assert!(last.detail.contains("initiator=/witness/op"));
+    }
+
+    /// Witness: §11.10 audit-bridge content_hash is deterministic
+    /// across identical inputs and differs across different policies.
+    /// The dashboard hashes the same JSON the operator submitted and
+    /// stores the hex in `AuditLogEntry.detail`; the SHA-256 is what
+    /// audit consumers cross-reference between forwarders.
+    #[test]
+    fn audit_bridge_hash_is_deterministic() {
+        use sha2::{Digest as _, Sha256};
+        let body_a = r#"{"ephemeral_allowed":false,"localhop_disabled":true,"replay_window_secs":120,"require_signed_commands":true,"validator_anchor":"/lab/ca"}"#;
+        let body_b = r#"{"ephemeral_allowed":true,"localhop_disabled":true,"replay_window_secs":120,"require_signed_commands":true,"validator_anchor":"/lab/ca"}"#;
+
+        let hash_a: [u8; 32] = Sha256::digest(body_a.as_bytes()).into();
+        let hash_a2: [u8; 32] = Sha256::digest(body_a.as_bytes()).into();
+        let hash_b: [u8; 32] = Sha256::digest(body_b.as_bytes()).into();
+        assert_eq!(hash_a, hash_a2, "same body must hash to the same digest");
+        assert_ne!(hash_a, hash_b, "different policies must hash differently");
+
+        // Audit-bridge entry carries the hash as hex in detail.
+        let entry_a = policy_set_audit_entry(1, "/witness/op", &hash_a);
+        let entry_a2 = policy_set_audit_entry(1, "/witness/op", &hash_a);
+        let entry_b = policy_set_audit_entry(1, "/witness/op", &hash_b);
+        assert_eq!(
+            entry_a.detail, entry_a2.detail,
+            "deterministic hash → deterministic entry detail"
+        );
+        assert_ne!(entry_a.detail, entry_b.detail);
+        assert!(
+            entry_a
+                .detail
+                .contains(&format!("policy_content_hash={}", hex_lower(&hash_a)))
+        );
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn schema_global_append_round_trips_through_snapshot() {
+        let dir = std::env::temp_dir().join(format!(
+            "ndn-dashboard-schema-witness-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let kl = Name::root().append(b"witness").append(b"KEY").append(b"k0");
+        crate::security_chains::init_schema_journal(dir.clone(), kl);
+        let before = crate::security_chains::schema_journal_snapshot().len();
+        let entry = SchemaJournalEntry {
+            ts_unix_ns: 1_700_000_000_000_000_000,
+            kind: SchemaJournalKind::AnchorAdd,
+            subject_name: "anchor=/lab/ca/KEY/k0 fingerprint=abab".into(),
+            initiator_name: "/witness/op".into(),
+        };
+        crate::security_chains::append_schema_entry(entry);
+        let after = crate::security_chains::schema_journal_snapshot();
+        assert!(after.len() >= before + 1);
+        let last = after.last().expect("non-empty after append");
+        assert_eq!(last.kind, SchemaJournalKind::AnchorAdd);
+        assert!(last.subject_name.starts_with("anchor=/lab/ca/KEY/k0"));
+    }
 }

@@ -29,6 +29,14 @@ use dioxus::prelude::*;
 pub enum SecurityPosture {
     /// All checks pass. Gate does not fire.
     Hardened,
+    /// The connected forwarder does not implement ndn-rs's `security/*`
+    /// mgmt extensions (e.g. an NFD or YaNFD forwarder). The dashboard
+    /// can't assess identity / anchors / schema posture against this
+    /// forwarder, so it MUST NOT default to `NoIdentity` (which would
+    /// spuriously fire the gate). Gate stays quiet; chip renders the
+    /// `Unsupported` state explicitly. Detection: an explicit
+    /// NOT_FOUND from a probe verb like `security/identity-status`.
+    Unsupported,
     /// No persistent identity, signing falls back to an ephemeral
     /// in-memory key. §2.2 panel.
     NoIdentity,
@@ -52,6 +60,7 @@ impl SecurityPosture {
     pub fn kind(&self) -> PostureKind {
         match self {
             Self::Hardened => PostureKind::Hardened,
+            Self::Unsupported => PostureKind::Unsupported,
             Self::NoIdentity => PostureKind::NoIdentity,
             Self::IdentityExpired { .. } => PostureKind::IdentityExpired,
             Self::TrustSchemaWeakened { .. } => PostureKind::TrustSchemaWeakened,
@@ -61,11 +70,19 @@ impl SecurityPosture {
     pub fn is_hardened(&self) -> bool {
         matches!(self, Self::Hardened)
     }
+
+    /// Like `is_hardened` but also returns true for `Unsupported` —
+    /// both states leave the gate quiet because the dashboard can't
+    /// claim a posture violation against either.
+    pub fn suppresses_gate(&self) -> bool {
+        matches!(self, Self::Hardened | Self::Unsupported)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostureKind {
     Hardened,
+    Unsupported,
     NoIdentity,
     IdentityExpired,
     TrustSchemaWeakened,
@@ -104,6 +121,12 @@ impl ActiveIdentity {
 /// when the §4.1 cert inspector lands and threads expiry into AppCtx,
 /// pass the new field here.
 pub fn derive_posture(input: PostureInput<'_>) -> SecurityPosture {
+    // Forwarder doesn't speak ndn-rs's security extensions (likely
+    // NFD or YaNFD). All other axes are unobservable; the gate must
+    // stay quiet — otherwise we'd spuriously assert NoIdentity.
+    if input.security_surface_supported == Some(false) {
+        return SecurityPosture::Unsupported;
+    }
     // NoIdentity — the most-common first-run case.
     if input.identity_is_ephemeral || input.identity_name.is_empty() {
         return SecurityPosture::NoIdentity;
@@ -138,6 +161,14 @@ pub struct PostureInput<'a> {
     /// Current wall-clock time (Unix-epoch seconds). `None` ⇒ skip
     /// expiry detection.
     pub now_unix_s: Option<u64>,
+    /// Whether the connected forwarder implements ndn-rs's
+    /// `security/*` mgmt extensions. `Some(true)` ⇒ supported (a
+    /// security probe returned 2xx); `Some(false)` ⇒ NOT supported
+    /// (the probe returned 404); `None` ⇒ unknown yet (no probe has
+    /// landed). When `Some(false)` the gate stays quiet — the
+    /// dashboard can't observe any of the other axes against that
+    /// forwarder.
+    pub security_surface_supported: Option<bool>,
 }
 
 // ── §3 surfaces — chip + sidebar dot ────────────────────────────────
@@ -155,6 +186,10 @@ pub struct PostureInput<'a> {
 pub enum ChipState {
     /// Persistent identity + valid cert + signed mgmt. Green padlock.
     Hardened { identity_name: String },
+    /// The forwarder doesn't speak ndn-rs's `security/*` extensions
+    /// — chip renders explicitly so the operator knows the security
+    /// surfaces aren't applicable. Gray, distinct from Ephemeral.
+    Unsupported,
     /// Ephemeral in-memory identity. Yellow open padlock.
     Ephemeral,
     /// `require_signed_commands == false` — anyone with socket
@@ -175,6 +210,7 @@ impl ChipState {
     pub fn label(&self) -> String {
         match self {
             Self::Hardened { identity_name } => identity_name.clone(),
+            Self::Unsupported => "NFD COMPAT".into(),
             Self::Ephemeral => "EPHEMERAL".into(),
             Self::UnsignedMgmt => "UNSIGNED MGMT".into(),
             Self::ExpiringSoon { days, .. } => format!("EXPIRES {days}d"),
@@ -185,6 +221,7 @@ impl ChipState {
     pub fn icon(&self) -> &'static str {
         match self {
             Self::Hardened { .. } => "🔐",
+            Self::Unsupported => "—",
             Self::Ephemeral => "🔓",
             Self::UnsignedMgmt => "‼",
             Self::ExpiringSoon { .. } => "🔐",
@@ -196,6 +233,7 @@ impl ChipState {
     pub fn css_class(&self) -> &'static str {
         match self {
             Self::Hardened { .. } => "id-chip id-chip-green",
+            Self::Unsupported => "id-chip id-chip-gray",
             Self::Ephemeral => "id-chip id-chip-yellow",
             Self::UnsignedMgmt => "id-chip id-chip-red",
             Self::ExpiringSoon { .. } => "id-chip id-chip-amber",
@@ -218,6 +256,10 @@ pub struct ChipInput<'a> {
     /// landed). When unknown, this dimension contributes nothing to
     /// the chip state — Ephemeral / Hardened are reported as-is.
     pub mgmt_signed_commands_required: Option<bool>,
+    /// Same shape as [`PostureInput::security_surface_supported`]. When
+    /// `Some(false)` the chip renders `Unsupported` instead of falling
+    /// back to `Ephemeral` (which would lie about the forwarder).
+    pub security_surface_supported: Option<bool>,
 }
 
 const EXPIRING_SOON_DAYS: u64 = 7;
@@ -225,6 +267,13 @@ const EXPIRING_SOON_DAYS: u64 = 7;
 /// Compute the chip state from the live AppCtx-shaped view. Pure
 /// function — unit-tested below.
 pub fn derive_chip_state(input: ChipInput<'_>) -> ChipState {
+    // Forwarder doesn't support the security verbs — render
+    // `Unsupported` so we don't lie about identity/cert state.
+    // This must precede Expired / UnsignedMgmt / Ephemeral so a
+    // missing cert-expiry signal doesn't falsely escalate.
+    if input.security_surface_supported == Some(false) {
+        return ChipState::Unsupported;
+    }
     // Expired wins over everything — the cert is already invalid.
     if let Some(expiry) = input.cert_valid_until_unix_s
         && let Some(now) = input.now_unix_s
@@ -282,6 +331,13 @@ pub fn derive_sec_dot(state: &ChipState) -> SecDotView {
             css_class: "sec-dot sec-dot-green",
             tooltip: "Trust posture: hardened".into(),
         },
+        ChipState::Unsupported => SecDotView {
+            glyph: "—",
+            css_class: "sec-dot sec-dot-gray",
+            tooltip: "Forwarder doesn't implement ndn-rs security/* mgmt extensions \
+                      (NFD / YaNFD); security surfaces unavailable"
+                .into(),
+        },
         ChipState::UnsignedMgmt => SecDotView {
             glyph: "🔓",
             css_class: "sec-dot sec-dot-red",
@@ -332,7 +388,7 @@ pub fn gate_should_fire(
     accepted: Option<&(String, PostureKind)>,
     forwarder_id: &str,
 ) -> bool {
-    if current.is_hardened() {
+    if current.suppresses_gate() {
         return false;
     }
     !matches!(
@@ -364,6 +420,7 @@ mod tests {
             identity_is_ephemeral: ephemeral,
             cert_valid_until_unix_s: None,
             now_unix_s: None,
+            security_surface_supported: Some(true),
         }
     }
 
@@ -391,6 +448,7 @@ mod tests {
             identity_is_ephemeral: false,
             cert_valid_until_unix_s: Some(1_700_000_000),
             now_unix_s: Some(1_700_000_000 + 5 * 86_400),
+            security_surface_supported: Some(true),
         });
         match p {
             SecurityPosture::IdentityExpired { days_ago, .. } => assert_eq!(days_ago, 5),
@@ -405,6 +463,7 @@ mod tests {
             cert_valid_until_unix_s: None,
             now_unix_s: None,
             mgmt_signed_commands_required: signed,
+            security_surface_supported: Some(true),
         }
     }
 
@@ -416,6 +475,7 @@ mod tests {
             cert_valid_until_unix_s: Some(1_700_000_000),
             now_unix_s: Some(1_700_000_000 + 3 * 86_400),
             mgmt_signed_commands_required: Some(false),
+            security_surface_supported: Some(true),
         });
         assert!(matches!(state, ChipState::Expired { days_ago: 3, .. }));
     }
@@ -446,6 +506,7 @@ mod tests {
             cert_valid_until_unix_s: Some(1_700_000_000 + 3 * 86_400),
             now_unix_s: Some(1_700_000_000),
             mgmt_signed_commands_required: Some(true),
+            security_surface_supported: Some(true),
         });
         assert!(matches!(state, ChipState::ExpiringSoon { days: 3, .. }));
     }
@@ -458,6 +519,7 @@ mod tests {
             cert_valid_until_unix_s: Some(1_700_000_000 + 90 * 86_400),
             now_unix_s: Some(1_700_000_000),
             mgmt_signed_commands_required: Some(true),
+            security_surface_supported: Some(true),
         });
         assert!(matches!(state, ChipState::Hardened { .. }));
     }
@@ -468,6 +530,7 @@ mod tests {
             ChipState::Hardened {
                 identity_name: "/lab/alice".into(),
             },
+            ChipState::Unsupported,
             ChipState::Ephemeral,
             ChipState::UnsignedMgmt,
             ChipState::ExpiringSoon {
@@ -484,6 +547,46 @@ mod tests {
             assert!(!dot.tooltip.is_empty(), "tooltip empty for {s:?}");
             assert!(dot.css_class.starts_with("sec-dot"));
         }
+    }
+
+    /// Witness: against a forwarder that DOESN'T speak ndn-rs's
+    /// `security/*` extensions (e.g. NFD / YaNFD), the chip MUST NOT
+    /// fall through to `Ephemeral` / the gate MUST NOT report
+    /// `NoIdentity`. Before the cross-forwarder fix landed, both
+    /// signals had no surface_supported axis and produced
+    /// `Ephemeral` + `NoIdentity` against an empty identity_name —
+    /// silently lying about the forwarder.
+    #[test]
+    fn unsupported_when_forwarder_lacks_security_verbs() {
+        // identity_name="" (the dashboard never populated it because
+        // /security/identity-status returned NOT_FOUND), no other
+        // signals available, security_surface_supported=Some(false).
+        let chip = derive_chip_state(ChipInput {
+            identity_name: "",
+            identity_is_ephemeral: false,
+            cert_valid_until_unix_s: None,
+            now_unix_s: None,
+            mgmt_signed_commands_required: None,
+            security_surface_supported: Some(false),
+        });
+        assert_eq!(
+            chip,
+            ChipState::Unsupported,
+            "chip must render Unsupported, not Ephemeral, against NFD/YaNFD"
+        );
+
+        let posture = derive_posture(PostureInput {
+            identity_name: "",
+            identity_is_ephemeral: false,
+            cert_valid_until_unix_s: None,
+            now_unix_s: None,
+            security_surface_supported: Some(false),
+        });
+        assert_eq!(posture, SecurityPosture::Unsupported);
+        assert!(
+            !gate_should_fire(&posture, None, "nfd"),
+            "gate must stay quiet against forwarders that don't speak our extensions"
+        );
     }
 
     #[test]

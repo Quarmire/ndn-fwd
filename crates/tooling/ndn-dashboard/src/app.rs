@@ -263,6 +263,13 @@ pub struct AppCtx {
     /// `None` until the first `policy-get` poll lands;
     /// `Some(false)` drives the UnsignedMgmt chip state.
     pub mgmt_signed_commands_required: Signal<Option<bool>>,
+    /// Does the connected forwarder implement ndn-rs's `security/*`
+    /// mgmt extensions? `None` ⇒ unknown yet; `Some(true)` ⇒ the
+    /// security probe verbs returned 2xx; `Some(false)` ⇒ they
+    /// returned 404 (NFD / YaNFD). Drives the `Unsupported`
+    /// posture/chip state so the dashboard doesn't falsely report
+    /// `NoIdentity` against cross-impl forwarders.
+    pub security_surface_supported: Signal<Option<bool>>,
     /// Full mgmt-access policy snapshot — populated from `policy-get`
     /// each desktop poll cycle. `None` until the first response lands.
     /// The §4.5 `MgmtAccessTab` reads this; `mgmt_signed_commands_required`
@@ -448,6 +455,7 @@ pub fn App() -> Element {
     let cert_valid_until_unix_s: Signal<Option<u64>> = use_signal(|| None);
     let mgmt_signed_commands_required: Signal<Option<bool>> = use_signal(|| None);
     let mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>> = use_signal(|| None);
+    let security_surface_supported: Signal<Option<bool>> = use_signal(|| None);
     let validation_stats: Signal<Option<ValidationStats>> = use_signal(|| None);
     let validation_history: Signal<VecDeque<(u64, u64)>> = use_signal(VecDeque::new);
     let trust_validation: Signal<Option<(String, TrustValidationResult)>> = use_signal(|| None);
@@ -683,6 +691,7 @@ pub fn App() -> Element {
                 cert_valid_until_unix_s,
                 mgmt_signed_commands_required,
                 mgmt_access_policy,
+                security_surface_supported,
                 validation_stats,
                 validation_history,
             )
@@ -700,7 +709,7 @@ pub fn App() -> Element {
             'session: loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, validation_stats, validation_history).await {
+                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history).await {
                             conn_state.set(ConnState::Disconnected);
                             error_msg.set(Some(e));
                             break 'session;
@@ -710,7 +719,7 @@ pub fn App() -> Element {
                         if matches!(cmd_msg, DashCmd::Reconnect) {
                             break 'session;
                         }
-                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, validation_stats, validation_history, trust_validation).await;
+                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history, trust_validation).await;
                     }
                 }
             }
@@ -1244,6 +1253,7 @@ pub fn App() -> Element {
         cert_valid_until_unix_s,
         mgmt_signed_commands_required,
         mgmt_access_policy,
+        security_surface_supported,
         validation_stats,
         validation_history,
         trust_validation,
@@ -1586,6 +1596,7 @@ async fn poll_all(
     mut cert_valid_until_unix_s: Signal<Option<u64>>,
     mut mgmt_signed_commands_required: Signal<Option<bool>>,
     mut mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
+    mut security_surface_supported: Signal<Option<bool>>,
     mut validation_stats: Signal<Option<ValidationStats>>,
     mut validation_history: Signal<VecDeque<(u64, u64)>>,
 ) -> Result<(), String> {
@@ -1729,12 +1740,22 @@ async fn poll_all(
     if let Ok(r) = client.security_schema_list().await {
         schema_rules.set(SchemaRuleInfo::parse_list(&r.status_text));
     }
-    // Identity status — works even when router uses an ephemeral key (no PIB).
+    // Identity status — works even when router uses an ephemeral key
+    // (no PIB). Also functions as the probe for ndn-rs's security/*
+    // mgmt extensions: a 2xx response ⇒ the forwarder speaks them;
+    // a 404 NOT_FOUND ⇒ a cross-impl forwarder (NFD / YaNFD) that
+    // doesn't. The chip + gate degrade to the `Unsupported` posture
+    // when this signal is `Some(false)` (see `security_state.rs`).
     if let Ok(r) = client.security_identity_status().await {
-        let (name, ephemeral, pib) = parse_identity_status(&r.status_text);
-        identity_name.set(name);
-        identity_is_ephemeral.set(ephemeral);
-        identity_pib_path.set(pib);
+        if r.is_ok() {
+            let (name, ephemeral, pib) = parse_identity_status(&r.status_text);
+            identity_name.set(name);
+            identity_is_ephemeral.set(ephemeral);
+            identity_pib_path.set(pib);
+            security_surface_supported.set(Some(true));
+        } else if r.status_code == ndn_config::control_response::status::NOT_FOUND {
+            security_surface_supported.set(Some(false));
+        }
     }
     // Discovery / routing status — best-effort (older routers won't have these).
     if let Ok(r) = client.discovery_status().await {
@@ -1948,6 +1969,7 @@ async fn run_cmd(
     cert_valid_until_unix_s: Signal<Option<u64>>,
     mgmt_signed_commands_required: Signal<Option<bool>>,
     mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
+    security_surface_supported: Signal<Option<bool>>,
     validation_stats: Signal<Option<ValidationStats>>,
     validation_history: Signal<VecDeque<(u64, u64)>>,
     mut trust_validation: Signal<Option<(String, TrustValidationResult)>>,
@@ -2109,6 +2131,7 @@ async fn run_cmd(
                         cert_valid_until_unix_s,
                         mgmt_signed_commands_required,
                         mgmt_access_policy,
+                        security_surface_supported,
                         validation_stats,
                         validation_history,
                         trust_validation,
@@ -2336,6 +2359,7 @@ async fn run_cmd(
                 cert_valid_until_unix_s,
                 mgmt_signed_commands_required,
                 mgmt_access_policy,
+                security_surface_supported,
                 validation_stats,
                 validation_history,
             )

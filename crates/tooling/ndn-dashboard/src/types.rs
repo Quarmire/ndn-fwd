@@ -1384,3 +1384,197 @@ impl From<ndn_config::RibEntry> for RibEntryInfo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── TrustValidationResult — §7 portable JSON shape ─────────────
+
+    /// Valid verdict is a bare `"Valid"` string per serde's
+    /// externally-tagged enum default. Optional list fields default
+    /// to `[]` when absent so the dashboard renders cleanly against
+    /// a stub forwarder that only emits the verdict.
+    #[test]
+    fn trust_validation_result_valid_minimal() {
+        let body = r#"{"verdict":"Valid"}"#;
+        let r = TrustValidationResult::from_json(body).expect("valid parse");
+        assert!(r.verdict.is_valid());
+        assert!(r.chain.is_empty());
+        assert!(r.schema_rules_applied.is_empty());
+        assert!(r.failure_diagnosis.is_none());
+        assert!(r.challenge_attestations.is_empty());
+    }
+
+    /// Invalid verdict is `{ "Invalid": { failed_at, reason } }`. The
+    /// dashboard surfaces both fields in the §4.2 VerdictBox.
+    #[test]
+    fn trust_validation_result_invalid_with_diagnosis() {
+        let body = r#"{
+            "verdict": { "Invalid": { "failed_at": "/lab/x", "reason": "stub" } },
+            "chain": [],
+            "schema_rules_applied": [],
+            "failure_diagnosis": { "kind": "ChainNotResolved", "hint": "install anchor" },
+            "challenge_attestations": []
+        }"#;
+        let r = TrustValidationResult::from_json(body).expect("invalid parse");
+        assert!(!r.verdict.is_valid());
+        match r.verdict {
+            TrustVerdict::Invalid { failed_at, reason } => {
+                assert_eq!(failed_at, "/lab/x");
+                assert_eq!(reason, "stub");
+            }
+            _ => panic!("expected Invalid"),
+        }
+        let diag = r.failure_diagnosis.expect("diagnosis present");
+        assert_eq!(diag.kind, "ChainNotResolved");
+        assert!(diag.hint.contains("install"));
+    }
+
+    /// Chain steps + schema rules applied round-trip cleanly when
+    /// the forwarder's validator-trace API lands. Pins the §7 field
+    /// names so the wire stays stable as the chain walk fills in.
+    #[test]
+    fn trust_validation_result_full_chain() {
+        let body = r#"{
+            "verdict": "Valid",
+            "chain": [
+                { "name": "/lab/alice/KEY/k1/router-ca/v=1", "signed_by": "/lab/router-ca/KEY/k0" },
+                { "name": "/lab/router-ca/KEY/k0", "signed_by": "/lab/router-ca/KEY/k0" }
+            ],
+            "schema_rules_applied": [
+                { "data_pattern": "/lab/*/KEY/*", "key_pattern": "/lab/router-ca/KEY/*", "matches": true }
+            ]
+        }"#;
+        let r = TrustValidationResult::from_json(body).expect("full parse");
+        assert_eq!(r.chain.len(), 2);
+        assert_eq!(r.chain[0].signed_by, "/lab/router-ca/KEY/k0");
+        assert_eq!(r.schema_rules_applied.len(), 1);
+        assert!(r.schema_rules_applied[0].matches);
+    }
+
+    /// Unknown top-level fields must not break the parse — the wire
+    /// is forward-compatible. Server may add new fields in future;
+    /// older dashboards must keep working against newer forwarders.
+    #[test]
+    fn trust_validation_result_unknown_fields_dont_fail() {
+        let body = r#"{
+            "verdict": "Valid",
+            "chain": [],
+            "future_field_xyz": [1, 2, 3],
+            "another_unknown": { "nested": true }
+        }"#;
+        let r = TrustValidationResult::from_json(body).expect("ignores extras");
+        assert!(r.verdict.is_valid());
+    }
+
+    // ── MgmtAccessPolicySnapshot — §4.5 JSON shape ─────────────────
+
+    #[test]
+    fn mgmt_access_policy_round_trip_through_json() {
+        let p = MgmtAccessPolicySnapshot {
+            ephemeral_allowed: true,
+            localhop_disabled: false,
+            replay_window_secs: 120,
+            require_signed_commands: true,
+            validator_anchor: Some("/lab/router-ca/KEY/k0".into()),
+        };
+        let json = p.to_json();
+        let parsed = MgmtAccessPolicySnapshot::from_json(&json).expect("round-trip");
+        assert_eq!(parsed, p);
+    }
+
+    /// Forward-compat: unknown fields the server adds in future must
+    /// not break the parse. Field order in JSON is not load-bearing.
+    #[test]
+    fn mgmt_access_policy_unknown_fields_dont_fail() {
+        let body = r#"{
+            "ephemeral_allowed": false,
+            "localhop_disabled": true,
+            "replay_window_secs": 120,
+            "require_signed_commands": true,
+            "validator_anchor": "/lab/router-ca/KEY/k0",
+            "new_field_v2": "ignored",
+            "another": 42
+        }"#;
+        let p = MgmtAccessPolicySnapshot::from_json(body).expect("parses");
+        assert!(p.require_signed_commands);
+        assert!(p.localhop_disabled);
+        assert_eq!(p.replay_window_secs, 120);
+    }
+
+    /// `validator_anchor: null` must parse to `None` so the dashboard
+    /// renders the "no anchor configured" state correctly.
+    #[test]
+    fn mgmt_access_policy_anchor_null_becomes_none() {
+        let body = r#"{
+            "ephemeral_allowed": false,
+            "localhop_disabled": true,
+            "replay_window_secs": 120,
+            "require_signed_commands": true,
+            "validator_anchor": null
+        }"#;
+        let p = MgmtAccessPolicySnapshot::from_json(body).expect("parses");
+        assert!(p.validator_anchor.is_none());
+    }
+
+    // ── ValidationStats — §4.3 LiveValidationChart feed ────────────
+
+    #[test]
+    fn validation_stats_parses_all_fields() {
+        let text = "validator_present=true\nverified_per_sec=42\nrejected_per_sec=7\n";
+        let stats = ValidationStats::parse(text);
+        assert!(stats.validator_present);
+        assert_eq!(stats.verified_per_sec, 42);
+        assert_eq!(stats.rejected_per_sec, 7);
+    }
+
+    #[test]
+    fn validation_stats_handles_missing_lines() {
+        // v1 forwarders emit `validator_present=false` + zero
+        // counters; older builds may omit lines entirely. Either
+        // way we degrade to the zero default rather than failing.
+        let text = "validator_present=false\n";
+        let stats = ValidationStats::parse(text);
+        assert!(!stats.validator_present);
+        assert_eq!(stats.verified_per_sec, 0);
+        assert_eq!(stats.rejected_per_sec, 0);
+    }
+
+    #[test]
+    fn validation_stats_tolerates_unknown_keys() {
+        let text = "validator_present=true\n\
+                    verified_per_sec=10\n\
+                    future_key=xyz\n\
+                    rejected_per_sec=2\n";
+        let stats = ValidationStats::parse(text);
+        assert_eq!(stats.verified_per_sec, 10);
+        assert_eq!(stats.rejected_per_sec, 2);
+    }
+
+    // ── SecurityKeyInfo helpers — §4.1 identity grouping ───────────
+
+    #[test]
+    fn security_key_info_identity_and_key_id() {
+        let k = SecurityKeyInfo {
+            name: "/lab/alice/KEY/k1".into(),
+            has_cert: true,
+            valid_until: "never".into(),
+        };
+        assert_eq!(k.identity_name(), "/lab/alice");
+        assert_eq!(k.key_id(), "k1");
+    }
+
+    #[test]
+    fn security_key_info_handles_missing_key_component() {
+        // Defensive: the wire shouldn't emit such entries, but if it
+        // does the helpers degrade gracefully.
+        let k = SecurityKeyInfo {
+            name: "/lab/alice".into(),
+            has_cert: false,
+            valid_until: "-".into(),
+        };
+        assert_eq!(k.identity_name(), "/lab/alice");
+        assert_eq!(k.key_id(), "");
+    }
+}

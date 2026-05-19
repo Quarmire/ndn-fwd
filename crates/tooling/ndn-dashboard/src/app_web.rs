@@ -95,6 +95,7 @@ pub fn AppWeb() -> Element {
     let cert_valid_until_unix_s: Signal<Option<u64>> = use_signal(|| None);
     let mgmt_signed_commands_required: Signal<Option<bool>> = use_signal(|| None);
     let mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>> = use_signal(|| None);
+    let security_surface_supported: Signal<Option<bool>> = use_signal(|| None);
     let validation_stats: Signal<Option<ValidationStats>> = use_signal(|| None);
     let validation_history: Signal<VecDeque<(u64, u64)>> = use_signal(VecDeque::new);
     let trust_validation: Signal<Option<(String, TrustValidationResult)>> = use_signal(|| None);
@@ -216,6 +217,7 @@ pub fn AppWeb() -> Element {
                 &cert_valid_until_unix_s,
                 &mgmt_signed_commands_required,
                 &mgmt_access_policy,
+                &security_surface_supported,
                 &validation_stats,
                 &validation_history,
             )
@@ -267,6 +269,7 @@ pub fn AppWeb() -> Element {
                     &cert_valid_until_unix_s,
                     &mgmt_signed_commands_required,
                     &mgmt_access_policy,
+                    &security_surface_supported,
                     &validation_stats,
                     &validation_history,
                 )
@@ -310,6 +313,7 @@ pub fn AppWeb() -> Element {
         cert_valid_until_unix_s,
         mgmt_signed_commands_required,
         mgmt_access_policy,
+        security_surface_supported,
         validation_stats,
         validation_history,
         trust_validation,
@@ -507,6 +511,7 @@ async fn poll_all_web(
     cert_valid_until_unix_s: &Signal<Option<u64>>,
     mgmt_signed_commands_required: &Signal<Option<bool>>,
     mgmt_access_policy: &Signal<Option<MgmtAccessPolicySnapshot>>,
+    security_surface_supported: &Signal<Option<bool>>,
     validation_stats: &Signal<Option<ValidationStats>>,
     validation_history: &Signal<VecDeque<(u64, u64)>>,
 ) -> Result<(), String> {
@@ -616,16 +621,26 @@ async fn poll_all_web(
         let mut sk = *security_keys;
         sk.set(keys);
     }
-    if let Ok(resp) = client.security_identity_status().await
-        && resp.is_ok()
-    {
-        let (name, ephemeral, pib) = parse_identity_status_web(&resp.status_text);
-        let mut n = *identity_name;
-        n.set(name);
-        let mut e = *identity_is_ephemeral;
-        e.set(ephemeral);
-        let mut p = *identity_pib_path;
-        p.set(pib);
+    // Identity status doubles as the security-extension probe — see
+    // `app.rs`'s desktop counterpart for the rationale. The web path
+    // mirrors it bit-for-bit: 2xx ⇒ supported, 404 ⇒ NFD-style
+    // cross-impl forwarder, other ⇒ leave the signal at its prior
+    // value.
+    if let Ok(resp) = client.security_identity_status().await {
+        if resp.is_ok() {
+            let (name, ephemeral, pib) = parse_identity_status_web(&resp.status_text);
+            let mut n = *identity_name;
+            n.set(name);
+            let mut e = *identity_is_ephemeral;
+            e.set(ephemeral);
+            let mut p = *identity_pib_path;
+            p.set(pib);
+            let mut s = *security_surface_supported;
+            s.set(Some(true));
+        } else if resp.status_code == ndn_config::control_response::status::NOT_FOUND {
+            let mut s = *security_surface_supported;
+            s.set(Some(false));
+        }
     }
     if let Ok(resp) = client.security_policy_get().await
         && resp.is_ok()

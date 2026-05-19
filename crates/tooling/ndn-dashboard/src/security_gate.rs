@@ -61,11 +61,13 @@ pub fn SecurityGate() -> Element {
         .duration_since(web_time::UNIX_EPOCH)
         .ok()
         .map(|d| d.as_secs());
+    let surface_supported = *ctx.security_surface_supported.read();
     let posture = derive_posture(PostureInput {
         identity_name,
         identity_is_ephemeral,
         cert_valid_until_unix_s: cert_expiry,
         now_unix_s: now,
+        security_surface_supported: surface_supported,
     });
 
     let forwarder_id = current_forwarder_id();
@@ -93,7 +95,11 @@ pub fn SecurityGate() -> Element {
                     PostureKind::TrustSchemaWeakened => rsx! {
                         TrustSchemaWeakenedPanel { posture: posture.clone() }
                     },
-                    PostureKind::Hardened => rsx! {},
+                    // The gate short-circuits before reaching here for
+                    // Hardened / Unsupported (see `suppresses_gate`);
+                    // these arms are unreachable but the exhaustive
+                    // match keeps `PostureKind` evolution safe.
+                    PostureKind::Hardened | PostureKind::Unsupported => rsx! {},
                 }
             }
         }

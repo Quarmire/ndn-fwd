@@ -3270,3 +3270,240 @@ const ODD_WORDS: [&str; 32] = [
     "Umber", "Verdant", "Willow", "Xenon", "Yarrow", "Zephyr", "Astral", "Briar", "Cinder",
     "Drake", "Equinox", "Frost",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::security_chains::{AuditLogEntry, AuditOutcome};
+
+    fn mk(ts_s: u64, outcome: AuditOutcome, subject: &str, detail: &str) -> AuditLogEntry {
+        AuditLogEntry {
+            ts_unix_ns: ts_s * 1_000_000_000,
+            outcome,
+            subject: subject.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn sample() -> Vec<AuditLogEntry> {
+        vec![
+            mk(
+                1_700_000_000,
+                AuditOutcome::Accepted,
+                "security/policy-set",
+                "initiator=/lab/alice/KEY/k1 policy_content_hash=ab12",
+            ),
+            mk(
+                1_700_000_100,
+                AuditOutcome::Rejected,
+                "security/anchor-remove",
+                "by=/lab/bob/KEY/k0 reason=sig-invalid",
+            ),
+            mk(
+                1_700_000_200,
+                AuditOutcome::Info,
+                "rib/register",
+                "name=/lab/alice/data face=4 cost=0",
+            ),
+        ]
+    }
+
+    // ── §4.6 filter — subject substring, outcome, time range ───────
+
+    #[test]
+    fn filter_subject_substring_is_case_insensitive() {
+        let s = sample();
+        let f = filter_entries(&s, "POLICY-SET", OutcomeFilter::Any, None, None);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].subject, "security/policy-set");
+    }
+
+    #[test]
+    fn filter_outcome_dropdown_pins_each_variant() {
+        let s = sample();
+        assert_eq!(
+            filter_entries(&s, "", OutcomeFilter::Accepted, None, None).len(),
+            1
+        );
+        assert_eq!(
+            filter_entries(&s, "", OutcomeFilter::Rejected, None, None).len(),
+            1
+        );
+        assert_eq!(
+            filter_entries(&s, "", OutcomeFilter::Info, None, None).len(),
+            1
+        );
+        assert_eq!(
+            filter_entries(&s, "", OutcomeFilter::Warning, None, None).len(),
+            0
+        );
+        assert_eq!(
+            filter_entries(&s, "", OutcomeFilter::Any, None, None).len(),
+            3
+        );
+    }
+
+    #[test]
+    fn filter_time_range_inclusive_at_boundaries() {
+        let s = sample();
+        // since == an entry's ts → that entry IS included.
+        let f = filter_entries(&s, "", OutcomeFilter::Any, Some(1_700_000_100), None);
+        assert_eq!(f.len(), 2);
+        // until == an entry's ts → that entry IS included.
+        let f = filter_entries(&s, "", OutcomeFilter::Any, None, Some(1_700_000_100));
+        assert_eq!(f.len(), 2);
+        // narrow window.
+        let f = filter_entries(
+            &s,
+            "",
+            OutcomeFilter::Any,
+            Some(1_700_000_100),
+            Some(1_700_000_100),
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].subject, "security/anchor-remove");
+    }
+
+    #[test]
+    fn parse_unix_s_blank_is_none() {
+        assert_eq!(parse_unix_s(""), None);
+        assert_eq!(parse_unix_s("   "), None);
+        assert_eq!(parse_unix_s("notanumber"), None);
+        assert_eq!(parse_unix_s(" 1700000000 "), Some(1_700_000_000));
+    }
+
+    // ── §11.3 export scrub determinism ─────────────────────────────
+
+    #[test]
+    fn export_scrub_same_inputs_same_output() {
+        let s = sample();
+        let a = serialize_export(&s, true, false);
+        let b = serialize_export(&s, true, false);
+        assert_eq!(a, b, "deterministic export — no random salts");
+        let c = serialize_export(&s, false, true);
+        let d = serialize_export(&s, false, true);
+        assert_eq!(c, d);
+    }
+
+    #[test]
+    fn export_scrub_replace_with_stable_hashes_removes_names() {
+        let s = sample();
+        let scrubbed = serialize_export(&s, false, true);
+        // No raw identity names leak when include_names=false +
+        // hash_names=true.
+        assert!(!scrubbed.contains("/lab/alice/KEY/k1"));
+        assert!(!scrubbed.contains("/lab/bob/KEY/k0"));
+        // Detail tokens that pointed at /-prefixed names become hashes.
+        assert!(scrubbed.contains("hash="));
+    }
+
+    #[test]
+    fn export_scrub_include_with_hash_preserves_correlation() {
+        // The (include=true, hash=true) combo keeps both name +
+        // hash in-place so the operator can replay the audit log
+        // with the originals and still cross-reference shared
+        // partial reports.
+        let s = sample();
+        let body = serialize_export(&s, true, true);
+        assert!(body.contains("/lab/alice/KEY/k1"));
+        assert!(body.contains("(hash="));
+    }
+
+    #[test]
+    fn export_scrub_drop_entirely_when_both_false() {
+        let s = sample();
+        let body = serialize_export(&s, false, false);
+        assert!(!body.contains("/lab/alice"));
+        assert!(body.contains("<scrubbed>"));
+    }
+
+    #[test]
+    fn stable_hash_is_deterministic() {
+        let h1 = stable_hash("/lab/alice/KEY/k1");
+        let h2 = stable_hash("/lab/alice/KEY/k1");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16, "first 8 bytes as hex");
+        // Different inputs produce different hashes (collision
+        // resistance is the underlying SHA-256's job; this just
+        // smoke-tests the helper).
+        assert_ne!(h1, stable_hash("/lab/bob/KEY/k0"));
+    }
+
+    // ── §11.4 TOFU promote — fingerprint parsing + word-pair ───────
+
+    #[test]
+    fn parse_fingerprint_strips_separators() {
+        let cases = [
+            ("abcd1234", vec![0xab, 0xcd, 0x12, 0x34]),
+            ("ab:cd:12:34", vec![0xab, 0xcd, 0x12, 0x34]),
+            ("ab-cd-12-34", vec![0xab, 0xcd, 0x12, 0x34]),
+            ("ab cd  12\t34\n", vec![0xab, 0xcd, 0x12, 0x34]),
+            ("ABCD1234", vec![0xab, 0xcd, 0x12, 0x34]),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_fingerprint_hex(input),
+                Some(expected.clone()),
+                "input: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_fingerprint_rejects_odd_or_nonhex() {
+        // Odd length.
+        assert_eq!(parse_fingerprint_hex("abc"), None);
+        // Non-hex chars.
+        assert_eq!(parse_fingerprint_hex("ghij"), None);
+        assert_eq!(parse_fingerprint_hex("aXcd"), None);
+        // Empty.
+        assert_eq!(parse_fingerprint_hex(""), None);
+        // Just whitespace.
+        assert_eq!(parse_fingerprint_hex("  "), None);
+    }
+
+    #[test]
+    fn fingerprint_words_is_deterministic_and_uses_even_odd_lists() {
+        let bytes = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let w1 = fingerprint_words(&bytes);
+        let w2 = fingerprint_words(&bytes);
+        assert_eq!(w1, w2);
+        // Even positions pick from EVEN_WORDS (lowercase) and odd
+        // positions pick from ODD_WORDS (Capitalised). With all
+        // zeros we get the [0]th of each.
+        assert_eq!(
+            w1,
+            format!(
+                "{} {} {} {} {} {}",
+                EVEN_WORDS[0],
+                ODD_WORDS[0],
+                EVEN_WORDS[0],
+                ODD_WORDS[0],
+                EVEN_WORDS[0],
+                ODD_WORDS[0]
+            )
+        );
+
+        // Different bytes → different words.
+        let bytes2 = vec![0x01, 0x01];
+        let w3 = fingerprint_words(&bytes2);
+        assert_ne!(w1, w3);
+
+        // Bytes shorter than 6 still render (truncated, not padded).
+        let bytes3 = vec![0xff, 0xff];
+        let w4 = fingerprint_words(&bytes3);
+        assert!(!w4.contains('…'), "no ellipsis when bytes <= 6");
+
+        // Bytes longer than 6 get an ellipsis suffix.
+        let bytes5 = vec![0u8; 32];
+        let w5 = fingerprint_words(&bytes5);
+        assert!(w5.ends_with('…'));
+    }
+
+    #[test]
+    fn group_hex_splits_into_4char_groups() {
+        assert_eq!(group_hex("abcd1234"), "abcd 1234");
+        assert_eq!(group_hex("ab"), "ab");
+        assert_eq!(group_hex("abcd12345678"), "abcd 1234 5678");
+    }
+}
