@@ -50,15 +50,17 @@ pub fn SecurityGate() -> Element {
     let identity_name: &str = identity_name_handle.as_str();
     let identity_is_ephemeral: bool = *identity_is_ephemeral_handle;
     let cert_expiry = *ctx.cert_valid_until_unix_s.read();
-    // Native wall clock; wasm32 stays None (matches the chip's
-    // wasm-side stub until web_time is threaded — Phase B).
+    // Wall clock — native std on desktop, web_time on wasm32.
     #[cfg(not(target_arch = "wasm32"))]
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|d| d.as_secs());
     #[cfg(target_arch = "wasm32")]
-    let now: Option<u64> = None;
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs());
     let posture = derive_posture(PostureInput {
         identity_name,
         identity_is_ephemeral,
@@ -66,10 +68,12 @@ pub fn SecurityGate() -> Element {
         now_unix_s: now,
     });
 
-    let accepted = *GATE_ACCEPTED.read();
-    if !gate_should_fire(&posture, accepted) {
+    let forwarder_id = current_forwarder_id();
+    let accepted_handle = GATE_ACCEPTED.read();
+    if !gate_should_fire(&posture, accepted_handle.as_ref(), &forwarder_id) {
         return rsx! {};
     }
+    drop(accepted_handle);
 
     rsx! {
         // Backdrop — clicks pass through to nothing (modal; no
@@ -149,7 +153,7 @@ fn NoIdentityPanel() -> Element {
                     anyone with socket/WebSocket access can issue mgmt commands.",
             checked: skip_acknowledged,
             on_skip: move |_| {
-                accept(PostureKind::NoIdentity);
+                accept(current_forwarder_id(), PostureKind::NoIdentity);
                 skip_acknowledged.set(false);
                 push_toast(
                     "Continuing in ephemeral mode. Restart the dashboard to be reminded.",
@@ -208,7 +212,7 @@ fn IdentityExpiredPanel(posture: SecurityPosture) -> Element {
             label: "Continue with the expired cert (testing only).".to_string(),
             checked: skip_acknowledged,
             on_skip: move |_| {
-                accept(PostureKind::IdentityExpired);
+                accept(current_forwarder_id(), PostureKind::IdentityExpired);
                 skip_acknowledged.set(false);
                 push_toast(
                     "Continuing with an expired cert.",
@@ -269,7 +273,7 @@ fn TrustSchemaWeakenedPanel(posture: SecurityPosture) -> Element {
             label: "Accept the new schema — I made these changes.".to_string(),
             checked: skip_acknowledged,
             on_skip: move |_| {
-                accept(PostureKind::TrustSchemaWeakened);
+                accept(current_forwarder_id(), PostureKind::TrustSchemaWeakened);
                 skip_acknowledged.set(false);
                 push_toast(
                     "Schema change accepted. The new anchor set is now baseline.",
@@ -355,8 +359,8 @@ fn SkipRow(label: String, checked: Signal<bool>, on_skip: EventHandler<()>) -> E
 
 // ── Navigation glue ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy)]
-enum SecurityTab {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityTab {
     Identities,
     Anchors,
     Ca,
@@ -364,12 +368,45 @@ enum SecurityTab {
     Audit,
 }
 
-fn jump_to_security_view(_tab: SecurityTab) {
-    // Phase B will plumb a `ACTIVE_SECURITY_TAB` signal so the gate
-    // deep-links into a specific tab. For v1 we just open the
-    // Security view; the user picks the tab. Tracked in the kickoff
-    // Phase B "Mgmt access tab" + "Identities tab" entries.
+impl SecurityTab {
+    /// Numeric tab id matching `views::security`'s constants. Kept
+    /// inside the security module so the constants stay private to
+    /// the view file; the gate only needs to write the right number.
+    pub fn tab_id(self) -> u8 {
+        match self {
+            // Mirror `views::security::TAB_*` constants. Keep in sync.
+            Self::Identities => 0,
+            Self::Anchors => 1, // Trust & Schema combined tab
+            Self::Schema => 1,
+            Self::Ca => 4,
+            Self::Audit => 8,
+        }
+    }
+}
+
+/// Stable identifier for the currently-connected forwarder, used as
+/// the §2 gate-acceptance key (so accepting `NoIdentity` on
+/// `ndn-fwd` doesn't suppress the gate on `nfd`). Desktop reads the
+/// selected `ForwarderProfile`; web uses a per-page constant since
+/// the web build only connects to one URL per session.
+#[cfg(feature = "desktop")]
+fn current_forwarder_id() -> String {
+    crate::forwarder_profile::selected_profile()
+        .machine_name()
+        .to_owned()
+}
+
+#[cfg(not(feature = "desktop"))]
+fn current_forwarder_id() -> String {
+    "web-default".to_owned()
+}
+
+fn jump_to_security_view(tab: SecurityTab) {
     *crate::app_shared::ACTIVE_VIEW.write() = View::Security;
+    // Deep-link into the requested tab. Security() reads
+    // ACTIVE_SECURITY_TAB on first paint and on every change so the
+    // gate's [Go to X] buttons land where the user expects.
+    *crate::app_shared::ACTIVE_SECURITY_TAB.write() = Some(tab.tab_id());
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

@@ -57,6 +57,11 @@ pub static CONFIG_PRESETS: GlobalSignal<Vec<(String, String)>> = Signal::global(
 /// Currently active view — writable from anywhere (tray, tool shortcuts, etc.).
 pub static ACTIVE_VIEW: GlobalSignal<crate::views::View> =
     Signal::global(|| crate::views::View::Overview);
+// `ACTIVE_SECURITY_TAB` lives in `app_shared` (see that module's
+// definition). It's reachable from both desktop and web reader sites
+// via `crate::app_shared::` without a re-export here — keeping the
+// duplication discipline matched against the rest of the
+// app/app_shared split.
 
 /// Dark mode toggle — `true` = dark (default), `false` = light.
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);

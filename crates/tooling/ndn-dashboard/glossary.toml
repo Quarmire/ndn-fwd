@@ -93,3 +93,19 @@ term = "Signed Data chain"
 gloss = "A sequence of signed NDN Data packets linked by content_hash, indexed by typed SequenceNumber name components."
 extended = "Dashboard primitive backing both the audit log and the schema journal; forward-compatible with substrate-replicated chains."
 wiki_anchor = "signed-data-chain"
+
+[[entries]]
+term = "Signed Data"
+gloss = "An NDN Data packet carrying a SignatureValue plus a KeyLocator that points at the signing key's cert."
+wiki_anchor = "signed-data"
+
+[[entries]]
+term = "Signed Interest"
+gloss = "An NDN Interest carrying a SignatureValue + SignatureTime over its name, used for management commands and other authenticated actions."
+wiki_anchor = "signed-interests"
+
+[[entries]]
+term = "TOFU"
+gloss = "Trust-on-first-use — accept the fingerprint once after out-of-band verification, then refuse silent changes."
+extended = "Same trust model SSH host keys use; the dashboard journals the decision so it's reviewable later."
+wiki_anchor = "tofu"

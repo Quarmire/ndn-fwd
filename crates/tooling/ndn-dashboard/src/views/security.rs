@@ -39,6 +39,18 @@ pub fn Security() -> Element {
     let mut active_tab: Signal<u8> = use_signal(|| TAB_IDENTITIES);
     let new_key_name: Signal<String> = use_signal(String::new);
 
+    // §2 gate deep-link consumer. When the gate's [Go to X] buttons
+    // wrote a target tab, switch to it once and clear the signal so
+    // subsequent user-driven tab clicks aren't overridden. Runs each
+    // render — cheap, and a no-op when ACTIVE_SECURITY_TAB is None.
+    {
+        let pending = *crate::app_shared::ACTIVE_SECURITY_TAB.read();
+        if let Some(tab_id) = pending {
+            active_tab.set(tab_id);
+            *crate::app_shared::ACTIVE_SECURITY_TAB.write() = None;
+        }
+    }
+
     let tabs: &[(&str, u8)] = &[
         ("Identities", TAB_IDENTITIES),
         ("Trust & Schema", TAB_TRUST),
@@ -193,7 +205,11 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
                         EduGloss { term: "Cert" }
                     }
                     div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
-                        "Each identity owns one or more keys; each key may carry a certificate that binds it to a validity window. Click a node on the left to inspect its keys and certs."
+                        "Each "
+                        EduGloss { term: "Identity" }
+                        " owns one or more keys; each key may carry a "
+                        EduGloss { term: "Cert" }
+                        " that binds it to a validity window. Click a node on the left to inspect its keys and certs."
                     }
                 }
             }
@@ -864,7 +880,9 @@ fn TrustSchemaList(
 
             if rules.is_empty() {
                 div { class: "empty",
-                    "No trust schema rules configured. All signed Data is accepted (security profile = disabled)."
+                    "No trust schema rules configured. All "
+                    EduGloss { term: "Signed Data" }
+                    " is accepted (security profile = disabled)."
                 }
             } else if !raw_mode {
                 // Guided rendering — table per §11.6 default.
@@ -1975,7 +1993,7 @@ fn MgmtAccessEditor(
             BoolRow {
                 label: "Require signed commands",
                 checked: view.require_signed_commands,
-                description: "When ON, every management Interest must carry a SignatureValue verified by the validator. When OFF (default for new forwarders) anyone with WebSocket access can issue commands.",
+                description: "When ON, every management Interest must be a Signed Interest verified by the validator. When OFF (default for new forwarders) anyone with WebSocket access can issue commands.",
                 consequence: "Turning this OFF allows unsigned mgmt commands on this forwarder.",
                 on_change: move |v| on_toggle_require_signed.call(v),
             }
@@ -2238,7 +2256,9 @@ fn VerdictBox(verdict: TrustVerdict) -> Element {
                     "✓ Valid"
                 }
                 div { style: "font-size:11px;color:var(--text-muted);margin-top:4px;",
-                    "The cert chains back to an installed trust anchor and every link satisfies the active schema rules."
+                    "The cert chains back to an installed "
+                    EduGloss { term: "Trust anchor" }
+                    " and every link satisfies the active schema rules."
                 }
             }
         },
@@ -2825,12 +2845,60 @@ fn copy_to_clipboard(s: &str) {
 }
 
 #[cfg(not(feature = "desktop"))]
-fn copy_to_clipboard(_s: &str) {
-    // Web build: clipboard access on wasm32 requires async + a
-    // Permissions prompt the dashboard hasn't yet shimmed. The
-    // export modal still renders the body in a <pre> so the
-    // operator can hand-select-and-copy until the wasm clipboard
-    // path lands.
+fn copy_to_clipboard(s: &str) {
+    // Wasm32: use the browser's async Clipboard API via
+    // `navigator.clipboard.writeText`. Fires a permission prompt on
+    // first call (or no-ops silently in restricted contexts like
+    // file://). The export modal also renders the body in a <pre>
+    // so the operator can hand-select-and-copy if the prompt is
+    // declined.
+    let s = s.to_owned();
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        // `Navigator.clipboard` isn't in web-sys's default feature
+        // set on every version, so reach for it via the JS reflect
+        // API: window.navigator.clipboard.writeText(s).
+        let nav = window.navigator();
+        let nav_js: wasm_bindgen::JsValue = nav.into();
+        let clipboard =
+            match js_sys::Reflect::get(&nav_js, &wasm_bindgen::JsValue::from_str("clipboard")) {
+                Ok(v) if !v.is_undefined() && !v.is_null() => v,
+                _ => {
+                    tracing::warn!(
+                        target: "dashboard.security",
+                        "clipboard API unavailable — falling back to render-only"
+                    );
+                    return;
+                }
+            };
+        let write_fn =
+            match js_sys::Reflect::get(&clipboard, &wasm_bindgen::JsValue::from_str("writeText")) {
+                Ok(v) if v.is_function() => v,
+                _ => return,
+            };
+        let func: js_sys::Function = write_fn.into();
+        let promise = match func.call1(&clipboard, &wasm_bindgen::JsValue::from_str(&s)) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    error = ?e,
+                    "clipboard writeText invocation failed"
+                );
+                return;
+            }
+        };
+        let promise: js_sys::Promise = promise.into();
+        if let Err(e) = wasm_bindgen_futures::JsFuture::from(promise).await {
+            tracing::warn!(
+                target: "dashboard.security",
+                error = ?e,
+                "clipboard writeText rejected (permission denied or restricted context)"
+            );
+        }
+    });
 }
 
 // ── §4.4 CaList — Trusted tier ──────────────────────────────────────────────
@@ -2884,9 +2952,9 @@ fn TrustedCaList(
 
             if trusted_count == 0 {
                 div { class: "empty",
-                    "No trusted CAs configured. Run the forwarder with a trust anchor (see "
+                    "No trusted CAs configured. Run the forwarder with a "
                     EduGloss { term: "Trust anchor" }
-                    " in the docs) or promote a discovered CA below."
+                    " or promote a discovered CA below."
                 }
             }
         }
@@ -3004,7 +3072,8 @@ fn PromoteToTrustedModal(
                     }
                 }
                 div { style: "font-size:11px;color:var(--text-muted);margin-bottom:14px;line-height:1.5;",
-                    "Trust-on-first-connect (§11.4) — verify the fingerprint via an out-of-band channel (a printed card, a signed Slack message, a phone call) before promoting. The decision is appended to the dashboard's "
+                    EduGloss { term: "TOFU" }
+                    " ceremony (§11.4) — verify the fingerprint via an out-of-band channel (a printed card, a signed Slack message, a phone call) before promoting. The decision is appended to the dashboard's "
                     EduGloss { term: "Schema journal" }
                     ", so future audits can replay what you trusted and when."
                 }

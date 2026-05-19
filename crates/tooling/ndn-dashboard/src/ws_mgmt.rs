@@ -249,6 +249,44 @@ impl WsMgmtClient {
     pub async fn list_strategy(&mut self) -> Result<MgmtResponse> {
         self.send_cmd("strategy-choice", "list", None).await
     }
+
+    // ── Security reads (kickoff cross-cutting Phase B item) ────────────
+    //
+    // Auth-exempt verbs per `is_public_dataset_verb` in ndn-mgmt; the
+    // web build polls these alongside status/faces/fib so the chip,
+    // gate, and security tabs reach feature parity with desktop.
+
+    pub async fn security_identity_list(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("security", "identity-list", None).await
+    }
+    pub async fn security_identity_status(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("security", "identity-status", None).await
+    }
+    pub async fn security_anchor_list(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("security", "anchor-list", None).await
+    }
+    pub async fn security_schema_list(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("security", "schema-list", None).await
+    }
+    pub async fn security_ca_info(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("security", "ca-info", None).await
+    }
+    pub async fn security_policy_get(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("security", "policy-get", None).await
+    }
+    pub async fn security_validation_stats(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("security", "validation-stats", None).await
+    }
+    pub async fn security_validate(&mut self, target: &str) -> Result<MgmtResponse> {
+        let name = target
+            .parse::<Name>()
+            .map_err(|e| anyhow!("invalid validate target name: {e:?}"))?;
+        let cp = ControlParameters {
+            name: Some(name),
+            ..Default::default()
+        };
+        self.send_cmd("security", "validate", Some(&cp)).await
+    }
 }
 
 /// Unwrap an NDNLPv2 `LpPacket` and return its fragment; returns the

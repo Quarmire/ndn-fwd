@@ -199,8 +199,27 @@ pub fn AppWeb() -> Element {
             *LAST_LOG_SEQ.write() = 0;
 
             // Initial poll
-            if let Err(e) =
-                poll_all_web(&mut client, &status, &faces, &routes, &cs, &strategies).await
+            if let Err(e) = poll_all_web(
+                &mut client,
+                &status,
+                &faces,
+                &routes,
+                &cs,
+                &strategies,
+                &security_keys,
+                &security_anchors,
+                &schema_rules,
+                &ca_info,
+                &identity_name,
+                &identity_is_ephemeral,
+                &identity_pib_path,
+                &cert_valid_until_unix_s,
+                &mgmt_signed_commands_required,
+                &mgmt_access_policy,
+                &validation_stats,
+                &validation_history,
+            )
+            .await
             {
                 conn_state.set(ConnState::Disconnected);
                 error_msg.set(Some(e));
@@ -219,12 +238,39 @@ pub fn AppWeb() -> Element {
                     if matches!(cmd_msg, DashCmd::Reconnect) {
                         break 'session;
                     }
-                    run_cmd_web(cmd_msg, &mut client, &error_msg).await;
+                    run_cmd_web(
+                        cmd_msg,
+                        &mut client,
+                        &error_msg,
+                        &trust_validation,
+                        &identity_name,
+                        &identity_is_ephemeral,
+                    )
+                    .await;
                 }
 
                 // Poll
-                if let Err(e) =
-                    poll_all_web(&mut client, &status, &faces, &routes, &cs, &strategies).await
+                if let Err(e) = poll_all_web(
+                    &mut client,
+                    &status,
+                    &faces,
+                    &routes,
+                    &cs,
+                    &strategies,
+                    &security_keys,
+                    &security_anchors,
+                    &schema_rules,
+                    &ca_info,
+                    &identity_name,
+                    &identity_is_ephemeral,
+                    &identity_pib_path,
+                    &cert_valid_until_unix_s,
+                    &mgmt_signed_commands_required,
+                    &mgmt_access_policy,
+                    &validation_stats,
+                    &validation_history,
+                )
+                .await
                 {
                     conn_state.set(ConnState::Disconnected);
                     error_msg.set(Some(e));
@@ -443,6 +489,7 @@ fn render_view_web(view: View) -> Element {
 
 // ── Simplified polling for web ──────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_all_web(
     client: &mut WsMgmtClient,
     status: &Signal<Option<ForwarderStatus>>,
@@ -450,6 +497,18 @@ async fn poll_all_web(
     routes: &Signal<Vec<FibEntry>>,
     cs: &Signal<Option<CsInfo>>,
     strategies: &Signal<Vec<StrategyEntry>>,
+    security_keys: &Signal<Vec<SecurityKeyInfo>>,
+    security_anchors: &Signal<Vec<AnchorInfo>>,
+    schema_rules: &Signal<Vec<SchemaRuleInfo>>,
+    ca_info: &Signal<Option<CaInfo>>,
+    identity_name: &Signal<String>,
+    identity_is_ephemeral: &Signal<bool>,
+    identity_pib_path: &Signal<Option<String>>,
+    cert_valid_until_unix_s: &Signal<Option<u64>>,
+    mgmt_signed_commands_required: &Signal<Option<bool>>,
+    mgmt_access_policy: &Signal<Option<MgmtAccessPolicySnapshot>>,
+    validation_stats: &Signal<Option<ValidationStats>>,
+    validation_history: &Signal<VecDeque<(u64, u64)>>,
 ) -> Result<(), String> {
     use ndn_config::nfd_dataset;
 
@@ -542,12 +601,141 @@ async fn poll_all_web(
         strategies_sig.set(mapped);
     }
 
+    // ── Security reads (kickoff cross-cutting Phase B item) ──────────
+    // Auth-exempt verbs per `is_public_dataset_verb`; the web build
+    // now polls them so chip + gate + tabs hit feature parity with
+    // desktop. Each block is best-effort — older forwarders without
+    // these verbs degrade to "no data" cleanly.
+    if let Ok(resp) = client.security_identity_list().await
+        && resp.is_ok()
+    {
+        let keys = SecurityKeyInfo::parse_list(&resp.status_text);
+        let expiry = keys.iter().find_map(SecurityKeyInfo::valid_until_unix_s);
+        let mut cv = *cert_valid_until_unix_s;
+        cv.set(expiry);
+        let mut sk = *security_keys;
+        sk.set(keys);
+    }
+    if let Ok(resp) = client.security_identity_status().await
+        && resp.is_ok()
+    {
+        let (name, ephemeral, pib) = parse_identity_status_web(&resp.status_text);
+        let mut n = *identity_name;
+        n.set(name);
+        let mut e = *identity_is_ephemeral;
+        e.set(ephemeral);
+        let mut p = *identity_pib_path;
+        p.set(pib);
+    }
+    if let Ok(resp) = client.security_policy_get().await
+        && resp.is_ok()
+        && let Ok(parsed) = MgmtAccessPolicySnapshot::from_json(&resp.status_text)
+    {
+        let mut req = *mgmt_signed_commands_required;
+        req.set(Some(parsed.require_signed_commands));
+        let mut pol = *mgmt_access_policy;
+        pol.set(Some(parsed));
+    }
+    if let Ok(resp) = client.security_validation_stats().await
+        && resp.is_ok()
+    {
+        let parsed = ValidationStats::parse(&resp.status_text);
+        let mut vs = *validation_stats;
+        vs.set(Some(parsed));
+        let mut hist = *validation_history;
+        let mut h = hist.write();
+        h.push_back((parsed.verified_per_sec, parsed.rejected_per_sec));
+        if h.len() > 60 {
+            h.pop_front();
+        }
+    }
+    if let Ok(resp) = client.security_anchor_list().await
+        && resp.is_ok()
+    {
+        let mut a = *security_anchors;
+        a.set(AnchorInfo::parse_list(&resp.status_text));
+    }
+    if let Ok(resp) = client.security_schema_list().await
+        && resp.is_ok()
+    {
+        let mut s = *schema_rules;
+        s.set(SchemaRuleInfo::parse_list(&resp.status_text));
+    }
+    if let Ok(resp) = client.security_ca_info().await {
+        // ca-info returns NOT_FOUND when the forwarder isn't acting
+        // as a CA — that's a normal state for the dashboard, not an
+        // error.
+        if resp.is_ok() {
+            let mut c = *ca_info;
+            c.set(CaInfo::parse(&resp.status_text));
+        }
+    }
+
     Ok(())
 }
 
-async fn run_cmd_web(cmd: DashCmd, client: &mut WsMgmtClient, error_msg: &Signal<Option<String>>) {
+/// Identity-status text parser (web mirror of the desktop helper in
+/// `app.rs`). Format per `ndn-mgmt::security_identity_status`:
+/// `identity=<name> is_ephemeral=<bool> pib_path=<path>`.
+fn parse_identity_status_web(text: &str) -> (String, bool, Option<String>) {
+    let mut name = String::new();
+    let mut ephemeral = false;
+    let mut pib = None::<String>;
+    for token in text.split_whitespace() {
+        if let Some((k, v)) = token.split_once('=') {
+            match k {
+                "identity" => name = v.to_string(),
+                "is_ephemeral" => ephemeral = v == "true",
+                "pib_path" => {
+                    pib = if v.is_empty() || v == "-" {
+                        None
+                    } else {
+                        Some(v.to_string())
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (name, ephemeral, pib)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_cmd_web(
+    cmd: DashCmd,
+    client: &mut WsMgmtClient,
+    error_msg: &Signal<Option<String>>,
+    trust_validation: &Signal<Option<(String, TrustValidationResult)>>,
+    identity_name: &Signal<String>,
+    identity_is_ephemeral: &Signal<bool>,
+) {
     use ndn_config::ControlParameters;
     use ndn_packet::Name;
+
+    // Inline copies of the desktop run_cmd's helpers so the web
+    // build doesn't have to depend on `app.rs`. These mirror the
+    // §11.10 audit-bridge + §2.4 schema-journal initiator-name
+    // discipline exactly.
+    fn web_unix_ns_now() -> u64 {
+        web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    }
+    fn web_initiator_name(
+        identity_name: &Signal<String>,
+        identity_is_ephemeral: &Signal<bool>,
+    ) -> String {
+        let n = identity_name.peek().clone();
+        if n.is_empty() {
+            return "/local/ndn-dashboard/anonymous".into();
+        }
+        if *identity_is_ephemeral.peek() {
+            format!("/local/ndn-dashboard/ephemeral{n}")
+        } else {
+            n
+        }
+    }
 
     let result = match cmd {
         DashCmd::FaceCreate(uri) => {
@@ -677,10 +865,201 @@ async fn run_cmd_web(cmd: DashCmd, client: &mut WsMgmtClient, error_msg: &Signal
         DashCmd::Shutdown => client.send_cmd("status", "shutdown", None).await,
         DashCmd::Reconnect => return,
         DashCmd::RefreshConfig => client.send_cmd("config", "get", None).await,
-        // The remaining DashCmd variants (recording, security, yubikey,
-        // discovery/dvr config, schema) are desktop-only flows that
-        // don't have a web equivalent yet. Surface the gap as an error
-        // instead of a silent warn so the user sees why nothing happened.
+
+        // ── Security writes — wired now that web polls security ─────
+        DashCmd::SecurityGenerate(name) => match name.parse::<Name>() {
+            Ok(n) => {
+                let params = ControlParameters {
+                    name: Some(n),
+                    ..Default::default()
+                };
+                client
+                    .send_cmd("security", "identity-generate", Some(&params))
+                    .await
+            }
+            Err(e) => {
+                error_msg
+                    .to_owned()
+                    .set(Some(format!("invalid name '{name}': {e:?}")));
+                return;
+            }
+        },
+        DashCmd::SecurityKeyDelete(name) => match name.parse::<Name>() {
+            Ok(n) => {
+                let params = ControlParameters {
+                    name: Some(n),
+                    ..Default::default()
+                };
+                client
+                    .send_cmd("security", "key-delete", Some(&params))
+                    .await
+            }
+            Err(e) => {
+                error_msg
+                    .to_owned()
+                    .set(Some(format!("invalid name '{name}': {e:?}")));
+                return;
+            }
+        },
+        DashCmd::SchemaRuleAdd(rule) => {
+            let params = ControlParameters {
+                uri: Some(rule.clone()),
+                ..Default::default()
+            };
+            let resp = client
+                .send_cmd("security", "schema-rule-add", Some(&params))
+                .await;
+            if let Ok(r) = &resp
+                && r.is_ok()
+            {
+                let entry = crate::security_chains::SchemaJournalEntry {
+                    ts_unix_ns: web_unix_ns_now(),
+                    kind: crate::security_chains::SchemaJournalKind::SchemaRuleAdd,
+                    subject_name: rule,
+                    initiator_name: web_initiator_name(identity_name, identity_is_ephemeral),
+                };
+                crate::security_chains::append_schema_entry(entry);
+            }
+            resp
+        }
+        DashCmd::SchemaRuleRemove(index) => {
+            let params = ControlParameters {
+                count: Some(index),
+                ..Default::default()
+            };
+            let resp = client
+                .send_cmd("security", "schema-rule-remove", Some(&params))
+                .await;
+            if let Ok(r) = &resp
+                && r.is_ok()
+            {
+                let entry = crate::security_chains::SchemaJournalEntry {
+                    ts_unix_ns: web_unix_ns_now(),
+                    kind: crate::security_chains::SchemaJournalKind::SchemaRuleRemove,
+                    subject_name: format!("<index={index}>"),
+                    initiator_name: web_initiator_name(identity_name, identity_is_ephemeral),
+                };
+                crate::security_chains::append_schema_entry(entry);
+            }
+            resp
+        }
+        DashCmd::SchemaSet(rules) => {
+            let params = ControlParameters {
+                uri: Some(rules.clone()),
+                ..Default::default()
+            };
+            let resp = client
+                .send_cmd("security", "schema-set", Some(&params))
+                .await;
+            if let Ok(r) = &resp
+                && r.is_ok()
+            {
+                let line_count = rules.lines().filter(|l| !l.trim().is_empty()).count();
+                let entry = crate::security_chains::SchemaJournalEntry {
+                    ts_unix_ns: web_unix_ns_now(),
+                    kind: crate::security_chains::SchemaJournalKind::SchemaRuleAdd,
+                    subject_name: format!("<bulk replace · {line_count} rule(s)>"),
+                    initiator_name: web_initiator_name(identity_name, identity_is_ephemeral),
+                };
+                crate::security_chains::append_schema_entry(entry);
+            }
+            resp
+        }
+        DashCmd::SecurityPolicySet(policy) => {
+            let body = policy.to_json();
+            let params = ControlParameters {
+                uri: Some(body.clone()),
+                ..Default::default()
+            };
+            let resp = client
+                .send_cmd("security", "policy-set", Some(&params))
+                .await;
+            if let Ok(r) = &resp
+                && r.is_ok()
+            {
+                use sha2::{Digest as _, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(body.as_bytes());
+                let digest: [u8; 32] = hasher.finalize().into();
+                let initiator = web_initiator_name(identity_name, identity_is_ephemeral);
+                let entry = crate::security_chains::policy_set_audit_entry(
+                    web_unix_ns_now(),
+                    &initiator,
+                    &digest,
+                );
+                crate::security_chains::append_audit_entry(entry);
+            }
+            resp
+        }
+        DashCmd::SecurityValidateTrace(target) => {
+            let resp = client.security_validate(&target).await;
+            if let Ok(r) = &resp
+                && r.is_ok()
+            {
+                match TrustValidationResult::from_json(&r.status_text) {
+                    Ok(parsed) => {
+                        let mut tv = *trust_validation;
+                        tv.set(Some((target, parsed)));
+                    }
+                    Err(e) => {
+                        error_msg
+                            .to_owned()
+                            .set(Some(format!("validate response parse: {e}")));
+                    }
+                }
+            }
+            resp
+        }
+        DashCmd::SecurityTokenAdd(description) => {
+            let params = ControlParameters {
+                uri: Some(description),
+                ..Default::default()
+            };
+            client
+                .send_cmd("security", "ca-token-add", Some(&params))
+                .await
+        }
+        DashCmd::SecurityEnroll {
+            ca_prefix,
+            challenge_type,
+            challenge_param,
+        } => match ca_prefix.parse::<Name>() {
+            Ok(n) => {
+                let params = ControlParameters {
+                    name: Some(n),
+                    uri: Some(format!("{challenge_type}:{challenge_param}")),
+                    ..Default::default()
+                };
+                client
+                    .send_cmd("security", "ca-enroll", Some(&params))
+                    .await
+            }
+            Err(e) => {
+                error_msg
+                    .to_owned()
+                    .set(Some(format!("invalid ca_prefix '{ca_prefix}': {e:?}")));
+                return;
+            }
+        },
+        DashCmd::DiscoveryConfigSet(params_str) => {
+            let cp = ControlParameters {
+                uri: Some(params_str),
+                ..Default::default()
+            };
+            client.send_cmd("discovery", "config", Some(&cp)).await
+        }
+        DashCmd::DvrConfigSet(params_str) => {
+            let cp = ControlParameters {
+                uri: Some(params_str),
+                ..Default::default()
+            };
+            client.send_cmd("routing", "dvr-config", Some(&cp)).await
+        }
+
+        // Recording flows + YubiKey detection are local-only on web
+        // today. RecordStart/Stop/Clear/ReplaySession touch the
+        // session log signal which web doesn't expose; YubiKey USB
+        // probes aren't available from inside a browser tab.
         other => {
             error_msg
                 .to_owned()

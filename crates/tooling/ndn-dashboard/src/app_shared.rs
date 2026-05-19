@@ -21,6 +21,13 @@ pub static LOG_SPLIT_MODE: GlobalSignal<u8> = Signal::global(|| 0u8);
 pub static LOG_SPLIT_RATIO: GlobalSignal<u32> = Signal::global(|| 50u32);
 pub static CONFIG_PRESETS: GlobalSignal<Vec<(String, String)>> = Signal::global(Vec::new);
 pub static ACTIVE_VIEW: GlobalSignal<View> = Signal::global(|| View::Overview);
+/// §2 gate deep-link target. The Security view reads this on every
+/// render and, when `Some(tab_id)`, switches `active_tab` to that id
+/// and clears the signal (one-shot). Lets the §2 SecurityGate's
+/// `[Go to Identities → Import]` / `[Go to CAs]` / `[View audit]`
+/// buttons land on the right tab instead of dropping the user on the
+/// previously-selected one.
+pub static ACTIVE_SECURITY_TAB: GlobalSignal<Option<u8>> = Signal::global(|| None);
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
 
 // ── Toast notifications ──────────────────────────────────────────────────────

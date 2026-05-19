@@ -317,24 +317,35 @@ pub fn derive_sec_dot(state: &ChipState) -> SecDotView {
 // fix-up so we don't bake forwarder-identity sourcing into the gate
 // shape today.
 
-/// The last posture kind the user accepted in the current session.
+/// The last posture the user accepted in the current session, keyed
+/// by `(forwarder_id, kind)`. Accepting `NoIdentity` on forwarder A
+/// does NOT suppress the gate on forwarder B — flipping the
+/// `--forwarder=` flag re-fires the gate against the new connection.
 /// `None` ⇒ no posture accepted yet (gate fires on any non-Hardened).
-pub static GATE_ACCEPTED: GlobalSignal<Option<PostureKind>> = Signal::global(|| None);
+pub static GATE_ACCEPTED: GlobalSignal<Option<(String, PostureKind)>> = Signal::global(|| None);
 
-/// Returns true if the gate should fire for `current`. The user has
-/// already accepted a posture iff it matches the current one.
-pub fn gate_should_fire(current: &SecurityPosture, accepted: Option<PostureKind>) -> bool {
+/// Returns true if the gate should fire for `current` against
+/// `forwarder_id`. The user has already accepted iff the stored
+/// `(forwarder_id, kind)` matches both axes.
+pub fn gate_should_fire(
+    current: &SecurityPosture,
+    accepted: Option<&(String, PostureKind)>,
+    forwarder_id: &str,
+) -> bool {
     if current.is_hardened() {
         return false;
     }
-    Some(current.kind()) != accepted
+    !matches!(
+        accepted,
+        Some((fid, kind)) if fid == forwarder_id && *kind == current.kind()
+    )
 }
 
-/// Mark `kind` as accepted for the rest of this session. The gate
-/// resets on reconnect (call [`reset_acceptance`] from the connect
-/// coroutine).
-pub fn accept(kind: PostureKind) {
-    *GATE_ACCEPTED.write() = Some(kind);
+/// Mark `(forwarder_id, kind)` as accepted for the rest of this
+/// session. The gate resets on reconnect (call [`reset_acceptance`]
+/// from the connect coroutine).
+pub fn accept(forwarder_id: impl Into<String>, kind: PostureKind) {
+    *GATE_ACCEPTED.write() = Some((forwarder_id.into(), kind));
 }
 
 /// Reset acceptance — call this on Connect / Reconnect so a fresh
@@ -477,15 +488,36 @@ mod tests {
 
     #[test]
     fn gate_fires_on_any_unaccepted_non_hardened() {
-        assert!(!gate_should_fire(&SecurityPosture::Hardened, None));
-        assert!(gate_should_fire(&SecurityPosture::NoIdentity, None));
+        let fwd_a = "ndn-fwd".to_owned();
+        assert!(!gate_should_fire(&SecurityPosture::Hardened, None, &fwd_a));
+        assert!(gate_should_fire(&SecurityPosture::NoIdentity, None, &fwd_a));
+        let accepted_no_id_a = (fwd_a.clone(), PostureKind::NoIdentity);
         assert!(!gate_should_fire(
             &SecurityPosture::NoIdentity,
-            Some(PostureKind::NoIdentity)
+            Some(&accepted_no_id_a),
+            &fwd_a
         ));
+        let accepted_expired_a = (fwd_a.clone(), PostureKind::IdentityExpired);
         assert!(gate_should_fire(
             &SecurityPosture::NoIdentity,
-            Some(PostureKind::IdentityExpired)
+            Some(&accepted_expired_a),
+            &fwd_a
+        ));
+    }
+
+    /// Acceptance on one forwarder MUST NOT suppress the gate on
+    /// another. Phase B carry-forward fix from the kickoff §"Open
+    /// follow-ups Phase A surfaced".
+    #[test]
+    fn gate_acceptance_is_per_forwarder() {
+        let fwd_a = "ndn-fwd".to_owned();
+        let fwd_b = "nfd".to_owned();
+        let accepted_on_a = (fwd_a, PostureKind::NoIdentity);
+        // Same posture kind, different forwarder → gate still fires.
+        assert!(gate_should_fire(
+            &SecurityPosture::NoIdentity,
+            Some(&accepted_on_a),
+            &fwd_b
         ));
     }
 }

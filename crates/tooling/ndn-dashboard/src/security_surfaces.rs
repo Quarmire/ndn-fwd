@@ -18,10 +18,10 @@ use dioxus::prelude::*;
 use crate::app::AppCtx;
 use crate::security_state::{ChipInput, ChipState, derive_chip_state, derive_sec_dot};
 
-/// Native-only wall-clock read for the chip's Expired /
-/// ExpiringSoon checks. Returns `None` on wasm32 (the chip then
-/// skips the expiry dimension); switching to `web_time::SystemTime`
-/// is a one-line change when the web build threads a clock.
+/// Wall-clock read for the chip's Expired / ExpiringSoon checks.
+/// Native: `std::time::SystemTime::now()`. Wasm32: `web_time::SystemTime::now()`
+/// (delegates to `performance.now()` + page-load epoch). Both report
+/// Unix-epoch seconds so the chip's expiry math is target-agnostic.
 #[cfg(not(target_arch = "wasm32"))]
 fn now_unix_s() -> Option<u64> {
     std::time::SystemTime::now()
@@ -31,7 +31,10 @@ fn now_unix_s() -> Option<u64> {
 }
 #[cfg(target_arch = "wasm32")]
 fn now_unix_s() -> Option<u64> {
-    None
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 fn live_chip_state(ctx: &AppCtx) -> ChipState {
