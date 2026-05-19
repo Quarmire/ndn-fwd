@@ -1122,6 +1122,15 @@ async fn run_cmd_web(
             };
             client.send_cmd("routing", "dvr-config", Some(&cp)).await
         }
+        DashCmd::SecuritySafebagImport {
+            name,
+            safebag_wire,
+            passphrase,
+        } => {
+            client
+                .security_safebag_import(&name, &safebag_wire, passphrase.as_bytes())
+                .await
+        }
 
         // Recording flows + YubiKey detection are local-only on web
         // today. RecordStart/Stop/Clear/ReplaySession touch the

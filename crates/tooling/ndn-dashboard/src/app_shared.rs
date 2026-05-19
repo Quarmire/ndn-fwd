@@ -28,6 +28,11 @@ pub static ACTIVE_VIEW: GlobalSignal<View> = Signal::global(|| View::Overview);
 /// buttons land on the right tab instead of dropping the user on the
 /// previously-selected one.
 pub static ACTIVE_SECURITY_TAB: GlobalSignal<Option<u8>> = Signal::global(|| None);
+/// §5.1 SafeBag import state. The layout-root drag-drop handler (or
+/// the Security view's file-picker fallback) writes the parsed
+/// preview here; the modal renders when `open == true`.
+pub static SAFEBAG_IMPORT_STATE: GlobalSignal<crate::views::safebag_import::SafeBagImportState> =
+    Signal::global(crate::views::safebag_import::SafeBagImportState::default);
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
 
 // ── Toast notifications ──────────────────────────────────────────────────────
@@ -143,6 +148,13 @@ pub enum DashCmd {
         name: String,
         fingerprint_hex: String,
         cert_wire_hex: String,
+    },
+    /// §5.1 drag-drop SafeBag import → `security/safebag-import`.
+    /// See `app::DashCmd::SecuritySafebagImport` for full doc.
+    SecuritySafebagImport {
+        name: String,
+        safebag_wire: Vec<u8>,
+        passphrase: String,
     },
 }
 

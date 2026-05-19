@@ -116,6 +116,13 @@ ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"]
 # (works without OS RNG via getrandom/js).
 ed25519-dalek  = { workspace = true }
 
+# ndn-safebag is the wasm-buildable parse/decrypt surface for the
+# ndn-cxx-compatible SafeBag (TLV 0x80). Powers the §5.1 drag-drop
+# import modal's local preview + trust check; the modal decodes the
+# dropped file in-browser so the operator sees identity/key/cert
+# *before* committing the wire.
+ndn-safebag    = { workspace = true }
+
 # Web-only dependencies (optional, activated by "web" feature)
 gloo-net     = { version = "0.6", optional = true }
 gloo-storage = { version = "0.3", optional = true }

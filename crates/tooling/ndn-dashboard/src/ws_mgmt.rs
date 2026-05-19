@@ -287,6 +287,36 @@ impl WsMgmtClient {
         };
         self.send_cmd("security", "validate", Some(&cp)).await
     }
+
+    /// `security/safebag-import` — §5.1 dashboard drag-drop import.
+    /// `key_name` is the embedded cert's key name; `safebag_wire` is
+    /// the raw SafeBag TLV (0x80) bytes; `passphrase` decrypts the
+    /// wrapped PKCS#8. Signed-command gated by the SECURITY extended
+    /// module; the WS client just builds the params.
+    pub async fn security_safebag_import(
+        &mut self,
+        key_name: &str,
+        safebag_wire: &[u8],
+        passphrase: &[u8],
+    ) -> Result<MgmtResponse> {
+        let name = key_name
+            .parse::<Name>()
+            .map_err(|e| anyhow!("invalid safebag-import key name: {e:?}"))?;
+        let mut uri = String::with_capacity(safebag_wire.len() * 2 + passphrase.len() * 2 + 1);
+        for b in safebag_wire {
+            uri.push_str(&format!("{:02x}", b));
+        }
+        uri.push(':');
+        for b in passphrase {
+            uri.push_str(&format!("{:02x}", b));
+        }
+        let cp = ControlParameters {
+            name: Some(name),
+            uri: Some(uri),
+            ..Default::default()
+        };
+        self.send_cmd("security", "safebag-import", Some(&cp)).await
+    }
 }
 
 /// Unwrap an NDNLPv2 `LpPacket` and return its fragment; returns the

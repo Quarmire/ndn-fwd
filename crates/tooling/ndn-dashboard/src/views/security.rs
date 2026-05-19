@@ -124,6 +124,12 @@ pub fn Security() -> Element {
             // DID-layer (L2) frame on top of the cert-layer (L1) trace.
             ResolveAnyDidBox {}
 
+            // ── §5.1 SafeBag import file-picker fallback ─────────────────────
+            // The layout-root drag-drop is the primary affordance; this
+            // file-input mirrors the same flow for keyboard-driven users
+            // and environments where DnD isn't available.
+            crate::views::safebag_import::SafeBagImportPicker {}
+
             // ── Tab bar ──────────────────────────────────────────────────────
             div { style: "display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;",
                 for (label, tab_i) in tabs {

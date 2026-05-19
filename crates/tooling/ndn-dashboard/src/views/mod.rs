@@ -20,6 +20,7 @@ pub mod radio;
 pub mod rate_limit;
 pub mod routes;
 pub mod routing;
+pub mod safebag_import;
 pub mod security;
 pub mod security_did;
 pub mod security_did_ext;

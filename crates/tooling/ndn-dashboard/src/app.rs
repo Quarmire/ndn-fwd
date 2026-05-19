@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
+use dioxus::html::HasFileData as _;
 use dioxus::prelude::*;
 use futures::StreamExt as _;
 use ndn_ipc::MgmtClient;
@@ -193,6 +194,18 @@ pub enum DashCmd {
         name: String,
         fingerprint_hex: String,
         cert_wire_hex: String,
+    },
+    /// §5.1 drag-drop SafeBag import. Fires
+    /// `/localhost/nfd/security/safebag-import` to persist the
+    /// decrypted identity into the forwarder's PIB. `safebag_wire`
+    /// is the raw TLV bytes (not hex-encoded — the client method
+    /// hex-encodes both halves of the wire envelope). The dashboard
+    /// runs its own ndn-safebag preview + trust check before
+    /// dispatching; this command runs after the operator confirms.
+    SecuritySafebagImport {
+        name: String,
+        safebag_wire: Vec<u8>,
+        passphrase: String,
     },
 }
 
@@ -1309,8 +1322,30 @@ pub fn App() -> Element {
 
         ToastOverlay {}
 
+        // §5.1 SafeBag import modal. Reads its state from the global
+        // SAFEBAG_IMPORT_STATE signal so the layout-root drag-drop
+        // handler and the Security view file-picker can both surface
+        // it without prop-drilling.
+        crate::views::safebag_import::SafeBagImportModal {
+            state: crate::app_shared::SAFEBAG_IMPORT_STATE.signal(),
+        }
+
         div {
             class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
+            ondragover: move |evt| { evt.prevent_default(); },
+            ondrop: move |evt| {
+                evt.prevent_default();
+                let files = evt.files();
+                if let Some(file) = files.first().cloned() {
+                    let filename = file.name();
+                    spawn(async move {
+                        if let Ok(bytes) = file.read_bytes().await {
+                            let wire = bytes.to_vec();
+                            crate::views::safebag_import::open_with_wire(filename, wire);
+                        }
+                    });
+                }
+            },
             // ── Sidebar navigation ─────────────────────────────────────────
             nav { class: "sidebar",
                 div { class: "sidebar-logo",
@@ -2017,6 +2052,7 @@ async fn run_cmd(
         DashCmd::SecurityPolicySet(_) => Some("Mgmt access policy updated"),
         DashCmd::SecurityValidateTrace(_) => None, // surfaces via the sidesheet, not a toast
         DashCmd::SecurityAnchorAdd { .. } => Some("Anchor promoted (TOFU)"),
+        DashCmd::SecuritySafebagImport { .. } => Some("SafeBag imported"),
         _ => None,
     };
 
@@ -2354,6 +2390,25 @@ async fn run_cmd(
                     }
                     Err(e) => Err(e.to_string()),
                 }
+            }
+        }
+        DashCmd::SecuritySafebagImport {
+            name,
+            safebag_wire,
+            passphrase,
+        } => {
+            let parsed_name = match name.parse::<ndn_packet::Name>() {
+                Ok(n) => n,
+                Err(e) => {
+                    return push_toast(format!("invalid SafeBag key name: {e}"), ToastLevel::Error);
+                }
+            };
+            match client
+                .security_safebag_import(&parsed_name, &safebag_wire, passphrase.as_bytes())
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
             }
         }
         DashCmd::SecurityPolicySet(policy) => {
