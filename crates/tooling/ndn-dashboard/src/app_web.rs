@@ -132,6 +132,9 @@ pub fn AppWeb() -> Element {
 
         loop {
             conn_state.set(ConnState::Connecting);
+            // §6: new connection = new session; reset gate
+            // acceptance (mirrors the desktop coroutine).
+            crate::security_state::reset_acceptance();
 
             let mut client = {
                 #[cfg(feature = "browser-engine")]
@@ -258,6 +261,10 @@ pub fn AppWeb() -> Element {
 
     rsx! {
         document::Style { "{CSS}" }
+
+        // §2 security gate — modal first-run gate (same component on
+        // desktop and web; reads AppCtx).
+        crate::security_gate::SecurityGate {}
 
         if *show_onboarding.read() {
             Onboarding {

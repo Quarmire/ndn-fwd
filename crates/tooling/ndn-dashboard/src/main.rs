@@ -31,6 +31,8 @@ mod browser_engine;
 mod forwarder_proc;
 pub mod forwarder_profile;
 mod security_chains;
+mod security_gate;
+mod security_state;
 pub mod settings;
 mod signed_data_chain;
 mod styles;

@@ -551,6 +551,11 @@ pub fn App() -> Element {
     let cmd = use_coroutine(move |mut rx: UnboundedReceiver<DashCmd>| async move {
         loop {
             conn_state.set(ConnState::Connecting);
+            // §6: a new connection = new session. Reset gate
+            // acceptance so the user reconfirms the posture (the
+            // forwarder may have restarted into a different posture
+            // even when the URL didn't change).
+            crate::security_state::reset_acceptance();
             let path = socket_path.peek().clone();
 
             let client = match MgmtClient::connect(&path).await {
@@ -1211,6 +1216,11 @@ pub fn App() -> Element {
 
     rsx! {
         document::Style { "{CSS}" }
+
+        // §2 security gate — modal on top of every other view when the
+        // current SecurityPosture isn't Hardened and the user hasn't
+        // accepted the variant this session.
+        crate::security_gate::SecurityGate {}
 
         // First-time onboarding overlay (shown until ~/.ndn/dashboard-onboarded exists).
         if *show_onboarding.read() {
