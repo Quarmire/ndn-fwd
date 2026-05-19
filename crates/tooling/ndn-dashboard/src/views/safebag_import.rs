@@ -11,9 +11,10 @@
 //! broken trust — every failure shows the specific reason with a
 //! fix action.
 
-use crate::app::{AppCtx, DashCmd};
+use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 use crate::edu_gloss::EduGloss;
 use crate::types::{AnchorInfo, SchemaRuleInfo};
+use crate::views::engine_pill::{FdeDetection, probe_fde};
 use dioxus::prelude::*;
 use ndn_safebag::SafeBag;
 
@@ -42,6 +43,20 @@ pub struct SafeBagWirePreview {
     pub identity_name: String,
     pub key_name: String,
     pub cert_name: String,
+}
+
+/// §11.2 — fire a one-time FDE warning on the first PIB write path.
+/// The probe returns `Unknown` from the browser sandbox; the warning
+/// is honest about that limit. Desktop + Unknown is suppressed
+/// (operator knows their own filesystem).
+fn maybe_fire_fde_warning() {
+    let runtime = crate::views::engine_pill::current_runtime_for_test_or_render();
+    let fde = probe_fde();
+    if let Some(txt) = fde.warning_text(runtime) {
+        push_toast(txt, ToastLevel::Warning);
+    }
+    // FdeDetection::On is the silent-success branch — no toast.
+    let _ = FdeDetection::On;
 }
 
 /// Populate the global `SAFEBAG_IMPORT_STATE` from a dropped/picked
@@ -469,6 +484,11 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                                         submit_error.set(Some(e));
                                         return;
                                     }
+                                    // §11.2 — one-time FDE warning on the
+                                    // first PIB write path. Honest about
+                                    // the browser-sandbox limit when
+                                    // detection returns Unknown.
+                                    maybe_fire_fde_warning();
                                     ctx.cmd.send(DashCmd::SecuritySafebagImport {
                                         name: identity_name.clone(),
                                         safebag_wire: wire.clone(),

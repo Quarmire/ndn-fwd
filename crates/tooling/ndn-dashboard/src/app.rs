@@ -1426,6 +1426,8 @@ pub fn App() -> Element {
                     // §3.1 IdentityChip — always-rendered next to the
                     // connection badge.
                     crate::security_surfaces::IdentityChip {}
+                    // §8 engine pill — Desktop / Browser / Browser-engine-local.
+                    crate::views::engine_pill::EnginePill {}
                     input {
                         r#type: "text",
                         placeholder: "Socket path",

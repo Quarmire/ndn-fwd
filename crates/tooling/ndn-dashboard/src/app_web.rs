@@ -416,6 +416,8 @@ pub fn AppWeb() -> Element {
                         "{conn_state.read().label()}"
                     }
                     crate::security_surfaces::IdentityChip {}
+                    // §8 engine pill — Desktop / Browser / Browser-engine-local.
+                    crate::views::engine_pill::EnginePill {}
                     input {
                         r#type: "text",
                         placeholder: "WebSocket URL (ws://host:port)",
