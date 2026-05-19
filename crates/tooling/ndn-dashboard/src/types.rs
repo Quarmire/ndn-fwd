@@ -744,6 +744,18 @@ pub struct SecurityKeyInfo {
 }
 
 impl SecurityKeyInfo {
+    /// Cert `valid_until` in Unix-epoch seconds, or `None` for
+    /// permanent / missing certs. Used by the §3.1 IdentityChip to
+    /// detect Expired / ExpiringSoon.
+    pub fn valid_until_unix_s(&self) -> Option<u64> {
+        if self.valid_until == "never" || self.valid_until == "-" {
+            return None;
+        }
+        let ns_str = self.valid_until.strip_suffix("ns")?;
+        let ns = ns_str.parse::<u64>().ok()?;
+        Some(ns / 1_000_000_000)
+    }
+
     /// Days remaining until certificate expiry.
     ///
     /// Returns `None` for permanent ("never") or missing ("-") certs.

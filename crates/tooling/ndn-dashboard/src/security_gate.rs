@@ -49,11 +49,21 @@ pub fn SecurityGate() -> Element {
     let identity_is_ephemeral_handle = ctx.identity_is_ephemeral.read();
     let identity_name: &str = identity_name_handle.as_str();
     let identity_is_ephemeral: bool = *identity_is_ephemeral_handle;
+    let cert_expiry = *ctx.cert_valid_until_unix_s.read();
+    // Native wall clock; wasm32 stays None (matches the chip's
+    // wasm-side stub until web_time is threaded — Phase B).
+    #[cfg(not(target_arch = "wasm32"))]
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs());
+    #[cfg(target_arch = "wasm32")]
+    let now: Option<u64> = None;
     let posture = derive_posture(PostureInput {
         identity_name,
         identity_is_ephemeral,
-        cert_valid_until_unix_s: None, // Phase B: thread cert expiry through AppCtx
-        now_unix_s: None,
+        cert_valid_until_unix_s: cert_expiry,
+        now_unix_s: now,
     });
 
     let accepted = *GATE_ACCEPTED.read();

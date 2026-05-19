@@ -197,6 +197,15 @@ pub struct AppCtx {
     pub identity_name: Signal<String>,
     pub identity_is_ephemeral: Signal<bool>,
     pub identity_pib_path: Signal<Option<String>>,
+    /// Active cert's `valid_until` in Unix-epoch seconds. `None`
+    /// when there's no cert (ephemeral identity) or the cert is
+    /// flagged permanent. Drives the §3.1 IdentityChip's
+    /// Expired / ExpiringSoon transitions and the §2.3 gate panel.
+    pub cert_valid_until_unix_s: Signal<Option<u64>>,
+    /// Live mgmt-access posture's `require_signed_commands` flag.
+    /// `None` until the first `/localhost/nfd/security/policy-get`
+    /// poll lands; `Some(false)` drives the UnsignedMgmt chip state.
+    pub mgmt_signed_commands_required: Signal<Option<bool>>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
     pub discovery_status: Signal<Option<DiscoveryStatus>>,

@@ -18,21 +18,33 @@ use dioxus::prelude::*;
 use crate::app::AppCtx;
 use crate::security_state::{ChipInput, ChipState, derive_chip_state, derive_sec_dot};
 
+/// Native-only wall-clock read for the chip's Expired /
+/// ExpiringSoon checks. Returns `None` on wasm32 (the chip then
+/// skips the expiry dimension); switching to `web_time::SystemTime`
+/// is a one-line change when the web build threads a clock.
+#[cfg(not(target_arch = "wasm32"))]
+fn now_unix_s() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+#[cfg(target_arch = "wasm32")]
+fn now_unix_s() -> Option<u64> {
+    None
+}
+
 fn live_chip_state(ctx: &AppCtx) -> ChipState {
     let identity_name = ctx.identity_name.read();
     let is_ephemeral = *ctx.identity_is_ephemeral.read();
+    let cert_expiry = *ctx.cert_valid_until_unix_s.read();
+    let signed_required = *ctx.mgmt_signed_commands_required.read();
     derive_chip_state(ChipInput {
         identity_name: identity_name.as_str(),
         identity_is_ephemeral: is_ephemeral,
-        // Phase B: thread the active cert's valid_until + a clock
-        // signal through AppCtx so the chip can flip to Expired /
-        // ExpiringSoon. Today these dimensions are absent.
-        cert_valid_until_unix_s: None,
-        now_unix_s: None,
-        // Phase B: poll `/localhost/nfd/security/policy-get` and
-        // populate this signal. When None, the chip can't show
-        // UnsignedMgmt (it stays on Ephemeral / Hardened).
-        mgmt_signed_commands_required: None,
+        cert_valid_until_unix_s: cert_expiry,
+        now_unix_s: now_unix_s(),
+        mgmt_signed_commands_required: signed_required,
     })
 }
 

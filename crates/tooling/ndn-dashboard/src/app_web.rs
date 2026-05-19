@@ -92,6 +92,8 @@ pub fn AppWeb() -> Element {
     let identity_name: Signal<String> = use_signal(String::new);
     let identity_is_ephemeral: Signal<bool> = use_signal(|| false);
     let identity_pib_path: Signal<Option<String>> = use_signal(|| None);
+    let cert_valid_until_unix_s: Signal<Option<u64>> = use_signal(|| None);
+    let mgmt_signed_commands_required: Signal<Option<bool>> = use_signal(|| None);
     let cs_hit_history: Signal<VecDeque<f64>> = use_signal(VecDeque::new);
     let face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>> =
         use_signal(HashMap::new);
@@ -236,6 +238,8 @@ pub fn AppWeb() -> Element {
         identity_name,
         identity_is_ephemeral,
         identity_pib_path,
+        cert_valid_until_unix_s,
+        mgmt_signed_commands_required,
         cs_hit_history,
         face_throughput,
         discovery_status,

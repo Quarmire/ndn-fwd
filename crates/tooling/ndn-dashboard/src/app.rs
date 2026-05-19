@@ -237,6 +237,14 @@ pub struct AppCtx {
     pub identity_is_ephemeral: Signal<bool>,
     /// PIB path reported by the router (`None` when ephemeral).
     pub identity_pib_path: Signal<Option<String>>,
+    /// Active cert's `valid_until` in Unix-epoch seconds. `None`
+    /// when ephemeral or the cert is flagged permanent. Drives
+    /// the §3.1 IdentityChip Expired / ExpiringSoon transitions.
+    pub cert_valid_until_unix_s: Signal<Option<u64>>,
+    /// Live mgmt-access posture's `require_signed_commands` flag.
+    /// `None` until the first `policy-get` poll lands;
+    /// `Some(false)` drives the UnsignedMgmt chip state.
+    pub mgmt_signed_commands_required: Signal<Option<bool>>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     /// Per-face throughput rate history (60 samples × 3 s = 3 min window).
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
@@ -398,6 +406,8 @@ pub fn App() -> Element {
     let identity_name: Signal<String> = use_signal(String::new);
     let identity_is_ephemeral: Signal<bool> = use_signal(|| false);
     let identity_pib_path: Signal<Option<String>> = use_signal(|| None);
+    let cert_valid_until_unix_s: Signal<Option<u64>> = use_signal(|| None);
+    let mgmt_signed_commands_required: Signal<Option<bool>> = use_signal(|| None);
     let cs_hit_history: Signal<VecDeque<f64>> = use_signal(VecDeque::new);
     let face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>> =
         use_signal(HashMap::new);
@@ -609,6 +619,8 @@ pub fn App() -> Element {
                 identity_name,
                 identity_is_ephemeral,
                 identity_pib_path,
+                cert_valid_until_unix_s,
+                mgmt_signed_commands_required,
             )
             .await
             {
@@ -624,7 +636,7 @@ pub fn App() -> Element {
             'session: loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path).await {
+                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required).await {
                             conn_state.set(ConnState::Disconnected);
                             error_msg.set(Some(e));
                             break 'session;
@@ -634,7 +646,7 @@ pub fn App() -> Element {
                         if matches!(cmd_msg, DashCmd::Reconnect) {
                             break 'session;
                         }
-                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path).await;
+                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required).await;
                     }
                 }
             }
@@ -1165,6 +1177,8 @@ pub fn App() -> Element {
         identity_name,
         identity_is_ephemeral,
         identity_pib_path,
+        cert_valid_until_unix_s,
+        mgmt_signed_commands_required,
         cs_hit_history,
         face_throughput,
         discovery_status,
@@ -1476,6 +1490,8 @@ async fn poll_all(
     mut identity_name: Signal<String>,
     mut identity_is_ephemeral: Signal<bool>,
     mut identity_pib_path: Signal<Option<String>>,
+    mut cert_valid_until_unix_s: Signal<Option<u64>>,
+    mut mgmt_signed_commands_required: Signal<Option<bool>>,
 ) -> Result<(), String> {
     match client.status().await {
         Ok(r) => status.set(Some(ForwarderStatus::parse(&r.status_text))),
@@ -1574,7 +1590,26 @@ async fn poll_all(
         neighbors.set(NeighborInfo::parse_list(&r.status_text));
     }
     if let Ok(r) = client.security_identity_list().await {
-        security_keys.set(SecurityKeyInfo::parse_list(&r.status_text));
+        let keys = SecurityKeyInfo::parse_list(&r.status_text);
+        // §3.1 cert-expiry threading: pick the first persistent key
+        // whose cert isn't permanent/missing and surface its
+        // valid_until in Unix-epoch seconds. Phase B may want a
+        // smarter selector once multi-key UIs land.
+        let expiry = keys.iter().find_map(SecurityKeyInfo::valid_until_unix_s);
+        cert_valid_until_unix_s.set(expiry);
+        security_keys.set(keys);
+    }
+    // §3.1 UnsignedMgmt threading — poll policy-get (read-exempt
+    // from the SECURITY signed-command gate per `is_public_dataset_verb`),
+    // parse the JSON body, surface `require_signed_commands` so the
+    // IdentityChip can flip into UnsignedMgmt.
+    if let Ok(r) = client.security_policy_get().await
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&r.status_text)
+        && let Some(b) = parsed
+            .get("require_signed_commands")
+            .and_then(|v| v.as_bool())
+    {
+        mgmt_signed_commands_required.set(Some(b));
     }
     if let Ok(r) = client.security_anchor_list().await {
         security_anchors.set(AnchorInfo::parse_list(&r.status_text));
@@ -1801,6 +1836,8 @@ async fn run_cmd(
     identity_name: Signal<String>,
     identity_is_ephemeral: Signal<bool>,
     identity_pib_path: Signal<Option<String>>,
+    cert_valid_until_unix_s: Signal<Option<u64>>,
+    mgmt_signed_commands_required: Signal<Option<bool>>,
 ) {
     // Session recording: log before dispatch.
     if *recording.read()
@@ -1954,6 +1991,8 @@ async fn run_cmd(
                         identity_name,
                         identity_is_ephemeral,
                         identity_pib_path,
+                        cert_valid_until_unix_s,
+                        mgmt_signed_commands_required,
                     ))
                     .await;
                     recording.set(was_recording);
@@ -2083,6 +2122,8 @@ async fn run_cmd(
                 identity_name,
                 identity_is_ephemeral,
                 identity_pib_path,
+                cert_valid_until_unix_s,
+                mgmt_signed_commands_required,
             )
             .await;
         }
