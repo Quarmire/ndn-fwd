@@ -132,3 +132,9 @@ term = "Resolve DID"
 gloss = "Fetch and verify a DID Document — follow the KeyLocator, validate the chain, decode the document."
 extended = "The resolution trace shows each step (fetch / verify / decode); the dashboard's L2 framing wraps the L1 cert-chain trace."
 wiki_anchor = "did-resolution"
+
+[[entries]]
+term = "DID extension"
+gloss = "A non-W3C-canonical field a DID Document carries (substrate-specific posture, deployment metadata, …)."
+extended = "Renderers register at startup; unknown extension keys fall back to a 'Show raw' affordance."
+wiki_anchor = "did-extensions"

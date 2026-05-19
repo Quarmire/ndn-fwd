@@ -20,7 +20,9 @@ use crate::app::{AppCtx, DashCmd};
 use crate::edu_gloss::EduGloss;
 use crate::types::{FailureDiagnosis, SecurityKeyInfo, TrustValidationResult, TrustVerdict};
 use crate::views::onboarding::encode_did_ndn;
+use crate::views::security_did_ext::DidExtensionPanel;
 use dioxus::prelude::*;
+use std::collections::BTreeMap;
 
 // ── DID encoding round-trip ──────────────────────────────────────────────────
 
@@ -91,6 +93,13 @@ pub struct DidDocumentView {
     pub verification_methods: Vec<DidVerificationMethodView>,
     pub controllers: Vec<String>,
     pub services: Vec<DidServiceView>,
+    /// Extension fields beyond the W3C-canonical core. Each entry is
+    /// rendered through the §4.8 `DidExtensionRegistry`; unregistered
+    /// keys fall back to the "no renderer" affordance. Empty in v1
+    /// because `security/identity-list` doesn't carry extension data
+    /// yet — populates once a future mgmt verb surfaces full DID
+    /// Documents.
+    pub extensions: BTreeMap<String, serde_json::Value>,
     /// True when no public-key bytes are available yet — the panel
     /// renders a "verification methods carry no `publicKey*` material
     /// until a v1.5 wire extension lands" note in that case.
@@ -138,6 +147,7 @@ pub fn did_doc_view_for_identity(identity_name: &str, keys: &[SecurityKeyInfo]) 
         verification_methods,
         controllers,
         services: Vec::new(),
+        extensions: BTreeMap::new(),
         publickey_unavailable: true,
     }
 }
@@ -338,6 +348,12 @@ pub fn DidDocumentPanel(doc: DidDocumentView) -> Element {
                     }
                 }
             }
+
+            // §4.8 extension fields — renders via the global
+            // `DidExtensionRegistry`; unknown keys fall back to the
+            // "no renderer for X" affordance. Renders nothing when
+            // the document carries no extensions (the v1 default).
+            DidExtensionPanel { extensions: doc.extensions.clone() }
         }
     }
 }
@@ -534,6 +550,10 @@ mod tests {
         assert!(doc.verification_methods[0].has_cert);
         assert!(!doc.verification_methods[1].has_cert);
         assert!(doc.publickey_unavailable);
+        assert!(
+            doc.extensions.is_empty(),
+            "v1 view-DidDocument carries no extensions until a mgmt verb surfaces them"
+        );
     }
 
     #[test]

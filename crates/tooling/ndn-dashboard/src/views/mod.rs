@@ -22,6 +22,7 @@ pub mod routes;
 pub mod routing;
 pub mod security;
 pub mod security_did;
+pub mod security_did_ext;
 #[cfg(feature = "desktop")]
 pub mod session;
 pub mod strategy;
