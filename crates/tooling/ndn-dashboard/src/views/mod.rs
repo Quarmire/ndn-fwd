@@ -11,6 +11,7 @@ pub mod dashboard_config;
 pub mod enrollment_wizard;
 pub mod faces;
 pub mod fleet;
+pub mod key_rotation;
 pub mod logs;
 #[cfg(feature = "desktop")]
 pub mod modals;

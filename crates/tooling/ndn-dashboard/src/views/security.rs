@@ -514,10 +514,21 @@ fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
             div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;",
                 button {
                     class: "btn btn-secondary btn-sm",
-                    onclick: move |_| push_toast(
-                        "Phase C: §5 sub-flow — KeyRotationModal",
-                        ToastLevel::Info,
-                    ),
+                    onclick: {
+                        let identity = info.identity_name().to_owned();
+                        move |_| {
+                            let keys = ctx.security_keys.read().clone();
+                            let identity = identity.clone();
+                            let current_keys: Vec<_> = keys
+                                .into_iter()
+                                .filter(|k| k.identity_name() == identity)
+                                .collect();
+                            let mut st = crate::app_shared::KEY_ROTATION_STATE.write();
+                            st.open = true;
+                            st.identity_name = identity;
+                            st.current_keys = current_keys;
+                        }
+                    },
                     "Renew"
                 }
                 button {

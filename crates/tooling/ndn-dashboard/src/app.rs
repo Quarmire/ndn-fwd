@@ -1337,6 +1337,12 @@ pub fn App() -> Element {
             state: crate::app_shared::ENROLLMENT_WIZARD_STATE.signal(),
         }
 
+        // §5.3 key-rotation modal. Launched by CertCard's "Renew"
+        // button on the §4.1 IdentityInspector.
+        crate::views::key_rotation::KeyRotationModal {
+            state: crate::app_shared::KEY_ROTATION_STATE.signal(),
+        }
+
         div {
             class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
             ondragover: move |evt| { evt.prevent_default(); },

@@ -156,3 +156,9 @@ term = "IssuancePolicy"
 gloss = "The NDNCERT stage that decides what cert to actually issue — validity cap, algorithm, issuer KeyLocator."
 extended = "Third gatekeeper after NamespacePolicy + ChallengeHandler; pluggable via the F.7 registry hook in ndn-cert."
 wiki_anchor = "ndncert"
+
+[[entries]]
+term = "Key rotation"
+gloss = "Generate a new signing key under the same identity; the old key stays for in-flight verification until manually deleted."
+extended = "Recorded in the audit log so the chain documents when the rotation happened and who initiated it."
+wiki_anchor = "key-rotation"

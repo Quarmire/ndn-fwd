@@ -37,6 +37,9 @@ pub static SAFEBAG_IMPORT_STATE: GlobalSignal<crate::views::safebag_import::Safe
 pub static ENROLLMENT_WIZARD_STATE: GlobalSignal<
     crate::views::enrollment_wizard::EnrollmentWizardState,
 > = Signal::global(crate::views::enrollment_wizard::EnrollmentWizardState::default);
+/// §5.3 key-rotation modal state.
+pub static KEY_ROTATION_STATE: GlobalSignal<crate::views::key_rotation::KeyRotationState> =
+    Signal::global(crate::views::key_rotation::KeyRotationState::default);
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
 
 // ── Toast notifications ──────────────────────────────────────────────────────
