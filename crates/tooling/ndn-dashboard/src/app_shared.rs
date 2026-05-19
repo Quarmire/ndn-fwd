@@ -119,6 +119,13 @@ pub enum DashCmd {
     SchemaRuleAdd(String),
     SchemaRuleRemove(u64),
     SchemaSet(String),
+    /// §4.5 Mgmt access tab — submit a new mgmt-access policy. Body
+    /// is the dashboard's JSON snapshot; the forwarder applies the
+    /// three runtime-writable booleans immediately when
+    /// `MgmtHandles::runtime_policy` is wired. On a 2xx response the
+    /// handler appends a `security/policy-set` entry to the local
+    /// `AuditLogChain` (the §11.10 audit bridge).
+    SecurityPolicySet(MgmtAccessPolicySnapshot),
 }
 
 // Desktop-only: there is no `ndn-fwd` subprocess to manage on web.
@@ -206,6 +213,10 @@ pub struct AppCtx {
     /// `None` until the first `/localhost/nfd/security/policy-get`
     /// poll lands; `Some(false)` drives the UnsignedMgmt chip state.
     pub mgmt_signed_commands_required: Signal<Option<bool>>,
+    /// Full mgmt-access policy snapshot — populated from `policy-get`
+    /// each poll cycle. `None` until the first response lands. The
+    /// §4.5 `MgmtAccessTab` reads this on both desktop and web.
+    pub mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
     pub discovery_status: Signal<Option<DiscoveryStatus>>,

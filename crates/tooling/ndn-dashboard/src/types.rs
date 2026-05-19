@@ -1066,6 +1066,44 @@ impl SchemaRuleInfo {
     }
 }
 
+// ── Mgmt access policy snapshot (security/policy-get + policy-set) ──────────
+//
+// Dashboard-owned JSON-shape mirror of the forwarder's `MgmtAccessPolicy`
+// (defined in `ndn-mgmt`, gated `cfg(not(target_arch = "wasm32"))`). The
+// dashboard owns its own copy so the view layer compiles on both desktop
+// and wasm32 — `policy-get` returns JSON in `ControlResponse::status_text`
+// per `ndn-mgmt::security_policy_get`, and `policy-set` consumes the same
+// JSON shape in `ControlParameters.uri`. Field set is pinned by §4.5 of
+// the design doc and §11.10's "forwarder-internal config, not a chain"
+// resolution — keep the field names byte-identical with the server's
+// serde derive so JSON round-trips cleanly.
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MgmtAccessPolicySnapshot {
+    pub ephemeral_allowed: bool,
+    pub localhop_disabled: bool,
+    pub replay_window_secs: u64,
+    pub require_signed_commands: bool,
+    pub validator_anchor: Option<String>,
+}
+
+impl MgmtAccessPolicySnapshot {
+    /// Parse the JSON body in a `policy-get` response (or `Err` if the
+    /// body isn't valid JSON for this shape). Server emits this via
+    /// `serde_json::to_string(&MgmtAccessPolicy)` in
+    /// `ndn-mgmt::security_policy_get`.
+    pub fn from_json(body: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(body)
+    }
+
+    /// Canonical JSON form submitted to `policy-set` — identical shape
+    /// the server expects and the same string the §11.10 audit bridge
+    /// hashes for `policy_content_hash`.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
 // ── Wire-type conversions (desktop only) ─────────────────────────────────────
 //
 // These `From` impls convert NFD TLV wire types (from `ndn_config`) into the

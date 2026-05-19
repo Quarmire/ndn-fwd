@@ -165,6 +165,13 @@ pub enum DashCmd {
     SchemaRuleRemove(u64),
     /// Replace the entire trust schema; `rules` is newline-separated rule strings.
     SchemaSet(String),
+    /// §4.5 Mgmt access tab — submit a new mgmt-access policy. Body is
+    /// the dashboard's JSON snapshot; the forwarder applies the three
+    /// runtime-writable booleans immediately when
+    /// `MgmtHandles::runtime_policy` is wired. On a 2xx response the
+    /// handler appends a `security/policy-set` entry to the local
+    /// `AuditLogChain` (the §11.10 audit bridge).
+    SecurityPolicySet(MgmtAccessPolicySnapshot),
 }
 
 /// Commands sent to the router-management coroutine.
@@ -245,6 +252,11 @@ pub struct AppCtx {
     /// `None` until the first `policy-get` poll lands;
     /// `Some(false)` drives the UnsignedMgmt chip state.
     pub mgmt_signed_commands_required: Signal<Option<bool>>,
+    /// Full mgmt-access policy snapshot — populated from `policy-get`
+    /// each desktop poll cycle. `None` until the first response lands.
+    /// The §4.5 `MgmtAccessTab` reads this; `mgmt_signed_commands_required`
+    /// is a derived view on the same data and stays in sync.
+    pub mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     /// Per-face throughput rate history (60 samples × 3 s = 3 min window).
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
@@ -408,6 +420,24 @@ pub fn App() -> Element {
     let identity_pib_path: Signal<Option<String>> = use_signal(|| None);
     let cert_valid_until_unix_s: Signal<Option<u64>> = use_signal(|| None);
     let mgmt_signed_commands_required: Signal<Option<bool>> = use_signal(|| None);
+    let mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>> = use_signal(|| None);
+
+    // Initialise the §11.10 audit chain once per process. The chain
+    // dir is keyed by the selected forwarder profile so switching
+    // between `ndn-fwd` / `nfd` / `yanfd` keeps separate audit
+    // streams. v1 uses a process-local ephemeral signer in
+    // `security_chains::DashboardSigner` (key not persisted); chain
+    // entries from prior processes remain on disk but won't
+    // re-verify until v2 wires a stable dashboard signing key.
+    use_hook(|| {
+        let dir = audit_chain_dir();
+        let key_locator = ndn_packet::Name::root()
+            .append(b"local")
+            .append(b"ndn-dashboard")
+            .append(b"KEY")
+            .append(b"ephemeral");
+        crate::security_chains::init_audit_chain(dir, key_locator);
+    });
     let cs_hit_history: Signal<VecDeque<f64>> = use_signal(VecDeque::new);
     let face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>> =
         use_signal(HashMap::new);
@@ -621,6 +651,7 @@ pub fn App() -> Element {
                 identity_pib_path,
                 cert_valid_until_unix_s,
                 mgmt_signed_commands_required,
+                mgmt_access_policy,
             )
             .await
             {
@@ -636,7 +667,7 @@ pub fn App() -> Element {
             'session: loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required).await {
+                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy).await {
                             conn_state.set(ConnState::Disconnected);
                             error_msg.set(Some(e));
                             break 'session;
@@ -646,7 +677,7 @@ pub fn App() -> Element {
                         if matches!(cmd_msg, DashCmd::Reconnect) {
                             break 'session;
                         }
-                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required).await;
+                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy).await;
                     }
                 }
             }
@@ -1179,6 +1210,7 @@ pub fn App() -> Element {
         identity_pib_path,
         cert_valid_until_unix_s,
         mgmt_signed_commands_required,
+        mgmt_access_policy,
         cs_hit_history,
         face_throughput,
         discovery_status,
@@ -1452,6 +1484,21 @@ fn render_view(view: View) -> Element {
     }
 }
 
+/// Per-forwarder audit chain dir per §11.1.
+///
+/// Returns `$XDG_CONFIG_HOME/ndn-dashboard/<profile-id>/audit/` on
+/// platforms where `dirs_next::config_dir()` resolves, falling back
+/// to the system temp dir when it doesn't. The profile id keeps
+/// `ndn-fwd`, `nfd`, and `yanfd` chains separate so toggling the
+/// `--forwarder=` flag doesn't replay another impl's history.
+fn audit_chain_dir() -> std::path::PathBuf {
+    let profile = crate::forwarder_profile::selected_profile();
+    let base = dirs_next::config_dir().unwrap_or_else(std::env::temp_dir);
+    base.join("ndn-dashboard")
+        .join(profile.machine_name())
+        .join("audit")
+}
+
 fn default_socket_path() -> String {
     #[cfg(windows)]
     return r"\\.\pipe\ndn".to_string();
@@ -1492,6 +1539,7 @@ async fn poll_all(
     mut identity_pib_path: Signal<Option<String>>,
     mut cert_valid_until_unix_s: Signal<Option<u64>>,
     mut mgmt_signed_commands_required: Signal<Option<bool>>,
+    mut mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
 ) -> Result<(), String> {
     match client.status().await {
         Ok(r) => status.set(Some(ForwarderStatus::parse(&r.status_text))),
@@ -1599,17 +1647,16 @@ async fn poll_all(
         cert_valid_until_unix_s.set(expiry);
         security_keys.set(keys);
     }
-    // §3.1 UnsignedMgmt threading — poll policy-get (read-exempt
-    // from the SECURITY signed-command gate per `is_public_dataset_verb`),
-    // parse the JSON body, surface `require_signed_commands` so the
-    // IdentityChip can flip into UnsignedMgmt.
+    // §3.1 UnsignedMgmt threading + §4.5 Mgmt access tab feed —
+    // poll policy-get (read-exempt from the SECURITY signed-command
+    // gate per `is_public_dataset_verb`), parse the JSON body, surface
+    // both the `require_signed_commands` flag (for the IdentityChip's
+    // UnsignedMgmt state) and the full snapshot (for the §4.5 editor).
     if let Ok(r) = client.security_policy_get().await
-        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&r.status_text)
-        && let Some(b) = parsed
-            .get("require_signed_commands")
-            .and_then(|v| v.as_bool())
+        && let Ok(parsed) = MgmtAccessPolicySnapshot::from_json(&r.status_text)
     {
-        mgmt_signed_commands_required.set(Some(b));
+        mgmt_signed_commands_required.set(Some(parsed.require_signed_commands));
+        mgmt_access_policy.set(Some(parsed));
     }
     if let Ok(r) = client.security_anchor_list().await {
         security_anchors.set(AnchorInfo::parse_list(&r.status_text));
@@ -1838,6 +1885,7 @@ async fn run_cmd(
     identity_pib_path: Signal<Option<String>>,
     cert_valid_until_unix_s: Signal<Option<u64>>,
     mgmt_signed_commands_required: Signal<Option<bool>>,
+    mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
 ) {
     // Session recording: log before dispatch.
     if *recording.read()
@@ -1861,6 +1909,7 @@ async fn run_cmd(
         DashCmd::SchemaRuleAdd(_) => Some("Trust schema rule added"),
         DashCmd::SchemaRuleRemove(_) => Some("Trust schema rule removed"),
         DashCmd::SchemaSet(_) => Some("Trust schema updated"),
+        DashCmd::SecurityPolicySet(_) => Some("Mgmt access policy updated"),
         _ => None,
     };
 
@@ -1993,6 +2042,7 @@ async fn run_cmd(
                         identity_pib_path,
                         cert_valid_until_unix_s,
                         mgmt_signed_commands_required,
+                        mgmt_access_policy,
                     ))
                     .await;
                     recording.set(was_recording);
@@ -2088,6 +2138,38 @@ async fn run_cmd(
             .await
             .map(|_| ())
             .map_err(|e| e.to_string()),
+        DashCmd::SecurityPolicySet(policy) => {
+            let body = policy.to_json();
+            match client.security_policy_set(&body).await {
+                Ok(resp) if resp.is_ok() => {
+                    // §11.10 audit bridge: hash the submitted JSON body
+                    // and append the policy-set event to the local
+                    // AuditLogChain. The chain commits to the operator's
+                    // policy edit history independent of the forwarder's
+                    // own (un-chained) policy state.
+                    let initiator =
+                        active_identity_name_for_audit(&identity_name, &identity_is_ephemeral);
+                    let ts_ns = unix_ns_now();
+                    use sha2::{Digest as _, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(body.as_bytes());
+                    let digest: [u8; 32] = hasher.finalize().into();
+                    let entry =
+                        crate::security_chains::policy_set_audit_entry(ts_ns, &initiator, &digest);
+                    crate::security_chains::append_audit_entry(entry);
+                    // Force a re-poll of mgmt_access_policy on the next
+                    // tick by re-reading via poll_all; mgmt_access_policy
+                    // itself is set in poll_all below.
+                    let _ = mgmt_access_policy;
+                    Ok(())
+                }
+                Ok(resp) => Err(format!(
+                    "policy-set rejected: {} {}",
+                    resp.status_code, resp.status_text
+                )),
+                Err(e) => Err(e.to_string()),
+            }
+        }
     };
 
     match result {
@@ -2124,6 +2206,7 @@ async fn run_cmd(
                 identity_pib_path,
                 cert_valid_until_unix_s,
                 mgmt_signed_commands_required,
+                mgmt_access_policy,
             )
             .await;
         }
@@ -2131,6 +2214,37 @@ async fn run_cmd(
             push_toast(format!("Command failed: {e}"), ToastLevel::Error);
         }
     }
+}
+
+/// Resolve the initiator name the §11.10 audit bridge attaches to
+/// the AuditLogEntry. Uses the live `identity_name` when persistent,
+/// or a `/local/ndn-dashboard/ephemeral-<ephemeralName>` form when
+/// the forwarder is signing as an ephemeral key — so the audit log
+/// still records *who clicked* without conflating with a real
+/// persistent identity.
+fn active_identity_name_for_audit(
+    identity_name: &Signal<String>,
+    identity_is_ephemeral: &Signal<bool>,
+) -> String {
+    let n = identity_name.peek().clone();
+    if n.is_empty() {
+        return "/local/ndn-dashboard/anonymous".into();
+    }
+    if *identity_is_ephemeral.peek() {
+        format!("/local/ndn-dashboard/ephemeral{n}")
+    } else {
+        n
+    }
+}
+
+/// Unix-epoch nanoseconds — NDN's TIMESTAMP convention used by
+/// `AuditLogEntry.ts_unix_ns`. Falls back to zero if the system clock
+/// is before the epoch (effectively impossible on supported targets).
+fn unix_ns_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
 }
 
 /// Parse the `identity-status` dataset response.

@@ -1,8 +1,10 @@
 //! Security view — identity management, trust anchors, certificate chain,
-//! DID explorer, NDNCERT CA panel, and YubiKey integration.
+//! DID explorer, NDNCERT CA panel, YubiKey integration, and the §4.5
+//! mgmt-access policy editor.
 
 use crate::app::{AppCtx, DashCmd};
-use crate::types::SchemaRuleInfo;
+use crate::edu_gloss::EduGloss;
+use crate::types::{MgmtAccessPolicySnapshot, SchemaRuleInfo};
 use crate::views::onboarding::encode_did_ndn;
 use dioxus::prelude::*;
 
@@ -15,6 +17,7 @@ const TAB_DID: u8 = 3;
 const TAB_CA: u8 = 4;
 const TAB_YUBIKEY: u8 = 5;
 const TAB_SCHEMA: u8 = 6;
+const TAB_MGMT_ACCESS: u8 = 7;
 
 // ── Root component ────────────────────────────────────────────────────────────
 
@@ -39,6 +42,7 @@ pub fn Security() -> Element {
         ("CA / NDNCERT", TAB_CA),
         ("YubiKey", TAB_YUBIKEY),
         ("Trust Schema", TAB_SCHEMA),
+        ("Mgmt Access", TAB_MGMT_ACCESS),
     ];
 
     rsx! {
@@ -118,6 +122,7 @@ pub fn Security() -> Element {
                 TAB_CA         => rsx! { CaTab {} },
                 TAB_YUBIKEY    => rsx! { YubikeyTab {} },
                 TAB_SCHEMA     => rsx! { SchemaTab { rules: schema.clone() } },
+                TAB_MGMT_ACCESS=> rsx! { MgmtAccessTab {} },
                 _              => rsx! {},
             }
         }
@@ -1024,6 +1029,317 @@ fn BootstrapStep(n: u8, step: &'static str, desc: &'static str, first: bool) -> 
             div {
                 div { style: "font-size:12px;font-weight:600;color:var(--text);", "{step}" }
                 div { style: "font-size:11px;color:var(--text-muted);", "{desc}" }
+            }
+        }
+    }
+}
+
+// ── Tab: Mgmt Access (§4.5) ───────────────────────────────────────────────────
+//
+// First Phase B checkpoint. Surfaces the live `MgmtAccessPolicy`
+// (polled via `security/policy-get`) and lets the operator flip the
+// three runtime-writable booleans, with the `validator_anchor` edit
+// surfaced as `pending_restart` (per §4.5.1 the anchor flip requires
+// a Validator rebuild the forwarder can't do at runtime). On submit
+// the dashboard:
+//   1. sends `DashCmd::SecurityPolicySet(policy)` → run_cmd issues
+//      `security/policy-set` against the forwarder.
+//   2. On a 2xx response, run_cmd computes the SHA-256 over the
+//      submitted JSON body and appends a `security/policy-set`
+//      `AuditLogEntry` (§11.10 audit bridge) into the dashboard's
+//      `AuditLogChain` — desktop-backed by FileStore per §11.1.
+
+#[component]
+fn MgmtAccessTab() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let live = ctx.mgmt_access_policy.read().clone();
+    let is_ephemeral = *ctx.identity_is_ephemeral.read();
+    let pib_path = ctx.identity_pib_path.read().clone();
+
+    // Editor draft — initialised lazily once a live policy lands. The
+    // memo re-syncs the draft when the user switches forwarders
+    // (live.replay_window_secs is a stable identity-of-the-snapshot
+    // proxy when the rest of the fields shift).
+    let mut draft: Signal<Option<MgmtAccessPolicySnapshot>> =
+        use_signal(|| None::<MgmtAccessPolicySnapshot>);
+    {
+        let mut draft_for_init = draft;
+        let live_for_init = live.clone();
+        use_effect(move || {
+            if draft_for_init.read().is_none()
+                && let Some(p) = live_for_init.clone()
+            {
+                draft_for_init.set(Some(p));
+            }
+        });
+    }
+
+    rsx! {
+        div { class: "section-title", "Management access control" }
+
+        // Education card — §9 EduGloss seam over MgmtAccessPolicy.
+        div { class: "edu-card",
+            div { style: "display:flex;gap:12px;align-items:flex-start;",
+                div { style: "font-size:28px;flex-shrink:0;", "🛡" }
+                div {
+                    div { style: "font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px;",
+                        EduGloss { term: "MgmtAccessPolicy" }
+                    }
+                    div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
+                        "Controls which clients can issue management commands and how they're authenticated. "
+                        "Edits to the configurable rows below take effect live; rows marked "
+                        span { class: "badge badge-gray", "pending_restart" }
+                        " require a forwarder restart. Every change is bridged into the dashboard's "
+                        EduGloss { term: "Audit log" }
+                        " so the policy history is reconstructable."
+                    }
+                }
+            }
+        }
+
+        match live {
+            None => rsx! {
+                div { class: "empty",
+                    "Waiting for /localhost/nfd/security/policy-get response… (this dashboard polls every 3 s)"
+                }
+            },
+            Some(_) => {
+                let d = draft.read().clone();
+                let view = d.unwrap_or_default();
+                rsx! {
+                    MgmtAccessEditor {
+                        view: view.clone(),
+                        is_ephemeral,
+                        pib_path: pib_path.clone(),
+                        on_toggle_require_signed: move |v: bool| {
+                            let snapshot = draft.peek().clone();
+                            if let Some(mut cur) = snapshot {
+                                cur.require_signed_commands = v;
+                                draft.set(Some(cur));
+                            }
+                        },
+                        on_toggle_localhop_disabled: move |v: bool| {
+                            let snapshot = draft.peek().clone();
+                            if let Some(mut cur) = snapshot {
+                                cur.localhop_disabled = v;
+                                draft.set(Some(cur));
+                            }
+                        },
+                        on_toggle_ephemeral_allowed: move |v: bool| {
+                            let snapshot = draft.peek().clone();
+                            if let Some(mut cur) = snapshot {
+                                cur.ephemeral_allowed = v;
+                                draft.set(Some(cur));
+                            }
+                        },
+                        on_set_validator_anchor: move |s: String| {
+                            let snapshot = draft.peek().clone();
+                            if let Some(mut cur) = snapshot {
+                                cur.validator_anchor = (!s.trim().is_empty()).then(|| s.trim().to_owned());
+                                draft.set(Some(cur));
+                            }
+                        },
+                        on_submit: move |snapshot: MgmtAccessPolicySnapshot| {
+                            ctx.cmd.send(DashCmd::SecurityPolicySet(snapshot));
+                        },
+                        on_reset: move |_: ()| {
+                            // Re-pull from the live signal to discard edits.
+                            let cur = ctx.mgmt_access_policy.peek().clone();
+                            draft.set(cur);
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn MgmtAccessEditor(
+    view: MgmtAccessPolicySnapshot,
+    is_ephemeral: bool,
+    pib_path: Option<String>,
+    on_toggle_require_signed: EventHandler<bool>,
+    on_toggle_localhop_disabled: EventHandler<bool>,
+    on_toggle_ephemeral_allowed: EventHandler<bool>,
+    on_set_validator_anchor: EventHandler<String>,
+    on_submit: EventHandler<MgmtAccessPolicySnapshot>,
+    on_reset: EventHandler<()>,
+) -> Element {
+    let anchor_value = view.validator_anchor.clone().unwrap_or_default();
+
+    rsx! {
+        // ── Hardcoded floors per §4.5.1 ──────────────────────────────
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
+            div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:8px;",
+                "Hardcoded floors"
+                span {
+                    style: "margin-left:8px;font-size:10px;font-weight:500;color:var(--text-muted);",
+                    "compiled in — cannot be relaxed at runtime"
+                }
+            }
+            FloorRow {
+                label: "Mgmt command rate limit",
+                value: "100 / minute",
+                detail: "Excess commands return STATUS 429. Raise by recompiling with a tuned `MgmtHandles` rate-limit config.",
+            }
+            FloorRow {
+                label: "Replay window (SignatureTime)",
+                value: format!("±{} s", view.replay_window_secs),
+                detail: "Signed commands carrying a SignatureTime outside this window are rejected as replays (audit N.10). Floor: 60 s.",
+            }
+            FloorRow {
+                label: "TLS WebSocket",
+                value: "no silent downgrade",
+                detail: "If a face advertises TLS, the forwarder refuses to downgrade to plaintext on reconnect.",
+            }
+            FloorRow {
+                label: "In-browser build",
+                value: "limited surface",
+                detail: "When the forwarder is hosted inside a browser tab (?engine=local) certain mgmt operations refuse — no FilePib mutation, no YubiKey, no system signer.",
+            }
+        }
+
+        // ── Configurable defaults per §4.5.1 ─────────────────────────
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
+            div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px;",
+                "Configurable defaults"
+                span {
+                    style: "margin-left:8px;font-size:10px;font-weight:500;color:var(--text-muted);",
+                    "live edits — applied without a forwarder restart"
+                }
+            }
+
+            BoolRow {
+                label: "Require signed commands",
+                checked: view.require_signed_commands,
+                description: "When ON, every management Interest must carry a SignatureValue verified by the validator. When OFF (default for new forwarders) anyone with WebSocket access can issue commands.",
+                consequence: "Turning this OFF allows unsigned mgmt commands on this forwarder.",
+                on_change: move |v| on_toggle_require_signed.call(v),
+            }
+            BoolRow {
+                label: "Localhop commands disabled",
+                checked: view.localhop_disabled,
+                description: "When ON, /localhop/nfd/* command Interests are rejected with STATUS 403 regardless of signing — useful when no localhop trust anchor is configured.",
+                consequence: "Turning this OFF lets neighbours on the same link issue mgmt commands via /localhop/nfd/* (signed only if `require_signed_commands` is also ON).",
+                on_change: move |v| on_toggle_localhop_disabled.call(v),
+            }
+            BoolRow {
+                label: "Allow ephemeral signing identity",
+                checked: view.ephemeral_allowed,
+                description: "When ON, the forwarder may sign management responses with an in-memory ephemeral key when no PIB identity is configured. When OFF, mgmt responses are refused until a persistent identity is loaded.",
+                consequence: "Turning this OFF without a configured persistent identity will break the dashboard's connection.",
+                on_change: move |v| on_toggle_ephemeral_allowed.call(v),
+            }
+
+            // validator_anchor — pending_restart per §4.5.1.
+            div { style: "padding:10px 0;border-top:1px solid var(--border-subtle);",
+                div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;",
+                    div { style: "font-size:12px;color:var(--text);",
+                        "Validator anchor (mgmt signing anchor)"
+                        span { style: "margin-left:8px;", class: "badge badge-gray", "pending_restart" }
+                    }
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-bottom:6px;",
+                    "The "
+                    EduGloss { term: "Trust anchor" }
+                    " the forwarder uses to verify signed management commands. Changing this requires a forwarder restart — the Validator rebuilds at startup."
+                }
+                input {
+                    r#type: "text",
+                    placeholder: "/lab/router-ca/KEY/k0",
+                    value: "{anchor_value}",
+                    oninput: move |e| on_set_validator_anchor.call(e.value()),
+                    style: "width:100%;",
+                }
+            }
+        }
+
+        // ── Action row ───────────────────────────────────────────────
+        div { style: "display:flex;gap:8px;margin-bottom:14px;",
+            button {
+                class: "btn btn-primary",
+                onclick: {
+                    let snapshot = view.clone();
+                    move |_| on_submit.call(snapshot.clone())
+                },
+                "Apply policy"
+            }
+            button {
+                class: "btn btn-secondary",
+                onclick: move |_| on_reset.call(()),
+                "Reset to live"
+            }
+        }
+
+        // ── §4.5.2 file-emitted bootstrap token — render-only ────────
+        if is_ephemeral || pib_path.is_none() {
+            div { style: "border:1px solid var(--yellow,#f5c518)44;background:#2a240022;border-radius:8px;padding:14px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--yellow,#f5c518);margin-bottom:6px;",
+                    "Empty-PIB alternative — file-emitted bootstrap token"
+                }
+                div { style: "font-size:11px;color:var(--text-muted);line-height:1.6;",
+                    "For deployments that want out-of-band-only mgmt-access bootstrap, configure the forwarder to write a one-time token to /run/ndn-fwd/bootstrap-token on cold boot. The operator reads the token over SSH and enters it here to enable signing without an in-band identity creation flow."
+                }
+                div { style: "margin-top:8px;font-size:11px;color:var(--text-muted);",
+                    "Render-only in this checkpoint; the token-entry flow lands with the §5 sub-flows in Phase C."
+                }
+            }
+        }
+
+        // ── Unauthenticated-channel warning ──────────────────────────
+        div { style: "margin-top:14px;padding:10px 12px;background:#2a000022;border:1px solid var(--red,#f85149)55;border-radius:6px;font-size:11px;color:var(--text-muted);line-height:1.6;",
+            span { style: "color:var(--red,#f85149);font-weight:600;", "⚠ " }
+            "If this dashboard is connected over an unauthenticated channel (plain WebSocket on a non-local interface, no TLS), anyone reaching the bind interface can issue management commands as you. Restrict the bind interface, or move to a TLS WebSocket face."
+        }
+    }
+}
+
+#[component]
+fn FloorRow(label: &'static str, value: String, detail: &'static str) -> Element {
+    rsx! {
+        div { style: "display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--border-subtle);",
+            div { style: "flex:1;",
+                div { style: "font-size:12px;color:var(--text);", "{label}" }
+                div { style: "font-size:11px;color:var(--text-muted);margin-top:2px;", "{detail}" }
+            }
+            div { style: "min-width:120px;text-align:right;",
+                span { class: "badge badge-gray", "compiled-in floor" }
+                div { class: "mono", style: "font-size:11px;color:var(--text);margin-top:4px;", "{value}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn BoolRow(
+    label: &'static str,
+    checked: bool,
+    description: &'static str,
+    consequence: &'static str,
+    on_change: EventHandler<bool>,
+) -> Element {
+    rsx! {
+        div { style: "padding:10px 0;border-top:1px solid var(--border-subtle);",
+            label {
+                style: "display:flex;gap:10px;align-items:flex-start;cursor:pointer;",
+                input {
+                    r#type: "checkbox",
+                    checked,
+                    onchange: move |e| on_change.call(e.value() == "true"),
+                    style: "margin-top:2px;",
+                }
+                div { style: "flex:1;",
+                    div { style: "font-size:12px;color:var(--text);font-weight:500;",
+                        "{label}"
+                        if !checked {
+                            span { style: "margin-left:8px;", class: "badge badge-yellow", "consequence: {consequence}" }
+                        }
+                    }
+                    div { style: "font-size:11px;color:var(--text-muted);margin-top:2px;line-height:1.5;",
+                        "{description}"
+                    }
+                }
             }
         }
     }

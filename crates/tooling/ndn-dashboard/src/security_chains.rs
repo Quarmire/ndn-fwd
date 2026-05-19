@@ -22,8 +22,13 @@
 #![allow(dead_code)] // typed instantiations land ahead of UI wiring
 
 use bytes::Bytes;
+use ndn_packet::Name;
+#[cfg(feature = "desktop")]
+use ndn_packet::SignatureType;
 use ndn_tlv::{TlvReader, TlvWriter};
 
+#[cfg(feature = "desktop")]
+use crate::signed_data_chain::DataSigner;
 use crate::signed_data_chain::{ChainEntry, ChainError, MemoryStore, SignedDataChainStore};
 
 // ── AuditLogEntry — §4.6 ────────────────────────────────────────────
@@ -251,6 +256,57 @@ pub fn open_schema_journal_in_memory(
     SignedDataChainStore::open(chain_root, MemoryStore::new())
 }
 
+// ── DashboardSigner ─────────────────────────────────────────────────
+//
+// Process-local Ed25519 signer used to sign every dashboard-authored
+// chain entry. v1 limitation: the key is freshly generated per process
+// — chain entries from prior processes remain on disk but won't
+// re-verify against this process's key. Persisting the signer
+// (matched to the dashboard's "active identity" per §8) is a v2
+// follow-up tracked alongside the §4.4 CA-promotion ceremony. The
+// chain still **records** the policy edit history end-to-end, which
+// is what §11.10's audit bridge needs from v1.
+
+#[cfg(feature = "desktop")]
+pub struct DashboardSigner {
+    key_locator: Name,
+    signing: ed25519_dalek::SigningKey,
+}
+
+#[cfg(feature = "desktop")]
+impl DashboardSigner {
+    /// Construct a fresh ephemeral signer. `key_locator` is the NDN
+    /// name the dashboard uses to identify the audit author — set to
+    /// the dashboard process's notion of itself (the §3.1 active
+    /// identity's name, or a default like
+    /// `/local/ndn-dashboard/KEY/ephemeral` when no PIB identity is
+    /// loaded yet).
+    pub fn new_ephemeral(key_locator: Name) -> Self {
+        let mut seed = [0u8; 32];
+        let _ = getrandom::getrandom(&mut seed);
+        Self {
+            key_locator,
+            signing: ed25519_dalek::SigningKey::from_bytes(&seed),
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
+impl DataSigner for DashboardSigner {
+    fn sig_type(&self) -> SignatureType {
+        SignatureType::SignatureEd25519
+    }
+    fn key_locator(&self) -> Option<&Name> {
+        Some(&self.key_locator)
+    }
+    fn sign(&self, region: &[u8]) -> Result<Bytes, ChainError> {
+        use ed25519_dalek::Signer as _;
+        Ok(Bytes::copy_from_slice(
+            &self.signing.sign(region).to_bytes(),
+        ))
+    }
+}
+
 // ── §11.10 audit-bridge helper ──────────────────────────────────────
 
 /// Build the `AuditLogEntry` that records a successful `policy-set`
@@ -275,6 +331,159 @@ pub fn policy_set_audit_entry(
         subject: "security/policy-set".into(),
         detail: format!("initiator={initiator_name} policy_content_hash={hex}"),
     }
+}
+
+// ── Process-global audit chain (desktop) ─────────────────────────────
+//
+// The dashboard owns one append-only [`AuditLogChain`] per process,
+// reachable from any DashCmd handler that produces an audit event (in
+// Phase B step 1 that's just the §11.10 audit bridge on `policy-set`
+// success; later checkpoints add `anchor-add`, `schema-rule-*`, etc).
+//
+// Per §11.1 the desktop backend writes Data wires to
+// `$XDG_CONFIG_HOME/ndn-dashboard/<forwarder-id>/audit/<seq>.data`.
+// The forwarder id is the dashboard's [`ForwarderProfile::machine_name`]
+// so switching between `ndn-fwd`, `nfd`, and `yanfd` keeps separate
+// chains. Web (wasm32) gets a [`MemoryStore`] until Phase B step 5
+// wires `IndexedDbStore`.
+
+#[cfg(feature = "desktop")]
+mod audit_globals {
+    use super::*;
+    use crate::signed_data_chain::FileStore;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    pub type AuditChainBackend = FileStore;
+    pub type AuditChainHandle = AuditLogChain<AuditChainBackend>;
+
+    struct AuditState {
+        signer: DashboardSigner,
+        chain: Mutex<AuditChainHandle>,
+    }
+
+    static AUDIT_STATE: OnceLock<AuditState> = OnceLock::new();
+
+    /// Initialise the process's audit chain. Idempotent — subsequent
+    /// calls return the existing handle (chain dir + signer don't
+    /// rotate on reconnect). Logs at WARN if the chain can't be opened
+    /// and falls back to a no-op state so the rest of the dashboard
+    /// keeps working.
+    pub fn init(dir: PathBuf, key_locator: Name) {
+        let _ = AUDIT_STATE.get_or_init(|| {
+            let chain_root = Name::root()
+                .append(b"local")
+                .append(b"ndn-dashboard")
+                .append(b"audit");
+            let backend = FileStore::new(&dir);
+            let chain = match SignedDataChainStore::open(chain_root, backend) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "dashboard.security",
+                        dir = %dir.display(),
+                        error = %e,
+                        "failed to open audit chain — falling back to empty in-memory chain"
+                    );
+                    // Best-effort: open a memory chain so subsequent
+                    // append calls don't blow up. The on-disk dir
+                    // simply stays empty.
+                    let mem_root = Name::root()
+                        .append(b"local")
+                        .append(b"ndn-dashboard")
+                        .append(b"audit-fallback");
+                    SignedDataChainStore::open(mem_root, FileStore::new(&dir))
+                        .expect("audit chain fallback open")
+                }
+            };
+            AuditState {
+                signer: DashboardSigner::new_ephemeral(key_locator),
+                chain: Mutex::new(chain),
+            }
+        });
+    }
+
+    /// Append one [`AuditLogEntry`]. No-op (logs at WARN) if `init`
+    /// hasn't been called yet or the append fails.
+    pub fn append(entry: AuditLogEntry) {
+        let Some(state) = AUDIT_STATE.get() else {
+            tracing::warn!(
+                target: "dashboard.security",
+                subject = %entry.subject,
+                "audit chain not initialised — dropping entry"
+            );
+            return;
+        };
+        let mut guard = match state.chain.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    error = %e,
+                    "audit chain mutex poisoned — dropping entry"
+                );
+                return;
+            }
+        };
+        if let Err(e) = guard.append(entry, &state.signer) {
+            tracing::warn!(
+                target: "dashboard.security",
+                error = %e,
+                "audit chain append failed"
+            );
+        }
+    }
+
+    /// Snapshot the chain's decoded entries (Phase B step 5 surfaces
+    /// these as the `AuditLogStream` rows). Returns oldest first.
+    pub fn snapshot() -> Vec<AuditLogEntry> {
+        let Some(state) = AUDIT_STATE.get() else {
+            return Vec::new();
+        };
+        let guard = match state.chain.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let n = guard.len();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            match guard.decode_entry(i) {
+                Ok(e) => out.push(e),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "dashboard.security",
+                        seq = i,
+                        error = %err,
+                        "audit chain decode error — skipping"
+                    );
+                }
+            }
+        }
+        out
+    }
+}
+
+#[cfg(feature = "desktop")]
+pub use audit_globals::{append as append_audit_entry, init as init_audit_chain};
+// `snapshot` reads the chain back out for Phase B step 5's
+// AuditLogStream; re-export ahead of the consumer's landing.
+#[cfg(feature = "desktop")]
+#[allow(unused_imports)]
+pub use audit_globals::snapshot as audit_chain_snapshot;
+
+// Web/wasm32 stubs — chain init is a no-op until Phase B step 5
+// wires `IndexedDbStore`. Audit append silently drops on web today;
+// the §11.10 bridge call sites still call the helper so a wasm32
+// audit-bridge call site doesn't have to cfg-gate.
+#[cfg(not(feature = "desktop"))]
+pub fn init_audit_chain(_dir: std::path::PathBuf, _key_locator: Name) {}
+
+#[cfg(not(feature = "desktop"))]
+pub fn append_audit_entry(_entry: AuditLogEntry) {}
+
+#[cfg(not(feature = "desktop"))]
+pub fn audit_chain_snapshot() -> Vec<AuditLogEntry> {
+    Vec::new()
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
