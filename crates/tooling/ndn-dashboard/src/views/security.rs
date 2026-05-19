@@ -2,9 +2,9 @@
 //! DID explorer, NDNCERT CA panel, YubiKey integration, and the §4.5
 //! mgmt-access policy editor.
 
-use crate::app::{AppCtx, DashCmd};
+use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 use crate::edu_gloss::EduGloss;
-use crate::types::{MgmtAccessPolicySnapshot, SchemaRuleInfo};
+use crate::types::{MgmtAccessPolicySnapshot, SchemaRuleInfo, SecurityKeyInfo};
 use crate::views::onboarding::encode_did_ndn;
 use dioxus::prelude::*;
 
@@ -129,80 +129,127 @@ pub fn Security() -> Element {
     }
 }
 
-// ── Tab: Identities ───────────────────────────────────────────────────────────
+// ── Tab: Identities — §4.1 ───────────────────────────────────────────────────
+//
+// Phase B step 2 — primary security view layout. Splits keys into a
+// left-pane tree (grouped by identity prefix) and a right-pane
+// inspector that renders one CertCard per key with a
+// ValidityTimeline. v1 actions: [Delete] wires through the existing
+// `SecurityKeyDelete` DashCmd; [Renew] / [Export SafeBag] /
+// [Set as active] surface "Phase C: §5 sub-flow" toasts so the
+// affordance is visible without forging a UX commitment that
+// doesn't ship until Phase C.
 
 #[component]
-fn IdentitiesTab(
-    keys: Vec<crate::types::SecurityKeyInfo>,
-    mut new_key_name: Signal<String>,
-) -> Element {
+fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -> Element {
     let ctx = use_context::<AppCtx>();
+    let mut selected: Signal<Option<String>> = use_signal(|| None);
+    let groups = group_keys_by_identity(&keys);
+
+    // Default selection — first identity if any. The auto-select
+    // runs only when nothing has been chosen yet and at least one
+    // identity exists.
+    let initial = groups.first().map(|(name, _)| name.clone());
+    use_effect(move || {
+        if selected.read().is_none()
+            && let Some(name) = initial.clone()
+        {
+            selected.set(Some(name));
+        }
+    });
+
+    let selected_name = selected.read().clone();
+    let active_identity_name = ctx.identity_name.read().clone();
+    let is_ephemeral = *ctx.identity_is_ephemeral.read();
+
     rsx! {
-        div { class: "section-title", "Identity Keys" }
-        if keys.is_empty() {
-            div { class: "empty",
-                "No identity keys found. Security may not be configured, or the PIB is empty."
-            }
-        } else {
-            table {
-                thead {
-                    tr {
-                        th { "Key Name" }
-                        th {
-                            span {
-                                "data-tooltip": "Whether this key has a CA-issued certificate.\nWithout a certificate, signed Interests will be rejected by peers.",
-                                "Cert"
-                            }
-                        }
-                        th {
-                            span {
-                                "data-tooltip": "Time until the certificate expires.\nRenew before expiry via NDNCERT — use the CA / NDNCERT tab.",
-                                "Expiry"
-                            }
-                        }
-                        th { "Actions" }
+        div { class: "section-title", "Identities" }
+
+        // Education card — §9 EduGloss seam.
+        div { class: "edu-card",
+            div { style: "display:flex;gap:12px;align-items:flex-start;",
+                div { style: "font-size:28px;flex-shrink:0;", "🪪" }
+                div {
+                    div { style: "font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px;",
+                        EduGloss { term: "Identity" }
+                        " · "
+                        EduGloss { term: "Key" }
+                        " · "
+                        EduGloss { term: "Cert" }
                     }
-                }
-                tbody {
-                    for k in keys.iter() {
-                        {
-                            let key_name = k.name.clone();
-                            let has_cert = k.has_cert;
-                            let (badge_class, badge_label) = k.expiry_badge();
-                            rsx! {
-                                tr {
-                                    td { class: "mono", "{key_name}" }
-                                    td {
-                                        if has_cert {
-                                            span { class: "badge badge-green", "yes" }
-                                        } else {
-                                            span {
-                                                class: "badge badge-yellow",
-                                                "data-tooltip": "No certificate — enroll via the CA / NDNCERT tab.",
-                                                "no cert"
-                                            }
-                                        }
-                                    }
-                                    td { span { class: "{badge_class}", "{badge_label}" } }
-                                    td {
-                                        button {
-                                            class: "btn btn-danger btn-sm",
-                                            onclick: move |_| ctx.cmd.send(DashCmd::SecurityKeyDelete(key_name.clone())),
-                                            "Delete"
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
+                        "Each identity owns one or more keys; each key may carry a certificate that binds it to a validity window. Click a node on the left to inspect its keys and certs."
                     }
                 }
             }
         }
 
-        // Generate key form
-        div { class: "form-row",
+        if keys.is_empty() {
+            div { class: "empty",
+                "No identity keys found. Security may not be configured, or the PIB is empty."
+            }
+        } else {
+            div { style: "display:grid;grid-template-columns:minmax(260px,320px) 1fr;gap:16px;align-items:start;",
+                // Left pane — identity tree.
+                IdentityTree {
+                    groups: groups.clone(),
+                    selected: selected_name.clone(),
+                    active_identity_name: active_identity_name.clone(),
+                    on_select: move |name: String| selected.set(Some(name)),
+                }
+
+                // Right pane — inspector for the selected identity.
+                {
+                    let inspected = selected_name
+                        .as_ref()
+                        .and_then(|name| groups.iter().find(|(n, _)| n == name).map(|(_, keys)| (name.clone(), keys.clone())));
+                    match inspected {
+                        Some((name, group_keys)) => rsx! {
+                            IdentityInspector {
+                                identity_name: name.clone(),
+                                keys: group_keys,
+                                is_active_identity: name == active_identity_name,
+                                is_active_ephemeral: is_ephemeral,
+                            }
+                        },
+                        None => rsx! {
+                            div { class: "empty", "Select an identity from the tree to inspect its keys and certs." }
+                        },
+                    }
+                }
+            }
+        }
+
+        // Bottom — affordances for adding identities. Two of three
+        // are v1 stubs (§5 SafeBag import, NDNCERT join wizard
+        // live in Phase C); generate-key uses the existing
+        // `SecurityGenerate` DashCmd so an operator can still
+        // populate the PIB from this tab.
+        div {
+            style: "display:flex;flex-wrap:wrap;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--border-subtle);",
+            button {
+                class: "btn btn-secondary",
+                onclick: move |_| push_toast(
+                    "Phase C: §5 sub-flow — SafeBagImportModal",
+                    ToastLevel::Info,
+                ),
+                "+ Import SafeBag"
+            }
+            button {
+                class: "btn btn-secondary",
+                onclick: move |_| push_toast(
+                    "Phase C: §5 sub-flow — EnrollmentWizard",
+                    ToastLevel::Info,
+                ),
+                "+ Join via NDNCERT"
+            }
+        }
+
+        // Generate-key form (existing surface, retained so v1
+        // operators can mint a key without leaving this tab).
+        div { class: "form-row", style: "margin-top:14px;",
             div { class: "form-group",
-                label { "New Key Name (NDN name, e.g. /ndn/myrouter/key)" }
+                label { "Generate a new Ed25519 identity key" }
                 input {
                     r#type: "text",
                     placeholder: "/ndn/myrouter/key",
@@ -220,10 +267,394 @@ fn IdentitiesTab(
                         new_key_name.set(String::new());
                     }
                 },
-                "Generate Ed25519 Key"
+                "Generate"
             }
         }
     }
+}
+
+/// Group keys by their identity prefix (`/lab/alice/KEY/k1` →
+/// `/lab/alice`). Returns identities in stable sort order so the
+/// tree renders deterministically.
+fn group_keys_by_identity(keys: &[SecurityKeyInfo]) -> Vec<(String, Vec<SecurityKeyInfo>)> {
+    use std::collections::BTreeMap;
+    let mut grouped: BTreeMap<String, Vec<SecurityKeyInfo>> = BTreeMap::new();
+    for k in keys {
+        grouped
+            .entry(k.identity_name().to_owned())
+            .or_default()
+            .push(k.clone());
+    }
+    for (_, ks) in grouped.iter_mut() {
+        ks.sort_by(|a, b| a.key_id().cmp(b.key_id()));
+    }
+    grouped.into_iter().collect()
+}
+
+#[component]
+fn IdentityTree(
+    groups: Vec<(String, Vec<SecurityKeyInfo>)>,
+    selected: Option<String>,
+    active_identity_name: String,
+    on_select: EventHandler<String>,
+) -> Element {
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;min-height:280px;",
+            div { style: "font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;",
+                "Identity tree"
+            }
+            for (id_name, group_keys) in groups.iter() {
+                {
+                    let id_name_owned = id_name.clone();
+                    let is_selected = selected.as_deref() == Some(id_name.as_str());
+                    let is_active = id_name == &active_identity_name;
+                    let row_bg = if is_selected { "var(--accent-dim)" } else { "transparent" };
+                    let row_border = if is_selected { "var(--accent-solid)" } else { "transparent" };
+                    rsx! {
+                        div {
+                            style: "border:1px solid {row_border};background:{row_bg};border-radius:6px;padding:6px 8px;margin-bottom:4px;cursor:pointer;",
+                            onclick: move |_| on_select.call(id_name_owned.clone()),
+                            div { style: "display:flex;gap:6px;align-items:center;",
+                                span { style: "font-size:13px;", "🌐" }
+                                span { class: "mono", style: "font-size:12px;color:var(--text);flex:1;word-break:break-all;", "{id_name}" }
+                                if is_active {
+                                    span { class: "badge badge-green", style: "font-size:9px;", "active" }
+                                }
+                            }
+                            // Indented per-key list under this identity.
+                            div { style: "margin-top:4px;padding-left:18px;",
+                                for k in group_keys.iter() {
+                                    {
+                                        let kid = k.key_id().to_owned();
+                                        let has_cert = k.has_cert;
+                                        rsx! {
+                                            div {
+                                                style: "display:flex;gap:6px;align-items:center;padding:2px 0;font-size:11px;color:var(--text-muted);",
+                                                span { "{key_glyph(has_cert)}" }
+                                                span { class: "mono", "KEY/{kid}" }
+                                                if has_cert {
+                                                    span { style: "color:var(--green);", "·" }
+                                                    span { style: "font-size:10px;color:var(--green);", "cert" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if groups.is_empty() {
+                div { class: "empty", style: "padding:8px;font-size:11px;", "No identities to display." }
+            }
+        }
+    }
+}
+
+fn key_glyph(has_cert: bool) -> &'static str {
+    if has_cert { "●" } else { "○" }
+}
+
+#[component]
+fn IdentityInspector(
+    identity_name: String,
+    keys: Vec<SecurityKeyInfo>,
+    is_active_identity: bool,
+    is_active_ephemeral: bool,
+) -> Element {
+    let ctx = use_context::<AppCtx>();
+    let active_certs = keys.iter().filter(|k| k.has_cert).count();
+    let total_keys = keys.len();
+
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;",
+            // Header
+            div { style: "display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px;",
+                div {
+                    div { class: "mono", style: "font-size:14px;color:var(--text);word-break:break-all;", "{identity_name}" }
+                    div { style: "margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;font-size:11px;",
+                        if is_active_identity && !is_active_ephemeral {
+                            span { class: "badge badge-green", "active · persistent" }
+                        }
+                        if is_active_identity && is_active_ephemeral {
+                            span { class: "badge badge-yellow", "active · ephemeral" }
+                        }
+                        if !is_active_identity {
+                            span { class: "badge badge-gray", "not active" }
+                        }
+                        span { class: "badge badge-blue", "{total_keys} key{plural(total_keys)}" }
+                        span { class: "badge badge-blue", "{active_certs} cert{plural(active_certs)}" }
+                    }
+                }
+            }
+
+            // Per-key CertCards
+            if keys.is_empty() {
+                div { class: "empty", "This identity has no keys." }
+            } else {
+                for k in keys.iter() {
+                    {
+                        let k_owned = k.clone();
+                        rsx! {
+                            CertCard {
+                                info: k_owned,
+                                on_delete: move |name: String| {
+                                    ctx.cmd.send(DashCmd::SecurityKeyDelete(name));
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+#[component]
+fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
+    let name = info.name.clone();
+    let name_for_delete = name.clone();
+    let kid = info.key_id().to_owned();
+    let (badge_class, badge_label) = info.expiry_badge();
+    let has_cert = info.has_cert;
+    let valid_until_s = info.valid_until_unix_s();
+    let valid_from_s = info.valid_from_unix_s();
+    let now_s = now_unix_s_opt();
+
+    rsx! {
+        div { style: "border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:10px;",
+            // Top row — key id + cert badge.
+            div { style: "display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px;",
+                div {
+                    span { class: "mono", style: "font-size:12px;color:var(--text);", "KEY/{kid}" }
+                    span { style: "margin-left:8px;font-size:11px;color:var(--text-muted);",
+                        if has_cert { "active cert" } else { "no cert" }
+                    }
+                }
+                span { class: "{badge_class}", "{badge_label}" }
+            }
+
+            // Full key/cert name.
+            div { class: "mono", style: "font-size:10px;color:var(--text-muted);word-break:break-all;margin-bottom:8px;", "{name}" }
+
+            // Validity timeline.
+            ValidityTimeline {
+                start_unix_s: valid_from_s,
+                end_unix_s: valid_until_s,
+                now_unix_s: now_s,
+                alert_within_days: 30,
+            }
+
+            // Actions — three Phase-C stubs + Delete (live).
+            div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;",
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| push_toast(
+                        "Phase C: §5 sub-flow — KeyRotationModal",
+                        ToastLevel::Info,
+                    ),
+                    "Renew"
+                }
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| push_toast(
+                        "Phase C: §5 sub-flow — SafeBag export",
+                        ToastLevel::Info,
+                    ),
+                    "Export SafeBag"
+                }
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| push_toast(
+                        "Phase C: §5 sub-flow — set-as-active ceremony",
+                        ToastLevel::Info,
+                    ),
+                    "Set as active"
+                }
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    "data-tooltip": "Phase C — §4.2 TrustPathInspector sidesheet renders here",
+                    onclick: move |_| push_toast(
+                        "Phase C: §4.2 TrustPathInspector — trace ↑ not wired yet",
+                        ToastLevel::Info,
+                    ),
+                    "Trace ↑"
+                }
+                button {
+                    class: "btn btn-danger btn-sm",
+                    onclick: move |_| on_delete.call(name_for_delete.clone()),
+                    "Delete"
+                }
+            }
+        }
+    }
+}
+
+/// Phase B step 2 — `ValidityTimeline` component. Renders the cert's
+/// issued window with a "now" marker. Degrades to an endpoint-only
+/// gauge when `start_unix_s` is `None` (the v1 wire format doesn't
+/// surface `valid_from` yet; small wire extension follow-up).
+#[component]
+fn ValidityTimeline(
+    start_unix_s: Option<u64>,
+    end_unix_s: Option<u64>,
+    now_unix_s: Option<u64>,
+    alert_within_days: u64,
+) -> Element {
+    // No cert / permanent cert — render an explanatory line.
+    let Some(end) = end_unix_s else {
+        return rsx! {
+            div { style: "padding:6px 8px;border-radius:4px;background:var(--surface);border:1px solid var(--border-subtle);font-size:11px;color:var(--text-muted);",
+                "No expiry on this cert (permanent, or no cert present)."
+            }
+        };
+    };
+
+    let now = now_unix_s.unwrap_or(end);
+    let alert_secs = alert_within_days.saturating_mul(86_400);
+
+    // Compute the bar fill + color.
+    let (fill_pct, fill_color, end_status) = match start_unix_s {
+        Some(start) if end > start => {
+            let span = end - start;
+            let elapsed = now.saturating_sub(start).min(span);
+            let pct = ((elapsed as f64 / span as f64) * 100.0).clamp(0.0, 100.0);
+            let remaining = end.saturating_sub(now);
+            let color = if remaining == 0 {
+                "var(--red,#f85149)"
+            } else if remaining < alert_secs {
+                "var(--yellow,#f5c518)"
+            } else {
+                "var(--green,#3fb950)"
+            };
+            (pct, color, expiry_label(now, end))
+        }
+        _ => {
+            // No start — render a single-axis remaining-time gauge.
+            let remaining = end.saturating_sub(now);
+            let pct = if remaining == 0 {
+                100.0
+            } else if remaining < alert_secs {
+                // Show the unconsumed fraction of the alert window.
+                100.0 - (remaining as f64 / alert_secs as f64) * 100.0
+            } else {
+                // Beyond the alert window — show a small filled fraction.
+                10.0
+            };
+            let color = if remaining == 0 {
+                "var(--red,#f85149)"
+            } else if remaining < alert_secs {
+                "var(--yellow,#f5c518)"
+            } else {
+                "var(--green,#3fb950)"
+            };
+            (pct, color, expiry_label(now, end))
+        }
+    };
+
+    let start_label = start_unix_s
+        .map(format_unix_date)
+        .unwrap_or_else(|| "—".into());
+    let end_label = format_unix_date(end);
+    let fill_pct_int = fill_pct.round() as i64;
+
+    rsx! {
+        div { style: "border:1px solid var(--border-subtle);border-radius:4px;padding:8px;background:var(--surface);",
+            div { style: "display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-bottom:4px;",
+                span { "{start_label}" }
+                span { "{end_label}" }
+            }
+            // Bar
+            div { style: "position:relative;height:12px;background:var(--bg);border:1px solid var(--border-subtle);border-radius:2px;overflow:hidden;",
+                div {
+                    style: "width:{fill_pct_int}%;height:100%;background:{fill_color};transition:width .3s;",
+                }
+                // 'now' tick — same position as fill edge.
+                div {
+                    style: "position:absolute;top:-2px;bottom:-2px;left:{fill_pct_int}%;width:2px;background:var(--text);",
+                }
+            }
+            div { style: "margin-top:4px;font-size:11px;color:var(--text-muted);text-align:right;",
+                "{end_status}"
+            }
+        }
+    }
+}
+
+fn expiry_label(now: u64, end: u64) -> String {
+    if now >= end {
+        return "expired".into();
+    }
+    let remaining = end - now;
+    let days = remaining / 86_400;
+    if days == 0 {
+        let hours = remaining / 3_600;
+        if hours == 0 {
+            format!("{} min until expiry", remaining / 60)
+        } else {
+            format!("{hours} h until expiry")
+        }
+    } else if days == 1 {
+        "1 day until expiry".into()
+    } else {
+        format!("{days} days until expiry")
+    }
+}
+
+fn format_unix_date(secs: u64) -> String {
+    // No chrono dep — render as ISO date by walking the Gregorian
+    // calendar. Y/M/D only, which is what the §4.1 timeline labels
+    // need. Accurate well into the next century, which is enough.
+    let mut days = (secs / 86_400) as i64;
+    let mut year = 1970i64;
+    loop {
+        let yd = if is_leap(year) { 366 } else { 365 };
+        if days < yd as i64 {
+            break;
+        }
+        days -= yd as i64;
+        year += 1;
+    }
+    let months_normal: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months_leap: [i64; 12] = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = if is_leap(year) {
+        months_leap
+    } else {
+        months_normal
+    };
+    let mut month = 0usize;
+    while month < 12 && days >= months[month] {
+        days -= months[month];
+        month += 1;
+    }
+    let day = days + 1;
+    format!("{year:04}-{:02}-{:02}", month + 1, day)
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_unix_s_opt() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_unix_s_opt() -> Option<u64> {
+    // wasm32 clock follow-up tracked in the kickoff cross-cutting
+    // list ("`web_time` clock on wasm32"). Until then the timeline
+    // renders without a "now" marker on web — start_unix_s/end label
+    // still show, just no progress fraction.
+    None
 }
 
 // ── Tab: Trust Anchors ────────────────────────────────────────────────────────

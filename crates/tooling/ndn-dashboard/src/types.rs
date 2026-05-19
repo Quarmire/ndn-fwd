@@ -744,6 +744,39 @@ pub struct SecurityKeyInfo {
 }
 
 impl SecurityKeyInfo {
+    /// Identity prefix — everything before the `/KEY/<id>` suffix.
+    /// `/lab/alice/KEY/k1` → `/lab/alice`. Returns the full key name
+    /// when no `KEY` component is found (the wire shouldn't produce
+    /// such entries, but degrade gracefully if it does).
+    pub fn identity_name(&self) -> &str {
+        match self.name.rfind("/KEY/") {
+            Some(i) => &self.name[..i],
+            None => &self.name,
+        }
+    }
+
+    /// Key id — the component immediately after `/KEY/`. Returns
+    /// `""` when no `KEY` component is found.
+    pub fn key_id(&self) -> &str {
+        match self.name.rfind("/KEY/") {
+            Some(i) => {
+                let tail = &self.name[i + 5..];
+                tail.split('/').next().unwrap_or("")
+            }
+            None => "",
+        }
+    }
+
+    /// Cert `valid_from` in Unix-epoch seconds. Always `None` in v1
+    /// — `security/identity-list` doesn't surface the issued-at
+    /// timestamp yet. `ValidityTimeline` renders only the endpoint
+    /// marker when this is `None`; wiring real `valid_from` is a
+    /// small wire-format extension tracked alongside Phase B step 2's
+    /// IdentityInspector landing.
+    pub fn valid_from_unix_s(&self) -> Option<u64> {
+        None
+    }
+
     /// Cert `valid_until` in Unix-epoch seconds, or `None` for
     /// permanent / missing certs. Used by the §3.1 IdentityChip to
     /// detect Expired / ExpiringSoon.
