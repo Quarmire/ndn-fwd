@@ -256,7 +256,7 @@ pub fn open_schema_journal_in_memory(
 /// Build the `AuditLogEntry` that records a successful `policy-set`
 /// mutation. The dashboard appends this to its `AuditLogChain` when
 /// `/localhost/nfd/security/policy-set` returns 200. `policy_content_hash`
-/// is the SHA-256 of the canonical (TLV-encoded) `OperatorPosture`
+/// is the SHA-256 of the canonical (TLV-encoded) `MgmtAccessPolicy`
 /// the operator submitted; the bridge lets readers reconstruct the
 /// full policy edit history from the audit chain even though the
 /// policy itself isn't chained.

@@ -67,7 +67,7 @@ extended = "When the chain is unbroken and every link satisfies a schema rule, t
 wiki_anchor = "trust-paths"
 
 [[entries]]
-term = "OperatorPosture"
+term = "MgmtAccessPolicy"
 gloss = "The forwarder's runtime security policy — which commands need signing, which validators apply."
 extended = "Forwarder-internal config in v1; edits are bridged into the audit log so policy history is reconstructable."
 wiki_anchor = "mgmt-access"
