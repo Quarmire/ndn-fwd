@@ -5,8 +5,9 @@
 use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 use crate::edu_gloss::EduGloss;
 use crate::types::{
-    AnchorInfo, FailureDiagnosis, MgmtAccessPolicySnapshot, SchemaRuleApplied, SchemaRuleInfo,
-    SecurityKeyInfo, TrustChainStep, TrustValidationResult, TrustVerdict, ValidationStats,
+    AnchorInfo, CaInfo, FailureDiagnosis, MgmtAccessPolicySnapshot, SchemaRuleApplied,
+    SchemaRuleInfo, SecurityKeyInfo, TrustChainStep, TrustValidationResult, TrustVerdict,
+    ValidationStats,
 };
 use crate::views::onboarding::encode_did_ndn;
 use dioxus::prelude::*;
@@ -1345,7 +1346,25 @@ fn DidExplainCard(title: &'static str, body: &'static str) -> Element {
     }
 }
 
-// ── Tab: CA / NDNCERT ─────────────────────────────────────────────────────────
+// ── Tab: CA / NDNCERT — §4.4 ──────────────────────────────────────────────────
+//
+// Phase B step 6 — two-tier `CaList` design. Trusted tier renders
+// the local router's CA (when configured) plus every installed trust
+// anchor (each anchor is the trust root for an issuance namespace).
+// Discovered tier surfaces CAs the dashboard has heard about via
+// service discovery; the discovery wire is a v1.5 mgmt extension so
+// today the tier is empty + render-only.
+//
+// PromoteToTrustedModal handles the §11.4 mitigations:
+//   1. fingerprint hex + word-pair display for out-of-band match
+//   2. journal each promotion via `SchemaJournalKind::AnchorAdd`
+//      (the active dashboard identity signs the journal entry)
+//   3. time-windowed visibility — discovered CAs drop off after the
+//      §11.4 default 10-minute window; the timer surfaces on each
+//      discovered card (no live data yet, but the render path is
+//      stable for the wire landing)
+
+const DISCOVERY_WINDOW_SECS: u64 = 10 * 60;
 
 #[component]
 fn CaTab() -> Element {
@@ -1353,14 +1372,69 @@ fn CaTab() -> Element {
     let mut show_token_form = use_signal(|| false);
     let mut token_name = use_signal(String::new);
     let mut last_token = use_signal(String::new);
+    let mut promote_open: Signal<bool> = use_signal(|| false);
+    let mut promote_prefill: Signal<String> = use_signal(String::new);
     let ca = ctx.ca_info.read().clone();
+    let anchors = ctx.security_anchors.read().clone();
+    let identity_name = ctx.identity_name.read().clone();
+    let is_ephemeral = *ctx.identity_is_ephemeral.read();
 
     rsx! {
-        div { class: "section-title", "CA / NDNCERT" }
+        div { class: "section-title", "Certificate Authorities" }
 
-        // Live CA status or "not configured" notice
+        // Education card — first surface so operators meet the
+        // concept before the lists.
+        div { class: "edu-card",
+            div { style: "display:flex;gap:12px;align-items:flex-start;",
+                div { style: "font-size:28px;flex-shrink:0;", "🏛" }
+                div {
+                    div { style: "font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px;",
+                        EduGloss { term: "CA" }
+                        " · "
+                        EduGloss { term: "NDNCERT" }
+                    }
+                    div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
+                        "A CA issues certs that bind your identity key to a name. The Trusted tier below holds the CAs your forwarder validates against today. Discovered CAs are surfaced via service discovery; promote one only after you've matched its fingerprint out-of-band — same trust-on-first-connect ceremony as SSH."
+                    }
+                }
+            }
+        }
+
+        // Trusted tier.
+        TrustedCaList {
+            local_ca: ca.clone(),
+            anchors: anchors.clone(),
+            on_promote_from_anchor: move |name: String| {
+                promote_prefill.set(name);
+                promote_open.set(true);
+            },
+        }
+
+        // Discovered tier (render-only — v1.5 discovery wire pending).
+        DiscoveredCaList {
+            on_promote: move |name: String| {
+                promote_prefill.set(name);
+                promote_open.set(true);
+            },
+        }
+
+        // Manual-add affordance.
+        div { style: "margin-top:14px;",
+            button {
+                class: "btn btn-primary",
+                onclick: move |_| {
+                    promote_prefill.set(String::new());
+                    promote_open.set(true);
+                },
+                "+ Promote CA by name"
+            }
+        }
+
+        // Local-router-as-CA detail panel (existing surface, kept so
+        // operators of the local CA can manage their ZTP tokens
+        // alongside the new trusted/discovered split).
         if let Some(ref info) = ca {
-            div { style: "background:var(--green-dark);border:1px solid var(--green)44;border-radius:6px;padding:14px;margin-bottom:14px;",
+            div { style: "background:var(--green-dark);border:1px solid var(--green)44;border-radius:6px;padding:14px;margin-bottom:14px;margin-top:18px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--green);margin-bottom:8px;",
                     "CA Active on this router"
                 }
@@ -1380,56 +1454,28 @@ fn CaTab() -> Element {
                     }
                 }
             }
-        } else {
-            div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:14px;",
-                div { style: "font-size:12px;color:var(--text-muted);", "This router is not acting as a CA. To enable, add to router TOML:" }
-                div { class: "yk-cmd", style: "margin-top:8px;",
-                    "[security]\n"
-                    "ca_prefix = \"/ndn/site\"\n"
-                    "ca_info = \"Site CA\"\n"
-                    "ca_max_validity_days = 365\n"
-                    "ca_challenges = [\"token\", \"pin\"]"
+
+            // Enrollment flow diagram
+            div { style: "margin:16px 0;",
+                div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px;", "Enrollment Protocol Flow" }
+                div { class: "enroll-steps",
+                    EnrollStep { label: "PROBE", desc: "Check namespace", status: "done" }
+                    div { class: "enroll-step-line done" }
+                    EnrollStep { label: "NEW", desc: "Submit key + ECDH", status: "done" }
+                    div { class: "enroll-step-line" }
+                    EnrollStep { label: "CHALLENGE", desc: "Verify identity", status: "active" }
+                    div { class: "enroll-step-line" }
+                    EnrollStep { label: "CERT", desc: "Receive certificate", status: "" }
                 }
             }
-        }
 
-        // Education card
-        div { class: "edu-card",
-            div { style: "display:flex;gap:12px;align-items:flex-start;",
-                div { style: "font-size:28px;flex-shrink:0;", "🏛" }
-                div {
-                    div { style: "font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px;",
-                        "NDNCERT — Automated Certificate Management"
-                    }
-                    div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
-                        "NDNCERT (Named Data Networking Certificate Management Protocol) automates certificate issuance. "
-                        "A CA verifies your identity via challenges (PIN, email, possession, or YubiKey OTP) "
-                        "and issues a signed certificate bound to your identity key."
-                    }
-                }
+            // Protocol info
+            div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;",
+                InfoKv { label: "Protocol", val: "NDNCERT 0.3" }
+                InfoKv { label: "Key Exchange", val: "P-256 ECDH" }
+                InfoKv { label: "Encryption", val: "AES-GCM-128 + HKDF-SHA256" }
+                InfoKv { label: "Wire Format", val: "NDN TLV" }
             }
-        }
-
-        // Enrollment flow diagram
-        div { style: "margin:16px 0;",
-            div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px;", "Enrollment Protocol Flow" }
-            div { class: "enroll-steps",
-                EnrollStep { label: "PROBE", desc: "Check namespace", status: "done" }
-                div { class: "enroll-step-line done" }
-                EnrollStep { label: "NEW", desc: "Submit key + ECDH", status: "done" }
-                div { class: "enroll-step-line" }
-                EnrollStep { label: "CHALLENGE", desc: "Verify identity", status: "active" }
-                div { class: "enroll-step-line" }
-                EnrollStep { label: "CERT", desc: "Receive certificate", status: "" }
-            }
-        }
-
-        // Protocol info
-        div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;",
-            InfoKv { label: "Protocol", val: "NDNCERT 0.3" }
-            InfoKv { label: "Key Exchange", val: "P-256 ECDH" }
-            InfoKv { label: "Encryption", val: "AES-GCM-128 + HKDF-SHA256" }
-            InfoKv { label: "Wire Format", val: "NDN TLV" }
         }
 
         // Token management — enabled only when CA is active
@@ -1482,6 +1528,18 @@ fn CaTab() -> Element {
                 div { style: "padding:12px 14px;color:var(--text-muted);font-size:12px;",
                     "Generated tokens are logged by the router at INFO level. Future versions will list active tokens here."
                 }
+            }
+        }
+
+        // §11.4 TOFU ceremony modal — mounts when an operator clicks
+        // [Promote] on a discovered/anchor row or the [+ Promote CA
+        // by name] affordance.
+        if *promote_open.read() {
+            PromoteToTrustedModal {
+                prefill_name: promote_prefill.read().clone(),
+                initiator_name: identity_name.clone(),
+                is_initiator_ephemeral: is_ephemeral,
+                on_close: move |_: ()| promote_open.set(false),
             }
         }
     }
@@ -2774,3 +2832,372 @@ fn copy_to_clipboard(_s: &str) {
     // operator can hand-select-and-copy until the wasm clipboard
     // path lands.
 }
+
+// ── §4.4 CaList — Trusted tier ──────────────────────────────────────────────
+
+#[component]
+fn TrustedCaList(
+    local_ca: Option<CaInfo>,
+    anchors: Vec<AnchorInfo>,
+    on_promote_from_anchor: EventHandler<String>,
+) -> Element {
+    let trusted_count = anchors.len() + if local_ca.is_some() { 1 } else { 0 };
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-top:14px;margin-bottom:10px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--text);",
+                    "Trusted"
+                    span { style: "margin-left:8px;font-size:10px;font-weight:500;color:var(--text-muted);",
+                        "{trusted_count} root(s)"
+                    }
+                }
+                span { class: "badge badge-green", "active" }
+            }
+
+            if let Some(info) = local_ca.as_ref() {
+                CaRow {
+                    name: info.ca_prefix.clone(),
+                    badge_text: "local · self-signed",
+                    badge_class: "badge badge-green",
+                    detail: if info.ca_info.is_empty() {
+                        format!("max validity {}d · {} challenge(s)", info.max_validity_days, info.challenges.len())
+                    } else {
+                        format!("{} · max validity {}d", info.ca_info, info.max_validity_days)
+                    },
+                    on_promote: None,
+                }
+            }
+
+            for a in anchors.iter() {
+                CaRow {
+                    name: a.name.clone(),
+                    badge_text: "anchor",
+                    badge_class: "badge badge-blue",
+                    detail: "Installed trust anchor — promotes were journaled to schema-journal at install time.".to_string(),
+                    on_promote: Some(EventHandler::new({
+                        let name = a.name.clone();
+                        let cb = on_promote_from_anchor;
+                        move |_: ()| cb.call(name.clone())
+                    })),
+                }
+            }
+
+            if trusted_count == 0 {
+                div { class: "empty",
+                    "No trusted CAs configured. Run the forwarder with a trust anchor (see "
+                    EduGloss { term: "Trust anchor" }
+                    " in the docs) or promote a discovered CA below."
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CaRow(
+    name: String,
+    badge_text: &'static str,
+    badge_class: &'static str,
+    detail: String,
+    on_promote: Option<EventHandler<()>>,
+) -> Element {
+    rsx! {
+        div { style: "padding:10px 0;border-top:1px solid var(--border-subtle);display:flex;gap:10px;align-items:flex-start;",
+            span { style: "font-size:18px;flex-shrink:0;", "🏛" }
+            div { style: "flex:1;",
+                div { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
+                    span { class: "mono", style: "font-size:12px;color:var(--text);", "{name}" }
+                    span { class: "{badge_class}", "{badge_text}" }
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.5;",
+                    "{detail}"
+                }
+            }
+            if let Some(cb) = on_promote {
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| cb.call(()),
+                    "Re-verify"
+                }
+            }
+        }
+    }
+}
+
+// ── §4.4 CaList — Discovered tier (v1.5 wire pending) ──────────────────────
+
+#[component]
+fn DiscoveredCaList(on_promote: EventHandler<String>) -> Element {
+    // Render-only for now. The §11.4 discovery wire (service-record
+    // probe → discovered-CA list) is a v1.5 mgmt extension; once
+    // landed this component reads from a Signal<Vec<DiscoveredCa>>
+    // and surfaces real time-windowed entries.
+    let _ = on_promote;
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--text);",
+                    "Discovered"
+                    span { style: "margin-left:8px;font-size:10px;font-weight:500;color:var(--text-muted);",
+                        "0 in window"
+                    }
+                }
+                span { class: "badge badge-gray", "no wire yet" }
+            }
+            div { class: "empty",
+                "Service-discovery CA probes will surface here as they arrive. v1 forwarders don't yet emit the wire signal; once "
+                span { class: "mono", "security/ca-discovered" }
+                " lands, discovered CAs show up with a "
+                span { class: "mono", "{DISCOVERY_WINDOW_SECS}" }
+                "-second time-window (§11.4 mitigation 3) and require the TOFU ceremony to promote."
+            }
+        }
+    }
+}
+
+// ── §11.4 PromoteToTrustedModal ──────────────────────────────────────────────
+//
+// TOFU ceremony per §11.4 mitigation 1. Operator pastes the CA's
+// anchor name + the fingerprint hex they received out-of-band. The
+// modal renders the fingerprint as both raw hex AND a word-pair
+// sequence so the operator can read it aloud to the CA operator for
+// matching. On [Confirm], the dashboard appends a
+// `SchemaJournalKind::AnchorAdd` entry to the schema journal (§11.4
+// mitigation 2 — "every promote-to-trusted event is recorded in the
+// schema journal"). No mgmt verb fires — anchor-add isn't wired yet
+// and the journal-of-intent is the v1 audit surface.
+
+#[component]
+fn PromoteToTrustedModal(
+    prefill_name: String,
+    initiator_name: String,
+    is_initiator_ephemeral: bool,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut name: Signal<String> = use_signal(|| prefill_name.clone());
+    let mut fingerprint: Signal<String> = use_signal(String::new);
+    let mut acknowledged: Signal<bool> = use_signal(|| false);
+    let mut journaled: Signal<bool> = use_signal(|| false);
+
+    let fp_text = fingerprint.read().clone();
+    let fp_bytes = parse_fingerprint_hex(&fp_text);
+    let fp_valid = fp_bytes.as_ref().map(|b| b.len() >= 4).unwrap_or(false);
+    let name_valid = !name.read().trim().is_empty();
+    let can_confirm = name_valid && fp_valid && *acknowledged.read() && !*journaled.read();
+
+    rsx! {
+        div {
+            style: "position:fixed;inset:0;background:rgba(0,0,0,.40);z-index:75;display:flex;align-items:center;justify-content:center;",
+            onclick: move |_| on_close.call(()),
+            div {
+                style: "background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:18px 22px;width:min(640px,95vw);max-height:90vh;overflow:auto;",
+                onclick: move |e| { e.stop_propagation(); },
+
+                div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;",
+                    div { style: "font-size:14px;font-weight:600;color:var(--text);",
+                        "Promote CA to trusted"
+                    }
+                    button {
+                        class: "btn btn-secondary btn-sm",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-bottom:14px;line-height:1.5;",
+                    "Trust-on-first-connect (§11.4) — verify the fingerprint via an out-of-band channel (a printed card, a signed Slack message, a phone call) before promoting. The decision is appended to the dashboard's "
+                    EduGloss { term: "Schema journal" }
+                    ", so future audits can replay what you trusted and when."
+                }
+
+                div { class: "form-group", style: "margin-bottom:10px;",
+                    label { style: "font-size:11px;color:var(--text-muted);",
+                        "CA anchor name"
+                    }
+                    input {
+                        r#type: "text",
+                        placeholder: "/lab/router-ca/KEY/k0",
+                        value: "{name}",
+                        oninput: move |e| name.set(e.value()),
+                        style: "width:100%;",
+                    }
+                }
+
+                div { class: "form-group", style: "margin-bottom:10px;",
+                    label { style: "font-size:11px;color:var(--text-muted);",
+                        "Anchor fingerprint (hex, 8–64 chars)"
+                    }
+                    input {
+                        r#type: "text",
+                        placeholder: "ab12cd34ef56…",
+                        value: "{fingerprint}",
+                        oninput: move |e| fingerprint.set(e.value()),
+                        style: "width:100%;",
+                    }
+                }
+
+                if let Some(bytes) = fp_bytes.as_ref() {
+                    FingerprintVisual { bytes: bytes.clone() }
+                } else if !fp_text.trim().is_empty() {
+                    div { style: "font-size:11px;color:var(--red,#f85149);margin-bottom:10px;",
+                        "Fingerprint must be hexadecimal (whitespace and colons ignored)."
+                    }
+                }
+
+                label { style: "display:flex;gap:8px;align-items:flex-start;margin:12px 0;font-size:12px;cursor:pointer;line-height:1.5;",
+                    input {
+                        r#type: "checkbox",
+                        checked: *acknowledged.read(),
+                        onchange: move |e| acknowledged.set(e.value() == "true"),
+                        style: "margin-top:3px;",
+                    }
+                    span {
+                        "I confirmed this fingerprint with the CA operator via an out-of-band channel. I understand promoting accepts every cert this CA issues from this point forward."
+                    }
+                }
+
+                if *journaled.read() {
+                    div { style: "padding:10px;background:#00220022;border:1px solid var(--green,#3fb950)55;border-radius:4px;font-size:11px;color:var(--text);margin-bottom:10px;",
+                        "✓ Promotion journaled. Anchor-add mgmt verb isn't wired yet, so the forwarder doesn't accept this CA until "
+                        span { class: "mono", "security/anchor-add" }
+                        " lands; the audit trail is preserved either way."
+                    }
+                }
+
+                div { style: "display:flex;gap:8px;justify-content:flex-end;",
+                    button {
+                        class: if can_confirm { "btn btn-primary" } else { "btn btn-secondary" },
+                        disabled: !can_confirm,
+                        onclick: {
+                            let name_val = name.peek().trim().to_owned();
+                            let fp_val = fp_bytes.clone().unwrap_or_default();
+                            let initiator = initiator_name.clone();
+                            move |_| {
+                                let initiator_for_audit = if is_initiator_ephemeral {
+                                    format!("/local/ndn-dashboard/ephemeral{initiator}")
+                                } else if initiator.is_empty() {
+                                    "/local/ndn-dashboard/anonymous".to_owned()
+                                } else {
+                                    initiator.clone()
+                                };
+                                let fp_hex: String = fp_val.iter().map(|b| format!("{b:02x}")).collect();
+                                let subject = format!("anchor={} fingerprint={fp_hex}", name_val);
+                                let ts_unix_ns = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_nanos() as u64)
+                                    .unwrap_or(0);
+                                let entry = crate::security_chains::SchemaJournalEntry {
+                                    ts_unix_ns,
+                                    kind: crate::security_chains::SchemaJournalKind::AnchorAdd,
+                                    subject_name: subject,
+                                    initiator_name: initiator_for_audit,
+                                };
+                                crate::security_chains::append_schema_entry(entry);
+                                journaled.set(true);
+                                push_toast("CA promotion journaled (TOFU)", ToastLevel::Success);
+                            }
+                        },
+                        "Confirm & journal"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FingerprintVisual(bytes: Vec<u8>) -> Element {
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex_grouped = group_hex(&hex);
+    let words = fingerprint_words(&bytes);
+    rsx! {
+        div { style: "background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:10px;margin-bottom:10px;",
+            div { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;",
+                "Hex"
+            }
+            div { class: "mono", style: "font-size:12px;color:var(--text);word-break:break-all;margin-bottom:8px;",
+                "{hex_grouped}"
+            }
+            div { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;",
+                "Word-pair (PGP biometric-style)"
+            }
+            div { style: "font-size:12px;color:var(--text);font-weight:500;",
+                "{words}"
+            }
+            div { style: "font-size:10px;color:var(--text-muted);margin-top:6px;",
+                "Read the words aloud to verify with the CA operator; the encoding is deterministic so the same bytes always produce the same words."
+            }
+        }
+    }
+}
+
+/// Parse a hex string into bytes, tolerating whitespace and `:` /
+/// `-` separators. Returns `None` on any non-hex character or an
+/// odd digit count.
+fn parse_fingerprint_hex(s: &str) -> Option<Vec<u8>> {
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && *c != ':' && *c != '-')
+        .collect();
+    if cleaned.len() < 2 || !cleaned.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(cleaned.len() / 2);
+    for chunk in cleaned.as_bytes().chunks(2) {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
+fn group_hex(hex: &str) -> String {
+    let mut out = String::with_capacity(hex.len() + hex.len() / 4);
+    for (i, c) in hex.chars().enumerate() {
+        if i > 0 && i % 4 == 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// PGP-biometric-style word encoding — fixed 32-word even/odd lists
+/// chosen for phonetic distinctness and short ceremony readouts.
+/// Even-indexed bytes pick from `EVEN_WORDS`; odd-indexed bytes pick
+/// from `ODD_WORDS`. Each byte modulo 32 indexes into the
+/// corresponding list. For SHA-256 fingerprints we render the first 6
+/// bytes (3 word-pairs) which is sufficient ceremony entropy without
+/// requiring the operator to read 32+ words.
+fn fingerprint_words(bytes: &[u8]) -> String {
+    let take = bytes.len().min(6);
+    let mut out = String::new();
+    for (i, b) in bytes.iter().take(take).enumerate() {
+        let word = if i % 2 == 0 {
+            EVEN_WORDS[(b % 32) as usize]
+        } else {
+            ODD_WORDS[(b % 32) as usize]
+        };
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if bytes.len() > take {
+        out.push_str(" …");
+    }
+    out
+}
+
+const EVEN_WORDS: [&str; 32] = [
+    "amber", "anchor", "apple", "atlas", "basil", "beacon", "birch", "bronze", "canyon", "cedar",
+    "cobalt", "coral", "crystal", "dahlia", "delta", "ember", "falcon", "forest", "garnet",
+    "harbor", "ivory", "jasper", "kestrel", "lichen", "marble", "nectar", "onyx", "pebble",
+    "quartz", "raven", "spruce", "thistle",
+];
+
+const ODD_WORDS: [&str; 32] = [
+    "Aspen", "Boreal", "Citrus", "Drift", "Echo", "Fjord", "Glen", "Hazel", "Iris", "Juniper",
+    "Krill", "Lumen", "Marrow", "Nimbus", "Otter", "Pollen", "Quill", "Radian", "Sable", "Talon",
+    "Umber", "Verdant", "Willow", "Xenon", "Yarrow", "Zephyr", "Astral", "Briar", "Cinder",
+    "Drake", "Equinox", "Frost",
+];
