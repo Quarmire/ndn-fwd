@@ -22,14 +22,12 @@
 #![allow(dead_code)] // typed instantiations land ahead of UI wiring
 
 use bytes::Bytes;
-use ndn_packet::Name;
-#[cfg(feature = "desktop")]
-use ndn_packet::SignatureType;
+use ndn_packet::{Name, SignatureType};
 use ndn_tlv::{TlvReader, TlvWriter};
 
-#[cfg(feature = "desktop")]
-use crate::signed_data_chain::DataSigner;
-use crate::signed_data_chain::{ChainEntry, ChainError, MemoryStore, SignedDataChainStore};
+use crate::signed_data_chain::{
+    ChainEntry, ChainError, DataSigner, MemoryStore, SignedDataChainStore,
+};
 
 // ── AuditLogEntry — §4.6 ────────────────────────────────────────────
 
@@ -267,13 +265,11 @@ pub fn open_schema_journal_in_memory(
 // chain still **records** the policy edit history end-to-end, which
 // is what §11.10's audit bridge needs from v1.
 
-#[cfg(feature = "desktop")]
 pub struct DashboardSigner {
     key_locator: Name,
     signing: ed25519_dalek::SigningKey,
 }
 
-#[cfg(feature = "desktop")]
 impl DashboardSigner {
     /// Construct a fresh ephemeral signer. `key_locator` is the NDN
     /// name the dashboard uses to identify the audit author — set to
@@ -291,7 +287,6 @@ impl DashboardSigner {
     }
 }
 
-#[cfg(feature = "desktop")]
 impl DataSigner for DashboardSigner {
     fn sig_type(&self) -> SignatureType {
         SignatureType::SignatureEd25519
@@ -471,17 +466,138 @@ pub use audit_globals::{append as append_audit_entry, init as init_audit_chain};
 #[allow(unused_imports)]
 pub use audit_globals::snapshot as audit_chain_snapshot;
 
-// Web/wasm32 stubs — chain init is a no-op until Phase B step 5
-// wires `IndexedDbStore`. Audit append silently drops on web today;
-// the §11.10 bridge call sites still call the helper so a wasm32
-// audit-bridge call site doesn't have to cfg-gate.
-#[cfg(not(feature = "desktop"))]
+// Web (wasm32) audit chain — uses `IndexedDbStore` instead of
+// `FileStore`. `IdbDatabase` is `!Send` so we can't use `OnceLock` +
+// `Mutex` like the desktop globals; `thread_local!` + `RefCell` is
+// the wasm32-single-threaded equivalent.
+//
+// `init_audit_chain` keeps a sync signature (same as desktop) so
+// callers don't have to cfg-gate; on wasm32 it spawns the async
+// IDB open into the dioxus runtime via `wasm_bindgen_futures::
+// spawn_local`. The chain stays `None` until the open resolves —
+// `append_audit_entry` issued before then is logged and dropped
+// (logged at WARN so the gap is visible).
+
+#[cfg(all(target_arch = "wasm32", not(feature = "desktop")))]
+mod audit_globals_wasm {
+    use super::*;
+    use crate::signed_data_chain::IndexedDbStore;
+    use std::cell::RefCell;
+
+    pub type WasmAuditChain = AuditLogChain<IndexedDbStore>;
+
+    struct WasmAuditState {
+        signer: DashboardSigner,
+        chain: WasmAuditChain,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<WasmAuditState>> = const { RefCell::new(None) };
+    }
+
+    /// Install the chain once it's been async-opened against IDB.
+    /// Called by `init_audit_chain`'s spawn_local closure.
+    fn install(state: WasmAuditState) {
+        STATE.with(|s| {
+            if s.borrow().is_some() {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    "wasm audit chain already initialised — keeping existing"
+                );
+                return;
+            }
+            *s.borrow_mut() = Some(state);
+        });
+    }
+
+    pub fn init(_dir: std::path::PathBuf, key_locator: Name) {
+        // _dir is the desktop FileStore path; ignored on wasm32 where
+        // we key by IDB origin scope (the dashboard URL's origin is
+        // the natural per-deployment partition).
+        wasm_bindgen_futures::spawn_local(async move {
+            let chain_root = Name::root()
+                .append(b"local")
+                .append(b"ndn-dashboard")
+                .append(b"audit");
+            let backend = match IndexedDbStore::open("ndn-dashboard-chains", "audit").await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "dashboard.security",
+                        error = %e,
+                        "wasm audit chain: IDB open failed — audit log will be empty"
+                    );
+                    return;
+                }
+            };
+            match SignedDataChainStore::open(chain_root, backend) {
+                Ok(chain) => install(WasmAuditState {
+                    signer: DashboardSigner::new_ephemeral(key_locator),
+                    chain,
+                }),
+                Err(e) => tracing::warn!(
+                    target: "dashboard.security",
+                    error = %e,
+                    "wasm audit chain: chain open failed"
+                ),
+            }
+        });
+    }
+
+    pub fn append(entry: AuditLogEntry) {
+        STATE.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    subject = %entry.subject,
+                    "wasm audit chain not ready (IDB still opening) — dropping entry"
+                );
+                return;
+            };
+            if let Err(e) = state.chain.append(entry, &state.signer) {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    error = %e,
+                    "wasm audit chain append failed"
+                );
+            }
+        });
+    }
+
+    pub fn snapshot() -> Vec<AuditLogEntry> {
+        STATE.with(|s| match s.borrow().as_ref() {
+            None => Vec::new(),
+            Some(state) => {
+                let n = state.chain.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    if let Ok(e) = state.chain.decode_entry(i) {
+                        out.push(e);
+                    }
+                }
+                out
+            }
+        })
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "desktop")))]
+pub use audit_globals_wasm::{
+    append as append_audit_entry, init as init_audit_chain, snapshot as audit_chain_snapshot,
+};
+
+// Non-wasm32 non-desktop targets (e.g. native unit-test feature
+// combos) keep stubs so the crate still compiles. In practice this
+// branch is unreachable for production builds — desktop is the
+// default feature and web is wasm32-only.
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
 pub fn init_audit_chain(_dir: std::path::PathBuf, _key_locator: Name) {}
 
-#[cfg(not(feature = "desktop"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
 pub fn append_audit_entry(_entry: AuditLogEntry) {}
 
-#[cfg(not(feature = "desktop"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
 pub fn audit_chain_snapshot() -> Vec<AuditLogEntry> {
     Vec::new()
 }
@@ -596,13 +712,116 @@ pub use schema_globals::snapshot as schema_journal_snapshot;
 #[cfg(feature = "desktop")]
 pub use schema_globals::{append as append_schema_entry, init as init_schema_journal};
 
-#[cfg(not(feature = "desktop"))]
+// Web (wasm32) schema-journal — mirror of `audit_globals_wasm`
+// targeting the `"schema"` object store in the same DB.
+
+#[cfg(all(target_arch = "wasm32", not(feature = "desktop")))]
+mod schema_globals_wasm {
+    use super::*;
+    use crate::signed_data_chain::IndexedDbStore;
+    use std::cell::RefCell;
+
+    pub type WasmSchemaChain = SchemaJournalChain<IndexedDbStore>;
+
+    struct WasmSchemaState {
+        signer: DashboardSigner,
+        chain: WasmSchemaChain,
+    }
+
+    thread_local! {
+        static STATE: RefCell<Option<WasmSchemaState>> = const { RefCell::new(None) };
+    }
+
+    fn install(state: WasmSchemaState) {
+        STATE.with(|s| {
+            if s.borrow().is_some() {
+                return;
+            }
+            *s.borrow_mut() = Some(state);
+        });
+    }
+
+    pub fn init(_dir: std::path::PathBuf, key_locator: Name) {
+        wasm_bindgen_futures::spawn_local(async move {
+            let chain_root = Name::root()
+                .append(b"local")
+                .append(b"ndn-dashboard")
+                .append(b"schema");
+            let backend = match IndexedDbStore::open("ndn-dashboard-chains", "schema").await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "dashboard.security",
+                        error = %e,
+                        "wasm schema journal: IDB open failed"
+                    );
+                    return;
+                }
+            };
+            match SignedDataChainStore::open(chain_root, backend) {
+                Ok(chain) => install(WasmSchemaState {
+                    signer: DashboardSigner::new_ephemeral(key_locator),
+                    chain,
+                }),
+                Err(e) => tracing::warn!(
+                    target: "dashboard.security",
+                    error = %e,
+                    "wasm schema journal: chain open failed"
+                ),
+            }
+        });
+    }
+
+    pub fn append(entry: SchemaJournalEntry) {
+        STATE.with(|s| {
+            let mut guard = s.borrow_mut();
+            let Some(state) = guard.as_mut() else {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    subject = %entry.subject_name,
+                    "wasm schema journal not ready — dropping entry"
+                );
+                return;
+            };
+            if let Err(e) = state.chain.append(entry, &state.signer) {
+                tracing::warn!(
+                    target: "dashboard.security",
+                    error = %e,
+                    "wasm schema journal append failed"
+                );
+            }
+        });
+    }
+
+    pub fn snapshot() -> Vec<SchemaJournalEntry> {
+        STATE.with(|s| match s.borrow().as_ref() {
+            None => Vec::new(),
+            Some(state) => {
+                let n = state.chain.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..n {
+                    if let Ok(e) = state.chain.decode_entry(i) {
+                        out.push(e);
+                    }
+                }
+                out
+            }
+        })
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "desktop")))]
+pub use schema_globals_wasm::{
+    append as append_schema_entry, init as init_schema_journal, snapshot as schema_journal_snapshot,
+};
+
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
 pub fn init_schema_journal(_dir: std::path::PathBuf, _key_locator: Name) {}
 
-#[cfg(not(feature = "desktop"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
 pub fn append_schema_entry(_entry: SchemaJournalEntry) {}
 
-#[cfg(not(feature = "desktop"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
 pub fn schema_journal_snapshot() -> Vec<SchemaJournalEntry> {
     Vec::new()
 }

@@ -32,7 +32,6 @@ desktop = [
   "dep:ndn-ipc",
   "dep:ndn-tools-core",
   "dep:ndn-config",
-  "dep:ed25519-dalek",
   "dioxus/desktop",
   "tokio/process",
   "tokio/rt-multi-thread",
@@ -45,6 +44,9 @@ web = [
   "dep:web-sys",
   "dep:gloo-storage",
   "dep:gloo-timers",
+  "dep:js-sys",
+  "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
   "dep:ndn-config",
   "ndn-packet/std-wasm",
   "ndn-tlv/std",
@@ -106,12 +108,18 @@ which          = { version = "6", optional = true }
 arboard        = { version = "3", optional = true }
 ndn-ipc        = { workspace = true, optional = true }
 ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"], optional = true }
-ed25519-dalek  = { workspace = true, optional = true }
+
+# ed25519-dalek powers the DashboardSigner used to sign every chain
+# entry (audit log + schema journal). Available on every target —
+# native uses the std signing path, wasm32 uses the same crate
+# (works without OS RNG via getrandom/js).
+ed25519-dalek  = { workspace = true }
 
 # Web-only dependencies (optional, activated by "web" feature)
 gloo-net     = { version = "0.6", optional = true }
 gloo-storage = { version = "0.3", optional = true }
 gloo-timers  = { version = "0.3", optional = true }
+js-sys       = { version = "0.3", optional = true }
 
 # Browser-engine-only dependencies (optional, activated by
 # "browser-engine" feature on wasm32 web target).
@@ -129,7 +137,23 @@ tokio-util    = { workspace = true, features = ["rt"], optional = true }
 [dependencies.web-sys]
 version = "0.3"
 optional = true
-features = ["Window", "Storage"]
+features = [
+  "Window",
+  "Storage",
+  "IdbDatabase",
+  "IdbFactory",
+  "IdbObjectStore",
+  "IdbObjectStoreParameters",
+  "IdbOpenDbRequest",
+  "IdbRequest",
+  "IdbRequestReadyState",
+  "IdbTransaction",
+  "IdbTransactionMode",
+  "IdbVersionChangeEvent",
+  "WorkerGlobalScope",
+  "DomException",
+  "Event",
+]
 
 [dev-dependencies]
 ed25519-dalek = { workspace = true }

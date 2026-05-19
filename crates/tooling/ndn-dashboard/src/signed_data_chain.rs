@@ -553,34 +553,296 @@ mod file_store {
     }
 }
 
-// ── IndexedDbStore — wasm32 scaffold ────────────────────────────────
+// ── IndexedDbStore — wasm32 ─────────────────────────────────────────
 //
-// Real IDB read/write goes online when the audit-log UI lands; the
-// pattern follows `crates/extension/ndn-pib-idb/src/wasm.rs`. The
-// scaffold returns an error so downstream callers can refer to the
-// symbol today without compiling against an unimplemented body.
+// Per §11.1, the web target stores chain wires in IndexedDB scoped
+// to the dashboard's origin. One DB per dashboard (`db_name`), one
+// object store per chain (`store_name`), key = `seq` as
+// `f64` JsValue, value = the Data wire as `Uint8Array`.
+//
+// The `ChainBackend` trait is sync but IndexedDB is fundamentally
+// async. The shape: `IndexedDbStore::open` is async — it opens the
+// DB, reads every entry into a sync-accessible cache, and returns a
+// store whose `load_all()` is now instant. Writes are sync against
+// the cache (so the chain primitive's append succeeds) and
+// fire-and-forget-async against IndexedDB (logs on error). Reads
+// after a write see the in-memory copy immediately; persistence
+// catches up asynchronously.
+//
+// Mirrors `crates/extension/ndn-pib-idb/src/wasm.rs` for IDB ceremony
+// (factory lookup + request-awaiter).
 
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::IndexedDbStore;
 
 #[cfg(target_arch = "wasm32")]
 mod indexed_db {
-    use super::ChainError;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
+    use bytes::Bytes;
+    use js_sys::{Array, Uint8Array};
+    use wasm_bindgen::JsCast as _;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen_futures::{JsFuture, spawn_local};
+    use web_sys::{
+        DomException, IdbDatabase, IdbObjectStoreParameters, IdbOpenDbRequest, IdbRequest,
+        IdbTransactionMode, IdbVersionChangeEvent,
+    };
+
+    use super::{ChainBackend, ChainError};
+
+    const SCHEMA_VERSION: u32 = 1;
+
+    /// Per-chain IDB-backed wire store.
+    ///
+    /// Holds an `Rc<IdbDatabase>` and a `RefCell<Vec<Bytes>>` cache.
+    /// `IdbDatabase` is `!Send` (raw `JsValue`), which is fine on
+    /// wasm32 (single-threaded). Surrounding plumbing (the dashboard's
+    /// per-process audit-globals) must use `thread_local!` instead of
+    /// `OnceLock` for this reason.
     pub struct IndexedDbStore {
-        _db_name: String,
-        _chain_root: String,
+        db: Rc<IdbDatabase>,
+        store_name: String,
+        entries: RefCell<Vec<Bytes>>,
     }
 
     impl IndexedDbStore {
-        pub async fn open(db_name: &str, chain_root: &str) -> Result<Self, ChainError> {
-            let _ = (db_name, chain_root);
-            Err(ChainError::Backend(
-                "IndexedDbStore not wired yet — tracked at \
-                 docs/notes/dashboard-security-design-2026-05-13.md §11.1"
-                    .into(),
-            ))
+        /// Open the DB, run the schema upgrade if needed, and
+        /// preload every entry into the cache. On success the
+        /// returned store's `load_all()` is sync and instant.
+        pub async fn open(db_name: &str, store_name: &str) -> Result<Self, ChainError> {
+            let factory = idb_factory()?;
+            let req: IdbOpenDbRequest = factory
+                .open_with_u32(db_name, SCHEMA_VERSION)
+                .map_err(|e| ChainError::Backend(format!("IDB open: {e:?}")))?;
+
+            // Schema upgrade — create the object store if missing.
+            // The audit-chain + schema-journal both share the same
+            // DB; we attempt to create both stores on first open so
+            // either chain can be served afterwards without an
+            // version-bump dance.
+            let store_name_for_upgrade = store_name.to_owned();
+            let onupgradeneeded = Closure::<dyn FnMut(IdbVersionChangeEvent)>::new(
+                move |ev: IdbVersionChangeEvent| {
+                    let Some(target) = ev.target() else { return };
+                    let Ok(req): Result<IdbOpenDbRequest, _> = target.dyn_into() else {
+                        return;
+                    };
+                    let Ok(db_val) = req.result() else { return };
+                    let Ok(db): Result<IdbDatabase, _> = db_val.dyn_into() else {
+                        return;
+                    };
+                    let params = IdbObjectStoreParameters::new();
+                    // Best-effort: create both well-known stores. If
+                    // either exists already it's a no-op error we
+                    // ignore. Pre-creating the sibling avoids a second
+                    // upgrade ceremony when the schema journal opens.
+                    let _ = db.create_object_store_with_optional_parameters("audit", &params);
+                    let _ = db.create_object_store_with_optional_parameters("schema", &params);
+                    let _ = db.create_object_store_with_optional_parameters(
+                        &store_name_for_upgrade,
+                        &params,
+                    );
+                },
+            );
+            req.set_onupgradeneeded(Some(onupgradeneeded.as_ref().unchecked_ref()));
+
+            let db_value = await_request(req.unchecked_ref::<IdbRequest>()).await?;
+            drop(onupgradeneeded);
+
+            let db: IdbDatabase = db_value
+                .dyn_into()
+                .map_err(|_| ChainError::Backend("IDB open did not return IdbDatabase".into()))?;
+            let db_rc = Rc::new(db);
+
+            let entries = load_all_async(&db_rc, store_name).await?;
+            Ok(Self {
+                db: db_rc,
+                store_name: store_name.to_owned(),
+                entries: RefCell::new(entries),
+            })
         }
+    }
+
+    impl ChainBackend for IndexedDbStore {
+        fn load_all(&self) -> Result<Vec<Bytes>, ChainError> {
+            Ok(self.entries.borrow().clone())
+        }
+
+        fn append(&mut self, seq: u64, wire: Bytes) -> Result<(), ChainError> {
+            {
+                let mut entries = self.entries.borrow_mut();
+                if seq != entries.len() as u64 {
+                    return Err(ChainError::Backend(format!(
+                        "IDB backend: append at seq={seq}, expected {}",
+                        entries.len()
+                    )));
+                }
+                entries.push(wire.clone());
+            }
+            // Persistence is fire-and-forget. The in-memory cache is
+            // already authoritative for this process; on the next
+            // open the IDB read populates fresh, so a torn write
+            // shows up as a missing tail entry (which the chain's
+            // verify catches via prev_entry_hash linkage).
+            let db = self.db.clone();
+            let store_name = self.store_name.clone();
+            spawn_local(async move {
+                if let Err(e) = put_async(&db, &store_name, seq, &wire).await {
+                    tracing::warn!(
+                        target: "dashboard.security",
+                        seq,
+                        error = ?e,
+                        "IDB chain append failed (in-memory cache intact)"
+                    );
+                }
+            });
+            Ok(())
+        }
+    }
+
+    // ── async helpers ───────────────────────────────────────────────
+
+    async fn load_all_async(db: &IdbDatabase, store_name: &str) -> Result<Vec<Bytes>, ChainError> {
+        let tx = db
+            .transaction_with_str_and_mode(store_name, IdbTransactionMode::Readonly)
+            .map_err(|e| ChainError::Backend(format!("IDB tx({store_name}): {e:?}")))?;
+        let store = tx
+            .object_store(store_name)
+            .map_err(|e| ChainError::Backend(format!("IDB store({store_name}): {e:?}")))?;
+
+        // Pull keys + values separately so we can sort by seq before
+        // returning. `get_all` would return values in implementation-
+        // defined order; sorting by key (the seq number) guarantees
+        // the chain replays in monotonic order.
+        let keys_req = store
+            .get_all_keys()
+            .map_err(|e| ChainError::Backend(format!("IDB get_all_keys: {e:?}")))?;
+        let values_req = store
+            .get_all()
+            .map_err(|e| ChainError::Backend(format!("IDB get_all: {e:?}")))?;
+
+        let keys_val = await_request(&keys_req).await?;
+        let values_val = await_request(&values_req).await?;
+
+        let keys: Array = keys_val
+            .dyn_into()
+            .map_err(|_| ChainError::Backend("IDB keys not an array".into()))?;
+        let values: Array = values_val
+            .dyn_into()
+            .map_err(|_| ChainError::Backend("IDB values not an array".into()))?;
+        if keys.length() != values.length() {
+            return Err(ChainError::Backend(
+                "IDB get_all/get_all_keys length mismatch".into(),
+            ));
+        }
+
+        let mut pairs: Vec<(u64, Bytes)> = Vec::with_capacity(keys.length() as usize);
+        for i in 0..keys.length() {
+            let k = keys.get(i);
+            let v = values.get(i);
+            let seq = k.as_f64().ok_or_else(|| {
+                ChainError::Backend(format!("IDB chain entry {i}: key is not a number"))
+            })? as u64;
+            let arr: Uint8Array = v
+                .dyn_into()
+                .map_err(|_| ChainError::Backend(format!("IDB entry {i}: not Uint8Array")))?;
+            let mut buf = vec![0u8; arr.length() as usize];
+            arr.copy_to(&mut buf);
+            pairs.push((seq, Bytes::from(buf)));
+        }
+        pairs.sort_by_key(|(s, _)| *s);
+        Ok(pairs.into_iter().map(|(_, w)| w).collect())
+    }
+
+    async fn put_async(
+        db: &IdbDatabase,
+        store_name: &str,
+        seq: u64,
+        wire: &Bytes,
+    ) -> Result<(), ChainError> {
+        let tx = db
+            .transaction_with_str_and_mode(store_name, IdbTransactionMode::Readwrite)
+            .map_err(|e| ChainError::Backend(format!("IDB tx({store_name}): {e:?}")))?;
+        let store = tx
+            .object_store(store_name)
+            .map_err(|e| ChainError::Backend(format!("IDB store({store_name}): {e:?}")))?;
+        let array = Uint8Array::new_with_length(wire.len() as u32);
+        array.copy_from(wire);
+        let req = store
+            .put_with_key(&array.into(), &JsValue::from_f64(seq as f64))
+            .map_err(|e| ChainError::Backend(format!("IDB put({store_name},{seq}): {e:?}")))?;
+        let _ = await_request(&req).await?;
+        Ok(())
+    }
+
+    /// Resolve `indexedDB` on window or worker scope.
+    fn idb_factory() -> Result<web_sys::IdbFactory, ChainError> {
+        let global = js_sys::global();
+        if let Ok(window) = global.clone().dyn_into::<web_sys::Window>()
+            && let Ok(Some(f)) = window.indexed_db()
+        {
+            return Ok(f);
+        }
+        if let Ok(worker) = global.dyn_into::<web_sys::WorkerGlobalScope>()
+            && let Ok(Some(f)) = worker.indexed_db()
+        {
+            return Ok(f);
+        }
+        Err(ChainError::Backend(
+            "no IndexedDB factory available (not in a browser scope)".into(),
+        ))
+    }
+
+    /// Convert an `IDBRequest` into a `JsFuture` that resolves with
+    /// `req.result()` or rejects with the DOM exception's message.
+    async fn await_request(req: &IdbRequest) -> Result<JsValue, ChainError> {
+        use js_sys::Promise;
+
+        let req_clone = req.clone();
+        let req_for_err = req.clone();
+        let resolved = Rc::new(RefCell::new(false));
+
+        let promise = Promise::new(&mut |resolve, reject| {
+            let resolve_cb = resolve.clone();
+            let reject_cb = reject.clone();
+            let req_inner = req_clone.clone();
+            let req_inner_err = req_for_err.clone();
+            let resolved_ok = Rc::clone(&resolved);
+            let resolved_err = Rc::clone(&resolved);
+
+            let onsuccess = Closure::<dyn FnMut(JsValue)>::new(move |_ev: JsValue| {
+                if *resolved_ok.borrow() {
+                    return;
+                }
+                *resolved_ok.borrow_mut() = true;
+                let value = req_inner.result().unwrap_or(JsValue::UNDEFINED);
+                let _ = resolve_cb.call1(&JsValue::UNDEFINED, &value);
+            });
+            let onerror = Closure::<dyn FnMut(JsValue)>::new(move |_ev: JsValue| {
+                if *resolved_err.borrow() {
+                    return;
+                }
+                *resolved_err.borrow_mut() = true;
+                let err = req_inner_err
+                    .error()
+                    .ok()
+                    .flatten()
+                    .map(|e: DomException| JsValue::from_str(&e.message()))
+                    .unwrap_or_else(|| JsValue::from_str("unknown IDB error"));
+                let _ = reject_cb.call1(&JsValue::UNDEFINED, &err);
+            });
+            req_clone.set_onsuccess(Some(onsuccess.as_ref().unchecked_ref()));
+            req_clone.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+            onsuccess.forget();
+            onerror.forget();
+        });
+
+        JsFuture::from(promise)
+            .await
+            .map_err(|e| ChainError::Backend(format!("IDB request: {e:?}")))
     }
 }
 

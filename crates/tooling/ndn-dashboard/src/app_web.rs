@@ -99,6 +99,24 @@ pub fn AppWeb() -> Element {
     let validation_history: Signal<VecDeque<(u64, u64)>> = use_signal(VecDeque::new);
     let trust_validation: Signal<Option<(String, TrustValidationResult)>> = use_signal(|| None);
     let trust_inspector_open: Signal<bool> = use_signal(|| false);
+
+    // §4.6 / §2.4 — initialise the IndexedDB-backed audit log + schema
+    // journal once per page load. `init_*` is fire-and-forget: the
+    // async IDB open runs via `wasm_bindgen_futures::spawn_local` and
+    // the chains become writable once the open resolves. Entries
+    // submitted before then log a WARN and drop.
+    use_hook(|| {
+        let key_locator = ndn_packet::Name::root()
+            .append(b"local")
+            .append(b"ndn-dashboard")
+            .append(b"KEY")
+            .append(b"ephemeral");
+        // Dir argument is ignored on wasm32 — kept for signature
+        // parity with the desktop FileStore-based init.
+        let dir = std::path::PathBuf::new();
+        crate::security_chains::init_audit_chain(dir.clone(), key_locator.clone());
+        crate::security_chains::init_schema_journal(dir, key_locator);
+    });
     let cs_hit_history: Signal<VecDeque<f64>> = use_signal(VecDeque::new);
     let face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>> =
         use_signal(HashMap::new);
