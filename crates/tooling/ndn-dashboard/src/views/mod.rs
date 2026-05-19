@@ -8,6 +8,7 @@ pub mod config;
 pub mod cs;
 #[cfg(feature = "desktop")]
 pub mod dashboard_config;
+pub mod enrollment_wizard;
 pub mod faces;
 pub mod fleet;
 pub mod logs;

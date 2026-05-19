@@ -284,10 +284,9 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
             }
             button {
                 class: "btn btn-secondary",
-                onclick: move |_| push_toast(
-                    "Phase C: §5 sub-flow — EnrollmentWizard",
-                    ToastLevel::Info,
-                ),
+                onclick: move |_| {
+                    crate::app_shared::ENROLLMENT_WIZARD_STATE.write().open = true;
+                },
                 "+ Join via NDNCERT"
             }
         }

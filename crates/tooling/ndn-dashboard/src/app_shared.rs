@@ -33,6 +33,10 @@ pub static ACTIVE_SECURITY_TAB: GlobalSignal<Option<u8>> = Signal::global(|| Non
 /// preview here; the modal renders when `open == true`.
 pub static SAFEBAG_IMPORT_STATE: GlobalSignal<crate::views::safebag_import::SafeBagImportState> =
     Signal::global(crate::views::safebag_import::SafeBagImportState::default);
+/// §5.2 enrollment wizard open/close state.
+pub static ENROLLMENT_WIZARD_STATE: GlobalSignal<
+    crate::views::enrollment_wizard::EnrollmentWizardState,
+> = Signal::global(crate::views::enrollment_wizard::EnrollmentWizardState::default);
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
 
 // ── Toast notifications ──────────────────────────────────────────────────────

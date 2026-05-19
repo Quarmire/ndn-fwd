@@ -144,3 +144,15 @@ term = "SafeBag"
 gloss = "ndn-cxx-compatible identity-export envelope — a TLV that bundles a cert with the encrypted private key."
 extended = "Drag a .tpb file onto the dashboard to import the identity; the encryption passphrase decrypts the wrapped PKCS#8 key."
 wiki_anchor = "safebag"
+
+[[entries]]
+term = "ChallengeHandler"
+gloss = "The NDNCERT stage that decides whether your proof (token, email code, …) satisfies the CA's identity-verification challenge."
+extended = "Second of three gatekeepers in NDNCERT issuance — NamespacePolicy → ChallengeHandler → IssuancePolicy."
+wiki_anchor = "ndncert"
+
+[[entries]]
+term = "IssuancePolicy"
+gloss = "The NDNCERT stage that decides what cert to actually issue — validity cap, algorithm, issuer KeyLocator."
+extended = "Third gatekeeper after NamespacePolicy + ChallengeHandler; pluggable via the F.7 registry hook in ndn-cert."
+wiki_anchor = "ndncert"

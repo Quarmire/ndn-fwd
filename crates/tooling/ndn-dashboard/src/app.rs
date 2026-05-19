@@ -1330,6 +1330,13 @@ pub fn App() -> Element {
             state: crate::app_shared::SAFEBAG_IMPORT_STATE.signal(),
         }
 
+        // §5.2 NDNCERT enrollment wizard. Modal launched from the
+        // CA tab's "Enroll new identity" button (and any other entry
+        // that flips ENROLLMENT_WIZARD_STATE.open).
+        crate::views::enrollment_wizard::EnrollmentWizardModal {
+            state: crate::app_shared::ENROLLMENT_WIZARD_STATE.signal(),
+        }
+
         div {
             class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
             ondragover: move |evt| { evt.prevent_default(); },
