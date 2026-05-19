@@ -1032,6 +1032,51 @@ async fn run_cmd_web(
             }
             resp
         }
+        DashCmd::SecurityAnchorAdd {
+            name,
+            fingerprint_hex,
+            cert_wire_hex,
+        } => {
+            let subject = format!("anchor={name} fingerprint={fingerprint_hex}");
+            if cert_wire_hex.trim().is_empty() {
+                // Intent-only path — journal without firing the verb.
+                let entry = crate::security_chains::SchemaJournalEntry {
+                    ts_unix_ns: web_unix_ns_now(),
+                    kind: crate::security_chains::SchemaJournalKind::AnchorAdd,
+                    subject_name: format!("{subject} mode=intent-only"),
+                    initiator_name: web_initiator_name(identity_name, identity_is_ephemeral),
+                };
+                crate::security_chains::append_schema_entry(entry);
+                return; // success — no client call to dispatch
+            }
+            let parsed = match name.parse::<Name>() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid anchor name '{name}': {e:?}")));
+                    return;
+                }
+            };
+            let cp = ControlParameters {
+                name: Some(parsed),
+                uri: Some(cert_wire_hex),
+                ..Default::default()
+            };
+            let resp = client.send_cmd("security", "anchor-add", Some(&cp)).await;
+            if let Ok(r) = &resp
+                && r.is_ok()
+            {
+                let entry = crate::security_chains::SchemaJournalEntry {
+                    ts_unix_ns: web_unix_ns_now(),
+                    kind: crate::security_chains::SchemaJournalKind::AnchorAdd,
+                    subject_name: format!("{subject} mode=installed"),
+                    initiator_name: web_initiator_name(identity_name, identity_is_ephemeral),
+                };
+                crate::security_chains::append_schema_entry(entry);
+            }
+            resp
+        }
         DashCmd::SecurityTokenAdd(description) => {
             let params = ControlParameters {
                 uri: Some(description),

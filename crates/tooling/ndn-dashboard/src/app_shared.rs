@@ -137,6 +137,13 @@ pub enum DashCmd {
     /// `AppCtx.trust_validation`; sidesheet visibility is driven by
     /// `AppCtx.trust_inspector_open`.
     SecurityValidateTrace(String),
+    /// §11.4 TOFU promote → `security/anchor-add` + journal entry.
+    /// See `app::DashCmd::SecurityAnchorAdd` for full doc.
+    SecurityAnchorAdd {
+        name: String,
+        fingerprint_hex: String,
+        cert_wire_hex: String,
+    },
 }
 
 // Desktop-only: there is no `ndn-fwd` subprocess to manage on web.

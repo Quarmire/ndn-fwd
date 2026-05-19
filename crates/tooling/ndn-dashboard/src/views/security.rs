@@ -3042,8 +3042,10 @@ fn PromoteToTrustedModal(
     is_initiator_ephemeral: bool,
     on_close: EventHandler<()>,
 ) -> Element {
+    let ctx = use_context::<AppCtx>();
     let mut name: Signal<String> = use_signal(|| prefill_name.clone());
     let mut fingerprint: Signal<String> = use_signal(String::new);
+    let mut cert_wire: Signal<String> = use_signal(String::new);
     let mut acknowledged: Signal<bool> = use_signal(|| false);
     let mut journaled: Signal<bool> = use_signal(|| false);
 
@@ -3051,7 +3053,14 @@ fn PromoteToTrustedModal(
     let fp_bytes = parse_fingerprint_hex(&fp_text);
     let fp_valid = fp_bytes.as_ref().map(|b| b.len() >= 4).unwrap_or(false);
     let name_valid = !name.read().trim().is_empty();
-    let can_confirm = name_valid && fp_valid && *acknowledged.read() && !*journaled.read();
+    let cert_text = cert_wire.read().clone();
+    let cert_present = !cert_text.trim().is_empty();
+    let cert_parses = parse_fingerprint_hex(&cert_text).is_some();
+    let cert_ok = !cert_present || cert_parses;
+    let can_confirm =
+        name_valid && fp_valid && cert_ok && *acknowledged.read() && !*journaled.read();
+    let _ = initiator_name;
+    let _ = is_initiator_ephemeral;
 
     rsx! {
         div {
@@ -3112,6 +3121,38 @@ fn PromoteToTrustedModal(
                     }
                 }
 
+                // Phase B step B: cert-wire input. When present, the
+                // confirm fires `security/anchor-add` and actually
+                // installs the anchor. When empty, falls back to the
+                // legacy intent-only journal path (useful when the
+                // operator only has the fingerprint to record).
+                div { class: "form-group", style: "margin-bottom:10px;",
+                    label { style: "font-size:11px;color:var(--text-muted);",
+                        "Anchor cert wire (hex, optional — empty ⇒ journal intent only)"
+                    }
+                    textarea {
+                        style: "width:100%;height:80px;background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:8px;font-family:monospace;font-size:11px;color:var(--text);resize:vertical;",
+                        placeholder: "06fd…  (paste the full Data wire of the anchor cert)",
+                        value: "{cert_wire}",
+                        oninput: move |e| cert_wire.set(e.value()),
+                    }
+                    if cert_present && !cert_parses {
+                        div { style: "font-size:11px;color:var(--red,#f85149);margin-top:4px;",
+                            "Cert wire must be hexadecimal (whitespace, colons, and hyphens ignored)."
+                        }
+                    } else if cert_present {
+                        div { style: "font-size:11px;color:var(--green,#3fb950);margin-top:4px;",
+                            "✓ Will fire "
+                            span { class: "mono", "security/anchor-add" }
+                            " on confirm."
+                        }
+                    } else {
+                        div { style: "font-size:11px;color:var(--text-muted);margin-top:4px;",
+                            "No cert wire — journals the TOFU decision but doesn't install the anchor on the forwarder."
+                        }
+                    }
+                }
+
                 label { style: "display:flex;gap:8px;align-items:flex-start;margin:12px 0;font-size:12px;cursor:pointer;line-height:1.5;",
                     input {
                         r#type: "checkbox",
@@ -3126,9 +3167,11 @@ fn PromoteToTrustedModal(
 
                 if *journaled.read() {
                     div { style: "padding:10px;background:#00220022;border:1px solid var(--green,#3fb950)55;border-radius:4px;font-size:11px;color:var(--text);margin-bottom:10px;",
-                        "✓ Promotion journaled. Anchor-add mgmt verb isn't wired yet, so the forwarder doesn't accept this CA until "
-                        span { class: "mono", "security/anchor-add" }
-                        " lands; the audit trail is preserved either way."
+                        if cert_present {
+                            "✓ Anchor-add fired and promotion journaled. The forwarder now trusts this anchor for subsequent validations."
+                        } else {
+                            "✓ TOFU decision journaled (intent-only). Re-open with the cert wire to install the anchor on the forwarder."
+                        }
                     }
                 }
 
@@ -3137,35 +3180,21 @@ fn PromoteToTrustedModal(
                         class: if can_confirm { "btn btn-primary" } else { "btn btn-secondary" },
                         disabled: !can_confirm,
                         onclick: {
-                            let name_val = name.peek().trim().to_owned();
                             let fp_val = fp_bytes.clone().unwrap_or_default();
-                            let initiator = initiator_name.clone();
                             move |_| {
-                                let initiator_for_audit = if is_initiator_ephemeral {
-                                    format!("/local/ndn-dashboard/ephemeral{initiator}")
-                                } else if initiator.is_empty() {
-                                    "/local/ndn-dashboard/anonymous".to_owned()
-                                } else {
-                                    initiator.clone()
-                                };
-                                let fp_hex: String = fp_val.iter().map(|b| format!("{b:02x}")).collect();
-                                let subject = format!("anchor={} fingerprint={fp_hex}", name_val);
-                                let ts_unix_ns = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_nanos() as u64)
-                                    .unwrap_or(0);
-                                let entry = crate::security_chains::SchemaJournalEntry {
-                                    ts_unix_ns,
-                                    kind: crate::security_chains::SchemaJournalKind::AnchorAdd,
-                                    subject_name: subject,
-                                    initiator_name: initiator_for_audit,
-                                };
-                                crate::security_chains::append_schema_entry(entry);
+                                let name_val = name.peek().trim().to_owned();
+                                let cert_hex_val = cert_wire.peek().trim().to_owned();
+                                let fp_hex: String =
+                                    fp_val.iter().map(|b| format!("{b:02x}")).collect();
+                                ctx.cmd.send(DashCmd::SecurityAnchorAdd {
+                                    name: name_val,
+                                    fingerprint_hex: fp_hex,
+                                    cert_wire_hex: cert_hex_val,
+                                });
                                 journaled.set(true);
-                                push_toast("CA promotion journaled (TOFU)", ToastLevel::Success);
                             }
                         },
-                        "Confirm & journal"
+                        if cert_present { "Promote & install" } else { "Journal intent only" }
                     }
                 }
             }

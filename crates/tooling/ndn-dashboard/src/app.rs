@@ -183,6 +183,17 @@ pub enum DashCmd {
     /// `AppCtx.trust_validation`; sidesheet visibility is driven by
     /// `AppCtx.trust_inspector_open`.
     SecurityValidateTrace(String),
+    /// §11.4 TOFU promote — install a trust anchor at runtime via
+    /// `security/anchor-add`. On 2xx the handler also appends a
+    /// `SchemaJournalKind::AnchorAdd` entry to the schema journal
+    /// (the TOFU decision record). `cert_wire_hex` may be empty —
+    /// in that case the handler journals intent only (legacy modal
+    /// path), matching the pre-Phase-B-B behavior.
+    SecurityAnchorAdd {
+        name: String,
+        fingerprint_hex: String,
+        cert_wire_hex: String,
+    },
 }
 
 /// Commands sent to the router-management coroutine.
@@ -2005,6 +2016,7 @@ async fn run_cmd(
         DashCmd::SchemaSet(_) => Some("Trust schema updated"),
         DashCmd::SecurityPolicySet(_) => Some("Mgmt access policy updated"),
         DashCmd::SecurityValidateTrace(_) => None, // surfaces via the sidesheet, not a toast
+        DashCmd::SecurityAnchorAdd { .. } => Some("Anchor promoted (TOFU)"),
         _ => None,
     };
 
@@ -2295,6 +2307,53 @@ async fn run_cmd(
                     Err(e) => Err(e.to_string()),
                 },
                 Err(e) => Err(format!("invalid target name: {e}")),
+            }
+        }
+        DashCmd::SecurityAnchorAdd {
+            name,
+            fingerprint_hex,
+            cert_wire_hex,
+        } => {
+            // §11.4 TOFU promote. Two paths:
+            //   1. cert_wire_hex empty → journal intent only (legacy
+            //      pre-Phase-B-B path; preserved for the modal that
+            //      hasn't been extended with a cert-wire input yet).
+            //   2. cert_wire_hex present → fire `security/anchor-add`;
+            //      on 2xx journal the AnchorAdd entry. On 4xx/5xx
+            //      surface the error but DON'T journal — the anchor
+            //      wasn't actually installed.
+            let parsed_name = match name.parse::<ndn_packet::Name>() {
+                Ok(n) => n,
+                Err(e) => {
+                    return push_toast(format!("invalid anchor name: {e}"), ToastLevel::Error);
+                }
+            };
+            let wire_subject = format!("anchor={name} fingerprint={fingerprint_hex}");
+            if cert_wire_hex.trim().is_empty() {
+                // Intent-only path.
+                append_schema_journal(
+                    SchemaJournalKind::AnchorAdd,
+                    format!("{wire_subject} mode=intent-only"),
+                    &identity_name,
+                    &identity_is_ephemeral,
+                );
+                Ok(())
+            } else {
+                match client
+                    .security_anchor_add(&parsed_name, &cert_wire_hex)
+                    .await
+                {
+                    Ok(_) => {
+                        append_schema_journal(
+                            SchemaJournalKind::AnchorAdd,
+                            format!("{wire_subject} mode=installed"),
+                            &identity_name,
+                            &identity_is_ephemeral,
+                        );
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
             }
         }
         DashCmd::SecurityPolicySet(policy) => {
