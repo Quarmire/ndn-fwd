@@ -21,6 +21,7 @@ const TAB_DID: u8 = 3;
 const TAB_CA: u8 = 4;
 const TAB_YUBIKEY: u8 = 5;
 const TAB_MGMT_ACCESS: u8 = 7;
+const TAB_AUDIT: u8 = 8;
 
 // ── Root component ────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ pub fn Security() -> Element {
         ("CA / NDNCERT", TAB_CA),
         ("YubiKey", TAB_YUBIKEY),
         ("Mgmt Access", TAB_MGMT_ACCESS),
+        ("Audit log", TAB_AUDIT),
     ];
 
     rsx! {
@@ -124,6 +126,7 @@ pub fn Security() -> Element {
                 TAB_CA         => rsx! { CaTab {} },
                 TAB_YUBIKEY    => rsx! { YubikeyTab {} },
                 TAB_MGMT_ACCESS=> rsx! { MgmtAccessTab {} },
+                TAB_AUDIT      => rsx! { AuditLogTab {} },
                 _              => rsx! {},
             }
 
@@ -2300,4 +2303,474 @@ fn ChallengeAttestationsPanel(count: usize) -> Element {
             " · reserved (populates with the in-progress challenge_attestation cert field)"
         }
     }
+}
+
+// ── Tab: Audit log — §4.6 ────────────────────────────────────────────────────
+//
+// Phase B step 5 — renders the dashboard's `AuditLogChain` head→tail,
+// filterable by subject substring / outcome / time range. Each row
+// shows ts / outcome / subject / detail per the §4.6 mock. Export
+// modal per §11.3 — two-checkbox scrub (include identity names /
+// replace with stable hashes) + clipboard copy.
+//
+// Live data sources: §11.10 policy-set audit-bridge call site
+// (commit 03547f6) and §2.4 schema-journal entries are stored on a
+// SEPARATE chain — the audit log only sees policy-set events today.
+// As more bridges land (rib/register, anchor-add, etc.) the audit
+// log grows automatically without UI changes here.
+
+use crate::security_chains::{AuditLogEntry, AuditOutcome, audit_chain_snapshot};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutcomeFilter {
+    Any,
+    Accepted,
+    Rejected,
+    Info,
+    Warning,
+}
+
+impl OutcomeFilter {
+    fn matches(self, o: AuditOutcome) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Accepted => matches!(o, AuditOutcome::Accepted),
+            Self::Rejected => matches!(o, AuditOutcome::Rejected),
+            Self::Info => matches!(o, AuditOutcome::Info),
+            Self::Warning => matches!(o, AuditOutcome::Warning),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Info => "info",
+            Self::Warning => "warning",
+        }
+    }
+
+    fn all() -> [OutcomeFilter; 5] {
+        [
+            Self::Any,
+            Self::Accepted,
+            Self::Rejected,
+            Self::Info,
+            Self::Warning,
+        ]
+    }
+}
+
+fn outcome_class(o: AuditOutcome) -> &'static str {
+    match o {
+        AuditOutcome::Accepted => "badge badge-green",
+        AuditOutcome::Rejected => "badge badge-red",
+        AuditOutcome::Info => "badge badge-blue",
+        AuditOutcome::Warning => "badge badge-yellow",
+    }
+}
+
+fn outcome_label(o: AuditOutcome) -> &'static str {
+    match o {
+        AuditOutcome::Accepted => "accepted",
+        AuditOutcome::Rejected => "rejected",
+        AuditOutcome::Info => "info",
+        AuditOutcome::Warning => "warning",
+    }
+}
+
+#[component]
+fn AuditLogTab() -> Element {
+    let entries = audit_chain_snapshot();
+
+    let mut subject_filter: Signal<String> = use_signal(String::new);
+    let mut outcome_filter: Signal<OutcomeFilter> = use_signal(|| OutcomeFilter::Any);
+    let mut since_unix_s: Signal<String> = use_signal(String::new);
+    let mut until_unix_s: Signal<String> = use_signal(String::new);
+    let mut show_export: Signal<bool> = use_signal(|| false);
+
+    let filtered = filter_entries(
+        &entries,
+        &subject_filter.read(),
+        *outcome_filter.read(),
+        parse_unix_s(&since_unix_s.read()),
+        parse_unix_s(&until_unix_s.read()),
+    );
+
+    rsx! {
+        div { class: "section-title", "Security audit log" }
+
+        div { class: "edu-card",
+            div { style: "display:flex;gap:12px;align-items:flex-start;",
+                div { style: "font-size:28px;flex-shrink:0;", "📜" }
+                div {
+                    div { style: "font-size:13px;font-weight:600;color:var(--accent);margin-bottom:4px;",
+                        EduGloss { term: "Audit log" }
+                    }
+                    div { style: "font-size:12px;color:var(--text-muted);line-height:1.6;",
+                        "Every entry is a signed NDN Data packet at "
+                        span { class: "mono", "<chain>/seq=N" }
+                        " with "
+                        span { class: "mono", "prev_entry_hash" }
+                        " linkage. The dashboard's process-local signer signs each entry; cross-restart re-verification needs a persisted dashboard identity (v2 follow-up)."
+                    }
+                }
+            }
+        }
+
+        // Filter row.
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:14px;",
+            div { style: "display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;",
+                div { class: "form-group", style: "flex:1;min-width:200px;",
+                    label { style: "font-size:11px;color:var(--text-muted);", "Subject substring" }
+                    input {
+                        r#type: "text",
+                        placeholder: "e.g. security/policy-set",
+                        value: "{subject_filter}",
+                        oninput: move |e| subject_filter.set(e.value()),
+                        style: "width:100%;",
+                    }
+                }
+                div { class: "form-group", style: "min-width:140px;",
+                    label { style: "font-size:11px;color:var(--text-muted);", "Outcome" }
+                    select {
+                        value: "{outcome_filter.read().label()}",
+                        onchange: move |e| {
+                            let v = match e.value().as_str() {
+                                "accepted" => OutcomeFilter::Accepted,
+                                "rejected" => OutcomeFilter::Rejected,
+                                "info"     => OutcomeFilter::Info,
+                                "warning"  => OutcomeFilter::Warning,
+                                _          => OutcomeFilter::Any,
+                            };
+                            outcome_filter.set(v);
+                        },
+                        for opt in OutcomeFilter::all() {
+                            option { value: "{opt.label()}", "{opt.label()}" }
+                        }
+                    }
+                }
+                div { class: "form-group", style: "min-width:150px;",
+                    label { style: "font-size:11px;color:var(--text-muted);", "Since (unix s)" }
+                    input {
+                        r#type: "text",
+                        placeholder: "1717…",
+                        value: "{since_unix_s}",
+                        oninput: move |e| since_unix_s.set(e.value()),
+                        style: "width:100%;",
+                    }
+                }
+                div { class: "form-group", style: "min-width:150px;",
+                    label { style: "font-size:11px;color:var(--text-muted);", "Until (unix s)" }
+                    input {
+                        r#type: "text",
+                        placeholder: "1717…",
+                        value: "{until_unix_s}",
+                        oninput: move |e| until_unix_s.set(e.value()),
+                        style: "width:100%;",
+                    }
+                }
+                button {
+                    class: "btn btn-secondary btn-sm",
+                    onclick: move |_| {
+                        subject_filter.set(String::new());
+                        outcome_filter.set(OutcomeFilter::Any);
+                        since_unix_s.set(String::new());
+                        until_unix_s.set(String::new());
+                    },
+                    "Clear filters"
+                }
+            }
+        }
+
+        // Header counts + export trigger.
+        div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
+            div { style: "font-size:11px;color:var(--text-muted);",
+                "Showing "
+                span { style: "color:var(--text);font-weight:600;", "{filtered.len()}" }
+                " of "
+                span { style: "color:var(--text);font-weight:600;", "{entries.len()}" }
+                " entries"
+            }
+            button {
+                class: "btn btn-secondary btn-sm",
+                disabled: filtered.is_empty(),
+                onclick: move |_| show_export.set(true),
+                "Export filtered…"
+            }
+        }
+
+        AuditLogStream { entries: filtered.clone() }
+
+        if *show_export.read() {
+            AuditExportModal {
+                entries: filtered.clone(),
+                on_close: move |_: ()| show_export.set(false),
+            }
+        }
+    }
+}
+
+fn filter_entries(
+    all: &[AuditLogEntry],
+    subject: &str,
+    outcome: OutcomeFilter,
+    since: Option<u64>,
+    until: Option<u64>,
+) -> Vec<AuditLogEntry> {
+    let needle = subject.trim().to_lowercase();
+    all.iter()
+        .filter(|e| {
+            if !needle.is_empty() && !e.subject.to_lowercase().contains(&needle) {
+                return false;
+            }
+            if !outcome.matches(e.outcome) {
+                return false;
+            }
+            let ts_s = e.ts_unix_ns / 1_000_000_000;
+            if let Some(s) = since
+                && ts_s < s
+            {
+                return false;
+            }
+            if let Some(u) = until
+                && ts_s > u
+            {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+fn parse_unix_s(s: &str) -> Option<u64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    t.parse::<u64>().ok()
+}
+
+#[component]
+fn AuditLogStream(entries: Vec<AuditLogEntry>) -> Element {
+    if entries.is_empty() {
+        return rsx! {
+            div { class: "empty",
+                "No audit entries match the active filter. As you edit mgmt-access policy (§4.5) or take other audited actions, entries appear here head→tail."
+            }
+        };
+    }
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;overflow:hidden;",
+            for (i, entry) in entries.iter().enumerate() {
+                {
+                    let last = i + 1 == entries.len();
+                    let bottom_border = if last { "" } else { "border-bottom:1px solid var(--border-subtle);" };
+                    let ts_label = format_unix_ns(entry.ts_unix_ns);
+                    let outcome = entry.outcome;
+                    let subject = entry.subject.clone();
+                    let detail = entry.detail.clone();
+                    rsx! {
+                        div { style: "padding:10px 12px;{bottom_border}",
+                            div { style: "display:flex;gap:8px;align-items:center;margin-bottom:4px;",
+                                span { class: "{outcome_class(outcome)}", "{outcome_label(outcome)}" }
+                                span { class: "mono", style: "font-size:11px;color:var(--text);", "{subject}" }
+                                span { style: "margin-left:auto;font-size:10px;color:var(--text-muted);", "{ts_label}" }
+                            }
+                            div { style: "font-size:11px;color:var(--text-muted);word-break:break-all;line-height:1.5;",
+                                "{detail}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn format_unix_ns(ns: u64) -> String {
+    let secs = ns / 1_000_000_000;
+    let nanos = ns % 1_000_000_000;
+    let date = format_unix_date(secs);
+    let day_secs = secs % 86_400;
+    let h = day_secs / 3600;
+    let m = (day_secs % 3600) / 60;
+    let s = day_secs % 60;
+    let ms = nanos / 1_000_000;
+    format!("{date} {h:02}:{m:02}:{s:02}.{ms:03}Z")
+}
+
+#[component]
+fn AuditExportModal(entries: Vec<AuditLogEntry>, on_close: EventHandler<()>) -> Element {
+    // §11.3 — two checkboxes. The two states are mutually meaningful:
+    //   include=true  hash=false  : raw names (default)
+    //   include=true  hash=true   : both — preserve in-place "stable
+    //                               hash + original name" pair for
+    //                               correlation
+    //   include=false hash=true   : scrubbed — names replaced with
+    //                               stable SHA-256 of the original
+    //                               name
+    //   include=false hash=false  : scrubbed — names dropped entirely
+    //                               from the export
+    // Stable hash = first 8 bytes of SHA-256(name) as hex; deterministic
+    // across exports so the operator can still correlate across
+    // shared logs.
+    let mut include_names: Signal<bool> = use_signal(|| true);
+    let mut hash_names: Signal<bool> = use_signal(|| false);
+    let mut copied: Signal<bool> = use_signal(|| false);
+
+    let body = serialize_export(&entries, *include_names.read(), *hash_names.read());
+
+    rsx! {
+        div {
+            style: "position:fixed;inset:0;background:rgba(0,0,0,.40);z-index:70;display:flex;align-items:center;justify-content:center;",
+            onclick: move |_| on_close.call(()),
+            div {
+                style: "background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:18px 20px;width:min(600px,95vw);max-height:85vh;overflow:auto;",
+                onclick: move |e| { e.stop_propagation(); },
+                div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;",
+                    div { style: "font-size:14px;font-weight:600;color:var(--text);", "Export audit log" }
+                    button {
+                        class: "btn btn-secondary btn-sm",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-bottom:12px;line-height:1.5;",
+                    "Two-checkbox scrub per §11.3. Stable hashes are SHA-256(name) truncated to 64 bits — deterministic across exports so correlation across shared logs remains possible without revealing the original names."
+                }
+                label { style: "display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:12px;cursor:pointer;",
+                    input {
+                        r#type: "checkbox",
+                        checked: *include_names.read(),
+                        onchange: move |e| include_names.set(e.value() == "true"),
+                    }
+                    span { "Include identity names" }
+                }
+                label { style: "display:flex;gap:8px;align-items:center;margin-bottom:14px;font-size:12px;cursor:pointer;",
+                    input {
+                        r#type: "checkbox",
+                        checked: *hash_names.read(),
+                        onchange: move |e| hash_names.set(e.value() == "true"),
+                    }
+                    span { "Replace with stable hashes" }
+                }
+                div { style: "font-size:11px;color:var(--text-muted);margin-bottom:6px;",
+                    "{entries.len()} entries · {body.len()} bytes"
+                }
+                pre {
+                    style: "background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:10px;font-size:11px;max-height:300px;overflow:auto;",
+                    "{body}"
+                }
+                div { style: "display:flex;gap:8px;margin-top:12px;",
+                    button {
+                        class: if *copied.read() { "btn btn-success" } else { "btn btn-primary" },
+                        onclick: {
+                            let body = body.clone();
+                            move |_| {
+                                copy_to_clipboard(&body);
+                                copied.set(true);
+                            }
+                        },
+                        if *copied.read() { "✓ Copied" } else { "Copy to clipboard" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn serialize_export(entries: &[AuditLogEntry], include_names: bool, hash_names: bool) -> String {
+    use serde_json::{Map, Value};
+
+    let mut arr = Vec::with_capacity(entries.len());
+    for e in entries {
+        let mut obj = Map::new();
+        obj.insert(
+            "ts_unix_ns".into(),
+            Value::Number(serde_json::Number::from(e.ts_unix_ns)),
+        );
+        obj.insert(
+            "outcome".into(),
+            Value::String(outcome_label(e.outcome).into()),
+        );
+        obj.insert("subject".into(), Value::String(e.subject.clone()));
+        let detail = scrub_detail(&e.detail, include_names, hash_names);
+        obj.insert("detail".into(), Value::String(detail));
+        arr.push(Value::Object(obj));
+    }
+    let wrapped = serde_json::json!({
+        "format": "ndn-dashboard.audit-log.v1",
+        "include_names": include_names,
+        "hash_names": hash_names,
+        "entries": arr,
+    });
+    serde_json::to_string_pretty(&wrapped).unwrap_or_default()
+}
+
+/// Scrub names that appear in the detail line — today the policy-set
+/// bridge emits `initiator=/lab/alice/KEY/k1` and similar patterns.
+/// The scrub strategy walks tokens of the form `<key>=/...` and
+/// rewrites the right-hand side per the include/hash flags.
+fn scrub_detail(detail: &str, include_names: bool, hash_names: bool) -> String {
+    let mut out = String::with_capacity(detail.len());
+    for token in detail.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if let Some((k, v)) = token.split_once('=')
+            && v.starts_with('/')
+        {
+            out.push_str(k);
+            out.push('=');
+            match (include_names, hash_names) {
+                (true, false) => out.push_str(v),
+                (true, true) => {
+                    out.push_str(v);
+                    out.push_str(" (hash=");
+                    out.push_str(&stable_hash(v));
+                    out.push(')');
+                }
+                (false, true) => {
+                    out.push_str("hash=");
+                    out.push_str(&stable_hash(v));
+                }
+                (false, false) => out.push_str("<scrubbed>"),
+            }
+            continue;
+        }
+        out.push_str(token);
+    }
+    out
+}
+
+fn stable_hash(name: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    let mut h = Sha256::new();
+    h.update(name.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(16);
+    for b in &digest[..8] {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+#[cfg(feature = "desktop")]
+fn copy_to_clipboard(s: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(s.to_owned());
+    }
+}
+
+#[cfg(not(feature = "desktop"))]
+fn copy_to_clipboard(_s: &str) {
+    // Web build: clipboard access on wasm32 requires async + a
+    // Permissions prompt the dashboard hasn't yet shimmed. The
+    // export modal still renders the body in a <pre> so the
+    // operator can hand-select-and-copy until the wasm clipboard
+    // path lands.
 }
