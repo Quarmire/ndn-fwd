@@ -145,8 +145,23 @@ enum FaceAction {
         /// Face ID to destroy.
         face_id: u32,
     },
-    /// List all faces.
-    List,
+    /// List all faces, optionally filtered by URI scheme or remote /
+    /// local URI glob pattern.  Multiple filters AND together; an
+    /// empty filter matches everything.
+    List {
+        /// Filter by URI scheme (e.g. `udp4`, `tcp4`, `shm`, `unix`).
+        /// Matches against both the remote URI scheme and, when the
+        /// remote is empty, the local URI scheme.
+        #[arg(long, value_name = "SCHEME")]
+        scheme: Option<String>,
+        /// Filter by remote URI glob — `*` matches any character run.
+        /// e.g. `--remote 'udp4://192.168.1.*:6363'`.
+        #[arg(long, value_name = "PATTERN")]
+        remote: Option<String>,
+        /// Filter by local URI glob.
+        #[arg(long, value_name = "PATTERN")]
+        local: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -363,9 +378,19 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 print_params(&resp);
             }
-            FaceAction::List => {
+            FaceAction::List {
+                scheme,
+                remote,
+                local,
+            } => {
                 let entries = mgmt.face_list().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-                print_face_list(&entries);
+                let filtered = filter_face_list(
+                    &entries,
+                    scheme.as_deref(),
+                    remote.as_deref(),
+                    local.as_deref(),
+                );
+                print_face_list(&filtered);
             }
         },
         Command::Strategy { action } => match action {
@@ -799,6 +824,85 @@ pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus])
     }
 }
 
+/// Face-system Tier 5 §G — post-decode filter for `face list`.
+///
+/// Returns the subset of `entries` whose URIs match every supplied
+/// filter (AND semantics).  An empty filter passes everything.
+///
+/// - `scheme` matches the URI's scheme prefix (`udp4`, `tcp4`,
+///   `shm`, …); compared against the remote URI when non-empty,
+///   otherwise the local URI.
+/// - `remote` / `local` are glob patterns where `*` matches a run of
+///   any characters (no character classes; that's a future
+///   extension if operators ask).
+pub fn filter_face_list(
+    entries: &[ndn_config::FaceStatus],
+    scheme: Option<&str>,
+    remote: Option<&str>,
+    local: Option<&str>,
+) -> Vec<ndn_config::FaceStatus> {
+    entries
+        .iter()
+        .filter(|f| {
+            if let Some(want) = scheme
+                && !uri_matches_scheme(f, want)
+            {
+                return false;
+            }
+            if let Some(pat) = remote
+                && !glob_match(pat, &f.uri)
+            {
+                return false;
+            }
+            if let Some(pat) = local
+                && !glob_match(pat, &f.local_uri)
+            {
+                return false;
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+fn uri_matches_scheme(f: &ndn_config::FaceStatus, want: &str) -> bool {
+    let uri = if !f.uri.is_empty() {
+        &f.uri
+    } else {
+        &f.local_uri
+    };
+    uri.split("://").next() == Some(want)
+}
+
+/// Glob match `pattern` against `s`.  `*` matches any (possibly
+/// empty) run of characters.  Empty pattern matches empty string.
+fn glob_match(pattern: &str, s: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return parts[0] == s;
+    }
+    let mut pos = 0usize;
+    let first = parts[0];
+    if !s[pos..].starts_with(first) {
+        return false;
+    }
+    pos += first.len();
+    let last = parts[parts.len() - 1];
+    for piece in &parts[1..parts.len() - 1] {
+        if piece.is_empty() {
+            continue;
+        }
+        match s[pos..].find(piece) {
+            Some(idx) => pos += idx + piece.len(),
+            None => return false,
+        }
+    }
+    if last.is_empty() {
+        return true;
+    }
+    s[pos..].ends_with(last) && s.len() - pos >= last.len()
+}
+
 /// Kebab-case label set for an NFD `FaceFlags` bitmap — matches
 /// `nfdc face list`'s rendering.  The three bits we recognise:
 /// `local-fields`, `lp-reliability`, `congestion-marking`.  Other
@@ -885,6 +989,73 @@ mod ctl_tests {
             out.contains("features: fragmentation reassembly local-fields reliability congestion-marking trace-context"),
             "missing features line in:\n{out}",
         );
+    }
+
+    fn make(uri: &str, local_uri: &str) -> ndn_config::FaceStatus {
+        ndn_config::FaceStatus {
+            uri: uri.to_owned(),
+            local_uri: local_uri.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ndnctl_filter_by_scheme() {
+        let faces = vec![
+            make("udp4://1.2.3.4:6363", "udp4://0.0.0.0:53412"),
+            make("tcp4://5.6.7.8:6363", "tcp4://0.0.0.0:0"),
+            make("shm://app", ""),
+        ];
+        let udp = filter_face_list(&faces, Some("udp4"), None, None);
+        assert_eq!(udp.len(), 1);
+        assert!(udp[0].uri.starts_with("udp4"));
+
+        let shm = filter_face_list(&faces, Some("shm"), None, None);
+        assert_eq!(shm.len(), 1);
+        assert_eq!(shm[0].uri, "shm://app");
+    }
+
+    #[test]
+    fn ndnctl_filter_by_remote_glob() {
+        let faces = vec![
+            make("udp4://192.168.1.10:6363", "udp4://0.0.0.0:0"),
+            make("udp4://192.168.1.11:6363", "udp4://0.0.0.0:0"),
+            make("udp4://10.0.0.5:6363", "udp4://0.0.0.0:0"),
+        ];
+        let matched = filter_face_list(&faces, None, Some("udp4://192.168.1.*:6363"), None);
+        assert_eq!(matched.len(), 2, "two 192.168.1.x matches expected");
+
+        let exact = filter_face_list(&faces, None, Some("udp4://10.0.0.5:6363"), None);
+        assert_eq!(exact.len(), 1);
+    }
+
+    #[test]
+    fn ndnctl_filter_by_local_glob() {
+        let faces = vec![
+            make("udp4://1.1.1.1:6363", "udp4://192.168.1.5:53412"),
+            make("udp4://2.2.2.2:6363", "udp4://10.0.0.5:48391"),
+        ];
+        let matched = filter_face_list(&faces, None, None, Some("udp4://192.168.*"));
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].local_uri, "udp4://192.168.1.5:53412");
+    }
+
+    #[test]
+    fn ndnctl_filter_combined_and_semantics() {
+        let faces = vec![
+            make("udp4://192.168.1.10:6363", "udp4://0.0.0.0:0"),
+            make("tcp4://192.168.1.10:6363", "tcp4://0.0.0.0:0"),
+        ];
+        let matched = filter_face_list(&faces, Some("udp4"), Some("*192.168.1.*"), None);
+        assert_eq!(matched.len(), 1);
+        assert!(matched[0].uri.starts_with("udp4"));
+    }
+
+    #[test]
+    fn ndnctl_filter_empty_passes_all() {
+        let faces = vec![make("udp4://1.1.1.1:6363", ""), make("shm://app", "")];
+        let matched = filter_face_list(&faces, None, None, None);
+        assert_eq!(matched.len(), 2);
     }
 
     /// Pre-Tier-4 forwarders (and PassthroughLinkService faces)
