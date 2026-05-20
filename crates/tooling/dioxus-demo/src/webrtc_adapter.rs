@@ -14,7 +14,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use ndn_face_webrtc::{RtcChannel, WasmRtcChannel, WebRtcFace as RtcInnerFace};
 use ndn_runtime::Runtime;
-use ndn_transport::{Face, FaceError, FaceId, FaceKind};
+use ndn_transport::{Transport, FaceError, FaceId, FaceKind};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 use web_sys::RtcPeerConnection;
@@ -53,7 +53,7 @@ impl WebRtcFaceAdapter {
     }
 }
 
-impl Face for WebRtcFaceAdapter {
+impl Transport for WebRtcFaceAdapter {
     fn id(&self) -> FaceId {
         self.id
     }
@@ -63,11 +63,11 @@ impl Face for WebRtcFaceAdapter {
     fn remote_uri(&self) -> Option<String> {
         Some(format!("webrtc-adapter://peer/{}", self.id.0))
     }
-    async fn recv(&self) -> Result<Bytes, FaceError> {
+    async fn recv_bytes(&self) -> Result<Bytes, FaceError> {
         let mut rx = self.rx_in.lock().await;
         rx.recv().await.ok_or(FaceError::Closed)
     }
-    async fn send(&self, pkt: Bytes) -> Result<(), FaceError> {
+    async fn send_bytes(&self, pkt: Bytes) -> Result<(), FaceError> {
         self.tx_out.send(pkt).await.map_err(|_| FaceError::Closed)
     }
 }

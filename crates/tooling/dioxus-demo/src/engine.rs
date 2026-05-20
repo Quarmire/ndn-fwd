@@ -33,7 +33,7 @@ use ndn_packet::{Data, Interest, Name, SignatureType};
 use ndn_runtime::Runtime;
 use ndn_security::{Signer, Validator};
 use ndn_tlv::TlvWriter;
-use ndn_transport::{ErasedFace, Face, FaceError, FaceId, FaceKind};
+use ndn_transport::{ErasedFace, Transport, FaceError, FaceId, FaceKind};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -101,7 +101,7 @@ struct AppFace {
     to_demo: mpsc::Sender<Bytes>,
 }
 
-impl Face for AppFace {
+impl Transport for AppFace {
     fn id(&self) -> FaceId {
         self.id
     }
@@ -111,11 +111,11 @@ impl Face for AppFace {
     fn local_uri(&self) -> Option<String> {
         Some(format!("appface://demo/{}", self.id.0))
     }
-    async fn recv(&self) -> Result<Bytes, FaceError> {
+    async fn recv_bytes(&self) -> Result<Bytes, FaceError> {
         let mut rx = self.from_demo.lock().await;
         rx.recv().await.ok_or(FaceError::Closed)
     }
-    async fn send(&self, pkt: Bytes) -> Result<(), FaceError> {
+    async fn send_bytes(&self, pkt: Bytes) -> Result<(), FaceError> {
         self.to_demo.send(pkt).await.map_err(|_| FaceError::Closed)
     }
 }

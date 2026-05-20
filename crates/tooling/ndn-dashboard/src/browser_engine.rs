@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use bytes::Bytes;
 use ndn_engine::{ForwarderEngine, ShutdownHandle, WasmEngineBuilder, WasmEngineConfig};
 use ndn_runtime::{Runtime, default_runtime};
-use ndn_transport::{Face, FaceError, FaceId, FaceKind};
+use ndn_transport::{Transport, FaceError, FaceId, FaceKind};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -97,7 +97,7 @@ struct AppFace {
     tx: mpsc::Sender<Bytes>,
 }
 
-impl Face for AppFace {
+impl Transport for AppFace {
     fn id(&self) -> FaceId {
         self.id
     }
@@ -107,10 +107,10 @@ impl Face for AppFace {
     fn local_uri(&self) -> Option<String> {
         Some(format!("appface://dashboard/{}", self.id.0))
     }
-    async fn recv(&self) -> Result<Bytes, FaceError> {
+    async fn recv_bytes(&self) -> Result<Bytes, FaceError> {
         self.rx.lock().await.recv().await.ok_or(FaceError::Closed)
     }
-    async fn send(&self, pkt: Bytes) -> Result<(), FaceError> {
+    async fn send_bytes(&self, pkt: Bytes) -> Result<(), FaceError> {
         self.tx.send(pkt).await.map_err(|_| FaceError::Closed)
     }
 }
