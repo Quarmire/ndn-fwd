@@ -689,23 +689,37 @@ fn fmt_bytes(n: u64) -> String {
 // ─── Output ──────────────────────────────────────────────────────────────────
 
 fn print_face_list(faces: &[ndn_config::FaceStatus]) {
+    let mut out = String::new();
+    render_face_list_into(&mut out, faces);
+    print!("{out}");
+}
+
+/// Face-system Tier 4 §C — operator-facing renderer for the
+/// `faces/list` dataset.
+///
+/// Pulled out of [`print_face_list`] so unit tests can call it
+/// with a populated `FaceStatus` and assert the rendered fields
+/// without spawning a forwarder.  Mirrors `nfdc face list`'s line
+/// shape for every NFD-canonical field and appends ndn-rs-specific
+/// lines for `flags:`, `features:`, `reliability:`, `congestion:`.
+pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus]) {
+    use std::fmt::Write;
     for (i, f) in faces.iter().enumerate() {
         if i > 0 {
-            println!();
+            writeln!(out).unwrap();
         }
-        // Determine the kind label from whichever URI is non-empty.
         let kind = if !f.uri.is_empty() {
             face_kind(&f.uri)
         } else {
             face_kind(&f.local_uri)
         };
-        // First line: faceid, kind, persistency, scope, link-type, optional mtu.
         let mtu_suffix = if let Some(mtu) = f.mtu {
             format!("  mtu={mtu}")
         } else {
             String::new()
         };
-        println!(
+        writeln!(
+            out,
             "faceid={}  {}  {}  {}  {}{}",
             f.face_id,
             kind,
@@ -713,30 +727,187 @@ fn print_face_list(faces: &[ndn_config::FaceStatus]) {
             f.scope_str(),
             link_type_str(f.link_type),
             mtu_suffix,
-        );
-        // Remote URI line (only when non-empty).
+        )
+        .unwrap();
         if !f.uri.is_empty() {
-            println!("  remote: {}", f.uri);
+            writeln!(out, "  remote: {}", f.uri).unwrap();
         }
-        // Local URI line (only when non-empty).
         if !f.local_uri.is_empty() {
-            println!("  local:  {}", f.local_uri);
+            writeln!(out, "  local:  {}", f.local_uri).unwrap();
         }
-        // Counter lines.
-        println!(
+        // Flag-bit rendering — nfdc style, only labels for set bits.
+        let flag_labels = flag_bit_labels(f.flags);
+        if !flag_labels.is_empty() {
+            writeln!(out, "  flags:  {}", flag_labels.join(" ")).unwrap();
+        }
+        writeln!(
+            out,
             "  in:  interests={}  data={}  nacks={}  bytes={}",
             f.n_in_interests,
             f.n_in_data,
             f.n_in_nacks,
             fmt_bytes(f.n_in_bytes),
-        );
-        println!(
+        )
+        .unwrap();
+        writeln!(
+            out,
             "  out: interests={}  data={}  nacks={}  bytes={}",
             f.n_out_interests,
             f.n_out_data,
             f.n_out_nacks,
             fmt_bytes(f.n_out_bytes),
+        )
+        .unwrap();
+        // Tier 4 §4.3 — ndn-rs-specific lines.  Skip silently when
+        // the extension TLVs were absent on the wire (PassthroughLinkService
+        // faces or pre-Tier-4 forwarders).
+        let base = f.base_congestion_marking_interval;
+        let thresh = f.default_congestion_threshold;
+        let marks_sent = f.n_congestion_marks_sent;
+        let marks_recv = f.n_congestion_marks_received;
+        if base.is_some() || thresh.is_some() || marks_sent.is_some() || marks_recv.is_some() {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(b) = base {
+                parts.push(format!("base-interval={}µs", b));
+            }
+            if let Some(t) = thresh {
+                parts.push(format!("threshold={t}"));
+            }
+            if let Some(s) = marks_sent {
+                parts.push(format!("marks-sent={s}"));
+            }
+            if let Some(r) = marks_recv {
+                parts.push(format!("marks-received={r}"));
+            }
+            writeln!(out, "  congestion: {}", parts.join("  ")).unwrap();
+        }
+        let resent = f.n_lp_resent_packets;
+        let rto = f.rto_micros;
+        if resent.is_some() || rto.is_some() {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(r) = rto {
+                parts.push(format!("rto={r}µs"));
+            }
+            if let Some(n) = resent {
+                parts.push(format!("resent={n}"));
+            }
+            writeln!(out, "  reliability: {}", parts.join("  ")).unwrap();
+        }
+        if !f.feature_set.is_empty() {
+            writeln!(out, "  features: {}", f.feature_set.join(" ")).unwrap();
+        }
+    }
+}
+
+/// Kebab-case label set for an NFD `FaceFlags` bitmap — matches
+/// `nfdc face list`'s rendering.  The three bits we recognise:
+/// `local-fields`, `lp-reliability`, `congestion-marking`.  Other
+/// bits are ignored silently (NFD ignores unknown bits too).
+fn flag_bit_labels(flags: u64) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    // Bit constants live in ndn-transport; mirror them here to avoid a
+    // CLI → transport dep just for three numbers.
+    if flags & 0b001 != 0 {
+        out.push("local-fields");
+    }
+    if flags & 0b010 != 0 {
+        out.push("lp-reliability");
+    }
+    if flags & 0b100 != 0 {
+        out.push("congestion-marking");
+    }
+    out
+}
+
+#[cfg(test)]
+mod ctl_tests {
+    use super::*;
+
+    /// Tier 4 §C — the renderer prints every ndn-rs extension field
+    /// with the labels operators read in the design doc's example
+    /// output.
+    #[test]
+    fn ndnctl_renders_extended_fields() {
+        let fs = ndn_config::FaceStatus {
+            face_id: 259,
+            uri: "udp4://192.168.1.10:6363".to_owned(),
+            local_uri: "udp4://192.168.1.5:53412".to_owned(),
+            face_scope: 0,
+            face_persistency: 0,
+            link_type: 0,
+            mtu: Some(8800),
+            base_congestion_marking_interval: Some(100_000),
+            default_congestion_threshold: Some(50_000),
+            n_in_interests: 12503,
+            n_in_data: 8741,
+            n_in_nacks: 12,
+            n_out_interests: 8741,
+            n_out_data: 12503,
+            n_out_nacks: 0,
+            n_in_bytes: 4_200_000,
+            n_out_bytes: 3_100_000,
+            n_satisfied_interests: 8721,
+            n_unsatisfied_interests: 20,
+            flags: 0b011, // local-fields + lp-reliability
+            n_lp_acks_received: Some(12489),
+            n_lp_resent_packets: Some(14),
+            n_lp_rto_expirations: Some(0),
+            n_congestion_marks_sent: Some(3),
+            n_congestion_marks_received: Some(0),
+            effective_mtu: Some(8500),
+            feature_set: vec![
+                "fragmentation".to_owned(),
+                "reassembly".to_owned(),
+                "local-fields".to_owned(),
+                "reliability".to_owned(),
+                "congestion-marking".to_owned(),
+                "trace-context".to_owned(),
+            ],
+            rto_micros: Some(420),
+        };
+        let mut out = String::new();
+        render_face_list_into(&mut out, &[fs]);
+
+        // Flag-bit line shows kebab-case labels in nfdc order.
+        assert!(
+            out.contains("flags:  local-fields lp-reliability"),
+            "missing flag labels in output:\n{out}",
         );
+        // Congestion line covers base-interval / threshold / mark counters.
+        assert!(out.contains("base-interval=100000µs"), "{out}");
+        assert!(out.contains("threshold=50000"), "{out}");
+        assert!(out.contains("marks-sent=3"), "{out}");
+        // Reliability line covers RTO + resent counter.
+        assert!(out.contains("rto=420µs"), "{out}");
+        assert!(out.contains("resent=14"), "{out}");
+        // Features line covers the full pipeline names.
+        assert!(
+            out.contains("features: fragmentation reassembly local-fields reliability congestion-marking trace-context"),
+            "missing features line in:\n{out}",
+        );
+    }
+
+    /// Pre-Tier-4 forwarders (and PassthroughLinkService faces)
+    /// produce `FaceStatus` with no extension fields.  The renderer
+    /// stays silent for those lines — no empty headers.
+    #[test]
+    fn ndnctl_renders_extended_fields_skips_when_absent() {
+        let fs = ndn_config::FaceStatus {
+            face_id: 1,
+            uri: "shm://app".to_owned(),
+            ..Default::default()
+        };
+        let mut out = String::new();
+        render_face_list_into(&mut out, &[fs]);
+        assert!(
+            !out.contains("congestion:"),
+            "spurious congestion line:\n{out}"
+        );
+        assert!(
+            !out.contains("reliability:"),
+            "spurious reliability line:\n{out}"
+        );
+        assert!(!out.contains("features:"), "spurious features line:\n{out}");
     }
 }
 
