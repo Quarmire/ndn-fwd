@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
             // InProcFace::new creates (engine-side face, app-side handle).
             // The "engine" receives via face.recv(); the "app" sends via handle.
             let (face, handle) = InProcFace::new(FaceId(worker), 128);
-            use ndn_transport::Face;
+            use ndn_transport::Transport;
             let _face_id = face.id(); // confirm the face is alive
 
             let mut rtts = Vec::new();
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
                 let _ = handle.send(dummy).await;
                 rtts.push(t0.elapsed().as_micros() as u64);
                 // Drain the packet to avoid blocking the next iteration.
-                let _ = face.recv().await;
+                let _ = face.recv_bytes().await;
             }
             rtts
         });

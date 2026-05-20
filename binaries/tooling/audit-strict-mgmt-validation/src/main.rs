@@ -49,7 +49,7 @@ use ndn_packet::lp;
 use ndn_packet::{Data, Name};
 use ndn_security::trust_schema::{NamePattern, PatternComponent, SchemaRule, TrustSchema};
 use ndn_security::{FilePib, ValidationResult, Validator};
-use ndn_transport::{Face, FaceId};
+use ndn_transport::{FaceId, Transport};
 use tracing::{info, warn};
 
 fn arg(name: &str) -> Result<String> {
@@ -135,12 +135,13 @@ async fn main() -> Result<()> {
         .can_be_prefix()
         .sign_digest_sha256();
     let lp_wire = lp::encode_lp_packet(&interest_wire);
-    Face::send(&face, lp_wire)
+    Transport::send_bytes(&face, lp_wire)
         .await
         .context("sending mgmt Interest")?;
 
     // ── 4. Receive the response Data wire ─────────────────────────────────
-    let raw = match tokio::time::timeout(Duration::from_secs(3), Face::recv(&face)).await {
+    let raw = match tokio::time::timeout(Duration::from_secs(3), Transport::recv_bytes(&face)).await
+    {
         Ok(Ok(b)) => b,
         Ok(Err(e)) => bail!("face recv error: {e:?}"),
         Err(_) => bail!("timed out waiting for Data response"),
