@@ -2415,7 +2415,7 @@ fn FailureDiagnosisPanel(diagnosis: FailureDiagnosis) -> Element {
 fn ChallengeAttestationsPanel(count: usize) -> Element {
     // Reserved field. Renders an empty collapsed panel today; the
     // shape will populate once `ndn-cert-challenge-attestation` lands
-    // (see docs/notes/ndn-cert-challenge-attestation-NEXT.md).
+    // (see (internal)).
     rsx! {
         div { style: "background:var(--surface2);border:1px dashed var(--border-subtle);border-radius:6px;padding:8px 10px;font-size:11px;color:var(--text-muted);",
             "Challenge attestations: "

@@ -3,7 +3,7 @@
 //! Scans `crates/tooling/ndn-dashboard/src/**.rs` for `EduGloss { term:
 //! "X", ... }` callsites and fails when `X` is missing from
 //! `crates/tooling/ndn-dashboard/glossary.toml`. See §9.1 of
-//! `docs/notes/dashboard-security-design-2026-05-13.md`.
+//! (internal).
 //!
 //! Usage:
 //!   dash-glossary check [<repo-root>]

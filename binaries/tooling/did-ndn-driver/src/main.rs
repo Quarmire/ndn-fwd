@@ -86,7 +86,7 @@ async fn main() {
     // Stub mode: `UniversalResolver::new()` registers a
     // fetcher-less `NdnDidResolver` that returns
     // `DidResolutionError::InternalError` for every `did:ndn:*`
-    // request. See `docs/notes/did-ndn-meaningful-implementation-roadmap-2026-05-01.md`
+    // request. See (internal)
     // Tier 3.3 — to make the driver self-sufficient, build a
     // `CertFetcher` against a local forwarder face and call
     // `UniversalResolver::with_cert_fetcher(fetcher)` instead.

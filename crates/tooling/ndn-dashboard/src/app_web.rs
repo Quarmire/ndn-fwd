@@ -331,7 +331,7 @@ pub fn AppWeb() -> Element {
 
     // Views that are NOT available on web. Coding/RateLimit are
     // desktop-only until the WsMgmtClient-backed variants land
-    // (docs/notes/dashboard-correctness-floor-2026-05-13.md §1d).
+    // ((internal) §1d).
     let web_hidden_views = [View::Tools, View::Session, View::Coding, View::RateLimit];
 
     rsx! {

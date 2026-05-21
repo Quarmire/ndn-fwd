@@ -14,7 +14,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use ndn_face_webrtc::{RtcChannel, WasmRtcChannel, WebRtcFace as RtcInnerFace};
 use ndn_runtime::Runtime;
-use ndn_transport::{Transport, FaceError, FaceId, FaceKind};
+use ndn_transport::{FaceError, FaceId, FaceKind, Transport};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 use web_sys::RtcPeerConnection;

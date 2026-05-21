@@ -1,8 +1,8 @@
 # Education seam — single source of truth for the dashboard's
-# user-visible glosses of NDN terms (§9 / §9.1 of the security design,
-# `docs/notes/dashboard-security-design-2026-05-13.md`). Every
-# `EduGloss { term: "X", ... }` callsite in the dashboard must have a
-# matching `term` entry below; the `dash-glossary` CI tool enforces it.
+# user-visible glosses of NDN terms (§9 / §9.1 of the security
+# design). Every `EduGloss { term: "X", ... }` callsite in the
+# dashboard must have a matching `term` entry below; the
+# `dash-glossary` CI tool enforces it.
 #
 # Fields:
 #   term         — exact string passed to the EduGloss component.

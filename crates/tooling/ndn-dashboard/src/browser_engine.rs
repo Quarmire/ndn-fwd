@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use bytes::Bytes;
 use ndn_engine::{ForwarderEngine, ShutdownHandle, WasmEngineBuilder, WasmEngineConfig};
 use ndn_runtime::{Runtime, default_runtime};
-use ndn_transport::{Transport, FaceError, FaceId, FaceKind};
+use ndn_transport::{FaceError, FaceId, FaceKind, Transport};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 

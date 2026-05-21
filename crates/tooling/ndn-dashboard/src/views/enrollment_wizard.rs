@@ -587,7 +587,7 @@ fn StepIssuance(
                 }
                 div { "✓ Issuer signs as " span { class: "mono", "{ca_prefix}" } }
                 div { style: "color:var(--text-muted);margin-top:4px;font-size:10px;",
-                    "Final IssuancePolicy decision lives forwarder-side — `AcceptAllIssuance` by default; replace via the F.7 hook (`docs/notes/ndn-cert-challenge-attestation-NEXT.md`)."
+                    "Final IssuancePolicy decision lives forwarder-side — `AcceptAllIssuance` by default; replace via the F.7 hook ((internal))."
                 }
             }
         }

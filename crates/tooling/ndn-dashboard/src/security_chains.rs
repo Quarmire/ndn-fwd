@@ -31,9 +31,7 @@ use crate::signed_data_chain::{
 
 // ── AuditLogEntry — §4.6 ────────────────────────────────────────────
 
-/// One row of the security audit log. Tag IDs are wire identifiers;
-/// see `docs/wire-formats/audit-log-entry.toml` for the cross-stack
-/// consumer mapping.
+/// One row of the security audit log. Tag IDs are wire identifiers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditLogEntry {
     /// Unix-epoch nanoseconds (NDN's TIMESTAMP convention) — when the

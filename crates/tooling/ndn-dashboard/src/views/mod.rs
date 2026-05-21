@@ -1,6 +1,6 @@
 // `coding` and `rate_limit` currently call into `ndn-ipc::MgmtClient`
 // (Unix-socket only). Wiring them through `WsMgmtClient` for the web
-// build is tracked in docs/notes/dashboard-correctness-floor-2026-05-13.md §1d.
+// build is tracked in (internal) §1d.
 #[cfg(feature = "desktop")]
 pub mod coding;
 #[cfg(feature = "desktop")]

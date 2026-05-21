@@ -3,9 +3,9 @@
 //!
 //! Substrate-correct storage for the dashboard's audit log (§4.6) and
 //! schema journal (§2.4) per
-//! `docs/notes/dashboard-security-design-2026-05-13.md` and the
+//! (internal) and the
 //! kickoff at
-//! `docs/notes/dashboard-security-v1-implementation-kickoff-2026-05-13.md`
+//! (internal)
 //! (cross-stack design constraints §1–§4 — signed NDN Data, not JSON,
 //! not CBOR; per-seq chain with `prev_entry_hash` in Content; NDN-TLV
 //! encoded payload).

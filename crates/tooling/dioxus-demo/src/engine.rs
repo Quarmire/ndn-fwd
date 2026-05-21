@@ -33,7 +33,7 @@ use ndn_packet::{Data, Interest, Name, SignatureType};
 use ndn_runtime::Runtime;
 use ndn_security::{Signer, Validator};
 use ndn_tlv::TlvWriter;
-use ndn_transport::{ErasedFace, Transport, FaceError, FaceId, FaceKind};
+use ndn_transport::{ErasedFace, FaceError, FaceId, FaceKind, Transport};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;

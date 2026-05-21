@@ -26,7 +26,7 @@
 //! [`ndn_engine`] instance that runs entirely in the browser tab,
 //! per the Phase 7 work proven by `crates/tooling/dioxus-demo`.
 //!
-//! See `docs/notes/dashboard-multi-forwarder-2026-05-10.md` for
+//! See (internal) for
 //! the full design + rationale.
 
 use std::path::{Path, PathBuf};

@@ -1,7 +1,7 @@
 //! §6 state model — `SecurityPosture` / `ActiveIdentity` / per-session
 //! gate-acceptance memory.
 //!
-//! See `docs/notes/dashboard-security-design-2026-05-13.md` §6 and §2.
+//! See (internal) §6 and §2.
 //! The dashboard derives `SecurityPosture` from the AppCtx signals on
 //! every render; the gate (`crate::security_gate::SecurityGate`)
 //! consumes the derived value to decide whether to fire.

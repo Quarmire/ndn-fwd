@@ -1,6 +1,6 @@
 //! §4.7 DID lens — identity-level framing over the packet-level §4.1 view.
 //!
-//! Three v1 surfaces, per `docs/notes/dashboard-security-design-2026-05-13.md` §4.7:
+//! Three v1 surfaces, per (internal) §4.7:
 //!   * `DidLensToggle` + `DidDocumentPanel` — toggle on the §4.1 identity
 //!     inspector that flips its right pane between Keys&Certs and DID Document.
 //!   * `ResolveAnyDidBox` — search input in the Security view header that
