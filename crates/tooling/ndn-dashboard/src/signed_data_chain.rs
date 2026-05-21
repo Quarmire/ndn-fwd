@@ -1,50 +1,22 @@
-//! `SignedDataChainStore<T>` — append-only chain of signed NDN Data
-//! packets.
+//! `SignedDataChainStore<T>` — append-only chain of signed NDN Data packets
+//! used as the storage substrate for the dashboard's audit log and schema
+//! journal.
 //!
-//! Substrate-correct storage for the dashboard's audit log (§4.6) and
-//! schema journal (§2.4) per
-//! (internal) and the
-//! kickoff at
-//! (internal)
-//! (cross-stack design constraints §1–§4 — signed NDN Data, not JSON,
-//! not CBOR; per-seq chain with `prev_entry_hash` in Content; NDN-TLV
-//! encoded payload).
+//! Each entry is a signed Data packet named `<chain_root>/seq=N`. The Content
+//! is an ordered TLV stream:
 //!
-//! ## Wire shape
+//! | Tag | Field             | Value                                      |
+//! |-----|-------------------|--------------------------------------------|
+//! | 0   | `schema_version`  | `u16`, pinned by `T`                       |
+//! | 1   | `authored_under`  | `Option<Hash>` — reserved (v1 = zero-len)  |
+//! | 2   | `prev_entry_hash` | 32-byte SHA-256 of prior entry's wire      |
+//! | 3+  | type-defined      | `T::encode_payload_fields`                 |
 //!
-//! Each chain entry is a signed NDN Data packet whose Name is
-//! `<chain_root>/seq=N` (typed `SequenceNumber` NameComponent). The
-//! Content carries an ordered TLV stream:
-//!
-//! | Tag | Field              | Value                                      |
-//! |-----|--------------------|--------------------------------------------|
-//! | 0   | `schema_version`   | `u16` (NonNegativeInteger), pinned by `T`  |
-//! | 1   | `authored_under`   | `Option<Hash>` — reserved (v1 = zero-len)  |
-//! | 2   | `prev_entry_hash`  | 32-byte SHA-256 of prior entry's wire      |
-//! | 3+  | type-defined       | `T::encode_payload_fields`                 |
-//!
-//! Tag IDs are wire identifiers. Once shipped, never reused; new fields
-//! get new tag numbers (forward-compat discipline matches NDF's
-//! payload-foundation §"Wire format").
-//!
-//! ## Chain semantics
-//!
-//! - Genesis entry: `seq=0`, `prev_entry_hash` = `[0u8; 32]`.
-//! - Subsequent entry: `seq=N+1`, `prev_entry_hash` =
-//!   `prior.implicit_digest()` (the standard NDN
-//!   `ImplicitSha256DigestComponent` value over the full prior Data
-//!   wire).
-//! - `verify` walks the chain head→tail checking (a) `seq` monotonic
-//!   by 1 from 0; (b) `prev_entry_hash` matches the prior entry's
-//!   `implicit_digest`; (c) each entry's signature verifies against
-//!   the supplied verifier.
-//!
-//! Per §11.10 of the design doc, the operator-posture (`MgmtAccessConfig`)
-//! state is **not** stored via this primitive — it's forwarder-internal
-//! config. Policy edits author an `AuditLogEntry` into the dashboard's
-//! `AuditLogChain` instantiation; that's the §11.10 audit bridge.
+//! Tag IDs are wire identifiers — once shipped, never reused. The chain links
+//! by `prev_entry_hash = prior.implicit_digest()` (standard NDN
+//! `ImplicitSha256DigestComponent`); genesis is `seq=0`, all-zero hash.
 
-#![allow(dead_code)] // primitive lands ahead of its UI consumers
+#![allow(dead_code)]
 
 use std::marker::PhantomData;
 
@@ -60,17 +32,10 @@ pub type Hash = [u8; 32];
 /// Reserved tag IDs every chained entry uses. Type-specific payloads
 /// MUST start at [`tag::PAYLOAD_START`].
 pub mod tag {
-    /// `u16` schema version — pinned per `T`, bumped only on
-    /// backward-incompatible field-set changes. Always tag 0 per the
-    /// NDF substrate convention.
     pub const SCHEMA_VERSION: u64 = 0;
-    /// Reserved `authored_under: Option<Hash>`. Empty in v1 (chain
-    /// identity dispatch already implies the type); held open so v2
-    /// can attach a SemanticManifest pointer without a wire bump.
+    /// Reserved for `Option<Hash>`; empty in v1.
     pub const AUTHORED_UNDER: u64 = 1;
-    /// 32-byte chain linkage — SHA-256 of the prior entry's Data wire.
     pub const PREV_ENTRY_HASH: u64 = 2;
-    /// First tag ID available for type-defined fields.
     pub const PAYLOAD_START: u64 = 3;
 }
 
@@ -90,43 +55,34 @@ pub enum ChainError {
     Backend(String),
 }
 
-/// Application payload chained inside the dashboard's signed Data
-/// packets. Implementors own only their type-defined fields (tags 3+);
-/// the primitive owns the reserved tags 0–2.
+/// Application payload chained inside signed Data packets. Implementors own
+/// only their type-defined fields (tags ≥ [`tag::PAYLOAD_START`]); the
+/// primitive owns the reserved tags 0–2.
 pub trait ChainEntry: Sized {
-    /// Pinned per type; bumped only on backward-incompatible
-    /// field-set changes. Written into tag 0 of every entry's Content.
     const SCHEMA_VERSION: u16;
 
-    /// Encode the type-defined fields (tag IDs ≥ [`tag::PAYLOAD_START`])
-    /// into `w` in canonical ascending-tag order.
+    /// Encode fields in canonical ascending-tag order.
     fn encode_payload_fields(&self, w: &mut TlvWriter);
 
-    /// Decode the type-defined fields from a reader scoped to the
-    /// payload-tail of the Content TLV stream. The primitive has
-    /// already consumed tags 0–2 before handing the reader over.
+    /// `reader` is scoped to the payload tail; the primitive has already
+    /// consumed tags 0–2.
     fn decode_payload_fields(reader: &mut TlvReader) -> Result<Self, ChainError>;
 }
 
-/// Producer side. Carries the signature type, key locator, and sign
-/// closure that [`ndn_packet::encode::DataBuilder::sign_sync`] needs.
 pub trait DataSigner {
     fn sig_type(&self) -> SignatureType;
     fn key_locator(&self) -> Option<&Name>;
     fn sign(&self, region: &[u8]) -> Result<Bytes, ChainError>;
 }
 
-/// Consumer side. Verifies the NDN signature on a Data packet that
-/// the chain has presented (chain hash linkage is verified by the
-/// primitive itself; the verifier only attests to the per-packet
-/// signature).
+/// Verifies per-packet signatures only; chain hash linkage is verified by the
+/// chain primitive itself.
 pub trait DataVerifier {
     fn verify(&self, data: &Data) -> bool;
 }
 
-/// Backend storing Data wires keyed by chain position. Implementations
-/// are sync; async backends (IndexedDB) load the full chain once and
-/// present a sync view afterwards.
+/// Async backends (IndexedDB) load the full chain once and present a sync
+/// view afterwards.
 pub trait ChainBackend {
     /// Return every entry wire in seq order (seq=0 first).
     fn load_all(&self) -> Result<Vec<Bytes>, ChainError>;
@@ -134,8 +90,6 @@ pub trait ChainBackend {
     fn append(&mut self, seq: u64, wire: Bytes) -> Result<(), ChainError>;
 }
 
-/// The chain itself. Owns the in-memory cache of decoded Data packets
-/// plus the backing store.
 pub struct SignedDataChainStore<T: ChainEntry, B: ChainBackend> {
     chain_root: Name,
     backend: B,
@@ -177,9 +131,7 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
         &self.entries
     }
 
-    /// Hash referencing the chain head — the value the next appended
-    /// entry will carry as its `prev_entry_hash`. Zero for an empty
-    /// chain.
+    /// Zero for an empty chain.
     pub fn head_hash(&self) -> Hash {
         self.entries
             .last()
@@ -187,31 +139,21 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
             .unwrap_or([0u8; 32])
     }
 
-    /// Append a new entry signed by `signer`. Returns the new entry's
-    /// `implicit_digest` (the value any subsequent entry will use as
-    /// its `prev_entry_hash`).
+    /// Returns the new entry's `implicit_digest` (the next entry's `prev_entry_hash`).
     pub fn append(&mut self, payload: T, signer: &dyn DataSigner) -> Result<Hash, ChainError> {
         let seq = self.entries.len() as u64;
         let prev = self.head_hash();
 
-        // Build the entry Name: <chain_root>/seq=N (typed
-        // SequenceNumber component per the NDN packet spec).
         let mut name = self.chain_root.clone();
         name = name.append_component(NameComponent::sequence_num(seq));
 
-        // Encode the Content TLV stream: schema_version, authored_under
-        // (reserved zero-length in v1), prev_entry_hash, then T's
-        // type-defined fields (tags ≥ PAYLOAD_START).
         let mut w = TlvWriter::new();
         write_nni(&mut w, tag::SCHEMA_VERSION, u64::from(T::SCHEMA_VERSION));
-        // v1 authored_under = None → zero-length value. The decoder
-        // checks for length 0 (None) vs length 32 (Some(Hash)).
         w.write_tlv(tag::AUTHORED_UNDER, &[]);
         w.write_tlv(tag::PREV_ENTRY_HASH, &prev);
         payload.encode_payload_fields(&mut w);
         let content = w.finish();
 
-        // Build + sign the Data packet through the standard codec.
         let sig_type = signer.sig_type();
         let key_locator = signer.key_locator().cloned();
         let mut sign_err: Option<ChainError> = None;
@@ -229,8 +171,6 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
             return Err(e);
         }
 
-        // Decode round-trip to populate the cached `Data` (cheap; the
-        // Bytes are Arc-backed) and persist.
         let data = Data::decode(wire.clone())
             .map_err(|e| ChainError::DataWire(format!("decode self: {e:?}")))?;
         let digest = data.implicit_digest();
@@ -239,15 +179,12 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
         Ok(digest)
     }
 
-    /// Walk the chain from genesis to head; verify (a) seq monotonic
-    /// by 1 starting at 0; (b) `prev_entry_hash` matches prior
-    /// `implicit_digest`; (c) each entry's signature against
-    /// `verifier`.
+    /// Walks the chain checking seq monotonicity, `prev_entry_hash` linkage,
+    /// and per-entry signatures.
     pub fn verify(&self, verifier: &dyn DataVerifier) -> Result<(), ChainError> {
         let mut expected_prev: Hash = [0u8; 32];
         for (i, entry) in self.entries.iter().enumerate() {
             let seq = i as u64;
-            // (a) seq monotonic
             let last_comp = entry
                 .name
                 .components()
@@ -266,7 +203,6 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
                     reason: format!("expected seq={seq}, name carries seq={entry_seq}"),
                 });
             }
-            // (b) chain linkage
             let parsed = ParsedHeader::decode(entry).map_err(|e| ChainError::BrokenChain {
                 seq,
                 reason: format!("header parse: {e}"),
@@ -287,7 +223,6 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
                     reason: "prev_entry_hash does not match prior entry's implicit_digest".into(),
                 });
             }
-            // (c) signature
             if !verifier.verify(entry) {
                 return Err(ChainError::BrokenChain {
                     seq,
@@ -299,7 +234,7 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
         Ok(())
     }
 
-    /// Decode an entry's payload (the type-defined fields, tags 3+).
+    /// Decode an entry's payload (type-defined fields, tags ≥ PAYLOAD_START).
     pub fn decode_entry(&self, index: usize) -> Result<T, ChainError> {
         let entry = self
             .entries
@@ -307,7 +242,6 @@ impl<T: ChainEntry, B: ChainBackend> SignedDataChainStore<T, B> {
             .ok_or_else(|| ChainError::Backend(format!("entry index {index} out of range")))?;
         let content = entry.content().cloned().unwrap_or_default();
         let mut reader = TlvReader::new(content);
-        // Skip the reserved tags 0–2.
         let _ = ParsedHeader::read_from(&mut reader)
             .map_err(|e| ChainError::Decode(format!("header skip: {e}")))?;
         T::decode_payload_fields(&mut reader)
@@ -381,9 +315,7 @@ impl ParsedHeader {
     }
 }
 
-/// Write a NonNegativeInteger TLV (the standard NDN integer encoding —
-/// 1, 2, 4, or 8 bytes big-endian, shortest form). Matches
-/// `ndn-packet`'s internal `write_nni`.
+/// 1/2/4/8 bytes big-endian, shortest form. Matches ndn-packet's internal helper.
 fn write_nni(w: &mut TlvWriter, typ: u64, value: u64) {
     w.write_tlv(typ, &encode_nni(value));
 }
@@ -422,15 +354,11 @@ fn read_nni_u16(bytes: &Bytes) -> Result<u16, String> {
     Ok(v as u16)
 }
 
-// Public helper so [`ChainEntry`] impls can write 32-byte hashes,
-// optional names, etc. without re-implementing the encoding.
 pub fn sha256_of(bytes: &[u8]) -> Hash {
     let mut h = Sha256::new();
     h.update(bytes);
     h.finalize().into()
 }
-
-// ── MemoryStore — always available; the test backend ────────────────
 
 #[derive(Default)]
 pub struct MemoryStore {
@@ -461,15 +389,8 @@ impl ChainBackend for MemoryStore {
     }
 }
 
-// ── FileStore — desktop, one file per entry ─────────────────────────
-//
-// Per §11.1 of the design doc the desktop store lives under
-// `$XDG_CONFIG_HOME/ndn-dashboard/<forwarder-id>/<chain>/`. Each entry
-// is its own file named `<seq:020>.data` (zero-padded so a directory
-// listing sorts in seq order). The Data packet wire is the file
-// content. Atomicity: write `<seq>.data.tmp`, fsync, rename. A torn
-// append leaves the prior chain intact.
-
+/// Desktop store. One file per entry (`<seq:020>.data`); atomic append via
+/// write-tmp + fsync + rename so torn appends leave the prior chain intact.
 #[cfg(feature = "desktop")]
 #[allow(unused_imports)]
 pub use file_store::FileStore;
@@ -553,25 +474,9 @@ mod file_store {
     }
 }
 
-// ── IndexedDbStore — wasm32 ─────────────────────────────────────────
-//
-// Per §11.1, the web target stores chain wires in IndexedDB scoped
-// to the dashboard's origin. One DB per dashboard (`db_name`), one
-// object store per chain (`store_name`), key = `seq` as
-// `f64` JsValue, value = the Data wire as `Uint8Array`.
-//
-// The `ChainBackend` trait is sync but IndexedDB is fundamentally
-// async. The shape: `IndexedDbStore::open` is async — it opens the
-// DB, reads every entry into a sync-accessible cache, and returns a
-// store whose `load_all()` is now instant. Writes are sync against
-// the cache (so the chain primitive's append succeeds) and
-// fire-and-forget-async against IndexedDB (logs on error). Reads
-// after a write see the in-memory copy immediately; persistence
-// catches up asynchronously.
-//
-// Mirrors `crates/extension/ndn-pib-idb/src/wasm.rs` for IDB ceremony
-// (factory lookup + request-awaiter).
-
+/// wasm32 IDB store. One DB per dashboard origin, one object store per chain,
+/// key = `seq`, value = Data wire. `open` loads everything into a sync cache;
+/// writes hit the cache synchronously and persist to IDB fire-and-forget.
 #[cfg(target_arch = "wasm32")]
 pub use indexed_db::IndexedDbStore;
 
@@ -595,13 +500,8 @@ mod indexed_db {
 
     const SCHEMA_VERSION: u32 = 1;
 
-    /// Per-chain IDB-backed wire store.
-    ///
-    /// Holds an `Rc<IdbDatabase>` and a `RefCell<Vec<Bytes>>` cache.
-    /// `IdbDatabase` is `!Send` (raw `JsValue`), which is fine on
-    /// wasm32 (single-threaded). Surrounding plumbing (the dashboard's
-    /// per-process audit-globals) must use `thread_local!` instead of
-    /// `OnceLock` for this reason.
+    /// `IdbDatabase` is `!Send`; surrounding plumbing must use `thread_local!`,
+    /// not `OnceLock`.
     pub struct IndexedDbStore {
         db: Rc<IdbDatabase>,
         store_name: String,
@@ -609,20 +509,16 @@ mod indexed_db {
     }
 
     impl IndexedDbStore {
-        /// Open the DB, run the schema upgrade if needed, and
-        /// preload every entry into the cache. On success the
-        /// returned store's `load_all()` is sync and instant.
+        /// Opens the DB, runs the schema upgrade if needed, and preloads every
+        /// entry into the cache so `load_all()` is sync afterwards.
         pub async fn open(db_name: &str, store_name: &str) -> Result<Self, ChainError> {
             let factory = idb_factory()?;
             let req: IdbOpenDbRequest = factory
                 .open_with_u32(db_name, SCHEMA_VERSION)
                 .map_err(|e| ChainError::Backend(format!("IDB open: {e:?}")))?;
 
-            // Schema upgrade — create the object store if missing.
-            // The audit-chain + schema-journal both share the same
-            // DB; we attempt to create both stores on first open so
-            // either chain can be served afterwards without an
-            // version-bump dance.
+            // Create both well-known stores on first open so opening the
+            // sibling chain later doesn't need a version-bump ceremony.
             let store_name_for_upgrade = store_name.to_owned();
             let onupgradeneeded = Closure::<dyn FnMut(IdbVersionChangeEvent)>::new(
                 move |ev: IdbVersionChangeEvent| {
@@ -635,10 +531,6 @@ mod indexed_db {
                         return;
                     };
                     let params = IdbObjectStoreParameters::new();
-                    // Best-effort: create both well-known stores. If
-                    // either exists already it's a no-op error we
-                    // ignore. Pre-creating the sibling avoids a second
-                    // upgrade ceremony when the schema journal opens.
                     let _ = db.create_object_store_with_optional_parameters("audit", &params);
                     let _ = db.create_object_store_with_optional_parameters("schema", &params);
                     let _ = db.create_object_store_with_optional_parameters(
@@ -685,8 +577,8 @@ mod indexed_db {
             // Persistence is fire-and-forget. The in-memory cache is
             // already authoritative for this process; on the next
             // open the IDB read populates fresh, so a torn write
-            // shows up as a missing tail entry (which the chain's
-            // verify catches via prev_entry_hash linkage).
+            // Persistence failure shows up as a missing tail entry; chain
+            // verify catches it via prev_entry_hash linkage.
             let db = self.db.clone();
             let store_name = self.store_name.clone();
             spawn_local(async move {
@@ -703,8 +595,6 @@ mod indexed_db {
         }
     }
 
-    // ── async helpers ───────────────────────────────────────────────
-
     async fn load_all_async(db: &IdbDatabase, store_name: &str) -> Result<Vec<Bytes>, ChainError> {
         let tx = db
             .transaction_with_str_and_mode(store_name, IdbTransactionMode::Readonly)
@@ -713,10 +603,8 @@ mod indexed_db {
             .object_store(store_name)
             .map_err(|e| ChainError::Backend(format!("IDB store({store_name}): {e:?}")))?;
 
-        // Pull keys + values separately so we can sort by seq before
-        // returning. `get_all` would return values in implementation-
-        // defined order; sorting by key (the seq number) guarantees
-        // the chain replays in monotonic order.
+        // Sort by seq before returning; `get_all` would return values in
+        // implementation-defined order.
         let keys_req = store
             .get_all_keys()
             .map_err(|e| ChainError::Backend(format!("IDB get_all_keys: {e:?}")))?;
@@ -778,7 +666,6 @@ mod indexed_db {
         Ok(())
     }
 
-    /// Resolve `indexedDB` on window or worker scope.
     fn idb_factory() -> Result<web_sys::IdbFactory, ChainError> {
         let global = js_sys::global();
         if let Ok(window) = global.clone().dyn_into::<web_sys::Window>()
@@ -796,8 +683,7 @@ mod indexed_db {
         ))
     }
 
-    /// Convert an `IDBRequest` into a `JsFuture` that resolves with
-    /// `req.result()` or rejects with the DOM exception's message.
+    /// Resolves with `req.result()` or rejects with the DOM exception's message.
     async fn await_request(req: &IdbRequest) -> Result<JsValue, ChainError> {
         use js_sys::Promise;
 
@@ -846,18 +732,12 @@ mod indexed_db {
     }
 }
 
-// ── Tests ───────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey, Verifier as _, VerifyingKey};
     use ndn_packet::SignatureType;
 
-    // ── Test entry types ─────────────────────────────────────────────
-
-    /// Minimal payload — single u64 field at tag 3 to exercise the
-    /// reserved-tag-skipping logic.
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestEntry {
         n: u64,
@@ -883,8 +763,6 @@ mod tests {
             Ok(TestEntry { n })
         }
     }
-
-    // ── Test signer/verifier (Ed25519, no NDN-cert envelope) ─────────
 
     struct TestSigner {
         key_locator: Name,
@@ -970,7 +848,6 @@ mod tests {
         assert_eq!(store.len(), 3);
         store.verify(&verifier).expect("chain valid");
 
-        // Decoded payloads round-trip.
         for i in 0..3 {
             let decoded = store.decode_entry(i).unwrap();
             assert_eq!(decoded.n, i as u64);
@@ -1013,7 +890,6 @@ mod tests {
         let mut store: SignedDataChainStore<TestEntry, _> =
             SignedDataChainStore::open(root, MemoryStore::new()).unwrap();
         store.append(TestEntry { n: 1 }, &signer).unwrap();
-        // A different verifying key — signature verification must fail.
         let other = SigningKey::from_bytes(&[3u8; 32]).verifying_key();
         let bad_verifier = TestVerifier { verifying: other };
         let err = store.verify(&bad_verifier).unwrap_err();
@@ -1030,9 +906,6 @@ mod tests {
     fn schema_version_mismatch_breaks_verify() {
         let (root, signer, verifier) = fixture();
 
-        // Construct an entry with TestEntry's tags but a bogus
-        // schema_version=99 in tag 0. Reach below the primitive's API
-        // for surgical wire control.
         let chain_name = root.clone();
         let entry_name = chain_name.append_component(NameComponent::sequence_num(0));
         let mut w = TlvWriter::new();
@@ -1050,8 +923,6 @@ mod tests {
 
         let mut store: SignedDataChainStore<TestEntry, _> =
             SignedDataChainStore::open(root, MemoryStore::new()).unwrap();
-        // Inject the bogus entry directly into the cache + backend so
-        // verify walks it.
         store.entries.push(data);
         store.backend.entries.push(wire);
         let err = store.verify(&verifier).unwrap_err();
@@ -1089,7 +960,6 @@ mod tests {
                 store.append(TestEntry { n }, &signer).unwrap();
             }
         }
-        // Reopen + verify.
         let backend = FileStore::new(&tmp);
         let store: SignedDataChainStore<TestEntry, _> =
             SignedDataChainStore::open(root, backend).unwrap();

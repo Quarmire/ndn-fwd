@@ -129,7 +129,6 @@ pub fn AppWeb() -> Element {
 
     // Theme class is bound reactively on the layout root below — no JS.
 
-    // ── Engine / WebSocket management coroutine ─────────────────────────────
     // Two paths gated on connection mode:
     //   - `?engine=local` (browser-engine feature): start the in-page
     //     `ForwarderEngine`, set Connected, poll via direct introspection.
@@ -349,7 +348,6 @@ pub fn AppWeb() -> Element {
 
         div {
             class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
-            // ── Sidebar ───────────────────────────────────────────────────
             nav { class: "sidebar",
                 div { class: "sidebar-logo",
                     style: "display:flex;align-items:center;justify-content:space-between;",
@@ -407,7 +405,6 @@ pub fn AppWeb() -> Element {
                 }
             }
 
-            // ── Main area ─────────────────────────────────────────────────
             div { class: "main",
                 // Connection bar — WebSocket URL instead of socket path
                 div { class: "conn-bar",
@@ -493,7 +490,6 @@ fn render_view_web(view: View) -> Element {
     }
 }
 
-// ── Simplified polling for web ──────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 async fn poll_all_web(
@@ -519,7 +515,6 @@ async fn poll_all_web(
 ) -> Result<(), String> {
     use ndn_config::nfd_dataset;
 
-    // ── status/general — ControlResponse text encodes `faces=N fib=N pit=N cs=N`.
     if let Ok(resp) = client.status_general().await
         && resp.is_ok()
     {
@@ -527,7 +522,6 @@ async fn poll_all_web(
         status_sig.set(Some(ForwarderStatus::parse(&resp.status_text)));
     }
 
-    // ── faces/list — dataset of FaceStatus TLVs.
     if let Ok(resp) = client.list_faces().await
         && resp.is_ok()
     {
@@ -561,7 +555,6 @@ async fn poll_all_web(
         faces_sig.set(mapped);
     }
 
-    // ── fib/list — dataset of FibEntry TLVs.
     if let Ok(resp) = client.list_fib().await
         && resp.is_ok()
     {
@@ -584,7 +577,6 @@ async fn poll_all_web(
         routes_sig.set(mapped);
     }
 
-    // ── cs/info — ControlResponse text encodes counters.
     if let Ok(resp) = client.cs_info().await
         && resp.is_ok()
     {
@@ -592,7 +584,6 @@ async fn poll_all_web(
         cs_sig.set(CsInfo::parse(&resp.status_text));
     }
 
-    // ── strategy-choice/list — dataset of StrategyChoice TLVs.
     if let Ok(resp) = client.list_strategy().await
         && resp.is_ok()
     {
@@ -608,7 +599,6 @@ async fn poll_all_web(
         strategies_sig.set(mapped);
     }
 
-    // ── Security reads (kickoff cross-cutting Phase B item) ──────────
     // Auth-exempt verbs per `is_public_dataset_verb`; the web build
     // now polls them so chip + gate + tabs hit feature parity with
     // desktop. Each block is best-effort — older forwarders without
@@ -890,7 +880,6 @@ async fn run_cmd_web(
         DashCmd::Reconnect => return,
         DashCmd::RefreshConfig => client.send_cmd("config", "get", None).await,
 
-        // ── Security writes — wired now that web polls security ─────
         DashCmd::SecurityGenerate(name) => match name.parse::<Name>() {
             Ok(n) => {
                 let params = ControlParameters {

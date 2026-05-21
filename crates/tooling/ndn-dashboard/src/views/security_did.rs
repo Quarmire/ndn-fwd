@@ -24,7 +24,6 @@ use crate::views::security_did_ext::DidExtensionPanel;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
-// ── DID encoding round-trip ──────────────────────────────────────────────────
 
 /// Decode a `did:ndn:` DID into the underlying NDN name. Inverse of
 /// [`encode_did_ndn`]. Returns `None` when the input lacks the
@@ -78,7 +77,6 @@ pub fn parse_resolve_input(input: &str) -> Option<String> {
     }
 }
 
-// ── View-only DID Document construction ──────────────────────────────────────
 
 /// Display-only mirror of the rendered fields of a W3C DID Document.
 /// Constructed from the dashboard's `SecurityKeyInfo` list so the
@@ -173,7 +171,6 @@ fn parent_controllers(identity_name: &str) -> Vec<String> {
     vec![format!("did:ndn:{}", encode_did_ndn(parent))]
 }
 
-// ── L2 (DID-layer) framing of cert-layer failures ────────────────────────────
 
 /// Translate a §4.2 cert-layer `FailureDiagnosis` into DID-layer
 /// prose. The translation is best-effort and degrades to a generic
@@ -225,7 +222,6 @@ pub fn did_layer_failure_text(diagnosis: &FailureDiagnosis) -> (&'static str, St
     (l2_kind, hint)
 }
 
-// ── Components ───────────────────────────────────────────────────────────────
 
 /// Enum-as-segmented-toggle state for `IdentityInspector`'s right pane.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -470,7 +466,6 @@ pub fn DidResolutionL2Frame(result: TrustValidationResult) -> Element {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

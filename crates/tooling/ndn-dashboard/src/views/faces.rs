@@ -39,7 +39,6 @@ pub fn Faces() -> Element {
     let mut expanded: Signal<Option<u64>> = use_signal(|| None);
 
     rsx! {
-        // ── Face table ──────────────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Active Faces" }
             if faces.is_empty() {
@@ -113,7 +112,6 @@ pub fn Faces() -> Element {
                                             }
                                         }
                                     }
-                                    // ── Expandable detail row ───────────────
                                     if is_expanded {
                                         tr {
                                             td { colspan: "13",
@@ -151,7 +149,6 @@ pub fn Faces() -> Element {
                 }
             }
 
-            // ── Create face form ─────────────────────────────────────────────
             div { class: "form-row",
                 div { class: "form-group", style: "flex:1;",
                     label { r#for: "face-uri", "Face URI" }

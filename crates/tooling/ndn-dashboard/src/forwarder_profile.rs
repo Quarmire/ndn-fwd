@@ -1,51 +1,19 @@
-//! Forwarder profile + connection-mode selection.
-//!
-//! ndn-dashboard manages any of the three production-grade NDN
-//! forwarders that all speak the NFD-spec mgmt protocol:
-//!
-//! | Project  | Forwarder binary |
-//! |----------|------------------|
-//! | ndn-rs   | `ndn-fwd`        |
-//! | ndn-cxx  | `NFD`            |
-//! | ndnd     | `YaNFD`          |
-//!
-//! The per-forwarder differences are *configuration* (socket paths,
-//! binary names) and *capability* (which extensions present), not
-//! wire format. Profile selection is **runtime**, via the
-//! `--forwarder=<name>` CLI flag (desktop) or `?forwarder=<name>`
-//! query string (web), defaulting to auto-detect.
-//!
-//! # Connection modes
-//!
-//! [`ConnectionMode`] separates *which forwarder* (the profile) from
-//! *how the dashboard reaches it*. On desktop the connection is
-//! either a Unix-socket attach to a running forwarder or a spawn of
-//! the local binary. On web the connection is either a WebSocket
-//! to a remote forwarder or — new in this revision — an
-//! **in-page WASM engine**: dashboard ships its own
-//! [`ndn_engine`] instance that runs entirely in the browser tab,
-//! per the Phase 7 work proven by `crates/tooling/dioxus-demo`.
-//!
-//! See (internal) for
-//! the full design + rationale.
+//! Forwarder profile + connection-mode selection. ndn-dashboard manages any of
+//! the three NFD-spec-compatible forwarders (`ndn-fwd`, `NFD`, `YaNFD`).
+//! Selection is runtime: `--forwarder=<name>` (desktop) or
+//! `?forwarder=<name>` (web); defaults to auto-detect.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Process-wide selected (profile, socket) — set once in `main()`
-/// before Dioxus launches, read by `forwarder_proc` callers and
-/// the mgmt connection layer. `OnceLock` instead of Dioxus context
-/// because the resolution is process-static and several callers
-/// live in free functions outside any component scope.
+/// Set once in `main()` before Dioxus launches; the resolution is process-static.
 static SELECTED: OnceLock<(ForwarderProfile, PathBuf)> = OnceLock::new();
 
 pub fn install_selected(profile: ForwarderProfile, socket: PathBuf) {
     let _ = SELECTED.set((profile, socket));
 }
 
-/// Returns the installed selection, or `(NdnFwd, NdnFwd's default
-/// socket)` if no selection was installed (e.g. unit tests, web
-/// builds that haven't called [`install_selected`]).
+/// Falls back to `(NdnFwd, NdnFwd's default socket)` when no selection was installed.
 pub fn selected() -> (ForwarderProfile, PathBuf) {
     SELECTED.get().cloned().unwrap_or_else(|| {
         (
@@ -59,62 +27,36 @@ pub fn selected_profile() -> ForwarderProfile {
     selected().0
 }
 
-/// Which NDN forwarder the dashboard is talking to.
-///
-/// Differences across variants are configuration + capability,
-/// not wire format — all three speak the NFD-spec management
-/// protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForwarderProfile {
-    /// `ndn-fwd` — this workspace's forwarder. Has demo CA +
-    /// WebTransport + WebRTC + SharedWorker face + IssuancePolicy
-    /// + SafeBag extensions on top of NFD-spec baseline.
+    /// `ndn-fwd` — this workspace's forwarder.
     NdnFwd,
-    /// `NFD` — the C++ reference implementation from ndn-cxx
-    /// (https://github.com/named-data/NFD).
+    /// `NFD` — C++ reference implementation from ndn-cxx.
     Nfd,
-    /// `YaNFD` — the Go forwarder from ndnd
-    /// (https://github.com/named-data/ndnd).
+    /// `YaNFD` — Go forwarder from ndnd.
     YaNfd,
 }
 
-/// Capability flags for things outside the NFD-spec mgmt baseline.
-///
-/// Today the profile returns a static expected list; a follow-on
-/// revision queries `/localhost/nfd/status/general` at connect and
-/// replaces these with the discovered set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Extension {
-    /// `[demo_ca]`-served NDNCERT CA.
     DemoCa,
-    /// `[listeners.webtransport]` listener.
     WebTransport,
-    /// `[listeners.webrtc]` inbound peer face.
     WebRtcInbound,
-    /// SharedWorker face inside the dispatcher.
     SharedWorkerFace,
-    /// SafeBag export tooling.
     SafeBagExport,
-    /// `IssuancePolicy` post-challenge gate (F7).
     IssuancePolicy,
 }
 
 impl ForwarderProfile {
-    /// Default management socket path. Operators override via
-    /// `--socket=/custom/path`.
+    /// Override via `--socket=/custom/path`.
     pub fn default_socket(self) -> &'static Path {
         match self {
-            // Matches `[management] face_socket` in
-            // `binaries/spec/ndn-fwd/ndn-fwd.default.toml`.
             ForwarderProfile::NdnFwd => Path::new("/run/ndn-fwd/ndn-fwd.sock"),
-            // NFD's spec default.
             ForwarderProfile::Nfd => Path::new("/var/run/nfd.sock"),
-            // YaNFD packaging default per ndnd repo.
             ForwarderProfile::YaNfd => Path::new("/run/nfd/nfd.sock"),
         }
     }
 
-    /// Binary name to look for on `$PATH` when spawning.
     pub fn binary_name(self) -> &'static str {
         match self {
             ForwarderProfile::NdnFwd => {
@@ -129,7 +71,6 @@ impl ForwarderProfile {
         }
     }
 
-    /// Human-readable label for status bars / chooser dropdowns.
     pub fn human_label(self) -> &'static str {
         match self {
             ForwarderProfile::NdnFwd => "ndn-fwd (ndn-rs)",
@@ -138,7 +79,6 @@ impl ForwarderProfile {
         }
     }
 
-    /// CLI-friendly machine name accepted by `--forwarder=`.
     pub fn machine_name(self) -> &'static str {
         match self {
             ForwarderProfile::NdnFwd => "ndn-fwd",
@@ -147,9 +87,7 @@ impl ForwarderProfile {
         }
     }
 
-    /// Parse the CLI / query-string flag value. Accepts the project
-    /// name *and* the binary name for ergonomics — operators
-    /// reach for whichever they remember.
+    /// Accepts project name or binary name.
     pub fn from_cli(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "ndn-rs" | "ndn-fwd" | "ndnfwd" | "ndn_fwd" => Some(Self::NdnFwd),
@@ -159,9 +97,7 @@ impl ForwarderProfile {
         }
     }
 
-    /// Extensions the dashboard *expects* to find on this
-    /// forwarder. Static hint today; capability discovery via
-    /// `/localhost/nfd/status/general` will override at connect.
+    /// Static hint of extensions present on this forwarder.
     pub fn known_extensions(self) -> &'static [Extension] {
         match self {
             ForwarderProfile::NdnFwd => &[
@@ -172,17 +108,11 @@ impl ForwarderProfile {
                 Extension::SafeBagExport,
                 Extension::IssuancePolicy,
             ],
-            // ndn-cxx ships SafeBag (via ndnsec). YaNFD doesn't.
-            // None ship the ndn-rs-specific WT / WebRTC / shared-worker
-            // face configs or our demo CA / IssuancePolicy / token-mint
-            // extensions.
             ForwarderProfile::Nfd => &[Extension::SafeBagExport],
             ForwarderProfile::YaNfd => &[],
         }
     }
 
-    /// Detection iteration order. ndn-fwd first (we ship in the
-    /// same workspace; cheapest local hit), then NFD, then YaNFD.
     pub fn detection_order() -> [ForwarderProfile; 3] {
         [
             ForwarderProfile::NdnFwd,
@@ -192,38 +122,25 @@ impl ForwarderProfile {
     }
 }
 
-/// How the dashboard reaches its forwarder.
-///
-/// `Spawn` and `Attach` are desktop-only; `WebSocket` and
-/// `BrowserEngine` are web-only. The variant carries the
-/// connection-specific data; the [`ForwarderProfile`] carries the
-/// capability / binary metadata orthogonally.
+/// `Spawn`/`Attach` are desktop-only; `WebSocket`/`BrowserEngine` are web-only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionMode {
-    /// Spawn the profile's binary as a child process and manage
-    /// it (Start/Stop buttons in the desktop UI). Desktop only.
+    /// Manage the binary lifecycle (Start/Stop buttons).
     Spawn {
         profile: ForwarderProfile,
         socket: PathBuf,
     },
-    /// Attach to an already-running forwarder over its mgmt
-    /// Unix socket. Desktop only. No Start/Stop controls.
+    /// Connect to an already-running forwarder; no lifecycle controls.
     Attach {
         profile: ForwarderProfile,
         socket: PathBuf,
     },
-    /// Connect to a remote forwarder over WebSocket (NFD-spec mgmt
-    /// tunneled through WS). Web only. The forwarder typically
-    /// runs `[listeners.websocket]` to terminate this.
+    /// NFD-spec mgmt tunneled through WebSocket.
     WebSocket {
         profile: ForwarderProfile,
         url: String,
     },
-    /// Run an in-page `ndn_engine` instance. Web only. The
-    /// dashboard *is* the forwarder; mgmt Interests are dispatched
-    /// to the in-page engine without leaving the tab. Profile is
-    /// always `NdnFwd` (we ship ndn-engine). Proven path:
-    /// `crates/tooling/dioxus-demo` (see Phase 7).
+    /// In-page `ndn_engine`; the dashboard is the forwarder.
     BrowserEngine,
 }
 
@@ -237,15 +154,12 @@ impl ConnectionMode {
         }
     }
 
-    /// True if the mode supports Start/Stop controls.
     pub fn supports_lifecycle(&self) -> bool {
         matches!(self, ConnectionMode::Spawn { .. })
     }
 }
 
-/// Resolve the static (non-I/O) component of mode selection from
-/// CLI flags. Returns `None` only when neither flag is supplied
-/// AND auto-detect should run.
+/// `None` when neither flag is supplied (caller should run auto-detect).
 pub fn resolve_static(
     cli_forwarder: Option<&str>,
     cli_socket: Option<PathBuf>,
@@ -267,9 +181,7 @@ pub fn resolve_static(
     }
 }
 
-/// Probe each profile's default socket; first existing path wins.
-/// Path-existence only today; promoting to live status-Interest
-/// probe is the next iteration.
+/// Path-existence probe; first matching default socket wins.
 pub fn auto_detect() -> Option<(ForwarderProfile, PathBuf)> {
     for prof in ForwarderProfile::detection_order() {
         let sock = prof.default_socket();
@@ -280,12 +192,7 @@ pub fn auto_detect() -> Option<(ForwarderProfile, PathBuf)> {
     None
 }
 
-/// Web-side equivalent: parse the page query string for
-/// `?forwarder=<name>&ws=<url>&engine=local`. Returns the
-/// resolved [`ConnectionMode`].
-///
-/// - `engine=local` → [`ConnectionMode::BrowserEngine`] (overrides).
-/// - else `ws=<url>` or fallback → [`ConnectionMode::WebSocket`].
+/// Parses `?forwarder=<name>&ws=<url>&engine=local`. `engine=local` wins.
 #[cfg(target_arch = "wasm32")]
 pub fn resolve_web(query: &str) -> ConnectionMode {
     let mut forwarder = None;
@@ -313,8 +220,6 @@ pub fn resolve_web(query: &str) -> ConnectionMode {
 
 #[cfg(target_arch = "wasm32")]
 fn urlencoding_decode(s: &str) -> String {
-    // Minimal: handle `%xx` and `+`. Avoids a dep for two characters
-    // worth of decoding.
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -350,7 +255,6 @@ mod tests {
 
     #[test]
     fn cli_parse_accepts_project_and_binary_names() {
-        // ndn-rs / ndn-fwd → NdnFwd
         assert_eq!(
             ForwarderProfile::from_cli("ndn-rs"),
             Some(ForwarderProfile::NdnFwd)
@@ -363,7 +267,6 @@ mod tests {
             ForwarderProfile::from_cli("NDN-FWD"),
             Some(ForwarderProfile::NdnFwd)
         );
-        // ndn-cxx / NFD → Nfd
         assert_eq!(
             ForwarderProfile::from_cli("ndn-cxx"),
             Some(ForwarderProfile::Nfd)
@@ -372,7 +275,6 @@ mod tests {
             ForwarderProfile::from_cli("nfd"),
             Some(ForwarderProfile::Nfd)
         );
-        // ndnd / YaNFD → YaNfd
         assert_eq!(
             ForwarderProfile::from_cli("ndnd"),
             Some(ForwarderProfile::YaNfd)

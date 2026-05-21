@@ -13,7 +13,6 @@
 use crate::app::AppCtx;
 use dioxus::prelude::*;
 
-// ── Persistence ───────────────────────────────────────────────────────────────
 
 fn onboarded_path() -> std::path::PathBuf {
     std::env::var("HOME")
@@ -37,7 +36,6 @@ fn mark_onboarded() {
     let _ = std::fs::write(&path, "1");
 }
 
-// ── Component ────────────────────────────────────────────────────────────────
 
 #[component]
 pub fn Onboarding(mut on_complete: EventHandler<()>) -> Element {
@@ -111,7 +109,6 @@ fn render_step(
     }
 }
 
-// ── Step 0: Welcome ───────────────────────────────────────────────────────────
 
 fn render_welcome(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     rsx! {
@@ -151,7 +148,6 @@ fn render_welcome(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     }
 }
 
-// ── Step 1: Your Identity ─────────────────────────────────────────────────────
 
 fn render_identity(
     has_identity: bool,
@@ -211,7 +207,6 @@ fn render_identity(
     }
 }
 
-// ── Step 2: Trust Anchors ─────────────────────────────────────────────────────
 
 fn render_trust(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     rsx! {
@@ -274,7 +269,6 @@ fn render_trust(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     }
 }
 
-// ── Step 3: Done ──────────────────────────────────────────────────────────────
 
 fn render_done(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     rsx! {
@@ -330,7 +324,6 @@ fn QuickCard(icon: &'static str, title: &'static str, desc: &'static str) -> Ele
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Encode an NDN name as a `did:ndn` DID suffix (percent-encode slashes → %2F).
 pub fn encode_did_ndn(name: &str) -> String {

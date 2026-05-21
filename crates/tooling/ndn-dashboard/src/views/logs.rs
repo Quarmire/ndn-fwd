@@ -9,7 +9,6 @@ use crate::app::{
 };
 use crate::types::{LogEntry, LogLevel};
 
-// ── Dynamic module tree ───────────────────────────────────────────────────────
 
 #[derive(Clone, PartialEq)]
 struct ModuleGroup {
@@ -35,7 +34,6 @@ fn build_module_tree(targets: &BTreeSet<String>) -> Vec<ModuleGroup> {
         .collect()
 }
 
-// ── Export format ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 enum ExportFormat {
@@ -115,7 +113,6 @@ fn json_str(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-// ── Level override panel verbs ─────────────────────────────────────────────────
 
 const LEVEL_OPTIONS: &[(&str, &str)] = &[
     ("", "inherit"),
@@ -127,7 +124,6 @@ const LEVEL_OPTIONS: &[(&str, &str)] = &[
     ("off", "off"),
 ];
 
-// ── Split mode helper ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 enum SplitMode {
@@ -153,7 +149,6 @@ impl SplitMode {
     }
 }
 
-// ── CSS for pop-out windows ───────────────────────────────────────────────────
 
 const LOG_WINDOW_CSS: &str = "
 *{box-sizing:border-box;margin:0;padding:0}
@@ -190,7 +185,6 @@ tr:last-child td{border-bottom:none}
 .hint{font-size:11px;color:var(--text-faint)}
 ";
 
-// ── LogPane ───────────────────────────────────────────────────────────────────
 //
 // Reads only from GlobalSignals + local state. Works identically in the main
 // window and in pop-out OS windows. Writing to PENDING_LOG_FILTER is done only
@@ -199,7 +193,6 @@ tr:last-child td{border-bottom:none}
 
 #[component]
 pub fn LogPane(pane_id: usize) -> Element {
-    // ── Display filters (local to this pane) ─────────────────────────────────
     let mut threshold = use_signal(|| LogLevel::Info);
     // false = show level ≥ threshold (default); true = exact level only
     let mut exact_lvl = use_signal(|| false);
@@ -207,13 +200,11 @@ pub fn LogPane(pane_id: usize) -> Element {
     let mut mod_prefix: Signal<Option<String>> = use_signal(|| None);
     let mut hide_mgmt = use_signal(|| true);
 
-    // ── Column visibility ─────────────────────────────────────────────────────
     let mut show_ts = use_signal(|| true);
     let mut show_tid = use_signal(|| false);
     let mut show_lvl = use_signal(|| true);
     let mut show_tgt = use_signal(|| true);
 
-    // ── Panel state ───────────────────────────────────────────────────────────
     let mut show_overrides = use_signal(|| false);
     let mut show_export = use_signal(|| false);
     let mut show_confirm = use_signal(|| false); // confirm before sending to router
@@ -226,7 +217,6 @@ pub fn LogPane(pane_id: usize) -> Element {
     let mut export_lvl: Signal<LogLevel> = use_signal(|| LogLevel::Trace);
     let mut export_prefix: Signal<Option<String>> = use_signal(|| None);
 
-    // ── Module tree (dynamic, from observed targets) ──────────────────────────
     let module_tree = use_memo(move || -> Vec<ModuleGroup> {
         let log = ROUTER_LOG.read();
         let mut targets: BTreeSet<String> = BTreeSet::new();
@@ -236,7 +226,6 @@ pub fn LogPane(pane_id: usize) -> Element {
         build_module_tree(&targets)
     });
 
-    // ── Filtered entries (main display) ──────────────────────────────────────
     let filtered = use_memo(move || -> Vec<LogEntry> {
         let log = ROUTER_LOG.read();
         let thr = *threshold.read();
@@ -262,7 +251,6 @@ pub fn LogPane(pane_id: usize) -> Element {
             .collect()
     });
 
-    // ── Auto-scroll to bottom when new entries arrive ─────────────────────────
     // Captures a `MountedData` handle to a zero-height sentinel rendered as
     // the last child of the list. Whenever `filtered` changes, schedule a
     // `scroll_to` on the sentinel — the browser scrolls the list so the
@@ -279,7 +267,6 @@ pub fn LogPane(pane_id: usize) -> Element {
         }
     });
 
-    // ── Snapshot values for rsx (avoids holding guards across the block) ──────
     let total = ROUTER_LOG.read().len();
     let entries = filtered.cloned();
     let shown = entries.len();
@@ -290,7 +277,6 @@ pub fn LogPane(pane_id: usize) -> Element {
     let col_lvl = *show_lvl.read();
     let col_tgt = *show_tgt.read();
 
-    // ── Export content (computed only when export modal is open) ──────────────
     let export_entries: Vec<LogEntry> = if *show_export.read() {
         let exp_thr = *export_lvl.read();
         let exp_pfx = export_prefix.read().clone();
@@ -308,7 +294,6 @@ pub fn LogPane(pane_id: usize) -> Element {
     rsx! {
         div { class: "log-pane",
 
-            // ── Status bar ────────────────────────────────────────────────────
             div { style: "display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-shrink:0;flex-wrap:wrap;",
                 if running {
                     span {
@@ -362,7 +347,6 @@ pub fn LogPane(pane_id: usize) -> Element {
                 }
             }
 
-            // ── Toolbar ───────────────────────────────────────────────────────
             div { class: "log-toolbar",
                 // Level filter (display only — does NOT send anything to router)
                 label { class: "hint", "Show:" }
@@ -465,7 +449,6 @@ pub fn LogPane(pane_id: usize) -> Element {
                 }
             }
 
-            // ── Per-module overrides panel ────────────────────────────────────
             if *show_overrides.read() {
                 div { class: "filter-panel",
                     div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;",
@@ -556,7 +539,6 @@ pub fn LogPane(pane_id: usize) -> Element {
                 }
             }
 
-            // ── Log list (chronological, newest at bottom) ────────────────────
             div { style: "display:flex;flex-direction:column;flex:1;min-height:0;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:4px 6px;overflow:hidden;",
                 if entries.is_empty() {
                     div { class: "empty",
@@ -598,7 +580,6 @@ pub fn LogPane(pane_id: usize) -> Element {
             }
         } // end .log-pane
 
-        // ── Confirmation dialog ───────────────────────────────────────────────
         if *show_confirm.read() {
             {
                 let overrides = module_overrides.read().clone();
@@ -642,7 +623,6 @@ pub fn LogPane(pane_id: usize) -> Element {
             }
         }
 
-        // ── Export modal ──────────────────────────────────────────────────────
         if *show_export.read() {
             {
                 let fmt      = *export_fmt.read();
@@ -753,7 +733,6 @@ pub fn LogPane(pane_id: usize) -> Element {
     }
 }
 
-// ── Pop-out window ────────────────────────────────────────────────────────────
 
 #[component]
 fn LogWindowApp(pane_id: usize) -> Element {
@@ -763,7 +742,6 @@ fn LogWindowApp(pane_id: usize) -> Element {
     }
 }
 
-// ── Logs container ────────────────────────────────────────────────────────────
 
 #[component]
 pub fn Logs() -> Element {
@@ -805,7 +783,6 @@ pub fn Logs() -> Element {
             }
         }
 
-        // ── Top toolbar ───────────────────────────────────────────────────────
         div {
             style: "display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap;",
             span { style: "font-size:13px;font-weight:600;color:var(--text);", "Router Logs" }
@@ -847,7 +824,6 @@ pub fn Logs() -> Element {
             }
         }
 
-        // ── Pane area ─────────────────────────────────────────────────────────
         {
             let a = format!("{split_ratio}%");
             let b = format!("{}%", 100 - split_ratio);
@@ -891,7 +867,6 @@ pub fn Logs() -> Element {
     }
 }
 
-// ── File save helpers ─────────────────────────────────────────────────────────
 
 fn save_log_to_file(content: &str, ext: &str) {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());

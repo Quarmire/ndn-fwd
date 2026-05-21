@@ -50,7 +50,6 @@ pub fn Config() -> Element {
     });
 
     rsx! {
-        // ── Education snippet (B7): identity IS address ──────────────────────
         if !*edu_dismissed.read() {
             div { class: "edu-card",
                 div { style: "display:flex;gap:12px;align-items:flex-start;",
@@ -103,7 +102,6 @@ pub fn Config() -> Element {
             {
                 let cfg = parsed.unwrap();
 
-                // ── Toolbar ───────────────────────────────────────────────
                 rsx! {
                     div { style: "display:flex;gap:8px;margin-bottom:16px;align-items:center;flex-wrap:wrap;",
                         button {
@@ -168,7 +166,6 @@ pub fn Config() -> Element {
                         }
                     }
 
-                    // ── Restart-required banner ───────────────────────────
                     if editing.read().is_some() {
                         div { class: "restart-banner",
                             span { style: "font-size:14px;", "⚠" }
@@ -186,7 +183,6 @@ pub fn Config() -> Element {
                         }
                     }
 
-                    // ── Export panel ──────────────────────────────────────
                     if *show_export.read() {
                         div { class: "section",
                             div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;",
@@ -209,7 +205,6 @@ pub fn Config() -> Element {
                         }
                     }
 
-                    // ── Import panel ──────────────────────────────────────
                     if !*show_export.read() {
                         div { class: "section",
                             div { class: "section-title", "Import Config" }
@@ -236,28 +231,20 @@ pub fn Config() -> Element {
                         }
                     }
 
-                    // ── Engine section ────────────────────────────────────
                     {render_engine_section(cfg.engine.clone(), editing)}
 
-                    // ── Content Store section ─────────────────────────────
                     {render_cs_section(cfg.cs.clone(), editing)}
 
-                    // ── Management section ────────────────────────────────
                     {render_management_section(cfg.management.clone(), editing)}
 
-                    // ── Security section ──────────────────────────────────
                     {render_security_section(cfg.security.clone(), editing)}
 
-                    // ── Discovery section ─────────────────────────────────
                     {render_discovery_section(cfg.discovery.clone(), editing)}
 
-                    // ── Logging section ───────────────────────────────────
                     {render_logging_section(cfg.logging.clone(), ctx, editing)}
 
-                    // ── Faces section (editable) ──────────────────────────
                     FacesSection { faces: local_faces }
 
-                    // ── Static Routes section (editable) ──────────────────
                     RoutesSection { routes: local_routes, n_faces: local_faces.read().len() }
                 }
             }
@@ -265,7 +252,6 @@ pub fn Config() -> Element {
     }
 }
 
-// ── Section helpers ───────────────────────────────────────────────────────────
 
 fn section_header(
     title: &str,
@@ -310,7 +296,6 @@ fn kv_row(key: &str, val: impl std::fmt::Display, badge: Element) -> Element {
     }
 }
 
-// ── Engine ────────────────────────────────────────────────────────────────────
 
 fn render_engine_section(engine: EngineConfig, editing: Signal<Option<ConfigSection>>) -> Element {
     let is_open = *editing.read() == Some(ConfigSection::Engine);
@@ -358,7 +343,6 @@ fn render_engine_section(engine: EngineConfig, editing: Signal<Option<ConfigSect
     }
 }
 
-// ── Content Store ─────────────────────────────────────────────────────────────
 
 fn render_cs_section(cs: CsConfig, editing: Signal<Option<ConfigSection>>) -> Element {
     let is_open = *editing.read() == Some(ConfigSection::ContentStore);
@@ -411,7 +395,6 @@ fn render_cs_section(cs: CsConfig, editing: Signal<Option<ConfigSection>>) -> El
     }
 }
 
-// ── Management ────────────────────────────────────────────────────────────────
 
 fn render_management_section(
     mgmt: ManagementConfig,
@@ -441,7 +424,6 @@ fn render_management_section(
     }
 }
 
-// ── Security ──────────────────────────────────────────────────────────────────
 
 fn render_security_section(sec: SecurityConfig, editing: Signal<Option<ConfigSection>>) -> Element {
     let is_open = *editing.read() == Some(ConfigSection::Security);
@@ -505,7 +487,6 @@ fn render_security_section(sec: SecurityConfig, editing: Signal<Option<ConfigSec
     }
 }
 
-// ── Discovery ─────────────────────────────────────────────────────────────────
 
 fn render_discovery_section(
     disc: DiscoveryTomlConfig,
@@ -603,7 +584,6 @@ fn render_discovery_section(
     }
 }
 
-// ── Logging ───────────────────────────────────────────────────────────────────
 
 fn render_logging_section(
     log: LoggingConfig,
@@ -663,7 +643,6 @@ fn render_logging_section(
     }
 }
 
-// ── Editable Faces section ────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq)]
 enum AddFaceKind {
@@ -981,7 +960,6 @@ fn FacesSection(faces: Signal<Vec<FaceConfig>>) -> Element {
     }
 }
 
-// ── Editable Routes section ───────────────────────────────────────────────────
 
 #[component]
 fn RoutesSection(routes: Signal<Vec<RouteConfig>>, n_faces: usize) -> Element {

@@ -82,7 +82,6 @@ impl IdentityRole {
     }
 }
 
-// ── Pure NamespacePolicy decision (client-side heuristic) ─────────────────────
 
 /// What the wizard renders as the "NamespacePolicy decision" in step 2.
 /// The actual decision comes from the CA when we submit; this is the
@@ -122,7 +121,6 @@ pub fn preview_namespace_policy(name: &str, ca_prefix: &str) -> NamespacePolicyP
     }
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
 
 #[component]
 pub fn EnrollmentWizardModal(state: Signal<EnrollmentWizardState>) -> Element {
@@ -605,7 +603,6 @@ fn StepIssuance(
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

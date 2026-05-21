@@ -1,14 +1,12 @@
 use crate::app::{AppCtx, DashCmd};
 use dioxus::prelude::*;
 
-// ── Challenge type IDs ────────────────────────────────────────────────────────
 
 const CHALLENGE_TOKEN: &str = "token";
 const CHALLENGE_PIN: &str = "pin";
 const CHALLENGE_POSSESSION: &str = "possession";
 const CHALLENGE_YUBIKEY: &str = "yubikey-hotp";
 
-// ── Root component ────────────────────────────────────────────────────────────
 
 #[component]
 pub fn Fleet() -> Element {
@@ -53,7 +51,6 @@ pub fn Fleet() -> Element {
     drop(disc);
 
     rsx! {
-        // ── Education snippet (B7) ───────────────────────────────────────────
         if !*edu_dismissed.read() {
             div { class: "edu-card",
                 div { style: "display:flex;gap:12px;align-items:flex-start;",
@@ -94,7 +91,6 @@ pub fn Fleet() -> Element {
             }
         }
 
-        // ── Discovery Protocol Config ────────────────────────────────────────
         {
             let disc = ctx.discovery_status.read();
             if disc.is_some() {
@@ -191,7 +187,6 @@ pub fn Fleet() -> Element {
             }
         }
 
-        // ── Discovered Neighbors ─────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Discovered Neighbors" }
             if neighbors.is_empty() {
@@ -276,7 +271,6 @@ pub fn Fleet() -> Element {
             }
         }
 
-        // ── Enroll with CA (B5) ──────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title",
                 span {
@@ -446,7 +440,6 @@ pub fn Fleet() -> Element {
             }
         }
 
-        // ── Bootstrap New Device ─────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Bootstrap New Device" }
             div { style: "color:var(--text-muted);font-size:13px;margin-bottom:14px;",
@@ -508,7 +501,6 @@ pub fn Fleet() -> Element {
     }
 }
 
-// ── Enrollment progress component ─────────────────────────────────────────────
 
 #[component]
 fn EnrollProgress(step: u8, result_did: Option<String>, on_reset: EventHandler<()>) -> Element {

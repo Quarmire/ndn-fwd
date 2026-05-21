@@ -22,7 +22,6 @@ use dioxus::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::{OnceLock, RwLock};
 
-// ── Trait + global registry ──────────────────────────────────────────────────
 
 /// Renderer for a single DID Document extension key. The dashboard
 /// calls `render` with the raw JSON value associated with the
@@ -133,7 +132,6 @@ pub fn registry() -> &'static DidExtensionRegistry {
     REGISTRY.get_or_init(DidExtensionRegistry::new)
 }
 
-// ── DidExtensionPanel ────────────────────────────────────────────────────────
 
 /// Render the extension-fields section of a DID Document.
 ///
@@ -233,7 +231,6 @@ fn ExtensionRow(
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

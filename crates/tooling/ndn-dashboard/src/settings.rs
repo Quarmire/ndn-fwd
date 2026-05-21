@@ -81,7 +81,6 @@ impl Default for DashSettings {
     }
 }
 
-// ── Desktop: filesystem persistence ──────────────────────────────────────────
 
 #[cfg(feature = "desktop")]
 fn settings_path() -> std::path::PathBuf {
@@ -112,7 +111,6 @@ pub fn save_settings(settings: &DashSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Web: localStorage persistence ────────────────────────────────────────────
 
 #[cfg(feature = "web")]
 pub fn load_settings() -> DashSettings {
@@ -127,7 +125,6 @@ pub fn save_settings(settings: &DashSettings) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("localStorage write failed: {:?}", e))
 }
 
-// ── Fallback if neither feature is active ────────────────────────────────────
 
 #[cfg(not(any(feature = "desktop", feature = "web")))]
 pub fn load_settings() -> DashSettings {

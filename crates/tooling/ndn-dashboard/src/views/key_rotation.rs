@@ -226,7 +226,6 @@ pub fn KeyRotationModal(state: Signal<KeyRotationState>) -> Element {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

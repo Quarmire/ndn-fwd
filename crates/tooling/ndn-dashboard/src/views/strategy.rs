@@ -21,7 +21,6 @@ pub fn Strategy() -> Element {
     let mut custom_strat: Signal<String> = use_signal(String::new);
 
     rsx! {
-        // ── Strategy table ───────────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Strategy Assignments" }
             if strategies.is_empty() {
@@ -60,7 +59,6 @@ pub fn Strategy() -> Element {
                 }
             }
 
-            // ── Set strategy form ────────────────────────────────────────────
             div { class: "form-row",
                 div { class: "form-group",
                     label { r#for: "st-prefix", "Prefix" }

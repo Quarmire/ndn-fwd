@@ -1,7 +1,5 @@
-//! Types shared between the desktop (`app.rs`) and web (`app_web.rs`) modules.
-//!
-//! Views reference these types via `use crate::app_shared::*` (or re-exports).
-//! This module compiles on both native and wasm32 targets.
+//! Types shared between the desktop (`app.rs`) and web (`app_web.rs`) modules;
+//! compiles on both native and wasm32 targets.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -9,8 +7,6 @@ use dioxus::prelude::*;
 
 use crate::types::*;
 use crate::views::View;
-
-// ── Global reactive state ────────────────────────────────────────────────────
 
 pub static ROUTER_LOG: GlobalSignal<VecDeque<LogEntry>> = Signal::global(VecDeque::new);
 pub static LOG_FILTER: GlobalSignal<String> = Signal::global(String::new);
@@ -21,28 +17,16 @@ pub static LOG_SPLIT_MODE: GlobalSignal<u8> = Signal::global(|| 0u8);
 pub static LOG_SPLIT_RATIO: GlobalSignal<u32> = Signal::global(|| 50u32);
 pub static CONFIG_PRESETS: GlobalSignal<Vec<(String, String)>> = Signal::global(Vec::new);
 pub static ACTIVE_VIEW: GlobalSignal<View> = Signal::global(|| View::Overview);
-/// §2 gate deep-link target. The Security view reads this on every
-/// render and, when `Some(tab_id)`, switches `active_tab` to that id
-/// and clears the signal (one-shot). Lets the §2 SecurityGate's
-/// `[Go to Identities → Import]` / `[Go to CAs]` / `[View audit]`
-/// buttons land on the right tab instead of dropping the user on the
-/// previously-selected one.
+/// Deep-link target the Security view consumes one-shot when set.
 pub static ACTIVE_SECURITY_TAB: GlobalSignal<Option<u8>> = Signal::global(|| None);
-/// §5.1 SafeBag import state. The layout-root drag-drop handler (or
-/// the Security view's file-picker fallback) writes the parsed
-/// preview here; the modal renders when `open == true`.
 pub static SAFEBAG_IMPORT_STATE: GlobalSignal<crate::views::safebag_import::SafeBagImportState> =
     Signal::global(crate::views::safebag_import::SafeBagImportState::default);
-/// §5.2 enrollment wizard open/close state.
 pub static ENROLLMENT_WIZARD_STATE: GlobalSignal<
     crate::views::enrollment_wizard::EnrollmentWizardState,
 > = Signal::global(crate::views::enrollment_wizard::EnrollmentWizardState::default);
-/// §5.3 key-rotation modal state.
 pub static KEY_ROTATION_STATE: GlobalSignal<crate::views::key_rotation::KeyRotationState> =
     Signal::global(crate::views::key_rotation::KeyRotationState::default);
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
-
-// ── Toast notifications ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
@@ -94,8 +78,6 @@ pub fn push_toast(msg: impl Into<String>, level: ToastLevel) {
     });
 }
 
-// ── Commands ─────────────────────────────────────────────────────────────────
-
 #[derive(Debug)]
 pub enum DashCmd {
     FaceCreate(String),
@@ -138,26 +120,13 @@ pub enum DashCmd {
     SchemaRuleAdd(String),
     SchemaRuleRemove(u64),
     SchemaSet(String),
-    /// §4.5 Mgmt access tab — submit a new mgmt-access policy. Body
-    /// is the dashboard's JSON snapshot; the forwarder applies the
-    /// three runtime-writable booleans immediately when
-    /// `MgmtHandles::runtime_policy` is wired. On a 2xx response the
-    /// handler appends a `security/policy-set` entry to the local
-    /// `AuditLogChain` (the §11.10 audit bridge).
     SecurityPolicySet(MgmtAccessPolicySnapshot),
-    /// §4.2 TrustPathInspector trace. Result lands in
-    /// `AppCtx.trust_validation`; sidesheet visibility is driven by
-    /// `AppCtx.trust_inspector_open`.
     SecurityValidateTrace(String),
-    /// §11.4 TOFU promote → `security/anchor-add` + journal entry.
-    /// See `app::DashCmd::SecurityAnchorAdd` for full doc.
     SecurityAnchorAdd {
         name: String,
         fingerprint_hex: String,
         cert_wire_hex: String,
     },
-    /// §5.1 drag-drop SafeBag import → `security/safebag-import`.
-    /// See `app::DashCmd::SecuritySafebagImport` for full doc.
     SecuritySafebagImport {
         name: String,
         safebag_wire: Vec<u8>,
@@ -165,17 +134,12 @@ pub enum DashCmd {
     },
 }
 
-// Desktop-only: there is no `ndn-fwd` subprocess to manage on web.
-// (Also declared in `app.rs`; the duplication predates the workspace
-// split and is left alone here to keep #5 scope tight.)
 #[cfg(feature = "desktop")]
 #[derive(Debug)]
 pub enum RouterCmd {
     Start(Option<String>),
     Stop,
 }
-
-// ── Connection state ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnState {
@@ -204,16 +168,10 @@ impl ConnState {
     }
 }
 
-// ── Shared context ───────────────────────────────────────────────────────────
-
 #[cfg(feature = "desktop")]
 use crate::tool_runner::ToolCmd;
 
-/// Shared context provided to every view. Coroutine fields that drive
-/// out-of-process subprocesses (`router_cmd` — `ndn-fwd` lifecycle;
-/// `tool_cmd` — ping/iperf/peek/put runners) are desktop-only since the
-/// web build has no subprocess substrate. Views that need them are
-/// already cfg-gated to desktop in `views/mod.rs`.
+/// `router_cmd` / `tool_cmd` are desktop-only (no subprocess substrate on web).
 #[derive(Clone, Copy)]
 pub struct AppCtx {
     #[allow(dead_code)]
@@ -241,30 +199,17 @@ pub struct AppCtx {
     pub identity_name: Signal<String>,
     pub identity_is_ephemeral: Signal<bool>,
     pub identity_pib_path: Signal<Option<String>>,
-    /// Active cert's `valid_until` in Unix-epoch seconds. `None`
-    /// when there's no cert (ephemeral identity) or the cert is
-    /// flagged permanent. Drives the §3.1 IdentityChip's
-    /// Expired / ExpiringSoon transitions and the §2.3 gate panel.
+    /// `None` when ephemeral or flagged permanent.
     pub cert_valid_until_unix_s: Signal<Option<u64>>,
-    /// Live mgmt-access posture's `require_signed_commands` flag.
-    /// `None` until the first `/localhost/nfd/security/policy-get`
-    /// poll lands; `Some(false)` drives the UnsignedMgmt chip state.
+    /// `None` until the first `policy-get` poll lands.
     pub mgmt_signed_commands_required: Signal<Option<bool>>,
-    /// Full mgmt-access policy snapshot — populated from `policy-get`
-    /// each poll cycle. `None` until the first response lands. The
-    /// §4.5 `MgmtAccessTab` reads this on both desktop and web.
+    /// `None` until the first `policy-get` response lands.
     pub mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
-    /// Whether the connected forwarder implements ndn-rs's `security/*`
-    /// mgmt extensions. `Some(false)` ⇒ NFD / YaNFD (the dashboard
-    /// degrades to `Unsupported` posture). `None` ⇒ unknown.
+    /// `Some(false)` ⇒ NFD / YaNFD; degrade to `Unsupported` posture.
     pub security_surface_supported: Signal<Option<bool>>,
-    /// Live validator counters — §4.3 `LiveValidationChart` feed.
     pub validation_stats: Signal<Option<ValidationStats>>,
-    /// 60-sample (verified_per_sec, rejected_per_sec) sparkline history.
     pub validation_history: Signal<VecDeque<(u64, u64)>>,
-    /// §4.2 last `security/validate` result `(target_name, parsed)`.
     pub trust_validation: Signal<Option<(String, TrustValidationResult)>>,
-    /// §4.2 sidesheet open flag.
     pub trust_inspector_open: Signal<bool>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,

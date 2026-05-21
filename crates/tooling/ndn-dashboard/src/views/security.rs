@@ -1,6 +1,6 @@
 //! Security view — identity management, trust anchors, certificate chain,
-//! DID explorer, NDNCERT CA panel, YubiKey integration, and the §4.5
-//! mgmt-access policy editor.
+//! DID explorer, NDNCERT CA panel, YubiKey integration, and the mgmt-access
+//! policy editor.
 
 use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 use crate::edu_gloss::EduGloss;
@@ -17,8 +17,6 @@ use crate::views::security_did::{
 use dioxus::prelude::*;
 use std::collections::VecDeque;
 
-// ── Tab IDs ───────────────────────────────────────────────────────────────────
-
 const TAB_IDENTITIES: u8 = 0;
 const TAB_TRUST: u8 = 1;
 const TAB_CHAIN: u8 = 2;
@@ -27,8 +25,6 @@ const TAB_CA: u8 = 4;
 const TAB_YUBIKEY: u8 = 5;
 const TAB_MGMT_ACCESS: u8 = 7;
 const TAB_AUDIT: u8 = 8;
-
-// ── Root component ────────────────────────────────────────────────────────────
 
 #[component]
 pub fn Security() -> Element {
@@ -43,10 +39,6 @@ pub fn Security() -> Element {
     let mut active_tab: Signal<u8> = use_signal(|| TAB_IDENTITIES);
     let new_key_name: Signal<String> = use_signal(String::new);
 
-    // §2 gate deep-link consumer. When the gate's [Go to X] buttons
-    // wrote a target tab, switch to it once and clear the signal so
-    // subsequent user-driven tab clicks aren't overridden. Runs each
-    // render — cheap, and a no-op when ACTIVE_SECURITY_TAB is None.
     {
         let pending = *crate::app_shared::ACTIVE_SECURITY_TAB.read();
         if let Some(tab_id) = pending {
@@ -69,7 +61,6 @@ pub fn Security() -> Element {
     rsx! {
         div { class: "section",
 
-            // ── Ephemeral identity warning ────────────────────────────────────
             if is_ephemeral && !identity_name.is_empty() {
                 div {
                     style: "margin-bottom:16px;padding:12px 14px;\
@@ -99,7 +90,6 @@ pub fn Security() -> Element {
                 }
             }
 
-            // ── Persistent identity info bar ──────────────────────────────────
             if !is_ephemeral && !identity_name.is_empty() {
                 div {
                     style: "margin-bottom:16px;padding:8px 12px;\
@@ -118,19 +108,10 @@ pub fn Security() -> Element {
                 }
             }
 
-            // ── §4.7.2 Resolve-any-DID search ─────────────────────────────────
-            // Fires DashCmd::SecurityValidateTrace against the underlying
-            // NDN name and opens the §4.2 sidesheet; the sidesheet adds a
-            // DID-layer (L2) frame on top of the cert-layer (L1) trace.
             ResolveAnyDidBox {}
 
-            // ── §5.1 SafeBag import file-picker fallback ─────────────────────
-            // The layout-root drag-drop is the primary affordance; this
-            // file-input mirrors the same flow for keyboard-driven users
-            // and environments where DnD isn't available.
             crate::views::safebag_import::SafeBagImportPicker {}
 
-            // ── Tab bar ──────────────────────────────────────────────────────
             div { style: "display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;",
                 for (label, tab_i) in tabs {
                     {
@@ -159,12 +140,6 @@ pub fn Security() -> Element {
                 _              => rsx! {},
             }
 
-            // §4.2 sidesheet — overlay, anchored to the right.
-            // Opens when CertCard's [Trace ↑] fires
-            // `DashCmd::SecurityValidateTrace`. The component reads
-            // `ctx.trust_validation` directly; rendering only mounts
-            // when `trust_inspector_open` is true so the panel
-            // doesn't clip other views when collapsed.
             if *ctx.trust_inspector_open.read() {
                 TrustPathInspector {}
             }
@@ -172,26 +147,12 @@ pub fn Security() -> Element {
     }
 }
 
-// ── Tab: Identities — §4.1 ───────────────────────────────────────────────────
-//
-// Phase B step 2 — primary security view layout. Splits keys into a
-// left-pane tree (grouped by identity prefix) and a right-pane
-// inspector that renders one CertCard per key with a
-// ValidityTimeline. v1 actions: [Delete] wires through the existing
-// `SecurityKeyDelete` DashCmd; [Renew] / [Export SafeBag] /
-// [Set as active] surface "Phase C: §5 sub-flow" toasts so the
-// affordance is visible without forging a UX commitment that
-// doesn't ship until Phase C.
-
 #[component]
 fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -> Element {
     let ctx = use_context::<AppCtx>();
     let mut selected: Signal<Option<String>> = use_signal(|| None);
     let groups = group_keys_by_identity(&keys);
 
-    // Default selection — first identity if any. The auto-select
-    // runs only when nothing has been chosen yet and at least one
-    // identity exists.
     let initial = groups.first().map(|(name, _)| name.clone());
     use_effect(move || {
         if selected.read().is_none()
@@ -237,7 +198,6 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
             }
         } else {
             div { style: "display:grid;grid-template-columns:minmax(260px,320px) 1fr;gap:16px;align-items:start;",
-                // Left pane — identity tree.
                 IdentityTree {
                     groups: groups.clone(),
                     selected: selected_name.clone(),
@@ -245,7 +205,6 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
                     on_select: move |name: String| selected.set(Some(name)),
                 }
 
-                // Right pane — inspector for the selected identity.
                 {
                     let inspected = selected_name
                         .as_ref()
@@ -267,11 +226,6 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
             }
         }
 
-        // Bottom — affordances for adding identities. Two of three
-        // are v1 stubs (§5 SafeBag import, NDNCERT join wizard
-        // live in Phase C); generate-key uses the existing
-        // `SecurityGenerate` DashCmd so an operator can still
-        // populate the PIB from this tab.
         div {
             style: "display:flex;flex-wrap:wrap;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--border-subtle);",
             button {
@@ -291,8 +245,6 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
             }
         }
 
-        // Generate-key form (existing surface, retained so v1
-        // operators can mint a key without leaving this tab).
         div { class: "form-row", style: "margin-top:14px;",
             div { class: "form-group",
                 label { "Generate a new Ed25519 identity key" }
@@ -319,9 +271,6 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
     }
 }
 
-/// Group keys by their identity prefix (`/lab/alice/KEY/k1` →
-/// `/lab/alice`). Returns identities in stable sort order so the
-/// tree renders deterministically.
 fn group_keys_by_identity(keys: &[SecurityKeyInfo]) -> Vec<(String, Vec<SecurityKeyInfo>)> {
     use std::collections::BTreeMap;
     let mut grouped: BTreeMap<String, Vec<SecurityKeyInfo>> = BTreeMap::new();
@@ -367,7 +316,6 @@ fn IdentityTree(
                                     span { class: "badge badge-green", style: "font-size:9px;", "active" }
                                 }
                             }
-                            // Indented per-key list under this identity.
                             div { style: "margin-top:4px;padding-left:18px;",
                                 for k in group_keys.iter() {
                                     {
@@ -413,14 +361,10 @@ fn IdentityInspector(
     let active_certs = keys.iter().filter(|k| k.has_cert).count();
     let total_keys = keys.len();
 
-    // §4.7.1 — right-pane lens toggle. Defaults to the packet-level
-    // Keys & Certs view; flipping to DID Document re-frames the same
-    // data under the identity-level (DID) model.
     let lens: Signal<IdentityInspectorLens> = use_signal(|| IdentityInspectorLens::KeysCerts);
 
     rsx! {
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;",
-            // Header
             div { style: "display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px;",
                 div {
                     div { class: "mono", style: "font-size:14px;color:var(--text);word-break:break-all;", "{identity_name}" }
@@ -488,7 +432,6 @@ fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
 
     rsx! {
         div { style: "border:1px solid var(--border);border-radius:6px;padding:12px;margin-top:10px;",
-            // Top row — key id + cert badge.
             div { style: "display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px;",
                 div {
                     span { class: "mono", style: "font-size:12px;color:var(--text);", "KEY/{kid}" }
@@ -499,10 +442,8 @@ fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
                 span { class: "{badge_class}", "{badge_label}" }
             }
 
-            // Full key/cert name.
             div { class: "mono", style: "font-size:10px;color:var(--text-muted);word-break:break-all;margin-bottom:8px;", "{name}" }
 
-            // Validity timeline.
             ValidityTimeline {
                 start_unix_s: valid_from_s,
                 end_unix_s: valid_until_s,
@@ -510,7 +451,6 @@ fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
                 alert_within_days: 30,
             }
 
-            // Actions — three Phase-C stubs + Delete (live).
             div { style: "display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;",
                 button {
                     class: "btn btn-secondary btn-sm",
@@ -567,10 +507,8 @@ fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
     }
 }
 
-/// Phase B step 2 — `ValidityTimeline` component. Renders the cert's
-/// issued window with a "now" marker. Degrades to an endpoint-only
-/// gauge when `start_unix_s` is `None` (the v1 wire format doesn't
-/// surface `valid_from` yet; small wire extension follow-up).
+/// Renders the cert's issued window with a "now" marker; degrades to an
+/// endpoint-only gauge when `start_unix_s` is `None`.
 #[component]
 fn ValidityTimeline(
     start_unix_s: Option<u64>,
@@ -578,7 +516,6 @@ fn ValidityTimeline(
     now_unix_s: Option<u64>,
     alert_within_days: u64,
 ) -> Element {
-    // No cert / permanent cert — render an explanatory line.
     let Some(end) = end_unix_s else {
         return rsx! {
             div { style: "padding:6px 8px;border-radius:4px;background:var(--surface);border:1px solid var(--border-subtle);font-size:11px;color:var(--text-muted);",
@@ -590,7 +527,6 @@ fn ValidityTimeline(
     let now = now_unix_s.unwrap_or(end);
     let alert_secs = alert_within_days.saturating_mul(86_400);
 
-    // Compute the bar fill + color.
     let (fill_pct, fill_color, end_status) = match start_unix_s {
         Some(start) if end > start => {
             let span = end - start;
@@ -607,15 +543,12 @@ fn ValidityTimeline(
             (pct, color, expiry_label(now, end))
         }
         _ => {
-            // No start — render a single-axis remaining-time gauge.
             let remaining = end.saturating_sub(now);
             let pct = if remaining == 0 {
                 100.0
             } else if remaining < alert_secs {
-                // Show the unconsumed fraction of the alert window.
                 100.0 - (remaining as f64 / alert_secs as f64) * 100.0
             } else {
-                // Beyond the alert window — show a small filled fraction.
                 10.0
             };
             let color = if remaining == 0 {
@@ -641,12 +574,10 @@ fn ValidityTimeline(
                 span { "{start_label}" }
                 span { "{end_label}" }
             }
-            // Bar
             div { style: "position:relative;height:12px;background:var(--bg);border:1px solid var(--border-subtle);border-radius:2px;overflow:hidden;",
                 div {
                     style: "width:{fill_pct_int}%;height:100%;background:{fill_color};transition:width .3s;",
                 }
-                // 'now' tick — same position as fill edge.
                 div {
                     style: "position:absolute;top:-2px;bottom:-2px;left:{fill_pct_int}%;width:2px;background:var(--text);",
                 }
@@ -679,9 +610,6 @@ fn expiry_label(now: u64, end: u64) -> String {
 }
 
 fn format_unix_date(secs: u64) -> String {
-    // No chrono dep — render as ISO date by walking the Gregorian
-    // calendar. Y/M/D only, which is what the §4.1 timeline labels
-    // need. Accurate well into the next century, which is enough.
     let mut days = (secs / 86_400) as i64;
     let mut year = 1970i64;
     loop {
@@ -722,26 +650,8 @@ fn now_unix_s_opt() -> Option<u64> {
 
 #[cfg(target_arch = "wasm32")]
 fn now_unix_s_opt() -> Option<u64> {
-    // wasm32 clock follow-up tracked in the kickoff cross-cutting
-    // list ("`web_time` clock on wasm32"). Until then the timeline
-    // renders without a "now" marker on web — start_unix_s/end label
-    // still show, just no progress fraction.
     None
 }
-
-// ── Tab: Trust & Schema — §4.3 ────────────────────────────────────────────────
-//
-// Phase B step 3 — combined view of installed trust anchors and the
-// active trust schema, with the §4.3 LiveValidationChart hanging
-// below. Anchors are read-only in v1 (no anchor-add/anchor-remove
-// mgmt verbs yet — buttons surface Phase C: §4.3 sub-flow toasts);
-// schema rules use the existing rule-add / rule-remove / set verbs
-// and each change appends a `SchemaJournalEntry` (the §2.4 journal
-// bridge initialised in `app::App` next to the §11.10 audit chain).
-// LiveValidationChart polls `security/validation-stats`; while
-// counters are zero across forwarders today, the explicit
-// `validator_present` flag drives a "no live data" chip so the
-// gap is surfaced rather than silently rendered as zeros.
 
 #[component]
 fn TrustTab(anchors: Vec<AnchorInfo>, rules: Vec<SchemaRuleInfo>) -> Element {
@@ -755,7 +665,6 @@ fn TrustTab(anchors: Vec<AnchorInfo>, rules: Vec<SchemaRuleInfo>) -> Element {
     let history = ctx.validation_history.read().clone();
 
     rsx! {
-        // Education card.
         div { class: "edu-card",
             div { style: "display:flex;gap:12px;align-items:flex-start;",
                 div { style: "font-size:28px;flex-shrink:0;", "⚓" }
@@ -906,10 +815,6 @@ fn TrustSchemaList(
                 div { style: "display:flex;gap:6px;",
                     button {
                         class: if raw_mode { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
-                        // §11.6 — guided editor is the default; raw-text
-                        // tab toggles into a textarea + bulk-edit form
-                        // for power users. Syntax highlighting on the
-                        // raw view is a follow-up.
                         onclick: move |_| on_toggle_raw_mode.call(()),
                         if raw_mode { "Guided" } else { "Raw" }
                     }
@@ -923,7 +828,6 @@ fn TrustSchemaList(
                     " is accepted (security profile = disabled)."
                 }
             } else if !raw_mode {
-                // Guided rendering — table per §11.6 default.
                 table {
                     thead {
                         tr {
@@ -968,9 +872,6 @@ fn TrustSchemaList(
                     }
                 }
             } else {
-                // Raw-text rendering — §11.6 raw tab. Plain monospace
-                // dump of the rules; syntax highlighting is a later
-                // follow-up.
                 pre {
                     style: "background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;padding:10px;font-size:11px;color:var(--text);overflow:auto;",
                     for r in rules.iter() {
@@ -979,7 +880,6 @@ fn TrustSchemaList(
                 }
             }
 
-            // Add-rule form.
             div { style: "margin-top:14px;padding-top:12px;border-top:1px solid var(--border-subtle);",
                 div { style: "font-size:11px;color:var(--text-muted);margin-bottom:6px;",
                     "Format: "
@@ -1004,7 +904,6 @@ fn TrustSchemaList(
                 }
             }
 
-            // Bulk-edit toggle + textarea.
             div { style: "margin-top:14px;border:1px solid var(--border);border-radius:6px;overflow:hidden;",
                 div { style: "display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--surface);",
                     div { style: "font-size:12px;font-weight:600;color:var(--text);", "Bulk replace" }
@@ -1050,11 +949,6 @@ fn LiveValidationChart(stats: Option<ValidationStats>, history: VecDeque<(u64, u
     let verified = stats.as_ref().map(|s| s.verified_per_sec).unwrap_or(0);
     let rejected = stats.as_ref().map(|s| s.rejected_per_sec).unwrap_or(0);
 
-    // Surface the gap explicitly. When the validator isn't present
-    // (or the wire hasn't returned any data yet), counter values
-    // are guaranteed-zero. The chip says so plainly so an operator
-    // doesn't mistake "no telemetry yet" for "no traffic to
-    // validate".
     let (chip_class, chip_label) = match stats.as_ref() {
         None => ("badge badge-gray", "polling…"),
         Some(s) if !s.validator_present => ("badge badge-yellow", "no validator wired"),
@@ -1128,7 +1022,6 @@ fn Sparkline(history: VecDeque<(u64, u64)>) -> Element {
         .max()
         .unwrap_or(0)
         .max(1);
-    // Build inline SVG polylines.
     let width = 320.0_f64;
     let height = 48.0_f64;
     let step = if n > 1 {
@@ -1163,14 +1056,12 @@ fn Sparkline(history: VecDeque<(u64, u64)>) -> Element {
                 height: "{height}",
                 view_box: "0 0 {width} {height}",
                 preserve_aspect_ratio: "none",
-                // Verified — green
                 path {
                     d: "{verified_path}",
                     fill: "none",
                     stroke: "var(--green,#3fb950)",
                     "stroke-width": "1.5",
                 }
-                // Rejected — red
                 path {
                     d: "{rejected_path}",
                     fill: "none",
@@ -1184,8 +1075,6 @@ fn Sparkline(history: VecDeque<(u64, u64)>) -> Element {
         }
     }
 }
-
-// ── Tab: Certificate Chain ────────────────────────────────────────────────────
 
 #[component]
 fn ChainTab(
@@ -1214,23 +1103,18 @@ fn ChainTab(
             "Every link must be valid for your packets to be accepted by the network."
         }
 
-        // SVG chain diagram
         div { style: "overflow-x:auto;",
             div { class: "trust-chain",
-                // Trust Anchor node
                 {chain_node("🔑", "Trust Anchor", &anchor_name, if has_anchor { "ok" } else { "missing" }, "Root of trust — the certificate everyone in your network must trust.\nConfigure in router TOML: security.trust_anchor")}
                 div { class: "chain-arrow", style: "color:var(--border);", "→" }
 
-                // CA Certificate node
                 {chain_node("📜", "CA Certificate", "Signed by anchor", if has_anchor { "ok" } else { "missing" }, "The Certificate Authority that signs identity certificates.\nEnroll via CA / NDNCERT tab to get one.")}
                 div { class: "chain-arrow", style: "color:var(--border);", "→" }
 
-                // Identity cert node
                 {chain_node("🪪", "Your Identity", &identity_name, if has_cert { "ok" } else if has_identity { "warn" } else { "missing" }, "Your router's identity certificate.\nMust be signed by a CA that chains back to the trust anchor.")}
             }
         }
 
-        // Status summary
         div { style: "display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;",
             div { style: "flex:1;min-width:160px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:12px;",
                 div { style: "font-size:11px;color:var(--text-muted);margin-bottom:6px;", "IDENTITY" }
@@ -1250,7 +1134,6 @@ fn ChainTab(
             }
         }
 
-        // Actions
         if !has_cert && has_identity {
             div { style: "margin-top:14px;padding:12px;background:var(--yellow-bg)22;border:1px solid var(--yellow)44;border-radius:6px;font-size:12px;color:var(--yellow);",
                 "⚠ Your identity key has no certificate. Go to the "
@@ -1280,8 +1163,6 @@ fn chain_node(icon: &str, label: &str, name: &str, status: &str, tooltip: &str) 
     }
 }
 
-// ── Tab: DID Explorer ─────────────────────────────────────────────────────────
-
 #[component]
 fn DidTab(keys: Vec<crate::types::SecurityKeyInfo>) -> Element {
     let mut copied = use_signal(|| false);
@@ -1296,8 +1177,6 @@ fn DidTab(keys: Vec<crate::types::SecurityKeyInfo>) -> Element {
     } else {
         format!("did:ndn:{}", encode_did_ndn(&identity_name))
     };
-    // did:key requires the raw public key bytes; we don't have them in the dashboard
-    // yet so we show a placeholder.
     let did_key_note = "Requires public key bytes — not yet available via management API";
 
     let did_doc_preview = format!(
@@ -1307,7 +1186,6 @@ fn DidTab(keys: Vec<crate::types::SecurityKeyInfo>) -> Element {
     rsx! {
         div { class: "section-title", "DID Explorer" }
 
-        // Education card
         div { class: "edu-card",
             div { style: "display:flex;gap:12px;align-items:flex-start;",
                 div { style: "font-size:28px;flex-shrink:0;", "🔗" }
@@ -1330,7 +1208,6 @@ fn DidTab(keys: Vec<crate::types::SecurityKeyInfo>) -> Element {
                 "No identity key found. Generate a key in the Identities tab first."
             }
         } else {
-            // did:ndn
             div { style: "margin-bottom:18px;",
                 div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;",
                     div { style: "font-size:12px;font-weight:600;color:var(--text);",
@@ -1340,7 +1217,6 @@ fn DidTab(keys: Vec<crate::types::SecurityKeyInfo>) -> Element {
                     button {
                         class: "did-copy-btn",
                         onclick: move |_| {
-                            // Dioxus desktop: write to clipboard via dioxus_desktop eval
                             copied.set(true);
                         },
                         if *copied.read() { "✓ Copied" } else { "Copy" }
@@ -1352,7 +1228,6 @@ fn DidTab(keys: Vec<crate::types::SecurityKeyInfo>) -> Element {
                 }
             }
 
-            // did:key placeholder
             div { style: "margin-bottom:18px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px;",
                     span { style: "color:var(--purple);", "did:key" }
@@ -1363,13 +1238,11 @@ fn DidTab(keys: Vec<crate::types::SecurityKeyInfo>) -> Element {
                 }
             }
 
-            // DID document preview
             div {
                 div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px;", "DID Document (preview)" }
                 div { class: "yk-cmd", "{did_doc_preview}" }
             }
 
-            // Explainer rows
             div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px;",
                 DidExplainCard {
                     title: "No Central Registry",
@@ -1402,24 +1275,6 @@ fn DidExplainCard(title: &'static str, body: &'static str) -> Element {
     }
 }
 
-// ── Tab: CA / NDNCERT — §4.4 ──────────────────────────────────────────────────
-//
-// Phase B step 6 — two-tier `CaList` design. Trusted tier renders
-// the local router's CA (when configured) plus every installed trust
-// anchor (each anchor is the trust root for an issuance namespace).
-// Discovered tier surfaces CAs the dashboard has heard about via
-// service discovery; the discovery wire is a v1.5 mgmt extension so
-// today the tier is empty + render-only.
-//
-// PromoteToTrustedModal handles the §11.4 mitigations:
-//   1. fingerprint hex + word-pair display for out-of-band match
-//   2. journal each promotion via `SchemaJournalKind::AnchorAdd`
-//      (the active dashboard identity signs the journal entry)
-//   3. time-windowed visibility — discovered CAs drop off after the
-//      §11.4 default 10-minute window; the timer surfaces on each
-//      discovered card (no live data yet, but the render path is
-//      stable for the wire landing)
-
 const DISCOVERY_WINDOW_SECS: u64 = 10 * 60;
 
 #[component]
@@ -1438,8 +1293,6 @@ fn CaTab() -> Element {
     rsx! {
         div { class: "section-title", "Certificate Authorities" }
 
-        // Education card — first surface so operators meet the
-        // concept before the lists.
         div { class: "edu-card",
             div { style: "display:flex;gap:12px;align-items:flex-start;",
                 div { style: "font-size:28px;flex-shrink:0;", "🏛" }
@@ -1456,7 +1309,6 @@ fn CaTab() -> Element {
             }
         }
 
-        // Trusted tier.
         TrustedCaList {
             local_ca: ca.clone(),
             anchors: anchors.clone(),
@@ -1466,7 +1318,6 @@ fn CaTab() -> Element {
             },
         }
 
-        // Discovered tier (render-only — v1.5 discovery wire pending).
         DiscoveredCaList {
             on_promote: move |name: String| {
                 promote_prefill.set(name);
@@ -1474,7 +1325,6 @@ fn CaTab() -> Element {
             },
         }
 
-        // Manual-add affordance.
         div { style: "margin-top:14px;",
             button {
                 class: "btn btn-primary",
@@ -1486,9 +1336,6 @@ fn CaTab() -> Element {
             }
         }
 
-        // Local-router-as-CA detail panel (existing surface, kept so
-        // operators of the local CA can manage their ZTP tokens
-        // alongside the new trusted/discovered split).
         if let Some(ref info) = ca {
             div { style: "background:var(--green-dark);border:1px solid var(--green)44;border-radius:6px;padding:14px;margin-bottom:14px;margin-top:18px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--green);margin-bottom:8px;",
@@ -1511,7 +1358,6 @@ fn CaTab() -> Element {
                 }
             }
 
-            // Enrollment flow diagram
             div { style: "margin:16px 0;",
                 div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px;", "Enrollment Protocol Flow" }
                 div { class: "enroll-steps",
@@ -1525,7 +1371,6 @@ fn CaTab() -> Element {
                 }
             }
 
-            // Protocol info
             div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;",
                 InfoKv { label: "Protocol", val: "NDNCERT 0.3" }
                 InfoKv { label: "Key Exchange", val: "P-256 ECDH" }
@@ -1534,7 +1379,6 @@ fn CaTab() -> Element {
             }
         }
 
-        // Token management — enabled only when CA is active
         div { style: "border:1px solid var(--border);border-radius:6px;overflow:hidden;",
             div { style: "display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:var(--surface2);",
                 div { style: "font-size:12px;font-weight:600;color:var(--text);", "Zero-Touch Provisioning Tokens" }
@@ -1587,9 +1431,6 @@ fn CaTab() -> Element {
             }
         }
 
-        // §11.4 TOFU ceremony modal — mounts when an operator clicks
-        // [Promote] on a discovered/anchor row or the [+ Promote CA
-        // by name] affordance.
         if *promote_open.read() {
             PromoteToTrustedModal {
                 prefill_name: promote_prefill.read().clone(),
@@ -1627,8 +1468,6 @@ fn InfoKv(label: &'static str, val: &'static str) -> Element {
     }
 }
 
-// ── Tab: YubiKey ──────────────────────────────────────────────────────────────
-
 #[component]
 fn YubikeyTab() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -1642,7 +1481,6 @@ fn YubikeyTab() -> Element {
     rsx! {
         div { class: "section-title", "YubiKey Integration" }
 
-        // Education card
         div { class: "edu-card",
             div { style: "display:flex;gap:12px;align-items:flex-start;",
                 div { style: "font-size:28px;flex-shrink:0;", "🔐" }
@@ -1662,16 +1500,13 @@ fn YubikeyTab() -> Element {
             }
         }
 
-        // Mode cards
         div { style: "display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px;",
-            // PIV Signing Key card — now interactive
             div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px;",
                 div { style: "font-size:16px;margin-bottom:8px;", "🔑" }
                 div { style: "font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;", "PIV Signing Key" }
                 div { style: "font-size:11px;color:var(--text-muted);line-height:1.5;margin-bottom:10px;",
                     "Store your NDN identity private key in YubiKey PIV slot 9a. All packet signing happens on-device — even a compromised OS cannot steal your key."
                 }
-                // Detect button
                 div { style: "display:flex;gap:8px;margin-bottom:8px;",
                     button {
                         class: "btn btn-secondary btn-sm",
@@ -1679,7 +1514,6 @@ fn YubikeyTab() -> Element {
                         "Detect YubiKey"
                     }
                 }
-                // Status display
                 if let Some(ref st) = yk_status {
                     {
                         let (badge_class, text) = if st.starts_with("YubiKey: present") {
@@ -1694,7 +1528,6 @@ fn YubikeyTab() -> Element {
                         }
                     }
                 }
-                // Generate PIV key form
                 div { class: "form-group", style: "margin-bottom:6px;",
                     label { "Identity name for PIV key" }
                     input {
@@ -1738,14 +1571,12 @@ fn YubikeyTab() -> Element {
             }
         }
 
-        // HOTP seed generator
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px;",
             div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;",
                 div { style: "font-size:13px;font-weight:600;color:var(--text);", "Generate HOTP Seed" }
                 button {
                     class: "btn btn-primary btn-sm",
                     onclick: move |_| {
-                        // Generate 20 random bytes using system randomness.
                         let seed = generate_hotp_seed();
                         hotp_seed.set(Some(seed));
                         hotp_counter.set(0);
@@ -1813,7 +1644,6 @@ fn YubikeyTab() -> Element {
             }
         }
 
-        // Headless bootstrapping flow
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:16px;",
             div { style: "font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;", "Headless Bootstrap Flow" }
             BootstrapStep { n: 1, step: "Admin provisions",   desc: "Generate seed here → run ykpersonalize on the YubiKey", first: true }
@@ -1825,7 +1655,6 @@ fn YubikeyTab() -> Element {
     }
 }
 
-/// Generate 20 random bytes as a hex string using OS randomness.
 fn generate_hotp_seed() -> String {
     let mut seed = [0u8; 20];
     let _ = getrandom::getrandom(&mut seed);
@@ -1852,21 +1681,6 @@ fn BootstrapStep(n: u8, step: &'static str, desc: &'static str, first: bool) -> 
     }
 }
 
-// ── Tab: Mgmt Access (§4.5) ───────────────────────────────────────────────────
-//
-// First Phase B checkpoint. Surfaces the live `MgmtAccessPolicy`
-// (polled via `security/policy-get`) and lets the operator flip the
-// three runtime-writable booleans, with the `validator_anchor` edit
-// surfaced as `pending_restart` (per §4.5.1 the anchor flip requires
-// a Validator rebuild the forwarder can't do at runtime). On submit
-// the dashboard:
-//   1. sends `DashCmd::SecurityPolicySet(policy)` → run_cmd issues
-//      `security/policy-set` against the forwarder.
-//   2. On a 2xx response, run_cmd computes the SHA-256 over the
-//      submitted JSON body and appends a `security/policy-set`
-//      `AuditLogEntry` (§11.10 audit bridge) into the dashboard's
-//      `AuditLogChain` — desktop-backed by FileStore per §11.1.
-
 #[component]
 fn MgmtAccessTab() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -1874,10 +1688,6 @@ fn MgmtAccessTab() -> Element {
     let is_ephemeral = *ctx.identity_is_ephemeral.read();
     let pib_path = ctx.identity_pib_path.read().clone();
 
-    // Editor draft — initialised lazily once a live policy lands. The
-    // memo re-syncs the draft when the user switches forwarders
-    // (live.replay_window_secs is a stable identity-of-the-snapshot
-    // proxy when the rest of the fields shift).
     let mut draft: Signal<Option<MgmtAccessPolicySnapshot>> =
         use_signal(|| None::<MgmtAccessPolicySnapshot>);
     {
@@ -1895,7 +1705,6 @@ fn MgmtAccessTab() -> Element {
     rsx! {
         div { class: "section-title", "Management access control" }
 
-        // Education card — §9 EduGloss seam over MgmtAccessPolicy.
         div { class: "edu-card",
             div { style: "display:flex;gap:12px;align-items:flex-start;",
                 div { style: "font-size:28px;flex-shrink:0;", "🛡" }
@@ -1961,7 +1770,6 @@ fn MgmtAccessTab() -> Element {
                             ctx.cmd.send(DashCmd::SecurityPolicySet(snapshot));
                         },
                         on_reset: move |_: ()| {
-                            // Re-pull from the live signal to discard edits.
                             let cur = ctx.mgmt_access_policy.peek().clone();
                             draft.set(cur);
                         },
@@ -1987,7 +1795,6 @@ fn MgmtAccessEditor(
     let anchor_value = view.validator_anchor.clone().unwrap_or_default();
 
     rsx! {
-        // ── Hardcoded floors per §4.5.1 ──────────────────────────────
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
             div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:8px;",
                 "Hardcoded floors"
@@ -2018,7 +1825,6 @@ fn MgmtAccessEditor(
             }
         }
 
-        // ── Configurable defaults per §4.5.1 ─────────────────────────
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
             div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px;",
                 "Configurable defaults"
@@ -2050,7 +1856,6 @@ fn MgmtAccessEditor(
                 on_change: move |v| on_toggle_ephemeral_allowed.call(v),
             }
 
-            // validator_anchor — pending_restart per §4.5.1.
             div { style: "padding:10px 0;border-top:1px solid var(--border-subtle);",
                 div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;",
                     div { style: "font-size:12px;color:var(--text);",
@@ -2073,7 +1878,6 @@ fn MgmtAccessEditor(
             }
         }
 
-        // ── Action row ───────────────────────────────────────────────
         div { style: "display:flex;gap:8px;margin-bottom:14px;",
             button {
                 class: "btn btn-primary",
@@ -2090,7 +1894,6 @@ fn MgmtAccessEditor(
             }
         }
 
-        // ── §4.5.2 file-emitted bootstrap token — render-only ────────
         if is_ephemeral || pib_path.is_none() {
             div { style: "border:1px solid var(--yellow,#f5c518)44;background:#2a240022;border-radius:8px;padding:14px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--yellow,#f5c518);margin-bottom:6px;",
@@ -2105,7 +1908,6 @@ fn MgmtAccessEditor(
             }
         }
 
-        // ── Unauthenticated-channel warning ──────────────────────────
         div { style: "margin-top:14px;padding:10px 12px;background:#2a000022;border:1px solid var(--red,#f85149)55;border-radius:6px;font-size:11px;color:var(--text-muted);line-height:1.6;",
             span { style: "color:var(--red,#f85149);font-weight:600;", "⚠ " }
             "If this dashboard is connected over an unauthenticated channel (plain WebSocket on a non-local interface, no TLS), anyone reaching the bind interface can issue management commands as you. Restrict the bind interface, or move to a TLS WebSocket face."
@@ -2163,40 +1965,24 @@ fn BoolRow(
     }
 }
 
-// ── §4.2 TrustPathInspector ──────────────────────────────────────────────────
-//
-// Right-hand sidesheet that opens when an operator clicks [Trace ↑]
-// on a CertCard. Renders the §7 `TrustValidationResult` portable
-// shape (`verdict` / `chain` / `schema_rules_applied` /
-// `failure_diagnosis` / `challenge_attestations`). v1 forwarders
-// only check anchor-set membership — the chain + schema-rule lists
-// land empty until `ndn_security::Validator` exposes a trace API.
-// Render path is stable so once the wire goes live the sidesheet
-// re-paints without changes here.
-
 #[component]
 fn TrustPathInspector() -> Element {
     let ctx = use_context::<AppCtx>();
     let result = ctx.trust_validation.read().clone();
 
     rsx! {
-        // Backdrop — soft dim, click-to-close. Not a modal: the
-        // background stays interactive (the click handler only
-        // fires on the backdrop itself, not its children).
         div {
             style: "position:fixed;inset:0;background:rgba(0,0,0,.30);z-index:60;",
             onclick: move |_| {
                 let mut open = ctx.trust_inspector_open;
                 open.set(false);
             },
-            // Sidesheet — fixed to the right edge.
             div {
                 style: "position:absolute;top:0;right:0;bottom:0;width:min(520px,95vw);\
                         background:var(--surface);border-left:1px solid var(--border);\
                         box-shadow:-4px 0 16px rgba(0,0,0,.3);overflow-y:auto;\
                         padding:18px 20px;",
                 onclick: move |e| {
-                    // Swallow clicks so the backdrop's close handler doesn't fire.
                     e.stop_propagation();
                 },
 
@@ -2256,7 +2042,6 @@ fn TrustPathHeader(result: Option<(String, TrustValidationResult)>) -> Element {
 #[component]
 fn TrustPathBody(target: String, result: TrustValidationResult) -> Element {
     rsx! {
-        // Target.
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:14px;",
             div { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;",
                 "Target"
@@ -2266,25 +2051,18 @@ fn TrustPathBody(target: String, result: TrustValidationResult) -> Element {
             }
         }
 
-        // §4.7.3 — DID-layer (L2) wrap around the cert-layer (L1)
-        // failure diagnosis. Renders only on invalid+diagnosed.
         DidResolutionL2Frame { result: result.clone() }
 
-        // Verdict box.
         VerdictBox { verdict: result.verdict.clone() }
 
-        // Chain steps.
         ChainSteps { chain: result.chain.clone() }
 
-        // Schema rules applied.
         SchemaRulesApplied { rules: result.schema_rules_applied.clone() }
 
-        // Failure diagnosis (only when invalid).
         if let Some(diag) = result.failure_diagnosis.as_ref() {
             FailureDiagnosisPanel { diagnosis: diag.clone() }
         }
 
-        // Reserved challenge attestations.
         ChallengeAttestationsPanel { count: result.challenge_attestations.len() }
     }
 }
@@ -2413,9 +2191,6 @@ fn FailureDiagnosisPanel(diagnosis: FailureDiagnosis) -> Element {
 
 #[component]
 fn ChallengeAttestationsPanel(count: usize) -> Element {
-    // Reserved field. Renders an empty collapsed panel today; the
-    // shape will populate once `ndn-cert-challenge-attestation` lands
-    // (see (internal)).
     rsx! {
         div { style: "background:var(--surface2);border:1px dashed var(--border-subtle);border-radius:6px;padding:8px 10px;font-size:11px;color:var(--text-muted);",
             "Challenge attestations: "
@@ -2424,20 +2199,6 @@ fn ChallengeAttestationsPanel(count: usize) -> Element {
         }
     }
 }
-
-// ── Tab: Audit log — §4.6 ────────────────────────────────────────────────────
-//
-// Phase B step 5 — renders the dashboard's `AuditLogChain` head→tail,
-// filterable by subject substring / outcome / time range. Each row
-// shows ts / outcome / subject / detail per the §4.6 mock. Export
-// modal per §11.3 — two-checkbox scrub (include identity names /
-// replace with stable hashes) + clipboard copy.
-//
-// Live data sources: §11.10 policy-set audit-bridge call site
-// (commit 03547f6) and §2.4 schema-journal entries are stored on a
-// SEPARATE chain — the audit log only sees policy-set events today.
-// As more bridges land (rib/register, anchor-add, etc.) the audit
-// log grows automatically without UI changes here.
 
 use crate::security_chains::{AuditLogEntry, AuditOutcome, audit_chain_snapshot};
 
@@ -2539,7 +2300,6 @@ fn AuditLogTab() -> Element {
             }
         }
 
-        // Filter row.
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:14px;",
             div { style: "display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;",
                 div { class: "form-group", style: "flex:1;min-width:200px;",
@@ -2604,7 +2364,6 @@ fn AuditLogTab() -> Element {
             }
         }
 
-        // Header counts + export trigger.
         div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
             div { style: "font-size:11px;color:var(--text-muted);",
                 "Showing "
@@ -2724,19 +2483,6 @@ fn format_unix_ns(ns: u64) -> String {
 
 #[component]
 fn AuditExportModal(entries: Vec<AuditLogEntry>, on_close: EventHandler<()>) -> Element {
-    // §11.3 — two checkboxes. The two states are mutually meaningful:
-    //   include=true  hash=false  : raw names (default)
-    //   include=true  hash=true   : both — preserve in-place "stable
-    //                               hash + original name" pair for
-    //                               correlation
-    //   include=false hash=true   : scrubbed — names replaced with
-    //                               stable SHA-256 of the original
-    //                               name
-    //   include=false hash=false  : scrubbed — names dropped entirely
-    //                               from the export
-    // Stable hash = first 8 bytes of SHA-256(name) as hex; deterministic
-    // across exports so the operator can still correlate across
-    // shared logs.
     let mut include_names: Signal<bool> = use_signal(|| true);
     let mut hash_names: Signal<bool> = use_signal(|| false);
     let mut copied: Signal<bool> = use_signal(|| false);
@@ -2830,10 +2576,6 @@ fn serialize_export(entries: &[AuditLogEntry], include_names: bool, hash_names: 
     serde_json::to_string_pretty(&wrapped).unwrap_or_default()
 }
 
-/// Scrub names that appear in the detail line — today the policy-set
-/// bridge emits `initiator=/lab/alice/KEY/k1` and similar patterns.
-/// The scrub strategy walks tokens of the form `<key>=/...` and
-/// rewrites the right-hand side per the include/hash flags.
 fn scrub_detail(detail: &str, include_names: bool, hash_names: bool) -> String {
     let mut out = String::with_capacity(detail.len());
     for token in detail.split_whitespace() {
@@ -2888,20 +2630,11 @@ fn copy_to_clipboard(s: &str) {
 
 #[cfg(not(feature = "desktop"))]
 fn copy_to_clipboard(s: &str) {
-    // Wasm32: use the browser's async Clipboard API via
-    // `navigator.clipboard.writeText`. Fires a permission prompt on
-    // first call (or no-ops silently in restricted contexts like
-    // file://). The export modal also renders the body in a <pre>
-    // so the operator can hand-select-and-copy if the prompt is
-    // declined.
     let s = s.to_owned();
     wasm_bindgen_futures::spawn_local(async move {
         let Some(window) = web_sys::window() else {
             return;
         };
-        // `Navigator.clipboard` isn't in web-sys's default feature
-        // set on every version, so reach for it via the JS reflect
-        // API: window.navigator.clipboard.writeText(s).
         let nav = window.navigator();
         let nav_js: wasm_bindgen::JsValue = nav.into();
         let clipboard =
@@ -2942,8 +2675,6 @@ fn copy_to_clipboard(s: &str) {
         }
     });
 }
-
-// ── §4.4 CaList — Trusted tier ──────────────────────────────────────────────
 
 #[component]
 fn TrustedCaList(
@@ -3034,14 +2765,8 @@ fn CaRow(
     }
 }
 
-// ── §4.4 CaList — Discovered tier (v1.5 wire pending) ──────────────────────
-
 #[component]
 fn DiscoveredCaList(on_promote: EventHandler<String>) -> Element {
-    // Render-only for now. The §11.4 discovery wire (service-record
-    // probe → discovered-CA list) is a v1.5 mgmt extension; once
-    // landed this component reads from a Signal<Vec<DiscoveredCa>>
-    // and surfaces real time-windowed entries.
     let _ = on_promote;
     rsx! {
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;",
@@ -3064,18 +2789,6 @@ fn DiscoveredCaList(on_promote: EventHandler<String>) -> Element {
         }
     }
 }
-
-// ── §11.4 PromoteToTrustedModal ──────────────────────────────────────────────
-//
-// TOFU ceremony per §11.4 mitigation 1. Operator pastes the CA's
-// anchor name + the fingerprint hex they received out-of-band. The
-// modal renders the fingerprint as both raw hex AND a word-pair
-// sequence so the operator can read it aloud to the CA operator for
-// matching. On [Confirm], the dashboard appends a
-// `SchemaJournalKind::AnchorAdd` entry to the schema journal (§11.4
-// mitigation 2 — "every promote-to-trusted event is recorded in the
-// schema journal"). No mgmt verb fires — anchor-add isn't wired yet
-// and the journal-of-intent is the v1 audit surface.
 
 #[component]
 fn PromoteToTrustedModal(
@@ -3163,11 +2876,6 @@ fn PromoteToTrustedModal(
                     }
                 }
 
-                // Phase B step B: cert-wire input. When present, the
-                // confirm fires `security/anchor-add` and actually
-                // installs the anchor. When empty, falls back to the
-                // legacy intent-only journal path (useful when the
-                // operator only has the fingerprint to record).
                 div { class: "form-group", style: "margin-bottom:10px;",
                     label { style: "font-size:11px;color:var(--text-muted);",
                         "Anchor cert wire (hex, optional — empty ⇒ journal intent only)"
@@ -3270,9 +2978,6 @@ fn FingerprintVisual(bytes: Vec<u8>) -> Element {
     }
 }
 
-/// Parse a hex string into bytes, tolerating whitespace and `:` /
-/// `-` separators. Returns `None` on any non-hex character or an
-/// odd digit count.
 fn parse_fingerprint_hex(s: &str) -> Option<Vec<u8>> {
     let cleaned: String = s
         .chars()
@@ -3301,13 +3006,8 @@ fn group_hex(hex: &str) -> String {
     out
 }
 
-/// PGP-biometric-style word encoding — fixed 32-word even/odd lists
-/// chosen for phonetic distinctness and short ceremony readouts.
-/// Even-indexed bytes pick from `EVEN_WORDS`; odd-indexed bytes pick
-/// from `ODD_WORDS`. Each byte modulo 32 indexes into the
-/// corresponding list. For SHA-256 fingerprints we render the first 6
-/// bytes (3 word-pairs) which is sufficient ceremony entropy without
-/// requiring the operator to read 32+ words.
+/// PGP-biometric-style word encoding using fixed 32-word even/odd lists.
+/// Renders the first 6 bytes as 3 word-pairs.
 fn fingerprint_words(bytes: &[u8]) -> String {
     let take = bytes.len().min(6);
     let mut out = String::new();
@@ -3379,8 +3079,6 @@ mod tests {
         ]
     }
 
-    // ── §4.6 filter — subject substring, outcome, time range ───────
-
     #[test]
     fn filter_subject_substring_is_case_insensitive() {
         let s = sample();
@@ -3417,13 +3115,10 @@ mod tests {
     #[test]
     fn filter_time_range_inclusive_at_boundaries() {
         let s = sample();
-        // since == an entry's ts → that entry IS included.
         let f = filter_entries(&s, "", OutcomeFilter::Any, Some(1_700_000_100), None);
         assert_eq!(f.len(), 2);
-        // until == an entry's ts → that entry IS included.
         let f = filter_entries(&s, "", OutcomeFilter::Any, None, Some(1_700_000_100));
         assert_eq!(f.len(), 2);
-        // narrow window.
         let f = filter_entries(
             &s,
             "",
@@ -3443,8 +3138,6 @@ mod tests {
         assert_eq!(parse_unix_s(" 1700000000 "), Some(1_700_000_000));
     }
 
-    // ── §11.3 export scrub determinism ─────────────────────────────
-
     #[test]
     fn export_scrub_same_inputs_same_output() {
         let s = sample();
@@ -3460,20 +3153,13 @@ mod tests {
     fn export_scrub_replace_with_stable_hashes_removes_names() {
         let s = sample();
         let scrubbed = serialize_export(&s, false, true);
-        // No raw identity names leak when include_names=false +
-        // hash_names=true.
         assert!(!scrubbed.contains("/lab/alice/KEY/k1"));
         assert!(!scrubbed.contains("/lab/bob/KEY/k0"));
-        // Detail tokens that pointed at /-prefixed names become hashes.
         assert!(scrubbed.contains("hash="));
     }
 
     #[test]
     fn export_scrub_include_with_hash_preserves_correlation() {
-        // The (include=true, hash=true) combo keeps both name +
-        // hash in-place so the operator can replay the audit log
-        // with the originals and still cross-reference shared
-        // partial reports.
         let s = sample();
         let body = serialize_export(&s, true, true);
         assert!(body.contains("/lab/alice/KEY/k1"));
@@ -3494,13 +3180,8 @@ mod tests {
         let h2 = stable_hash("/lab/alice/KEY/k1");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 16, "first 8 bytes as hex");
-        // Different inputs produce different hashes (collision
-        // resistance is the underlying SHA-256's job; this just
-        // smoke-tests the helper).
         assert_ne!(h1, stable_hash("/lab/bob/KEY/k0"));
     }
-
-    // ── §11.4 TOFU promote — fingerprint parsing + word-pair ───────
 
     #[test]
     fn parse_fingerprint_strips_separators() {
@@ -3522,14 +3203,10 @@ mod tests {
 
     #[test]
     fn parse_fingerprint_rejects_odd_or_nonhex() {
-        // Odd length.
         assert_eq!(parse_fingerprint_hex("abc"), None);
-        // Non-hex chars.
         assert_eq!(parse_fingerprint_hex("ghij"), None);
         assert_eq!(parse_fingerprint_hex("aXcd"), None);
-        // Empty.
         assert_eq!(parse_fingerprint_hex(""), None);
-        // Just whitespace.
         assert_eq!(parse_fingerprint_hex("  "), None);
     }
 
@@ -3539,9 +3216,6 @@ mod tests {
         let w1 = fingerprint_words(&bytes);
         let w2 = fingerprint_words(&bytes);
         assert_eq!(w1, w2);
-        // Even positions pick from EVEN_WORDS (lowercase) and odd
-        // positions pick from ODD_WORDS (Capitalised). With all
-        // zeros we get the [0]th of each.
         assert_eq!(
             w1,
             format!(
@@ -3555,17 +3229,14 @@ mod tests {
             )
         );
 
-        // Different bytes → different words.
         let bytes2 = vec![0x01, 0x01];
         let w3 = fingerprint_words(&bytes2);
         assert_ne!(w1, w3);
 
-        // Bytes shorter than 6 still render (truncated, not padded).
         let bytes3 = vec![0xff, 0xff];
         let w4 = fingerprint_words(&bytes3);
         assert!(!w4.contains('…'), "no ellipsis when bytes <= 6");
 
-        // Bytes longer than 6 get an ellipsis suffix.
         let bytes5 = vec![0u8; 32];
         let w5 = fingerprint_words(&bytes5);
         assert!(w5.ends_with('…'));

@@ -1,15 +1,8 @@
-//! NDN Dashboard — Dioxus application for managing and monitoring
-//! an ndn-fwd instance.
+//! NDN Dashboard — Dioxus application for managing and monitoring an
+//! ndn-fwd instance via the NDN management protocol on `/localhost/nfd/`.
 //!
-//! The dashboard communicates with the router exclusively via the NDN
-//! management protocol (TLV Interest/Data on `/localhost/nfd/`).
-//!
-//! **Desktop** mode uses [`ndn_ipc::MgmtClient`] over Unix sockets with
-//! system tray integration and subprocess management.
-//!
-//! **Web** mode uses a pure-Rust WebSocket client compiled to WASM,
-//! demonstrating ndn-rs portability — the same TLV codec and packet types
-//! run natively and in the browser.
+//! Desktop mode uses [`ndn_ipc::MgmtClient`] over Unix sockets; web mode
+//! uses a pure-Rust WebSocket client compiled to WASM.
 
 #![allow(non_snake_case)]
 
@@ -17,8 +10,6 @@
 mod app;
 pub mod app_shared;
 mod edu_gloss;
-// On web, `mod app` is a thin re-export of app_shared so that view modules
-// that `use crate::app::*` continue to compile without changes.
 #[cfg(all(feature = "web", not(feature = "desktop")))]
 pub mod app {
     pub use crate::app_shared::*;
@@ -57,9 +48,6 @@ fn main() {
             )
             .init();
 
-        // Resolve forwarder profile from CLI flags before launching the
-        // Dioxus runtime. Hand-rolled rather than pulling clap; the
-        // surface is two flags. Unknown args fall through to Dioxus.
         let (cli_fwd, cli_sock) = parse_forwarder_args();
         let resolved = forwarder_profile::resolve_static(cli_fwd.as_deref(), cli_sock.clone())
             .or_else(forwarder_profile::auto_detect)

@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use dioxus::prelude::*;
 
-// ── Persistent tab navigation state ──────────────────────────────────────────
 
 /// Which tab is active in the Tools view — persists across navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +23,6 @@ pub static IPERF_IDS: GlobalSignal<Vec<u32>> = Signal::global(|| vec![next_tool_
 pub static PEEK_IDS: GlobalSignal<Vec<u32>> = Signal::global(|| vec![next_tool_instance_id()]);
 pub static PUT_IDS: GlobalSignal<Vec<u32>> = Signal::global(|| vec![next_tool_instance_id()]);
 
-// ── Tool result table (shared across all tool cards) ──────────────────────────
 
 /// A summary record stored in the shared results table after a tool run completes.
 #[derive(Clone, Debug)]
@@ -61,7 +59,6 @@ pub fn next_tool_instance_id() -> u32 {
     TOOL_INST_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-// ── Tool instance state ───────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct ToolInstanceState {
@@ -94,7 +91,6 @@ pub struct ToolInstanceState {
 pub static TOOL_INSTANCES: GlobalSignal<std::collections::HashMap<u32, ToolInstanceState>> =
     Signal::global(std::collections::HashMap::new);
 
-// ── Tool commands ─────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub enum ToolCmd {
@@ -144,7 +140,6 @@ pub enum ToolParams {
     },
 }
 
-// ── Tool helpers ──────────────────────────────────────────────────────────────
 
 /// Return current local time as HH:MM:SS string.
 pub fn chrono_now() -> String {
@@ -285,7 +280,6 @@ fn smooth_rtts(data: &[u64], target_len: usize) -> Vec<u64> {
         .collect()
 }
 
-// ── Formatting utilities ──────────────────────────────────────────────────────
 
 /// Format bits-per-second as a human-readable string.
 pub fn fmt_bps(bps: f64) -> String {

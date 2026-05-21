@@ -15,7 +15,6 @@ pub fn DashboardConfig() -> Element {
         div { class: "section",
             div { class: "section-title", "Dashboard Settings" }
 
-            // ── Node Identity ─────────────────────────────────────────────────
             div { style: "margin-bottom:28px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px;border-bottom:1px solid var(--border-subtle);padding-bottom:8px;",
                     "Node Identity"
@@ -34,7 +33,6 @@ pub fn DashboardConfig() -> Element {
                 }
             }
 
-            // ── Ping Server ───────────────────────────────────────────────────
             div { style: "margin-bottom:28px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px;border-bottom:1px solid var(--border-subtle);padding-bottom:8px;",
                     "Ping Server"
@@ -66,7 +64,6 @@ pub fn DashboardConfig() -> Element {
                 }
             }
 
-            // ── Iperf Server ──────────────────────────────────────────────────
             div { style: "margin-bottom:28px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px;border-bottom:1px solid var(--border-subtle);padding-bottom:8px;",
                     "Iperf Server"
@@ -147,7 +144,6 @@ pub fn DashboardConfig() -> Element {
                 }
             }
 
-            // ── Results Table ─────────────────────────────────────────────────
             div { style: "margin-bottom:28px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px;border-bottom:1px solid var(--border-subtle);padding-bottom:8px;",
                     "Results Table"
@@ -169,7 +165,6 @@ pub fn DashboardConfig() -> Element {
                 }
             }
 
-            // ── Save ──────────────────────────────────────────────────────────
             div { style: "display:flex;align-items:center;gap:12px;margin-bottom:32px;",
                 button {
                     class: "btn btn-primary",
@@ -198,7 +193,6 @@ pub fn DashboardConfig() -> Element {
                 }
             }
 
-            // ── Experimental Features ─────────────────────────────────────────
             div { style: "border-top:1px solid var(--border);padding-top:20px;",
                 div { style: "font-size:12px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px;",
                     "Experimental Features"

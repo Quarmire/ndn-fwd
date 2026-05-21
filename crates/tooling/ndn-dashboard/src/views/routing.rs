@@ -1,7 +1,6 @@
 use crate::app::{AppCtx, DashCmd};
 use dioxus::prelude::*;
 
-// ── Routing view ──────────────────────────────────────────────────────────────
 //
 // Shows routing protocol status and runtime configuration.
 // Currently supports the DVR (Distance Vector Routing) protocol.
@@ -27,7 +26,6 @@ pub fn Routing() -> Element {
     let mut dvr_error: Signal<Option<String>> = use_signal(|| None);
 
     rsx! {
-        // ── DVR Protocol ────────────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Distance Vector Routing (DVR)" }
 
@@ -120,7 +118,6 @@ pub fn Routing() -> Element {
             }
         }
 
-        // ── Static / other protocols ──────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Static Routes" }
             div { style: "font-size:13px;color:var(--text-muted);",

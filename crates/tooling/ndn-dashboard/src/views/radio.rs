@@ -103,7 +103,6 @@ pub fn Radio() -> Element {
             }
         }
 
-        // ── All faces link overview ───────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "All Faces — Link Overview" }
             if counters.is_empty() {

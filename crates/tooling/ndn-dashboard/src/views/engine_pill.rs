@@ -1,28 +1,16 @@
-//! §8 engine pill — surfaces what kind of dashboard the operator is
-//! looking at: a native desktop binary, a browser tab talking to a
-//! remote forwarder over WebSocket, or a browser tab running its own
-//! in-page forwarder engine via `?engine=local`.
-//!
-//! The distinction matters because the security/persistence
-//! affordances differ: desktop reads/writes a `FilePib` on disk;
-//! browser uses `IdbPib` in IndexedDB; browser-engine-local
-//! additionally hosts the engine itself inside the same JS realm.
+//! Runtime-classification pill rendered next to the conn-bar identity chip.
 
 use dioxus::prelude::*;
 
-/// What kind of runtime is the dashboard sitting in. Computed at
-/// startup from compile-time features + the `?engine=` query
-/// string; the pill renders it next to the conn-bar's identity chip.
+/// Computed at startup from compile-time features + the `?engine=` query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DashboardRuntime {
-    /// Native binary (Dioxus desktop). Talks to a local ndn-fwd
-    /// over Unix domain socket via ndn-ipc.
+    /// Native binary; talks to a local ndn-fwd over Unix domain socket.
     Desktop,
-    /// Browser tab (wasm32 + dioxus/web). Talks to a remote ndn-fwd
-    /// over WebSocket via the dashboard's WsMgmtClient.
+    /// wasm32 browser tab; talks to a remote forwarder over WebSocket.
     Browser,
-    /// Browser tab with `?engine=local` — the dashboard hosts its
-    /// own `ForwarderEngine` in-page via the browser-engine feature.
+    /// wasm32 + `browser-engine` + `?engine=local` — the dashboard hosts its
+    /// own `ForwarderEngine` in-page.
     BrowserEngineLocal,
 }
 
@@ -58,16 +46,7 @@ impl DashboardRuntime {
     }
 }
 
-/// Detect the active runtime at component-render time.
-///
-/// * Native target → `Desktop`.
-/// * wasm32 + `browser-engine` feature + `?engine=local` (resolved
-///   by the existing `browser_engine` module) → `BrowserEngineLocal`.
-/// * wasm32 otherwise → `Browser`.
-///
-/// The function is intentionally pure on the visible inputs (the
-/// `engine_local` flag); callers pass the resolved boolean so tests
-/// can pin each branch.
+/// Pure on `engine_local` so tests can pin each branch.
 pub fn classify(target_wasm32: bool, engine_local: bool) -> DashboardRuntime {
     match (target_wasm32, engine_local) {
         (false, _) => DashboardRuntime::Desktop,
@@ -104,18 +83,12 @@ fn current_runtime() -> DashboardRuntime {
     classify(true, engine_local)
 }
 
-/// Pub-visible runtime classifier for cross-module callers that need
-/// to format runtime-specific text (e.g. the §11.2 FDE warning).
 pub fn current_runtime_for_test_or_render() -> DashboardRuntime {
     current_runtime()
 }
 
 #[cfg(target_arch = "wasm32")]
 fn engine_local_query_param() -> bool {
-    // ?engine=local on the current page URL flips the browser-engine
-    // mode (matching the existing `browser_engine` module's
-    // convention). Best-effort — anything unparseable falls back to
-    // a remote-WebSocket assumption.
     let Some(window) = web_sys::window() else {
         return false;
     };
@@ -134,33 +107,14 @@ fn engine_local_query_param() -> bool {
     false
 }
 
-// ── §11.2 FDE-detection-with-warning ─────────────────────────────────────────
-//
-// Per design §11.2, the dashboard warns on the first PIB-IDB write
-// when full-disk encryption is verifiably OFF. Reality: from inside
-// a browser sandbox there is no API that reveals whether the OS
-// disk is encrypted. So the v1 surface is honest about that limit:
-// a one-time "we can't verify your FDE state" warning on the first
-// IDB-PIB write, gated by a localStorage flag so it doesn't reappear
-// once the operator has seen it. Desktop binaries skip the warning
-// entirely — operators know their own filesystems.
-
-/// Result of the §11.2 FDE probe. The probe is best-effort; v1
-/// returns `Unknown` from the browser sandbox.
-///
-/// `Off` is never constructed by the v1 probe — it's reserved for a
-/// future native FDE probe (fdesetup / manage-bde / cryptsetup) so
-/// the warning-text contract can land its branch now.
+/// FDE probe result; the v1 probe always returns `Unknown` (no browser API
+/// reveals OS disk-encryption state). `Off` is reserved for a future native
+/// probe so the warning-text contract can land its branch now.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FdeDetection {
-    /// Disk encryption verifiably ON (probe confirmed; v1 never
-    /// produces this from a browser).
     On,
-    /// Disk encryption verifiably OFF (probe confirmed; v1 never
-    /// produces this from a browser).
     Off,
-    /// Couldn't determine — the design's "acceptable" outcome.
     Unknown,
 }
 
@@ -176,25 +130,16 @@ impl FdeDetection {
                 "The PIB will persist to IndexedDB in this browser. From the browser sandbox the dashboard can't verify whether the OS disk is encrypted; if the device's disk isn't encrypted, the PIB is recoverable by anyone with the device."
                     .to_owned(),
             ),
-            // Desktop + Unknown: the operator runs on their own
-            // machine and knows their own filesystem; suppress the
-            // warning to avoid false-positive noise.
             _ => None,
         }
     }
 }
 
-/// Best-effort FDE probe. The browser implementation always returns
-/// `Unknown` per the v1 design's "acceptable" outcome.
 #[cfg(target_arch = "wasm32")]
 pub fn probe_fde() -> FdeDetection {
     FdeDetection::Unknown
 }
 
-/// Best-effort FDE probe on native. v1 also returns `Unknown` —
-/// shelling out to `fdesetup`, `manage-bde`, or `cryptsetup` per OS
-/// is doable but out of scope for the dashboard's first cut; the
-/// pill's tooltip already tells the operator the PIB sits on disk.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn probe_fde() -> FdeDetection {
     FdeDetection::Unknown
@@ -231,7 +176,6 @@ mod tests {
         for l in &labels {
             assert!(!l.is_empty());
         }
-        // Distinct
         let mut sorted = labels.clone();
         sorted.sort();
         sorted.dedup();

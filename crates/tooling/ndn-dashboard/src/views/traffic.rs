@@ -18,7 +18,6 @@ use crate::types::ThroughputSample;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-// ── Shared helpers ────────────────────────────────────────────────────────────
 
 /// Sum selected face throughput histories into one aggregated VecDeque.
 /// `filter = None` means include all faces.
@@ -240,7 +239,6 @@ pub fn render_pps_bars(hist: &VecDeque<ThroughputSample>, height_px: u32) -> Ele
     }
 }
 
-// ── Traffic view ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, PartialEq)]
 enum MonitorMode {
@@ -301,7 +299,6 @@ pub fn Traffic() -> Element {
     };
 
     rsx! {
-        // ── Monitor mode + filter controls ────────────────────────────────
         div { class: "section",
             div { class: "section-hdr",
                 span { class: "section-title", "Traffic Monitor" }
@@ -446,7 +443,6 @@ pub fn Traffic() -> Element {
             }
         }
 
-        // ── Throughput charts ─────────────────────────────────────────────
         div { class: "section",
             div { class: "section-hdr",
                 span { style: "font-size:13px;color:var(--text);font-family:monospace;",
@@ -474,7 +470,6 @@ pub fn Traffic() -> Element {
             }
         }
 
-        // ── Per-face counters ─────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Face Traffic Counters" }
             if counters.is_empty() {
@@ -521,7 +516,6 @@ pub fn Traffic() -> Element {
             }
         }
 
-        // ── Prefix measurements ───────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Prefix Measurements" }
             if measurements.is_empty() {

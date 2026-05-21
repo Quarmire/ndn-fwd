@@ -35,7 +35,6 @@ pub fn Routes() -> Element {
     let mut new_cost: Signal<String> = use_signal(|| "10".to_string());
 
     rsx! {
-        // ── FIB table ────────────────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "FIB — Forwarding Information Base" }
             if routes.is_empty() {
@@ -98,7 +97,6 @@ pub fn Routes() -> Element {
                 }
             }
 
-            // ── Add route form ───────────────────────────────────────────────
             div { class: "form-row",
                 div { class: "form-group",
                     label { r#for: "rt-prefix", "Name Prefix" }
@@ -148,7 +146,6 @@ pub fn Routes() -> Element {
             }
         }
 
-        // ── RIB table ────────────────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "RIB — Routing Information Base" }
             if rib_entries.is_empty() {

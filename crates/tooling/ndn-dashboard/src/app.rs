@@ -36,38 +36,22 @@ use crate::{
     },
 };
 
-// ── Global reactive state ────────────────────────────────────────────────────
-// GlobalSignal is shared across all windows spawned from this process.
-
 pub static ROUTER_LOG: GlobalSignal<VecDeque<LogEntry>> = Signal::global(VecDeque::new);
 pub static LOG_FILTER: GlobalSignal<String> = Signal::global(String::new);
 pub static ROUTER_RUNNING: GlobalSignal<bool> = Signal::global(|| false);
-/// Set by LogPane in any window; polled by the main cmd coroutine each tick.
 pub static PENDING_LOG_FILTER: GlobalSignal<Option<String>> = Signal::global(|| None);
-/// Last ring-buffer sequence number received from the router.
 /// Reset to 0 on each new connection so that the first poll fetches all buffered lines.
 pub static LAST_LOG_SEQ: GlobalSignal<u64> = Signal::global(|| 0);
-/// Logs tab split layout — persisted as u8 so the Logs view can be remounted
-/// without losing the user's split choice. 0=Single, 1=Horizontal, 2=Vertical.
+/// 0=Single, 1=Horizontal, 2=Vertical.
 pub static LOG_SPLIT_MODE: GlobalSignal<u8> = Signal::global(|| 0u8);
-/// Logs tab split ratio (percent for the first pane, 20–80).
+/// Percent for the first pane, 20–80.
 pub static LOG_SPLIT_RATIO: GlobalSignal<u32> = Signal::global(|| 50u32);
-/// Saved config presets: (name, toml_string).
 pub static CONFIG_PRESETS: GlobalSignal<Vec<(String, String)>> = Signal::global(Vec::new);
 
-/// Currently active view — writable from anywhere (tray, tool shortcuts, etc.).
 pub static ACTIVE_VIEW: GlobalSignal<crate::views::View> =
     Signal::global(|| crate::views::View::Overview);
-// `ACTIVE_SECURITY_TAB` lives in `app_shared` (see that module's
-// definition). It's reachable from both desktop and web reader sites
-// via `crate::app_shared::` without a re-export here — keeping the
-// duplication discipline matched against the rest of the
-// app/app_shared split.
 
-/// Dark mode toggle — `true` = dark (default), `false` = light.
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
-
-// ── Toast notifications ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(dead_code)]
@@ -120,8 +104,6 @@ pub fn push_toast(msg: impl Into<String>, level: ToastLevel) {
     });
 }
 
-// ── Commands ─────────────────────────────────────────────────────────────────
-
 /// Operations sent to the background polling coroutine.
 #[derive(Debug)]
 pub enum DashCmd {
@@ -160,48 +142,25 @@ pub enum DashCmd {
     SecurityTokenAdd(String),
     YubikeyDetect,
     YubikeyGeneratePiv(String),
-    /// Apply runtime discovery config — `params` is a URL query string
-    /// (`"hello_interval_base_ms=5000&liveness_miss_count=3"`).
+    /// `params` is a URL query string (`"hello_interval_base_ms=5000&liveness_miss_count=3"`).
     DiscoveryConfigSet(String),
-    /// Apply runtime DVR config — `params` is a URL query string
-    /// (`"update_interval_ms=30000&route_ttl_ms=90000"`).
+    /// `params` is a URL query string (`"update_interval_ms=30000&route_ttl_ms=90000"`).
     DvrConfigSet(String),
-    /// Add a trust schema rule; `rule` is `"<data_pattern> => <key_pattern>"`.
+    /// `rule` is `"<data_pattern> => <key_pattern>"`.
     SchemaRuleAdd(String),
-    /// Remove the trust schema rule at the given 0-based index.
     SchemaRuleRemove(u64),
-    /// Replace the entire trust schema; `rules` is newline-separated rule strings.
+    /// `rules` is newline-separated rule strings; empty input clears all rules.
     SchemaSet(String),
-    /// §4.5 Mgmt access tab — submit a new mgmt-access policy. Body is
-    /// the dashboard's JSON snapshot; the forwarder applies the three
-    /// runtime-writable booleans immediately when
-    /// `MgmtHandles::runtime_policy` is wired. On a 2xx response the
-    /// handler appends a `security/policy-set` entry to the local
-    /// `AuditLogChain` (the §11.10 audit bridge).
     SecurityPolicySet(MgmtAccessPolicySnapshot),
-    /// §4.2 TrustPathInspector — request a `security/validate` trace
-    /// for the given cert Name. Result lands in
-    /// `AppCtx.trust_validation`; sidesheet visibility is driven by
-    /// `AppCtx.trust_inspector_open`.
     SecurityValidateTrace(String),
-    /// §11.4 TOFU promote — install a trust anchor at runtime via
-    /// `security/anchor-add`. On 2xx the handler also appends a
-    /// `SchemaJournalKind::AnchorAdd` entry to the schema journal
-    /// (the TOFU decision record). `cert_wire_hex` may be empty —
-    /// in that case the handler journals intent only (legacy modal
-    /// path), matching the pre-Phase-B-B behavior.
+    /// `cert_wire_hex` may be empty, in which case the handler journals intent only.
     SecurityAnchorAdd {
         name: String,
         fingerprint_hex: String,
         cert_wire_hex: String,
     },
-    /// §5.1 drag-drop SafeBag import. Fires
-    /// `/localhost/nfd/security/safebag-import` to persist the
-    /// decrypted identity into the forwarder's PIB. `safebag_wire`
-    /// is the raw TLV bytes (not hex-encoded — the client method
-    /// hex-encodes both halves of the wire envelope). The dashboard
-    /// runs its own ndn-safebag preview + trust check before
-    /// dispatching; this command runs after the operator confirms.
+    /// Fires `/localhost/nfd/security/safebag-import`; `safebag_wire` is raw TLV bytes
+    /// (the client method hex-encodes both halves of the wire envelope).
     SecuritySafebagImport {
         name: String,
         safebag_wire: Vec<u8>,
@@ -212,12 +171,10 @@ pub enum DashCmd {
 /// Commands sent to the router-management coroutine.
 #[derive(Debug)]
 pub enum RouterCmd {
-    /// Start the router. `None` = use built-in defaults; `Some(path)` = pass `--config <path>`.
+    /// `None` uses built-in defaults; `Some(path)` passes `--config <path>`.
     Start(Option<String>),
     Stop,
 }
-
-// ── Connection state ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnState {
@@ -246,8 +203,6 @@ impl ConnState {
     }
 }
 
-// ── Shared context ───────────────────────────────────────────────────────────
-
 /// All reactive state exposed to child view components via `use_context`.
 #[derive(Clone, Copy)]
 pub struct AppCtx {
@@ -273,69 +228,42 @@ pub struct AppCtx {
     pub ca_info: Signal<Option<CaInfo>>,
     pub schema_rules: Signal<Vec<SchemaRuleInfo>>,
     pub yubikey_status: Signal<Option<String>>,
-    /// Active identity name (may be the ephemeral name when no PIB is loaded).
+    /// May be the ephemeral name when no PIB is loaded.
     pub identity_name: Signal<String>,
-    /// `true` when the router is using an ephemeral in-memory signing key.
     pub identity_is_ephemeral: Signal<bool>,
-    /// PIB path reported by the router (`None` when ephemeral).
+    /// `None` when ephemeral.
     pub identity_pib_path: Signal<Option<String>>,
-    /// Active cert's `valid_until` in Unix-epoch seconds. `None`
-    /// when ephemeral or the cert is flagged permanent. Drives
-    /// the §3.1 IdentityChip Expired / ExpiringSoon transitions.
+    /// `None` when ephemeral or the cert is flagged permanent.
     pub cert_valid_until_unix_s: Signal<Option<u64>>,
-    /// Live mgmt-access posture's `require_signed_commands` flag.
-    /// `None` until the first `policy-get` poll lands;
-    /// `Some(false)` drives the UnsignedMgmt chip state.
+    /// `None` until the first `policy-get` poll lands.
     pub mgmt_signed_commands_required: Signal<Option<bool>>,
-    /// Does the connected forwarder implement ndn-rs's `security/*`
-    /// mgmt extensions? `None` ⇒ unknown yet; `Some(true)` ⇒ the
-    /// security probe verbs returned 2xx; `Some(false)` ⇒ they
-    /// returned 404 (NFD / YaNFD). Drives the `Unsupported`
-    /// posture/chip state so the dashboard doesn't falsely report
-    /// `NoIdentity` against cross-impl forwarders.
+    /// Does the connected forwarder implement ndn-rs's `security/*` mgmt extensions?
+    /// `None` ⇒ unknown; `Some(false)` ⇒ NFD / YaNFD returned 404.
     pub security_surface_supported: Signal<Option<bool>>,
-    /// Full mgmt-access policy snapshot — populated from `policy-get`
-    /// each desktop poll cycle. `None` until the first response lands.
-    /// The §4.5 `MgmtAccessTab` reads this; `mgmt_signed_commands_required`
-    /// is a derived view on the same data and stays in sync.
+    /// `None` until the first `policy-get` response lands.
     pub mgmt_access_policy: Signal<Option<MgmtAccessPolicySnapshot>>,
-    /// Live validator counters — §4.3 `LiveValidationChart` feed.
-    /// `None` until the first `security/validation-stats` poll
-    /// returns; the chart switches to its "no live data" placeholder
-    /// when the latest sample carries `validator_present=false`.
+    /// `None` until the first `security/validation-stats` poll returns.
     pub validation_stats: Signal<Option<ValidationStats>>,
-    /// 60-sample (3-min @ 3 s) sparkline history of
-    /// `(verified_per_sec, rejected_per_sec)`.
+    /// 60-sample (3-min @ 3 s) sparkline history of `(verified_per_sec, rejected_per_sec)`.
     pub validation_history: Signal<VecDeque<(u64, u64)>>,
-    /// §4.2 TrustPathInspector — last `security/validate` result
-    /// keyed by the cert Name the operator clicked. The sidesheet
-    /// reads `(target, result)` and renders the chain steps. `None`
-    /// until the first trace lands.
+    /// Last `security/validate` result keyed by the cert name the operator clicked.
     pub trust_validation: Signal<Option<(String, TrustValidationResult)>>,
-    /// §4.2 sidesheet open flag. Toggled by the Identities tab's
-    /// `[Trace ↑]` action (open) and the sidesheet's `[Close]`.
     pub trust_inspector_open: Signal<bool>,
     pub cs_hit_history: Signal<VecDeque<f64>>,
-    /// Per-face throughput rate history (60 samples × 3 s = 3 min window).
+    /// 60 samples × 3 s = 3 min window.
     pub face_throughput: Signal<HashMap<u64, VecDeque<ThroughputSample>>>,
-    /// Live discovery protocol status (best-effort; `None` if router does not support).
+    /// `None` if router does not support.
     pub discovery_status: Signal<Option<DiscoveryStatus>>,
-    /// Live DVR routing status (best-effort; `None` if DVR is not active).
+    /// `None` if DVR is not active.
     pub dvr_status: Signal<Option<DvrStatus>>,
     pub router_cmd: Coroutine<RouterCmd>,
     pub cmd: Coroutine<DashCmd>,
     pub tool_cmd: Coroutine<ToolCmd>,
 }
 
-// ── Tool event processing ─────────────────────────────────────────────────────
-
-/// Process a single tool event synchronously (no `.await`).
-///
-/// Extracted from the `select!` loop so the loop can drain all pending events
-/// from the channel *without yielding*, coalescing them into one Dioxus render
-/// cycle.  Without this, each event is a separate `await` → re-render → WebView
-/// round-trip, which overflows the edit-notification channel under iperf load
-/// and produces `Error sending edits applied notification` log errors.
+/// Process a single tool event synchronously so the `select!` loop can drain a
+/// burst into a single Dioxus render cycle, avoiding edit-notification overflow
+/// on the WebView under iperf load.
 fn process_tool_event(
     inst_id: u32,
     ev_opt: Option<ndn_tools_core::common::ToolEvent>,
@@ -346,7 +274,6 @@ fn process_tool_event(
     use ndn_tools_core::common::ToolData;
     match ev_opt {
         None => {
-            // Tool completed — remove its abort handle.
             handles.remove(&inst_id);
             if inst_id != srv_ping_id && inst_id != srv_iperf_id {
                 let ts = chrono_now();
@@ -444,12 +371,8 @@ fn process_tool_event(
     }
 }
 
-// ── Root component ───────────────────────────────────────────────────────────
-
 #[component]
 pub fn App() -> Element {
-    // Initialise the system tray once (must run on the main thread, after the
-    // OS event loop has started — use_hook fires during the first render).
     use_hook(tray::setup);
 
     let mut conn_state: Signal<ConnState> = use_signal(|| ConnState::Disconnected);
@@ -485,13 +408,6 @@ pub fn App() -> Element {
     let trust_validation: Signal<Option<(String, TrustValidationResult)>> = use_signal(|| None);
     let trust_inspector_open: Signal<bool> = use_signal(|| false);
 
-    // Initialise the §11.10 audit chain once per process. The chain
-    // dir is keyed by the selected forwarder profile so switching
-    // between `ndn-fwd` / `nfd` / `yanfd` keeps separate audit
-    // streams. v1 uses a process-local ephemeral signer in
-    // `security_chains::DashboardSigner` (key not persisted); chain
-    // entries from prior processes remain on disk but won't
-    // re-verify until v2 wires a stable dashboard signing key.
     use_hook(|| {
         let key_locator = ndn_packet::Name::root()
             .append(b"local")
@@ -512,18 +428,10 @@ pub fn App() -> Element {
     let mut show_start_modal: Signal<bool> = use_signal(|| false);
     let mut show_gear_menu: Signal<bool> = use_signal(|| false);
 
-    // Theme class is bound reactively on the layout root below — no JS.
-
-    // Shared channel: router_cmd → tool_cmd server lifecycle commands.
-    // Defined before both coroutines so each can capture its end.
     let (srv_cmd_tx, srv_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ToolCmd>();
-    // Wrap both ends in Arc so closures (FnMut) can clone the Arc each invocation.
-    // The actual sender/receiver is taken from the Option on first (and only) call.
     let srv_cmd_tx_arc = std::sync::Arc::new(srv_cmd_tx);
     let srv_cmd_rx_cell = std::sync::Arc::new(std::sync::Mutex::new(Some(srv_cmd_rx)));
 
-    // ── Router management coroutine ──────────────────────────────────────────
-    // Owns the RouterProc, watches for process exit, drains log lines.
     let srv_cmd_tx_arc_r = srv_cmd_tx_arc.clone();
     let router_cmd = use_coroutine(move |mut rx: UnboundedReceiver<RouterCmd>| {
         let srv_cmd_tx = srv_cmd_tx_arc_r.clone();
@@ -538,7 +446,6 @@ pub fn App() -> Element {
                             if !p.is_running() {
                                 proc = None;
                                 *ROUTER_RUNNING.write() = false;
-                                // Stop in-process tool servers when router dies.
                                 let _ = srv_cmd_tx.send(ToolCmd::StopPingServer);
                                 let _ = srv_cmd_tx.send(ToolCmd::StopIperfServer);
                             } else {
@@ -565,10 +472,8 @@ pub fn App() -> Element {
                                                     *ROUTER_RUNNING.write() = true;
                                                     proc = Some(p);
 
-                                                    // Give the router a moment to bind its socket.
                                                     tokio::time::sleep(Duration::from_millis(800)).await;
 
-                                                    // Auto-start in-process servers if configured.
                                                     let s = DASH_SETTINGS.peek().clone();
                                                     if s.ping_server_auto  { let _ = srv_cmd_tx.send(ToolCmd::StartPingServer);  }
                                                     if s.iperf_server_auto { let _ = srv_cmd_tx.send(ToolCmd::StartIperfServer); }
@@ -585,7 +490,6 @@ pub fn App() -> Element {
                                 }
                             }
                             RouterCmd::Stop => {
-                                // Stop in-process tool servers first.
                                 let _ = srv_cmd_tx.send(ToolCmd::StopPingServer);
                                 let _ = srv_cmd_tx.send(ToolCmd::StopIperfServer);
                                 if let Some(ref mut p) = proc {
@@ -598,18 +502,14 @@ pub fn App() -> Element {
                     }
                 }
             }
-        } // close async move
-    }); // close FnMut closure + use_coroutine
+        }
+    });
 
-    // ── Tray polling coroutine ───────────────────────────────────────────────
-    // Updates the tray icon colour and forwards menu events.
     use_coroutine(move |_: UnboundedReceiver<()>| async move {
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
             interval.tick().await;
 
-            // Prune old toasts (older than 5 seconds) — only write if there is
-            // actually something to remove, to avoid spurious reactive updates.
             {
                 let now = std::time::Instant::now();
                 if TOASTS
@@ -623,12 +523,10 @@ pub fn App() -> Element {
                 }
             }
 
-            // Sync icon/tooltip with current state.
             let connected = matches!(*conn_state.read(), ConnState::Connected);
             let running = *ROUTER_RUNNING.read();
             tray::update_state(connected, running);
 
-            // Forward tray-menu events.
             while let Some(tc) = tray::poll_menu_event() {
                 match tc {
                     tray::TrayCmd::StartRouter => router_cmd.send(RouterCmd::Start(None)),
@@ -641,7 +539,6 @@ pub fn App() -> Element {
                         *ACTIVE_VIEW.write() = View::Tools;
                     }
                     tray::TrayCmd::Quit => {
-                        // Kill managed router process before exiting.
                         router_cmd.send(RouterCmd::Stop);
                         std::process::exit(0);
                     }
@@ -650,14 +547,9 @@ pub fn App() -> Element {
         }
     });
 
-    // Background coroutine: owns the MgmtClient, polls data, handles commands.
     let cmd = use_coroutine(move |mut rx: UnboundedReceiver<DashCmd>| async move {
         loop {
             conn_state.set(ConnState::Connecting);
-            // §6: a new connection = new session. Reset gate
-            // acceptance so the user reconfirms the posture (the
-            // forwarder may have restarted into a different posture
-            // even when the URL didn't change).
             crate::security_state::reset_acceptance();
             let path = socket_path.peek().clone();
 
@@ -665,7 +557,6 @@ pub fn App() -> Element {
                 Ok(c) => c,
                 Err(e) => {
                     conn_state.set(ConnState::Error(e.to_string()));
-                    // Wait up to 3s before retry; Reconnect command skips the wait.
                     let sleep = tokio::time::sleep(Duration::from_secs(3));
                     tokio::pin!(sleep);
                     loop {
@@ -673,7 +564,6 @@ pub fn App() -> Element {
                             _ = &mut sleep => break,
                             Some(cmd) = rx.next() => {
                                 if matches!(cmd, DashCmd::Reconnect) { break }
-                                // discard other cmds while disconnected
                             }
                         }
                     }
@@ -683,7 +573,6 @@ pub fn App() -> Element {
 
             conn_state.set(ConnState::Connected);
             error_msg.set(None);
-            // Reset the log cursor so the first poll fetches all buffered lines.
             *LAST_LOG_SEQ.write() = 0;
 
             if let Err(e) = poll_all(
@@ -728,7 +617,7 @@ pub fn App() -> Element {
 
             let mut interval = tokio::time::interval(Duration::from_secs(3));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            interval.tick().await; // first tick is immediate; consume it
+            interval.tick().await;
 
             'session: loop {
                 tokio::select! {
@@ -750,12 +639,7 @@ pub fn App() -> Element {
         }
     });
 
-    // ── Embedded tool coroutine ──────────────────────────────────────────────
-    // Manages multiple simultaneous tool instances. Each Run creates a new task
-    // tracked by its instance ID; Stop cancels a specific instance immediately.
-    // All GlobalSignal writes happen here — inside the Dioxus runtime.
-    //
-    // Reserved IDs: SRV_PING_ID / SRV_IPERF_ID for in-process servers.
+    /// Reserved instance IDs for in-process servers.
     const SRV_PING_ID: u32 = u32::MAX - 1;
     const SRV_IPERF_ID: u32 = u32::MAX;
 
@@ -765,46 +649,35 @@ pub fn App() -> Element {
         async move {
             use ndn_tools_core::common::ConnectConfig;
 
-            // Take srv_cmd_rx out of the Mutex (only happens once on coroutine init).
             let mut srv_rx = srv_cmd_rx_cell
                 .lock()
                 .unwrap()
                 .take()
                 .expect("srv_cmd_rx already taken");
 
-            // Channel: (instance_id, Option<ToolEvent>). None = tool completed.
             let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<(
                 u32,
                 Option<ndn_tools_core::common::ToolEvent>,
             )>();
 
-            // Map of instance_id → abort handle for currently running tools.
             let mut handles: std::collections::HashMap<u32, tokio::task::AbortHandle> =
                 std::collections::HashMap::new();
 
             loop {
-                // Merge UI commands and server lifecycle commands into a single Option<ToolCmd>.
                 let maybe_cmd: Option<ToolCmd> = tokio::select! {
                     Some(cmd) = rx.next() => Some(cmd),
                     Some(cmd) = srv_rx.recv() => Some(cmd),
                     Some((inst_id, ev_opt)) = ev_rx.recv() => {
-                        // Process the first event, then drain all immediately
-                        // available events without yielding.  This coalesces a
-                        // burst of tool events into a single Dioxus render cycle
-                        // instead of one re-render (and WebView round-trip) per
-                        // event — preventing the edit-notification overflow that
-                        // logs "Error sending edits applied notification".
                         process_tool_event(inst_id, ev_opt, &mut handles, SRV_PING_ID, SRV_IPERF_ID);
                         while let Ok((id, ev)) = ev_rx.try_recv() {
                             process_tool_event(id, ev, &mut handles, SRV_PING_ID, SRV_IPERF_ID);
                         }
-                        None // no command to process
+                        None
                     }
                 };
 
                 let Some(cmd) = maybe_cmd else { continue };
 
-                // ── Dispatch tool command ──────────────────────────────────────
                 match cmd {
                     ToolCmd::Stop { id } => {
                         if let Some(inst) = TOOL_INSTANCES.write().get_mut(&id) {
@@ -816,7 +689,6 @@ pub fn App() -> Element {
                     }
 
                     ToolCmd::Run { id, params } => {
-                        // Cancel any previous run for this instance slot.
                         if let Some(h) = handles.remove(&id) {
                             h.abort();
                         }
@@ -955,10 +827,6 @@ pub fn App() -> Element {
                             }
                         }
 
-                        // Spawn a single task that joins run_fut + bridge_fut, then
-                        // sends the completion signal — no race between bridge and done.
-                        // If the tool returns an error (e.g. node_prefix missing for
-                        // reverse mode), forward it as an error event so it's visible.
                         let done_tx = ev_tx.clone();
                         let fwd_tx = ev_tx.clone();
                         let face_socket = socket_path.peek().clone();
@@ -1247,8 +1115,8 @@ pub fn App() -> Element {
                     }
                 }
             }
-        } // close async move
-    }); // close FnMut closure + use_coroutine
+        }
+    });
 
     let ctx = AppCtx {
         conn: conn_state,
@@ -1292,27 +1160,17 @@ pub fn App() -> Element {
     };
     use_context_provider(move || ctx);
 
-    // §3.2 sidebar sec_dot + §3.1 IdentityChip derive themselves
-    // from AppCtx via `crate::security_surfaces::{SecDot, IdentityChip}`;
-    // the prior key-driven heuristic is gone in favour of the typed
-    // ChipState.
-
     rsx! {
         document::Style { "{CSS}" }
 
-        // §2 security gate — modal on top of every other view when the
-        // current SecurityPosture isn't Hardened and the user hasn't
-        // accepted the variant this session.
         crate::security_gate::SecurityGate {}
 
-        // First-time onboarding overlay (shown until ~/.ndn/dashboard-onboarded exists).
         if *show_onboarding.read() {
             Onboarding {
                 on_complete: move |_| show_onboarding.set(false),
             }
         }
 
-        // StartRouterModal — rendered as a fixed overlay outside the layout
         if *show_start_modal.read() {
             StartRouterModal {
                 on_close: move |_| show_start_modal.set(false),
@@ -1322,23 +1180,14 @@ pub fn App() -> Element {
 
         ToastOverlay {}
 
-        // §5.1 SafeBag import modal. Reads its state from the global
-        // SAFEBAG_IMPORT_STATE signal so the layout-root drag-drop
-        // handler and the Security view file-picker can both surface
-        // it without prop-drilling.
         crate::views::safebag_import::SafeBagImportModal {
             state: crate::app_shared::SAFEBAG_IMPORT_STATE.signal(),
         }
 
-        // §5.2 NDNCERT enrollment wizard. Modal launched from the
-        // CA tab's "Enroll new identity" button (and any other entry
-        // that flips ENROLLMENT_WIZARD_STATE.open).
         crate::views::enrollment_wizard::EnrollmentWizardModal {
             state: crate::app_shared::ENROLLMENT_WIZARD_STATE.signal(),
         }
 
-        // §5.3 key-rotation modal. Launched by CertCard's "Renew"
-        // button on the §4.1 IdentityInspector.
         crate::views::key_rotation::KeyRotationModal {
             state: crate::app_shared::KEY_ROTATION_STATE.signal(),
         }
@@ -1359,12 +1208,10 @@ pub fn App() -> Element {
                     });
                 }
             },
-            // ── Sidebar navigation ─────────────────────────────────────────
             nav { class: "sidebar",
                 div { class: "sidebar-logo",
                     style: "display:flex;align-items:center;justify-content:space-between;",
                     span { "NDN Dashboard" }
-                    // §3.2 — glyph + tooltip per ChipState.
                     crate::security_surfaces::SecDot {}
                 }
                 for view in View::NAV {
@@ -1381,10 +1228,8 @@ pub fn App() -> Element {
                     }
                 }
 
-                // Sidebar spacer pushes gear to the bottom
                 div { class: "sidebar-spacer" }
 
-                // Gear menu at bottom
                 div { class: "sidebar-bottom",
                     if *show_gear_menu.read() {
                         div { class: "gear-menu",
@@ -1415,18 +1260,13 @@ pub fn App() -> Element {
                 }
             }
 
-            // ── Main area ──────────────────────────────────────────────────
             div { class: "main",
-                // Connection bar
                 div { class: "conn-bar",
                     span {
                         class: "{conn_state.read().badge_class()}",
                         "{conn_state.read().label()}"
                     }
-                    // §3.1 IdentityChip — always-rendered next to the
-                    // connection badge.
                     crate::security_surfaces::IdentityChip {}
-                    // §8 engine pill — Desktop / Browser / Browser-engine-local.
                     crate::views::engine_pill::EnginePill {}
                     input {
                         r#type: "text",
@@ -1439,16 +1279,13 @@ pub fn App() -> Element {
                         onclick: move |_| cmd.send(DashCmd::Reconnect),
                         "Connect"
                     }
-                    // Icon buttons
                     button {
                         class: "icon-btn",
                         title: "Refresh",
                         onclick: move |_| cmd.send(DashCmd::Reconnect),
                         "⟳"
                     }
-                    // Spacer
                     div { style: "flex:1;" }
-                    // Theme toggle
                     button {
                         class: "theme-toggle",
                         title: if *DARK_MODE.read() { "Switch to Light Mode" } else { "Switch to Dark Mode" },
@@ -1458,9 +1295,7 @@ pub fn App() -> Element {
                         },
                         if *DARK_MODE.read() { "☀" } else { "🌙" }
                     }
-                    // Vertical separator
                     div { style: "width:1px;height:20px;background:var(--border);flex-shrink:0;" }
-                    // Router process controls (right side)
                     {
                         let running = *ROUTER_RUNNING.read();
                         rsx! {
@@ -1471,7 +1306,6 @@ pub fn App() -> Element {
                             }
                             if !running {
                                 {
-                                    // Disable "Start" when already connected to an external forwarder.
                                     let external = matches!(*conn_state.read(), ConnState::Connected);
                                     rsx! {
                                         button {
@@ -1505,8 +1339,6 @@ pub fn App() -> Element {
                     }
                 }
 
-                // Content — Logs gets a full-height flex container; other views
-                // use the padded scrollable .content div.
                 if *ACTIVE_VIEW.read() == View::Logs {
                     div { style: "flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;",
                         if let Some(ref err) = *error_msg.read() {
@@ -1580,7 +1412,7 @@ fn render_view(view: View) -> Element {
         View::Strategy => rsx! { Strategy {} },
         View::Coding => rsx! { crate::views::coding::Coding {} },
         View::RateLimit => rsx! { crate::views::rate_limit::RateLimit {} },
-        View::Logs => rsx! {}, // rendered via full-height branch in App
+        View::Logs => rsx! {},
         View::Session => rsx! { Session {} },
         View::Security => rsx! { Security {} },
         View::Fleet => rsx! { Fleet {} },
@@ -1592,20 +1424,12 @@ fn render_view(view: View) -> Element {
     }
 }
 
-/// Per-forwarder audit chain dir per §11.1.
-///
-/// Returns `$XDG_CONFIG_HOME/ndn-dashboard/<profile-id>/audit/` on
-/// platforms where `dirs_next::config_dir()` resolves, falling back
-/// to the system temp dir when it doesn't. The profile id keeps
-/// `ndn-fwd`, `nfd`, and `yanfd` chains separate so toggling the
-/// `--forwarder=` flag doesn't replay another impl's history.
+/// Per-forwarder audit chain dir. Keyed by the selected forwarder profile so
+/// toggling `--forwarder=` doesn't replay another impl's history.
 fn audit_chain_dir() -> std::path::PathBuf {
     dashboard_chain_dir_root().join("audit")
 }
 
-/// Sibling to [`audit_chain_dir`] for the §2.4 schema journal. Same
-/// per-forwarder keying so a backup tool can grab `audit/` + `schema/`
-/// in one shot.
 fn schema_journal_dir() -> std::path::PathBuf {
     dashboard_chain_dir_root().join("schema")
 }
@@ -1624,8 +1448,6 @@ fn default_socket_path() -> String {
         crate::forwarder_profile::selected().1.display().to_string()
     }
 }
-
-// ── Polling ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 async fn poll_all(
@@ -1665,8 +1487,6 @@ async fn poll_all(
         Ok(r) => status.set(Some(ForwarderStatus::parse(&r.status_text))),
         Err(e) => return Err(e.to_string()),
     }
-    // face_list returns FaceStatus which includes traffic counters — derive
-    // FaceCounter from it so we don't need a separate face_counters() call.
     match client.face_list().await {
         Ok(faces_data) => {
             let face_infos: Vec<FaceInfo> = faces_data
@@ -1694,7 +1514,6 @@ async fn poll_all(
         Ok(fib_data) => routes.set(fib_data.into_iter().map(FibEntry::from).collect()),
         Err(e) => return Err(e.to_string()),
     }
-    // RIB — best-effort (older routers may not support it).
     if let Ok(rib_data) = client.rib_list().await {
         rib_entries.set(rib_data.into_iter().map(RibEntryInfo::from).collect());
     }
@@ -1711,17 +1530,14 @@ async fn poll_all(
         ),
         Err(e) => return Err(e.to_string()),
     }
-    // Best-effort endpoints — ignore errors so older routers still work.
     if let Ok(r) = client.measurements_list().await {
         measurements.set(MeasurementEntry::parse_list(&r.status_text));
     }
-    // Config — fetch once on first connect; RefreshConfig command forces re-fetch.
     if config_toml.read().is_empty()
         && let Ok(r) = client.config_get().await
     {
         config_toml.set(r.status_text);
     }
-    // Per-face throughput history — compute per-second rates per face.
     {
         let curr_counters = counters.read();
         let active: HashSet<u64> = curr_counters.iter().map(|c| c.face_id).collect();
@@ -1742,7 +1558,6 @@ async fn poll_all(
         fh.retain(|k, _| active.contains(k));
         fp.retain(|k, _| active.contains(k));
     }
-    // Throughput history — aggregate across all faces.
     {
         let curr = ThroughputSample::from_counters(&counters.read());
         let rate = ThroughputSample::rate_from_delta(&prev_counters.read(), &curr, 3.0);
@@ -1753,39 +1568,21 @@ async fn poll_all(
             hist.pop_front();
         }
     }
-    // Phase 4 endpoints — best-effort.
     if let Ok(r) = client.neighbors_list().await {
         neighbors.set(NeighborInfo::parse_list(&r.status_text));
     }
     if let Ok(r) = client.security_identity_list().await {
         let keys = SecurityKeyInfo::parse_list(&r.status_text);
-        // §3.1 cert-expiry threading: pick the first persistent key
-        // whose cert isn't permanent/missing and surface its
-        // valid_until in Unix-epoch seconds. Phase B may want a
-        // smarter selector once multi-key UIs land.
         let expiry = keys.iter().find_map(SecurityKeyInfo::valid_until_unix_s);
         cert_valid_until_unix_s.set(expiry);
         security_keys.set(keys);
     }
-    // §3.1 UnsignedMgmt threading + §4.5 Mgmt access tab feed —
-    // poll policy-get (read-exempt from the SECURITY signed-command
-    // gate per `is_public_dataset_verb`), parse the JSON body, surface
-    // both the `require_signed_commands` flag (for the IdentityChip's
-    // UnsignedMgmt state) and the full snapshot (for the §4.5 editor).
     if let Ok(r) = client.security_policy_get().await
         && let Ok(parsed) = MgmtAccessPolicySnapshot::from_json(&r.status_text)
     {
         mgmt_signed_commands_required.set(Some(parsed.require_signed_commands));
         mgmt_access_policy.set(Some(parsed));
     }
-    // §4.3 LiveValidationChart feed — read-exempt from the SECURITY
-    // signed-command gate. Phase B step B forwarders return real
-    // `verified_total` + `rejected_total` + `probe_unix_ns` fields;
-    // we derive the per-second rate from the delta against the
-    // previous sample (computed in `ValidationStats::rate_against`).
-    // Pre-Phase-B-B forwarders only emit `*_per_sec=0`; the chart
-    // falls back to those zeros and keeps showing the "no live data"
-    // chip the kickoff designed.
     if let Ok(r) = client.security_validation_stats().await {
         let parsed = ValidationStats::parse(&r.status_text);
         let rate = validation_stats
@@ -1808,12 +1605,8 @@ async fn poll_all(
     if let Ok(r) = client.security_schema_list().await {
         schema_rules.set(SchemaRuleInfo::parse_list(&r.status_text));
     }
-    // Identity status — works even when router uses an ephemeral key
-    // (no PIB). Also functions as the probe for ndn-rs's security/*
-    // mgmt extensions: a 2xx response ⇒ the forwarder speaks them;
-    // a 404 NOT_FOUND ⇒ a cross-impl forwarder (NFD / YaNFD) that
-    // doesn't. The chip + gate degrade to the `Unsupported` posture
-    // when this signal is `Some(false)` (see `security_state.rs`).
+    // Also probes ndn-rs's security/* mgmt extensions: 2xx ⇒ supported,
+    // 404 ⇒ cross-impl forwarder (NFD / YaNFD).
     if let Ok(r) = client.security_identity_status().await {
         if r.is_ok() {
             let (name, ephemeral, pib) = parse_identity_status(&r.status_text);
@@ -1825,28 +1618,22 @@ async fn poll_all(
             security_surface_supported.set(Some(false));
         }
     }
-    // Discovery / routing status — best-effort (older routers won't have these).
     if let Ok(r) = client.discovery_status().await {
         discovery_status.set(DiscoveryStatus::parse(&r.status_text));
     }
     if let Ok(r) = client.routing_dvr_status().await {
         dvr_status.set(DvrStatus::parse(&r.status_text));
     }
-    // For external routers (not managed by dashboard), poll the ring buffer.
-    // Extract signal values as plain integers before any await — guards must not
-    // be held across await points or when writing to the same signal.
+    // Guards must not be held across await — extract signal values first.
     let is_running = *ROUTER_RUNNING.read();
     let last_seq = *LAST_LOG_SEQ.read();
     if !is_running && let Ok(r) = client.log_get_recent(last_seq).await {
         let text = r.status_text.trim().to_string();
         let mut lines = text.lines();
-        // First line is the max_seq sent by the router.
         if let Some(seq_str) = lines.next()
             && let Ok(max_seq) = seq_str.parse::<u64>()
             && max_seq > last_seq
         {
-            // Write LAST_LOG_SEQ before acquiring ROUTER_LOG to avoid
-            // any borrow ordering issues.
             *LAST_LOG_SEQ.write() = max_seq;
             {
                 let mut log = ROUTER_LOG.write();
@@ -1862,26 +1649,22 @@ async fn poll_all(
             }
         }
     }
-    // Apply any filter queued by pop-out windows or LogPane components.
-    // The write guard must be dropped (by binding to a local) before the await —
-    // collapsing into `if let ... && .await.is_ok()` would hold the guard across await.
+    // Write guard must drop before the await — collapsing into `if let ... && .await`
+    // would hold it across the await.
     let pending_filter = PENDING_LOG_FILTER.write().take();
     if let Some(filter) = pending_filter {
-        // Intentionally nested: the outer if drops the write guard before the inner await.
         #[allow(clippy::collapsible_if)]
         if client.log_set_filter(&filter).await.is_ok() {
             *LOG_FILTER.write() = filter;
         }
     }
-    // Sync the displayed filter badge with what the router is actually running.
     if let Ok(r) = client.log_get_filter().await {
         let fetched = r.status_text.trim().to_string();
-        let current = LOG_FILTER.read().clone(); // clone to drop guard before write
+        let current = LOG_FILTER.read().clone();
         if current != fetched {
             *LOG_FILTER.write() = fetched;
         }
     }
-    // CS hit rate sparkline history.
     if let Some(ref info) = *cs.read() {
         let rate = info.hit_rate_pct();
         let mut h = cs_hit_history.write();
@@ -1892,8 +1675,6 @@ async fn poll_all(
     }
     Ok(())
 }
-
-// ── Command dispatch ──────────────────────────────────────────────────────────
 
 /// Reconstruct a [`DashCmd`] from a recorded [`SessionEntry`] for replay.
 fn session_entry_to_cmd(entry: &SessionEntry) -> Option<DashCmd> {
@@ -2042,7 +1823,6 @@ async fn run_cmd(
     validation_history: Signal<VecDeque<(u64, u64)>>,
     mut trust_validation: Signal<Option<(String, TrustValidationResult)>>,
 ) {
-    // Session recording: log before dispatch.
     if *recording.read()
         && let Some(entry) = cmd_to_session_entry(&cmd)
     {
@@ -2163,8 +1943,7 @@ async fn run_cmd(
             tracing::info!("ReplaySession: replaying {} commands", entries.len());
             for entry in &entries {
                 if let Some(replay_cmd) = session_entry_to_cmd(entry) {
-                    // Re-enter run_cmd for each recorded command.
-                    // Skip recording the replayed commands to avoid infinite loops.
+                    // Skip recording replayed commands to avoid infinite loops.
                     let was_recording = *recording.read();
                     recording.set(false);
                     Box::pin(run_cmd(
@@ -2298,10 +2077,8 @@ async fn run_cmd(
             Err(e) => Err(e.to_string()),
         },
         DashCmd::SchemaRuleRemove(index) => {
-            // Capture the rule text before the remove call lands so
-            // the journal entry has a meaningful subject. If the index
-            // is out of range we still attempt the remove (the server
-            // will surface the error) and journal with "<unknown>".
+            // Capture the rule text before the remove so the journal entry has a
+            // meaningful subject; out-of-range indices journal with "<unknown>".
             let subject = schema_rules
                 .peek()
                 .iter()
@@ -2336,10 +2113,7 @@ async fn run_cmd(
             Err(e) => Err(e.to_string()),
         },
         DashCmd::SecurityValidateTrace(target) => {
-            // §4.2 — fire `security/validate` and stash the result
-            // for the sidesheet to render. We don't toast here
-            // because the sidesheet IS the UX; toasting would just
-            // be noise next to the rendered panel.
+            // Result lands in the sidesheet; no toast (the sidesheet IS the UX).
             match target.parse::<ndn_packet::Name>() {
                 Ok(n) => match client.security_validate(&n).await {
                     Ok(resp) if resp.is_ok() => {
@@ -2365,14 +2139,8 @@ async fn run_cmd(
             fingerprint_hex,
             cert_wire_hex,
         } => {
-            // §11.4 TOFU promote. Two paths:
-            //   1. cert_wire_hex empty → journal intent only (legacy
-            //      pre-Phase-B-B path; preserved for the modal that
-            //      hasn't been extended with a cert-wire input yet).
-            //   2. cert_wire_hex present → fire `security/anchor-add`;
-            //      on 2xx journal the AnchorAdd entry. On 4xx/5xx
-            //      surface the error but DON'T journal — the anchor
-            //      wasn't actually installed.
+            // Empty cert_wire_hex journals intent only; otherwise fires anchor-add
+            // and journals on 2xx only (the anchor must actually be installed).
             let parsed_name = match name.parse::<ndn_packet::Name>() {
                 Ok(n) => n,
                 Err(e) => {
@@ -2381,7 +2149,6 @@ async fn run_cmd(
             };
             let wire_subject = format!("anchor={name} fingerprint={fingerprint_hex}");
             if cert_wire_hex.trim().is_empty() {
-                // Intent-only path.
                 append_schema_journal(
                     SchemaJournalKind::AnchorAdd,
                     format!("{wire_subject} mode=intent-only"),
@@ -2430,11 +2197,8 @@ async fn run_cmd(
             let body = policy.to_json();
             match client.security_policy_set(&body).await {
                 Ok(resp) if resp.is_ok() => {
-                    // §11.10 audit bridge: hash the submitted JSON body
-                    // and append the policy-set event to the local
-                    // AuditLogChain. The chain commits to the operator's
-                    // policy edit history independent of the forwarder's
-                    // own (un-chained) policy state.
+                    // Audit bridge: hash the submitted JSON body and append a
+                    // policy-set event to the local AuditLogChain.
                     let initiator =
                         active_identity_name_for_audit(&identity_name, &identity_is_ephemeral);
                     let ts_ns = unix_ns_now();
@@ -2445,9 +2209,6 @@ async fn run_cmd(
                     let entry =
                         crate::security_chains::policy_set_audit_entry(ts_ns, &initiator, &digest);
                     crate::security_chains::append_audit_entry(entry);
-                    // Force a re-poll of mgmt_access_policy on the next
-                    // tick by re-reading via poll_all; mgmt_access_policy
-                    // itself is set in poll_all below.
                     let _ = mgmt_access_policy;
                     Ok(())
                 }
@@ -2507,12 +2268,10 @@ async fn run_cmd(
     }
 }
 
-/// Resolve the initiator name the §11.10 audit bridge attaches to
-/// the AuditLogEntry. Uses the live `identity_name` when persistent,
-/// or a `/local/ndn-dashboard/ephemeral-<ephemeralName>` form when
-/// the forwarder is signing as an ephemeral key — so the audit log
-/// still records *who clicked* without conflating with a real
-/// persistent identity.
+/// Initiator name attached to audit entries. Returns the live identity name
+/// when persistent, or `/local/ndn-dashboard/ephemeral-<name>` when ephemeral
+/// (so the audit log records who clicked without conflating with a real
+/// persistent identity).
 fn active_identity_name_for_audit(
     identity_name: &Signal<String>,
     identity_is_ephemeral: &Signal<bool>,
@@ -2528,9 +2287,7 @@ fn active_identity_name_for_audit(
     }
 }
 
-/// Unix-epoch nanoseconds — NDN's TIMESTAMP convention used by
-/// `AuditLogEntry.ts_unix_ns`. Falls back to zero if the system clock
-/// is before the epoch (effectively impossible on supported targets).
+/// Unix-epoch nanoseconds; falls back to zero on clock-before-epoch.
 fn unix_ns_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2538,9 +2295,8 @@ fn unix_ns_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Emit a §2.4 schema-journal entry for the supplied event. Pulls
-/// the active initiator name from the same helper the §11.10 audit
-/// bridge uses so the two chains agree on "who did this".
+/// Pulls the initiator name from the same helper the audit bridge uses so the
+/// two chains agree on "who did this".
 fn append_schema_journal(
     kind: crate::security_chains::SchemaJournalKind,
     subject_name: String,

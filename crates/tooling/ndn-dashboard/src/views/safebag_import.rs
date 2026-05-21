@@ -18,7 +18,6 @@ use crate::views::engine_pill::{FdeDetection, probe_fde};
 use dioxus::prelude::*;
 use ndn_safebag::SafeBag;
 
-// ── Modal state ──────────────────────────────────────────────────────────────
 
 /// State of the §5.1 SafeBag import modal — held in a global signal
 /// so the layout-root drag-drop handler can push the dropped wire
@@ -81,7 +80,6 @@ pub fn open_with_wire(filename: String, wire: Vec<u8>) {
     }
 }
 
-// ── Pure parsing/preview ─────────────────────────────────────────────────────
 
 /// Parse a SafeBag wire and extract the cert's name without
 /// touching the encrypted key. Returns `Err` when the outer SafeBag
@@ -127,7 +125,6 @@ pub fn verify_passphrase(wire: &[u8], passphrase: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-// ── Trust check ──────────────────────────────────────────────────────────────
 
 /// Outcome of the §5.1 pre-import trust check. Each row points at the
 /// specific failure with a remediation gesture; an import only
@@ -278,7 +275,6 @@ fn data_pattern_matches(pattern: &str, name: &str) -> bool {
     true
 }
 
-// ── File picker fallback ─────────────────────────────────────────────────────
 
 /// Keyboard-driven fallback for the layout-root drag-drop. Renders a
 /// small "Import SafeBag…" button in the Security view header; on
@@ -318,7 +314,6 @@ pub fn SafeBagImportPicker() -> Element {
     }
 }
 
-// ── Modal component ──────────────────────────────────────────────────────────
 
 #[component]
 pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
@@ -536,7 +531,6 @@ fn TrustRow(label: &'static str, row: TrustCheckRow) -> Element {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

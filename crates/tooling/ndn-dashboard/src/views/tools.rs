@@ -11,7 +11,6 @@ use crate::tool_runner::{
     ToolCmd, ToolParams, ToolTab, fmt_bps, fmt_bytes_short, next_tool_instance_id,
 };
 
-// ─── Root component ──────────────────────────────────────────────────────────
 // All navigation + panel-ID state lives in GlobalSignals (tool_runner.rs) so
 // it persists across tab switches without losing running tool state.
 
@@ -24,7 +23,6 @@ pub fn Tools() -> Element {
                 "Diagnostic and measurement tools. Multiple instances can run simultaneously."
             }
 
-            // ── Tab bar ────────────────────────────────────────────────────────
             div { style: "display:flex;align-items:center;gap:0;margin-bottom:20px;border-bottom:1px solid var(--border);",
                 for (tab, label) in [
                     (ToolTab::Ping,  "Ping"),
@@ -50,7 +48,6 @@ pub fn Tools() -> Element {
                 }
             }
 
-            // ── Tab content ────────────────────────────────────────────────────
             match *TOOLS_ACTIVE_TAB.read() {
                 ToolTab::Ping  => rsx! { PingTab {} },
                 ToolTab::Iperf => rsx! { IperfTab {} },
@@ -58,13 +55,11 @@ pub fn Tools() -> Element {
                 ToolTab::Put   => rsx! { PutTab {} },
             }
 
-            // ── Shared results table (always visible) ──────────────────────────
             ResultsTable {}
         }
     }
 }
 
-// ─── Ping tab ────────────────────────────────────────────────────────────────
 
 #[component]
 fn PingTab() -> Element {
@@ -199,7 +194,6 @@ fn PingCard(panel_id: u32) -> Element {
     }
 }
 
-// ─── Iperf tab ────────────────────────────────────────────────────────────────
 
 #[component]
 fn IperfTab() -> Element {
@@ -468,7 +462,6 @@ fn IperfCard(panel_id: u32) -> Element {
     }
 }
 
-// ─── Peek tab ────────────────────────────────────────────────────────────────
 
 #[component]
 fn PeekTab() -> Element {
@@ -587,7 +580,6 @@ fn PeekCard(panel_id: u32) -> Element {
     }
 }
 
-// ─── Put tab ─────────────────────────────────────────────────────────────────
 
 #[component]
 fn PutTab() -> Element {
@@ -762,7 +754,6 @@ fn PutCard(panel_id: u32) -> Element {
     }
 }
 
-// ─── Results table ────────────────────────────────────────────────────────────
 
 #[component]
 fn ResultsTable() -> Element {
@@ -886,7 +877,6 @@ fn ResultsTable() -> Element {
     }
 }
 
-// ─── Result row ───────────────────────────────────────────────────────────────
 
 #[component]
 #[allow(clippy::too_many_arguments)]
@@ -1109,7 +1099,6 @@ fn ResultRow(
     }
 }
 
-// ─── JSON / CSV helpers ───────────────────────────────────────────────────────
 
 fn result_to_json(r: &crate::tool_runner::ToolResultEntry) -> serde_json::Value {
     serde_json::json!({

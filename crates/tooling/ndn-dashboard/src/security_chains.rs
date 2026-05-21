@@ -1,25 +1,9 @@
 //! `AuditLogChain` + `SchemaJournalChain` — typed instantiations of
-//! [`crate::signed_data_chain::SignedDataChainStore`] for the
-//! dashboard's two Phase-A chains (§4.6 audit log + §2.4 schema
-//! journal).
-//!
-//! Wire shape per the security-design kickoff §2/§4: each entry is a
-//! signed NDN Data packet at `/<operator>/<chain-root>/seq=N`; Content
-//! is NDN-TLV with tag 0 = `schema_version`, tag 1 = reserved
-//! `authored_under` (empty in v1), tag 2 = `prev_entry_hash`, tags 3+
-//! type-defined. Tag IDs below are wire identifiers — once shipped,
-//! never reused.
-//!
-//! ## §11.10 audit bridge
-//!
-//! Mgmt-access posture is forwarder-internal config, not a substrate
-//! chain. Every successful `policy-set` mutation appends an
-//! [`AuditLogEntry`] with `verb = "security/policy-set"` and the new
-//! posture's content_hash into the dashboard's local `AuditLogChain`,
-//! so the policy edit history is reconstructable from the audit chain
-//! even though the policy itself isn't chained.
+//! [`crate::signed_data_chain::SignedDataChainStore`] for the audit log and
+//! schema journal. Tag IDs below are wire identifiers; once shipped, never
+//! reused.
 
-#![allow(dead_code)] // typed instantiations land ahead of UI wiring
+#![allow(dead_code)]
 
 use bytes::Bytes;
 use ndn_packet::{Name, SignatureType};
@@ -29,20 +13,15 @@ use crate::signed_data_chain::{
     ChainEntry, ChainError, DataSigner, MemoryStore, SignedDataChainStore,
 };
 
-// ── AuditLogEntry — §4.6 ────────────────────────────────────────────
-
-/// One row of the security audit log. Tag IDs are wire identifiers.
+/// One row of the security audit log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditLogEntry {
-    /// Unix-epoch nanoseconds (NDN's TIMESTAMP convention) — when the
-    /// dashboard observed the event.
+    /// Unix-epoch nanoseconds — when the dashboard observed the event.
     pub ts_unix_ns: u64,
-    /// Outcome — one of "accepted" / "rejected" / "info" / "warning".
     pub outcome: AuditOutcome,
-    /// Verb-ish subject identifier — e.g. `"security/policy-set"`,
-    /// `"rib/register"`, `"security/anchor-add"`.
+    /// Verb-ish subject identifier (e.g. `"security/policy-set"`).
     pub subject: String,
-    /// Free-form detail line, ≤ 512 bytes. Plain UTF-8.
+    /// Free-form detail line, ≤ 512 bytes UTF-8.
     pub detail: String,
 }
 
@@ -74,8 +53,6 @@ impl AuditOutcome {
     }
 }
 
-/// Type-defined tag IDs for `AuditLogEntry`. Starts at
-/// [`tag::PAYLOAD_START`].
 pub mod audit_tag {
     pub const TS_UNIX_NS: u64 = 3;
     pub const OUTCOME: u64 = 4;
@@ -133,29 +110,22 @@ impl ChainEntry for AuditLogEntry {
     }
 }
 
-/// `AuditLogChain` — the §4.6 chain typed over [`AuditLogEntry`].
 pub type AuditLogChain<B> = SignedDataChainStore<AuditLogEntry, B>;
 
-/// Convenience constructor for the in-memory variant (used by tests
-/// and as a fallback before backends initialise).
 pub fn open_audit_chain_in_memory(
     chain_root: ndn_packet::Name,
 ) -> Result<AuditLogChain<MemoryStore>, ChainError> {
     SignedDataChainStore::open(chain_root, MemoryStore::new())
 }
 
-// ── SchemaJournalEntry — §2.4 ────────────────────────────────────────
-
-/// One row of the schema-journal chain. Records anchor / schema-rule
-/// adds + removes with the responsible signed identity.
+/// Anchor / schema-rule adds + removes with the responsible signed identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaJournalEntry {
     pub ts_unix_ns: u64,
     pub kind: SchemaJournalKind,
-    /// The anchor or rule name affected.
+    /// Anchor or rule name affected.
     pub subject_name: String,
-    /// Operator identity name that initiated the change (the verb
-    /// signer; mirrors the §3.1 chip's active identity).
+    /// Operator identity that initiated the change.
     pub initiator_name: String,
 }
 
@@ -252,29 +222,17 @@ pub fn open_schema_journal_in_memory(
     SignedDataChainStore::open(chain_root, MemoryStore::new())
 }
 
-// ── DashboardSigner ─────────────────────────────────────────────────
-//
-// Process-local Ed25519 signer used to sign every dashboard-authored
-// chain entry. v1 limitation: the key is freshly generated per process
-// — chain entries from prior processes remain on disk but won't
-// re-verify against this process's key. Persisting the signer
-// (matched to the dashboard's "active identity" per §8) is a v2
-// follow-up tracked alongside the §4.4 CA-promotion ceremony. The
-// chain still **records** the policy edit history end-to-end, which
-// is what §11.10's audit bridge needs from v1.
-
+/// Process-local Ed25519 signer for dashboard-authored chain entries. The key
+/// is freshly generated per process; entries from prior processes remain on
+/// disk but won't re-verify against this process's key.
 pub struct DashboardSigner {
     key_locator: Name,
     signing: ed25519_dalek::SigningKey,
 }
 
 impl DashboardSigner {
-    /// Construct a fresh ephemeral signer. `key_locator` is the NDN
-    /// name the dashboard uses to identify the audit author — set to
-    /// the dashboard process's notion of itself (the §3.1 active
-    /// identity's name, or a default like
-    /// `/local/ndn-dashboard/KEY/ephemeral` when no PIB identity is
-    /// loaded yet).
+    /// `key_locator` identifies the audit author (e.g. the active identity name
+    /// or `/local/ndn-dashboard/KEY/ephemeral`).
     pub fn new_ephemeral(key_locator: Name) -> Self {
         let mut seed = [0u8; 32];
         let _ = getrandom::getrandom(&mut seed);
@@ -300,15 +258,8 @@ impl DataSigner for DashboardSigner {
     }
 }
 
-// ── §11.10 audit-bridge helper ──────────────────────────────────────
-
-/// Build the `AuditLogEntry` that records a successful `policy-set`
-/// mutation. The dashboard appends this to its `AuditLogChain` when
-/// `/localhost/nfd/security/policy-set` returns 200. `policy_content_hash`
-/// is the SHA-256 of the canonical (TLV-encoded) `MgmtAccessPolicy`
-/// the operator submitted; the bridge lets readers reconstruct the
-/// full policy edit history from the audit chain even though the
-/// policy itself isn't chained.
+/// Records a successful `policy-set` mutation. `policy_content_hash` is the
+/// SHA-256 of the canonical TLV-encoded policy the operator submitted.
 pub fn policy_set_audit_entry(
     ts_unix_ns: u64,
     initiator_name: &str,
@@ -325,20 +276,6 @@ pub fn policy_set_audit_entry(
         detail: format!("initiator={initiator_name} policy_content_hash={hex}"),
     }
 }
-
-// ── Process-global audit chain (desktop) ─────────────────────────────
-//
-// The dashboard owns one append-only [`AuditLogChain`] per process,
-// reachable from any DashCmd handler that produces an audit event (in
-// Phase B step 1 that's just the §11.10 audit bridge on `policy-set`
-// success; later checkpoints add `anchor-add`, `schema-rule-*`, etc).
-//
-// Per §11.1 the desktop backend writes Data wires to
-// `$XDG_CONFIG_HOME/ndn-dashboard/<forwarder-id>/audit/<seq>.data`.
-// The forwarder id is the dashboard's [`ForwarderProfile::machine_name`]
-// so switching between `ndn-fwd`, `nfd`, and `yanfd` keeps separate
-// chains. Web (wasm32) gets a [`MemoryStore`] until Phase B step 5
-// wires `IndexedDbStore`.
 
 #[cfg(feature = "desktop")]
 mod audit_globals {
@@ -357,11 +294,7 @@ mod audit_globals {
 
     static AUDIT_STATE: OnceLock<AuditState> = OnceLock::new();
 
-    /// Initialise the process's audit chain. Idempotent — subsequent
-    /// calls return the existing handle (chain dir + signer don't
-    /// rotate on reconnect). Logs at WARN if the chain can't be opened
-    /// and falls back to a no-op state so the rest of the dashboard
-    /// keeps working.
+    /// Idempotent; subsequent calls return the existing handle.
     pub fn init(dir: PathBuf, key_locator: Name) {
         let _ = AUDIT_STATE.get_or_init(|| {
             let chain_root = Name::root()
@@ -378,9 +311,6 @@ mod audit_globals {
                         error = %e,
                         "failed to open audit chain — falling back to empty in-memory chain"
                     );
-                    // Best-effort: open a memory chain so subsequent
-                    // append calls don't blow up. The on-disk dir
-                    // simply stays empty.
                     let mem_root = Name::root()
                         .append(b"local")
                         .append(b"ndn-dashboard")
@@ -396,8 +326,7 @@ mod audit_globals {
         });
     }
 
-    /// Append one [`AuditLogEntry`]. No-op (logs at WARN) if `init`
-    /// hasn't been called yet or the append fails.
+    /// No-op (logs at WARN) if `init` hasn't been called yet or the append fails.
     pub fn append(entry: AuditLogEntry) {
         let Some(state) = AUDIT_STATE.get() else {
             tracing::warn!(
@@ -427,8 +356,7 @@ mod audit_globals {
         }
     }
 
-    /// Snapshot the chain's decoded entries (Phase B step 5 surfaces
-    /// these as the `AuditLogStream` rows). Returns oldest first.
+    /// Returns oldest first.
     pub fn snapshot() -> Vec<AuditLogEntry> {
         let Some(state) = AUDIT_STATE.get() else {
             return Vec::new();
@@ -458,24 +386,13 @@ mod audit_globals {
 
 #[cfg(feature = "desktop")]
 pub use audit_globals::{append as append_audit_entry, init as init_audit_chain};
-// `snapshot` reads the chain back out for Phase B step 5's
-// AuditLogStream; re-export ahead of the consumer's landing.
 #[cfg(feature = "desktop")]
 #[allow(unused_imports)]
 pub use audit_globals::snapshot as audit_chain_snapshot;
 
-// Web (wasm32) audit chain — uses `IndexedDbStore` instead of
-// `FileStore`. `IdbDatabase` is `!Send` so we can't use `OnceLock` +
-// `Mutex` like the desktop globals; `thread_local!` + `RefCell` is
-// the wasm32-single-threaded equivalent.
-//
-// `init_audit_chain` keeps a sync signature (same as desktop) so
-// callers don't have to cfg-gate; on wasm32 it spawns the async
-// IDB open into the dioxus runtime via `wasm_bindgen_futures::
-// spawn_local`. The chain stays `None` until the open resolves —
-// `append_audit_entry` issued before then is logged and dropped
-// (logged at WARN so the gap is visible).
-
+/// Wasm32 audit chain — `IdbDatabase` is `!Send`, so we use `thread_local!` +
+/// `RefCell`. `init_audit_chain` stays sync but spawns the async IDB open;
+/// appends before the open resolves are logged and dropped.
 #[cfg(all(target_arch = "wasm32", not(feature = "desktop")))]
 mod audit_globals_wasm {
     use super::*;
@@ -493,8 +410,6 @@ mod audit_globals_wasm {
         static STATE: RefCell<Option<WasmAuditState>> = const { RefCell::new(None) };
     }
 
-    /// Install the chain once it's been async-opened against IDB.
-    /// Called by `init_audit_chain`'s spawn_local closure.
     fn install(state: WasmAuditState) {
         STATE.with(|s| {
             if s.borrow().is_some() {
@@ -509,9 +424,6 @@ mod audit_globals_wasm {
     }
 
     pub fn init(_dir: std::path::PathBuf, key_locator: Name) {
-        // _dir is the desktop FileStore path; ignored on wasm32 where
-        // we key by IDB origin scope (the dashboard URL's origin is
-        // the natural per-deployment partition).
         wasm_bindgen_futures::spawn_local(async move {
             let chain_root = Name::root()
                 .append(b"local")
@@ -585,10 +497,6 @@ pub use audit_globals_wasm::{
     append as append_audit_entry, init as init_audit_chain, snapshot as audit_chain_snapshot,
 };
 
-// Non-wasm32 non-desktop targets (e.g. native unit-test feature
-// combos) keep stubs so the crate still compiles. In practice this
-// branch is unreachable for production builds — desktop is the
-// default feature and web is wasm32-only.
 #[cfg(all(not(target_arch = "wasm32"), not(feature = "desktop")))]
 pub fn init_audit_chain(_dir: std::path::PathBuf, _key_locator: Name) {}
 
@@ -599,15 +507,6 @@ pub fn append_audit_entry(_entry: AuditLogEntry) {}
 pub fn audit_chain_snapshot() -> Vec<AuditLogEntry> {
     Vec::new()
 }
-
-// ── Process-global schema journal (desktop) ─────────────────────────
-//
-// Parallel to the audit-log chain above. Records §2.4 schema-journal
-// events: anchor / schema-rule adds + removes, each signed by the
-// dashboard's `DashboardSigner` (shared with the audit chain — same
-// principal, same ephemeral-per-process v1 caveat). Chain lives under
-// `<XDG>/ndn-dashboard/<forwarder-id>/schema/` (sibling of the audit
-// chain so a backup tool can grab both at once).
 
 #[cfg(feature = "desktop")]
 mod schema_globals {
@@ -626,8 +525,7 @@ mod schema_globals {
 
     static SCHEMA_STATE: OnceLock<SchemaState> = OnceLock::new();
 
-    /// Idempotent. Logs and falls back to an empty chain if the
-    /// backend can't open the dir.
+    /// Idempotent; falls back to an empty chain if the backend can't open the dir.
     pub fn init(dir: PathBuf, key_locator: Name) {
         let _ = SCHEMA_STATE.get_or_init(|| {
             let chain_root = Name::root()
@@ -709,9 +607,6 @@ mod schema_globals {
 pub use schema_globals::snapshot as schema_journal_snapshot;
 #[cfg(feature = "desktop")]
 pub use schema_globals::{append as append_schema_entry, init as init_schema_journal};
-
-// Web (wasm32) schema-journal — mirror of `audit_globals_wasm`
-// targeting the `"schema"` object store in the same DB.
 
 #[cfg(all(target_arch = "wasm32", not(feature = "desktop")))]
 mod schema_globals_wasm {
@@ -824,8 +719,6 @@ pub fn schema_journal_snapshot() -> Vec<SchemaJournalEntry> {
     Vec::new()
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
-
 fn require_tag(actual: u64, expected: u64, field: &str) -> Result<(), ChainError> {
     if actual != expected {
         Err(ChainError::Decode(format!(
@@ -871,8 +764,6 @@ fn decode_nni(bytes: &[u8]) -> Result<u64, String> {
         n => Err(format!("NonNegativeInteger must be 1/2/4/8 bytes, got {n}")),
     }
 }
-
-// ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1053,7 +944,6 @@ mod tests {
         assert_eq!(decoded, entry);
     }
 
-    // ── Process-global helpers (desktop) ─────────────────────────────
     //
     // Pin the `init_audit_chain` → `append_audit_entry` →
     // `audit_chain_snapshot` round-trip + the parallel schema_journal

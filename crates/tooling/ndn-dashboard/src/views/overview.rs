@@ -27,7 +27,6 @@ const KNOWN_STRATEGIES: &[(&str, &str)] = &[
     ("/ndn/strategy/self-learning", "Self-Learning"),
 ];
 
-// ── Main component ────────────────────────────────────────────────────────────
 
 #[component]
 pub fn Overview() -> Element {
@@ -77,10 +76,8 @@ pub fn Overview() -> Element {
         .unwrap_or_else(|| ("0 B".to_string(), "0 B".to_string()));
 
     rsx! {
-        // ── Modals (desktop only — need ndn_config types) ─────────────────────
         { overview_modals(show_face_modal, show_route_modal) }
 
-        // ── Education card ────────────────────────────────────────────────────
         if !*edu_dismissed.read() {
             div { class: "edu-card",
                 div { style: "display:flex;gap:12px;align-items:flex-start;",
@@ -111,7 +108,6 @@ pub fn Overview() -> Element {
             }
         }
 
-        // ── Stat header cards (clickable toggles) ─────────────────────────────
         div { class: "overview-cards",
 
             // Faces card
@@ -183,7 +179,6 @@ pub fn Overview() -> Element {
             }
         }
 
-        // ── Expanded: Faces ───────────────────────────────────────────────────
         if *faces_open.read() {
             div { class: "section",
                 div { class: "section-hdr",
@@ -236,7 +231,6 @@ pub fn Overview() -> Element {
             }
         }
 
-        // ── Expanded: Routes ──────────────────────────────────────────────────
         if *routes_open.read() {
             div { class: "section",
                 div { class: "section-hdr",
@@ -325,7 +319,6 @@ pub fn Overview() -> Element {
             }
         }
 
-        // ── Expanded: Content Store ───────────────────────────────────────────
         if *cs_open.read() {
             div { class: "section",
                 div { class: "section-hdr",
@@ -410,7 +403,6 @@ pub fn Overview() -> Element {
             }
         }
 
-        // ── Expanded: Traffic ─────────────────────────────────────────────────
         if *traffic_open.read() {
             div { class: "section",
                 div { class: "section-hdr",

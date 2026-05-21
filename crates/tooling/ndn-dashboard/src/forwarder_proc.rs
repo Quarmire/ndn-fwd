@@ -13,7 +13,6 @@ use tokio::process::{Child, Command};
 
 use crate::types::LogEntry;
 
-// ── RouterProc ────────────────────────────────────────────────────────────────
 
 pub struct RouterProc {
     child: Child,
@@ -89,7 +88,6 @@ impl RouterProc {
     }
 }
 
-// ── Temp config writer ────────────────────────────────────────────────────────
 
 /// Write `toml` to a temporary file and return its path.
 /// Used by StartRouterModal "Start with Config" to pass the current config
@@ -100,7 +98,6 @@ pub fn write_temp_config(toml: &str) -> std::io::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-// ── Binary discovery ──────────────────────────────────────────────────────────
 
 use crate::forwarder_profile::ForwarderProfile;
 

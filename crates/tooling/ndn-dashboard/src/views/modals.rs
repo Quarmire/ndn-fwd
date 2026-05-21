@@ -7,7 +7,6 @@ use ndn_config::{
 
 use crate::app::{AppCtx, CONFIG_PRESETS, DashCmd, RouterCmd, ToastLevel, push_toast};
 
-// ── BuildConfig helpers ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum BuildFaceKind {
@@ -184,7 +183,6 @@ fn assemble_config(
     cfg.to_toml_string().unwrap_or_default()
 }
 
-// ── StartRouterModal ──────────────────────────────────────────────────────────
 
 #[component]
 pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>) -> Element {
@@ -196,7 +194,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
     let toml_preview = config_toml.read().clone();
     let has_config = !toml_preview.is_empty();
 
-    // ── Build Config state ────────────────────────────────────────────────────
     let mut bc_socket = use_signal(|| "/run/nfd/nfd.sock".to_string());
     let mut bc_cs_variant = use_signal(|| "lru".to_string());
     let mut bc_cs_cap = use_signal(|| 64u32);
@@ -308,7 +305,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
                 }
 
                 match *active_tab.read() {
-                    // ── Build Config tab ──────────────────────────────────
                     1 => rsx! {
                         div {
                             // Basic Settings
@@ -978,7 +974,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
                         }
                     },
 
-                    // ── Load Config File tab ──────────────────────────────
                     2 => rsx! {
                         div {
                             div { style: "font-size:13px;color:var(--text-muted);margin-bottom:12px;",
@@ -1016,7 +1011,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
                         }
                     },
 
-                    // ── Saved Presets tab ─────────────────────────────────
                     3 => rsx! {
                         div {
                             {
@@ -1078,7 +1072,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
                         }
                     },
 
-                    // ── Current Config tab ────────────────────────────────
                     4 if has_config => rsx! {
                         div {
                             div { style: "font-size:13px;color:var(--text-muted);margin-bottom:8px;",
@@ -1143,7 +1136,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
                         }
                     },
 
-                    // ── Quick Start tab (default) ─────────────────────────
                     _ => rsx! {
                         div {
                             div { style: "font-size:13px;color:var(--text-muted);margin-bottom:16px;line-height:1.6;",
@@ -1181,7 +1173,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
     }
 }
 
-// ── FaceCreateModal ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FaceKind {
@@ -1454,7 +1445,6 @@ pub fn FaceCreateModal(on_close: EventHandler<()>) -> Element {
     }
 }
 
-// ── RouteAddModal ─────────────────────────────────────────────────────────────
 
 #[component]
 pub fn RouteAddModal(on_close: EventHandler<()>) -> Element {

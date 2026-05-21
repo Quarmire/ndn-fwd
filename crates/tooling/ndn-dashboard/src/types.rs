@@ -1,9 +1,4 @@
-// Typed data models and text-response parsers for NDN management protocol.
-//
-// Phase 2 note: FaceInfo, FibEntry, and StrategyEntry now have `From` impls
-// that convert from the NFD TLV wire types in `ndn_config` (see end of file).
-
-// ── Log entries ──────────────────────────────────────────────────────────────
+//! Typed data models and text-response parsers for the NDN management protocol.
 
 /// Severity level of a captured router log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,7 +32,6 @@ impl LogLevel {
         }
     }
 
-    /// CSS foreground colour for this level.
     pub fn color(self) -> &'static str {
         match self {
             Self::Trace => "#8b949e",
@@ -48,7 +42,6 @@ impl LogLevel {
         }
     }
 
-    /// CSS background colour for this level.
     pub fn bg(self) -> &'static str {
         match self {
             Self::Trace => "#1c2128",
@@ -70,22 +63,18 @@ pub struct LogEntry {
     pub message: String,
 }
 
-/// Strip ANSI escape sequences from `s` (e.g. `\x1b[32m`, `\x1b[0m`).
-///
-/// Only handles the common CSI sequences (`ESC [ ... letter`) that
-/// tracing-subscriber emits.  Other forms fall through unchanged.
+/// Strip common ANSI CSI sequences (`ESC [ ... letter`) from `s`.
 fn strip_ansi(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'\x1b' && bytes.get(i + 1) == Some(&b'[') {
-            // Skip: ESC [ (params) (final-byte A-Za-z)
             i += 2;
             while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
                 i += 1;
             }
-            i += 1; // skip the final letter
+            i += 1;
         } else {
             out.push(bytes[i]);
             i += 1;
@@ -95,14 +84,9 @@ fn strip_ansi(s: &str) -> String {
 }
 
 impl LogEntry {
-    /// Parse a single compact-format tracing line.
-    ///
-    /// Format: `"TIMESTAMP  LEVEL target: message key=val key2=val2"`
-    ///
+    /// Parse a compact-format tracing line `"TIMESTAMP  LEVEL target: message ..."`.
     /// Falls back to a raw Info entry if the line cannot be parsed.
     pub fn parse_line(s: &str) -> Self {
-        // Always strip ANSI codes — the router emits plain text when piped,
-        // but strip defensively in case of terminal-mode restarts.
         let s = strip_ansi(s);
         let s = s.trim();
         Self::parse_line_inner(s)
@@ -117,14 +101,12 @@ impl LogEntry {
             message: s.to_owned(),
         };
 
-        // Split off timestamp (first space-separated token)
         let (timestamp, rest) = match s.split_once(' ') {
             Some(pair) => pair,
             None => return raw_fallback(),
         };
         let rest = rest.trim_start();
 
-        // Split off level (next space-separated token)
         let (level_str, rest) = match rest.split_once(' ') {
             Some(pair) => pair,
             None => return raw_fallback(),
@@ -135,7 +117,6 @@ impl LogEntry {
         };
         let rest = rest.trim_start();
 
-        // Skip optional ThreadId(N) token emitted when thread_ids are enabled.
         let (thread_id, rest) = if rest.starts_with("ThreadId(") {
             match rest.split_once(' ') {
                 Some((tid, r)) => (Some(tid.to_owned()), r.trim_start()),
@@ -145,7 +126,6 @@ impl LogEntry {
             (None, rest)
         };
 
-        // Split "target: message" on the first ": "
         let (target, message) = match rest.find(": ") {
             Some(i) => (&rest[..i], &rest[i + 2..]),
             None => ("", rest),
@@ -160,14 +140,8 @@ impl LogEntry {
         }
     }
 }
-// The current router returns human-readable text in ControlResponse::status_text.
-// Each parser converts that text into structured types for the UI.
-// Phase 2 note: the four list parsers below are retained for future use with
-// custom ndn-rs endpoints; the main data path now uses NFD TLV wire types.
 
-// ── Forwarder status ────────────────────────────────────────────────────────
-
-/// Parsed from `status/general` response: `"faces=5 fib=10 pit=3 cs=100"`
+/// Parsed from `status/general` response: `"faces=5 fib=10 pit=3 cs=100"`.
 #[derive(Debug, Clone, Default)]
 pub struct ForwarderStatus {
     pub n_faces: u64,
@@ -194,7 +168,6 @@ impl ForwarderStatus {
     }
 }
 
-// ── Faces ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct FaceInfo {
@@ -203,11 +176,9 @@ pub struct FaceInfo {
     pub local_uri: Option<String>,
     pub persistency: String,
     pub kind: Option<String>,
-    // NFD TLV fields (populated from FaceStatus dataset).
     pub face_scope: u64,
     pub link_type: u64,
     pub mtu: Option<u64>,
-    // Traffic counters (from FaceStatus — no separate faces/counters call needed).
     pub n_in_interests: u64,
     pub n_out_interests: u64,
     pub n_in_data: u64,
@@ -220,12 +191,6 @@ pub struct FaceInfo {
 
 impl FaceInfo {
     /// Parse from `faces/list` response text.
-    ///
-    /// Format per entry (one per line, indented):
-    /// ```text
-    /// faceid=1 remote=udp4://192.168.1.1:6363 local=udp4://0.0.0.0:0 persistency=Persistent
-    /// faceid=2 kind=App persistency=OnDemand
-    /// ```
     #[allow(dead_code)]
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut faces = Vec::new();
@@ -269,7 +234,6 @@ impl FaceInfo {
         faces
     }
 
-    /// Short label derived from the URI scheme or explicit kind field.
     pub fn kind_label(&self) -> &str {
         if let Some(k) = &self.kind {
             return k.as_str();
@@ -286,7 +250,6 @@ impl FaceInfo {
             u if u.starts_with("ether://") => "Ether",
             u if u.starts_with("shm://") => "SHM",
             u if u.starts_with("unix://") => "Unix",
-            // Internal faces: "internal://<kind>" where kind is the Display of FaceKind.
             u if u.starts_with("internal://") => {
                 let kind = &u["internal://".len()..];
                 match kind {
@@ -303,7 +266,6 @@ impl FaceInfo {
         }
     }
 
-    /// CSS class for the kind badge colour.
     pub fn kind_badge_class(&self) -> &str {
         match self.kind_label() {
             "UDP" => "badge badge-green",
@@ -321,8 +283,6 @@ impl FaceInfo {
     }
 }
 
-// ── FIB / RIB routes ────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct NextHop {
     pub face_id: u64,
@@ -337,11 +297,6 @@ pub struct FibEntry {
 
 impl FibEntry {
     /// Parse from `fib/list` response text.
-    ///
-    /// Format per entry:
-    /// ```text
-    ///   /ndn nexthops=[faceid=1 cost=10, faceid=2 cost=5]
-    /// ```
     #[allow(dead_code)]
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut entries = Vec::new();
@@ -391,8 +346,6 @@ fn parse_nexthops(text: &str) -> Vec<NextHop> {
         .collect()
 }
 
-// ── Content store ────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct CsInfo {
     pub capacity_bytes: u64,
@@ -404,9 +357,7 @@ pub struct CsInfo {
 }
 
 impl CsInfo {
-    /// Parse from `cs/info` response text.
-    ///
-    /// Format: `"capacity=67108864B entries=42 used=1234B hits=100 misses=50 variant=lru"`
+    /// Parse `"capacity=67108864B entries=42 used=1234B hits=100 misses=50 variant=lru"`.
     pub fn parse(text: &str) -> Option<Self> {
         let mut info = CsInfo {
             capacity_bytes: 0,
@@ -420,7 +371,6 @@ impl CsInfo {
         for token in text.split_whitespace() {
             if let Some((k, v)) = token.split_once('=') {
                 found = true;
-                // Strip trailing 'B' from byte values
                 let v = v.trim_end_matches('B');
                 match k {
                     "capacity" => info.capacity_bytes = v.parse().unwrap_or(0),
@@ -454,8 +404,6 @@ impl CsInfo {
     }
 }
 
-// ── Face traffic counters ─────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Default)]
 pub struct FaceCounter {
     pub face_id: u64,
@@ -468,15 +416,8 @@ pub struct FaceCounter {
 }
 
 impl FaceCounter {
-    /// Parse from `faces/counters` response text.
-    ///
-    /// Retained for compatibility with older routers that don't return counter data
-    /// in `FaceStatus`; the main path now derives counters from `face_list()`.
-    ///
-    /// Format per line:
-    /// ```text
-    ///   faceid=1 in_interests=10 in_data=5 out_interests=2 out_data=3 in_bytes=1024 out_bytes=512
-    /// ```
+    /// Parse from `faces/counters` response text. Retained for older routers; the
+    /// main path derives counters from `face_list()`.
     #[allow(dead_code)]
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut out = Vec::new();
@@ -507,8 +448,6 @@ impl FaceCounter {
     }
 }
 
-// ── Measurements ─────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct FaceRtt {
     pub face_id: u64,
@@ -524,11 +463,6 @@ pub struct MeasurementEntry {
 
 impl MeasurementEntry {
     /// Parse from `measurements/list` response text.
-    ///
-    /// Format per line:
-    /// ```text
-    ///   prefix=/ndn sat_rate=0.950 rtt=[face1=2.1ms face2=4.5ms]
-    /// ```
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut out = Vec::new();
         for line in text.lines() {
@@ -540,7 +474,6 @@ impl MeasurementEntry {
             let mut sat_rate = 0.0f32;
             let mut face_rtts = Vec::new();
 
-            // Extract rtt=[...] block first to avoid splitting on its contents
             let (main_part, rtt_part) = match line.find(" rtt=[") {
                 Some(i) => (&line[..i], &line[i + " rtt=[".len()..line.len() - 1]),
                 None => (line, ""),
@@ -556,7 +489,6 @@ impl MeasurementEntry {
                 }
             }
 
-            // Parse "face1=2.1ms face2=4.5ms"
             for token in rtt_part.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
                     let face_id: u64 = k.strip_prefix("face").unwrap_or("0").parse().unwrap_or(0);
@@ -576,7 +508,6 @@ impl MeasurementEntry {
         out
     }
 
-    /// Satisfaction rate as a CSS color class.
     pub fn sat_rate_class(&self) -> &'static str {
         if self.satisfaction_rate >= 0.9 {
             "badge badge-green"
@@ -588,8 +519,6 @@ impl MeasurementEntry {
     }
 }
 
-// ── Throughput history ────────────────────────────────────────────────────────
-
 /// One sample of aggregated traffic (summed across all faces).
 #[derive(Debug, Clone, Default)]
 pub struct ThroughputSample {
@@ -600,7 +529,6 @@ pub struct ThroughputSample {
 }
 
 impl ThroughputSample {
-    /// Compute per-second rate between two cumulative counter snapshots.
     /// `elapsed_secs` is the poll interval (typically 3.0).
     pub fn rate_from_delta(
         prev: &ThroughputSample,
@@ -618,7 +546,6 @@ impl ThroughputSample {
         }
     }
 
-    /// Sum all face counters into a single aggregate snapshot.
     pub fn from_counters(counters: &[FaceCounter]) -> ThroughputSample {
         ThroughputSample {
             in_bytes: counters.iter().map(|c| c.in_bytes).sum(),
@@ -628,7 +555,6 @@ impl ThroughputSample {
         }
     }
 
-    /// Cumulative snapshot from a single face counter (raw values, not rates).
     pub fn from_face_counter(c: &FaceCounter) -> ThroughputSample {
         ThroughputSample {
             in_bytes: c.in_bytes,
@@ -639,20 +565,17 @@ impl ThroughputSample {
     }
 }
 
-// ── Session recording ─────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
     pub kind: String,
     pub params: String,
 }
 
-// ── Neighbors ─────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct NeighborInfo {
     pub node_name: String,
-    pub state: String, // "Established", "Stale", "Probing", "Absent"
+    /// "Established", "Stale", "Probing", or "Absent".
+    pub state: String,
     pub last_seen_s: Option<f64>,
     pub rtt_us: Option<u32>,
     pub face_ids: Vec<u64>,
@@ -660,11 +583,6 @@ pub struct NeighborInfo {
 
 impl NeighborInfo {
     /// Parse from `neighbors/list` response text.
-    ///
-    /// Format per entry:
-    /// ```text
-    ///   /ndn/site/host  state=Established  last_seen=2.5s ago  rtt=1234us  faces=[1,2]
-    /// ```
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut out = Vec::new();
         for line in text.lines() {
@@ -678,7 +596,6 @@ impl NeighborInfo {
                 None => continue,
             };
 
-            // Collect remaining text, extract faces=[...] block
             let rest: Vec<&str> = tokens.collect();
             let rest_str = rest.join(" ");
 
@@ -702,7 +619,6 @@ impl NeighborInfo {
                     match k {
                         "state" => state = v.to_string(),
                         "last_seen" => {
-                            // "2.5s" — strip trailing 's'
                             last_seen_s = v.trim_end_matches('s').parse().ok();
                         }
                         "rtt" if v != "None" => {
@@ -734,8 +650,6 @@ impl NeighborInfo {
     }
 }
 
-// ── Security ───────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct SecurityKeyInfo {
     pub name: String,
@@ -744,10 +658,8 @@ pub struct SecurityKeyInfo {
 }
 
 impl SecurityKeyInfo {
-    /// Identity prefix — everything before the `/KEY/<id>` suffix.
-    /// `/lab/alice/KEY/k1` → `/lab/alice`. Returns the full key name
-    /// when no `KEY` component is found (the wire shouldn't produce
-    /// such entries, but degrade gracefully if it does).
+    /// Everything before the `/KEY/<id>` suffix (`/lab/alice/KEY/k1` → `/lab/alice`).
+    /// Returns the full name when no `KEY` component is found.
     pub fn identity_name(&self) -> &str {
         match self.name.rfind("/KEY/") {
             Some(i) => &self.name[..i],
@@ -755,8 +667,7 @@ impl SecurityKeyInfo {
         }
     }
 
-    /// Key id — the component immediately after `/KEY/`. Returns
-    /// `""` when no `KEY` component is found.
+    /// Component immediately after `/KEY/`, or `""` when absent.
     pub fn key_id(&self) -> &str {
         match self.name.rfind("/KEY/") {
             Some(i) => {
@@ -767,19 +678,13 @@ impl SecurityKeyInfo {
         }
     }
 
-    /// Cert `valid_from` in Unix-epoch seconds. Always `None` in v1
-    /// — `security/identity-list` doesn't surface the issued-at
-    /// timestamp yet. `ValidityTimeline` renders only the endpoint
-    /// marker when this is `None`; wiring real `valid_from` is a
-    /// small wire-format extension tracked alongside Phase B step 2's
-    /// IdentityInspector landing.
+    /// Always `None` — `security/identity-list` doesn't surface the issued-at
+    /// timestamp yet.
     pub fn valid_from_unix_s(&self) -> Option<u64> {
         None
     }
 
-    /// Cert `valid_until` in Unix-epoch seconds, or `None` for
-    /// permanent / missing certs. Used by the §3.1 IdentityChip to
-    /// detect Expired / ExpiringSoon.
+    /// `None` for permanent or missing certs.
     pub fn valid_until_unix_s(&self) -> Option<u64> {
         if self.valid_until == "never" || self.valid_until == "-" {
             return None;
@@ -789,15 +694,11 @@ impl SecurityKeyInfo {
         Some(ns / 1_000_000_000)
     }
 
-    /// Days remaining until certificate expiry.
-    ///
-    /// Returns `None` for permanent ("never") or missing ("-") certs.
-    /// Returns a negative value if the cert has already expired.
+    /// Negative when expired; `None` for permanent or missing certs.
     pub fn days_to_expiry(&self) -> Option<i64> {
         if self.valid_until == "never" || self.valid_until == "-" {
             return None;
         }
-        // Router format: "{N}ns" — nanoseconds since Unix epoch.
         if let Some(ns_str) = self.valid_until.strip_suffix("ns")
             && let Ok(ns) = ns_str.parse::<u64>()
         {
@@ -811,7 +712,6 @@ impl SecurityKeyInfo {
         None
     }
 
-    /// CSS badge class and label for certificate expiry.
     pub fn expiry_badge(&self) -> (&'static str, String) {
         match self.days_to_expiry() {
             None if self.valid_until == "never" => ("badge badge-green", "permanent".to_string()),
@@ -825,11 +725,6 @@ impl SecurityKeyInfo {
     }
 
     /// Parse from `security/identity-list` response text.
-    ///
-    /// Format per entry:
-    /// ```text
-    ///   name=/ndn/test has_cert=true valid_until=never
-    /// ```
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut out = Vec::new();
         for line in text.lines() {
@@ -868,7 +763,6 @@ pub struct AnchorInfo {
 }
 
 impl AnchorInfo {
-    /// Parse from `security/anchor-list` response text.
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut out = Vec::new();
         for line in text.lines() {
@@ -883,8 +777,6 @@ impl AnchorInfo {
     }
 }
 
-// ── Forwarding strategies ────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct StrategyEntry {
     pub prefix: String,
@@ -893,11 +785,6 @@ pub struct StrategyEntry {
 
 impl StrategyEntry {
     /// Parse from `strategy-choice/list` response text.
-    ///
-    /// Format per entry:
-    /// ```text
-    ///   prefix=/ strategy=best-route
-    /// ```
     #[allow(dead_code)]
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut entries = Vec::new();
@@ -924,18 +811,14 @@ impl StrategyEntry {
         entries
     }
 
-    /// Short display name from the strategy name (strips NDN name prefix/version).
+    /// Strips NDN name prefix and version (`/ndn/strategy/best-route/v5` → `best-route`).
     pub fn short_name(&self) -> &str {
-        // e.g. "/ndn/strategy/best-route/v5" → "best-route"
-        // or "best-route" → "best-route"
         self.strategy
             .rsplit('/')
             .find(|s| !s.starts_with('v') || !s[1..].chars().all(|c| c.is_ascii_digit()))
             .unwrap_or(&self.strategy)
     }
 }
-
-// ── Discovery status ──────────────────────────────────────────────────────────
 
 /// Parsed from `discovery/status` response.
 #[derive(Debug, Clone, Default)]
@@ -979,8 +862,6 @@ impl DiscoveryStatus {
     }
 }
 
-// ── DVR routing status ────────────────────────────────────────────────────────
-
 /// Parsed from `routing/dvr-status` response.
 #[derive(Debug, Clone, Default)]
 pub struct DvrStatus {
@@ -1011,17 +892,7 @@ impl DvrStatus {
     }
 }
 
-// ── CA / NDNCERT info ────────────────────────────────────────────────────────
-
-/// Parsed from `security/ca-info` response text.
-///
-/// Format (newline-separated key=value):
-/// ```text
-/// ca_prefix=/ndn/site
-/// ca_info=Site CA
-/// max_validity_days=365
-/// challenges=token,pin
-/// ```
+/// Parsed from `security/ca-info` response text (newline-separated `key=value`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CaInfo {
     pub ca_prefix: String,
@@ -1059,8 +930,6 @@ impl CaInfo {
     }
 }
 
-// ── Trust schema rules ────────────────────────────────────────────────────────
-
 /// A single trust schema rule returned by `security/schema-list`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemaRuleInfo {
@@ -1070,19 +939,14 @@ pub struct SchemaRuleInfo {
 }
 
 impl SchemaRuleInfo {
-    /// Parse from `security/schema-list` response text.
-    ///
-    /// Format per line:
-    /// ```text
-    /// [0] /sensor/<node>/<type> => /sensor/<node>/KEY/<id>
-    /// ```
+    /// Parse from `security/schema-list` response text. Per-line format:
+    /// `[<index>] <data_pattern> => <key_pattern>`.
     pub fn parse_list(text: &str) -> Vec<Self> {
         let mut out = Vec::new();
         for line in text.lines() {
             let line = line.trim();
-            // Expected: "[<index>] <data> => <key>"
             let bracket_end = match line.strip_prefix('[').and_then(|s| s.find(']')) {
-                Some(i) => i + 1, // offset of ']' relative to start of line (after '[')
+                Some(i) => i + 1,
                 None => continue,
             };
             let rest = line[bracket_end + 1..].trim();
@@ -1099,18 +963,9 @@ impl SchemaRuleInfo {
     }
 }
 
-// ── Mgmt access policy snapshot (security/policy-get + policy-set) ──────────
-//
-// Dashboard-owned JSON-shape mirror of the forwarder's `MgmtAccessPolicy`
-// (defined in `ndn-mgmt`, gated `cfg(not(target_arch = "wasm32"))`). The
-// dashboard owns its own copy so the view layer compiles on both desktop
-// and wasm32 — `policy-get` returns JSON in `ControlResponse::status_text`
-// per `ndn-mgmt::security_policy_get`, and `policy-set` consumes the same
-// JSON shape in `ControlParameters.uri`. Field set is pinned by §4.5 of
-// the design doc and §11.10's "forwarder-internal config, not a chain"
-// resolution — keep the field names byte-identical with the server's
-// serde derive so JSON round-trips cleanly.
-
+/// Dashboard-side mirror of the forwarder's `MgmtAccessPolicy`. Field names
+/// must stay byte-identical with the server's serde derive so JSON round-trips
+/// cleanly through `policy-get` / `policy-set`.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MgmtAccessPolicySnapshot {
     pub ephemeral_allowed: bool,
@@ -1121,48 +976,27 @@ pub struct MgmtAccessPolicySnapshot {
 }
 
 impl MgmtAccessPolicySnapshot {
-    /// Parse the JSON body in a `policy-get` response (or `Err` if the
-    /// body isn't valid JSON for this shape). Server emits this via
-    /// `serde_json::to_string(&MgmtAccessPolicy)` in
-    /// `ndn-mgmt::security_policy_get`.
     pub fn from_json(body: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(body)
     }
 
-    /// Canonical JSON form submitted to `policy-set` — identical shape
-    /// the server expects and the same string the §11.10 audit bridge
-    /// hashes for `policy_content_hash`.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
 }
 
-// ── Validation stats — §7 / §4.3 LiveValidationChart feed ───────────────────
-//
-// Parsed from the `security/validation-stats` response body. Two wire
-// shapes coexist:
-//   - Phase-B-A legacy: `verified_per_sec=<u64>` + `rejected_per_sec=<u64>`
-//     (always zero — the forwarder didn't expose real counters yet).
-//   - Phase-B-B current: `verified_total=<u64>` + `rejected_total=<u64>`
-//     + `probe_unix_ns=<u64>` (monotonic counters + sample timestamp).
-//     The dashboard derives per-second rates from consecutive polls.
-//
-// Both shapes are emitted by current forwarders for forward-compat;
-// the dashboard prefers `*_total` when present and falls back to
-// the legacy fields otherwise.
-
+/// Parsed from `security/validation-stats`. Newer forwarders emit `*_total` +
+/// `probe_unix_ns` so the dashboard derives per-second rates client-side; older
+/// forwarders only emit `*_per_sec` (always zero).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ValidationStats {
     pub validator_present: bool,
     pub verified_per_sec: u64,
     pub rejected_per_sec: u64,
-    /// Monotonic verified-count since forwarder boot. `None` ⇒ the
-    /// connected forwarder is pre-Phase-B-B and doesn't expose totals.
+    /// `None` when the forwarder predates the totals wire shape.
     pub verified_total: Option<u64>,
     pub rejected_total: Option<u64>,
-    /// Sampling timestamp (Unix-epoch ns). Lets the dashboard compute
-    /// `(delta_total) / (delta_probe_secs)` for the rate. `None` if
-    /// the forwarder didn't emit the field.
+    /// Unix-epoch ns sampling timestamp.
     pub probe_unix_ns: Option<u64>,
 }
 
@@ -1185,11 +1019,9 @@ impl ValidationStats {
         out
     }
 
-    /// Compute the per-second rate of `(verified, rejected)` between
-    /// two consecutive `ValidationStats` samples. Returns `None`
-    /// when either sample lacks the totals/probe fields, or when the
-    /// time delta is zero/backward. The dashboard's
-    /// `LiveValidationChart` consumes the result.
+    /// Per-second `(verified, rejected)` rate between two samples. Returns
+    /// `None` when either sample lacks totals/probe fields or the time delta
+    /// is zero or backward.
     pub fn rate_against(&self, prev: &Self) -> Option<(u64, u64)> {
         let (cur_v, cur_r, cur_t) = (
             self.verified_total?,
@@ -1214,15 +1046,7 @@ impl ValidationStats {
     }
 }
 
-// ── TrustValidationResult — §7 portable shape ────────────────────────────────
-//
-// Dashboard-side mirror of the JSON `security/validate` returns. The
-// wire is pinned (`/<operator>/nfd/security/validate` → JSON body); v1
-// validators populate `verdict` + `failure_diagnosis` but always emit
-// `chain`/`schema_rules_applied`/`challenge_attestations` as `[]`
-// until the validator's trace API lands. The §4.2 `TrustPathInspector`
-// renders this shape directly; field set is forward-stable.
-
+/// Dashboard-side mirror of the JSON `security/validate` returns.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct TrustValidationResult {
     pub verdict: TrustVerdict,
@@ -1232,9 +1056,6 @@ pub struct TrustValidationResult {
     pub schema_rules_applied: Vec<SchemaRuleApplied>,
     #[serde(default)]
     pub failure_diagnosis: Option<FailureDiagnosis>,
-    /// Reserved — populates with the `ndn-cert-challenge-attestation`
-    /// shape once that work lands. The dashboard sidesheet shows an
-    /// empty collapsed panel while this is `[]`.
     #[serde(default)]
     pub challenge_attestations: Vec<ChallengeAttestation>,
 }
@@ -1245,8 +1066,7 @@ impl TrustValidationResult {
     }
 }
 
-/// `"Valid"` or `{ "Invalid": { failed_at, reason } }` — externally
-/// tagged enum that round-trips through serde's defaults.
+/// `"Valid"` or `{ "Invalid": { failed_at, reason } }`.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub enum TrustVerdict {
     Valid,
@@ -1280,20 +1100,13 @@ pub struct FailureDiagnosis {
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct ChallengeAttestation {
-    /// Free-form `kind` discriminator emitted by the issuance policy
-    /// (e.g. `"DeviceApproval"`, `"PinChallenge"`). Forward-compatible
-    /// with the in-progress `ndn-cert-challenge-attestation-NEXT.md`
-    /// design.
+    /// Free-form discriminator emitted by the issuance policy
+    /// (e.g. `"DeviceApproval"`, `"PinChallenge"`).
     pub kind: String,
     #[serde(default)]
     pub detail: String,
 }
 
-// ── Wire-type conversions (desktop only) ─────────────────────────────────────
-//
-// These `From` impls convert NFD TLV wire types (from `ndn_config`) into the
-// dashboard's display-oriented structs.  Desktop only — the web build uses
-// WsMgmtClient and parses responses differently.
 #[cfg(feature = "desktop")]
 impl From<ndn_config::FaceStatus> for FaceInfo {
     fn from(fs: ndn_config::FaceStatus) -> Self {
@@ -1354,8 +1167,6 @@ impl From<ndn_config::StrategyChoice> for StrategyEntry {
     }
 }
 
-// ── RIB (Routing Information Base) ──────────────────────────────────────────
-
 /// A single route entry inside a RIB entry (one per nexthop / origin).
 #[derive(Debug, Clone)]
 pub struct RibRoute {
@@ -1363,14 +1174,14 @@ pub struct RibRoute {
     /// Origin code: 0=app, 65=client, 128=nlsr, 255=static.
     pub origin: u64,
     pub cost: u64,
-    /// Route flags bitmask: 0x1=child-inherit, 0x2=capture.
+    /// Bitmask: 0x1=child-inherit, 0x2=capture.
     pub flags: u64,
     /// Expiration in milliseconds, if set.
     pub expiration_period: Option<u64>,
 }
 
 impl RibRoute {
-    #[allow(dead_code)] // called inside rsx! closures; not visible to dead_code lint
+    #[allow(dead_code)]
     pub fn origin_label(&self) -> String {
         match self.origin {
             0 => "app".to_string(),
@@ -1385,7 +1196,7 @@ impl RibRoute {
         }
     }
 
-    #[allow(dead_code)] // called inside rsx! closures; not visible to dead_code lint
+    #[allow(dead_code)]
     pub fn flags_label(&self) -> String {
         let mut parts = Vec::new();
         if self.flags & 0x01 != 0 {
@@ -1433,12 +1244,6 @@ impl From<ndn_config::RibEntry> for RibEntryInfo {
 mod tests {
     use super::*;
 
-    // ── TrustValidationResult — §7 portable JSON shape ─────────────
-
-    /// Valid verdict is a bare `"Valid"` string per serde's
-    /// externally-tagged enum default. Optional list fields default
-    /// to `[]` when absent so the dashboard renders cleanly against
-    /// a stub forwarder that only emits the verdict.
     #[test]
     fn trust_validation_result_valid_minimal() {
         let body = r#"{"verdict":"Valid"}"#;
@@ -1450,8 +1255,6 @@ mod tests {
         assert!(r.challenge_attestations.is_empty());
     }
 
-    /// Invalid verdict is `{ "Invalid": { failed_at, reason } }`. The
-    /// dashboard surfaces both fields in the §4.2 VerdictBox.
     #[test]
     fn trust_validation_result_invalid_with_diagnosis() {
         let body = r#"{
@@ -1475,9 +1278,6 @@ mod tests {
         assert!(diag.hint.contains("install"));
     }
 
-    /// Chain steps + schema rules applied round-trip cleanly when
-    /// the forwarder's validator-trace API lands. Pins the §7 field
-    /// names so the wire stays stable as the chain walk fills in.
     #[test]
     fn trust_validation_result_full_chain() {
         let body = r#"{
@@ -1497,9 +1297,6 @@ mod tests {
         assert!(r.schema_rules_applied[0].matches);
     }
 
-    /// Unknown top-level fields must not break the parse — the wire
-    /// is forward-compatible. Server may add new fields in future;
-    /// older dashboards must keep working against newer forwarders.
     #[test]
     fn trust_validation_result_unknown_fields_dont_fail() {
         let body = r#"{
@@ -1511,8 +1308,6 @@ mod tests {
         let r = TrustValidationResult::from_json(body).expect("ignores extras");
         assert!(r.verdict.is_valid());
     }
-
-    // ── MgmtAccessPolicySnapshot — §4.5 JSON shape ─────────────────
 
     #[test]
     fn mgmt_access_policy_round_trip_through_json() {
@@ -1528,8 +1323,6 @@ mod tests {
         assert_eq!(parsed, p);
     }
 
-    /// Forward-compat: unknown fields the server adds in future must
-    /// not break the parse. Field order in JSON is not load-bearing.
     #[test]
     fn mgmt_access_policy_unknown_fields_dont_fail() {
         let body = r#"{
@@ -1547,8 +1340,6 @@ mod tests {
         assert_eq!(p.replay_window_secs, 120);
     }
 
-    /// `validator_anchor: null` must parse to `None` so the dashboard
-    /// renders the "no anchor configured" state correctly.
     #[test]
     fn mgmt_access_policy_anchor_null_becomes_none() {
         let body = r#"{
@@ -1562,8 +1353,6 @@ mod tests {
         assert!(p.validator_anchor.is_none());
     }
 
-    // ── ValidationStats — §4.3 LiveValidationChart feed ────────────
-
     #[test]
     fn validation_stats_parses_all_fields() {
         let text = "validator_present=true\nverified_per_sec=42\nrejected_per_sec=7\n";
@@ -1575,9 +1364,6 @@ mod tests {
 
     #[test]
     fn validation_stats_handles_missing_lines() {
-        // v1 forwarders emit `validator_present=false` + zero
-        // counters; older builds may omit lines entirely. Either
-        // way we degrade to the zero default rather than failing.
         let text = "validator_present=false\n";
         let stats = ValidationStats::parse(text);
         assert!(!stats.validator_present);
@@ -1587,9 +1373,6 @@ mod tests {
 
     #[test]
     fn validation_stats_parses_totals_and_probe_ts() {
-        // Phase B step B forwarders emit monotonic totals + a probe
-        // timestamp so the dashboard derives per-second rates client-
-        // side. Pre-Phase-B-B fields stay on the wire for fwd-compat.
         let text = "validator_present=true\n\
                     verified_per_sec=0\n\
                     rejected_per_sec=0\n\
@@ -1617,11 +1400,10 @@ mod tests {
             validator_present: true,
             verified_per_sec: 0,
             rejected_per_sec: 0,
-            verified_total: Some(160),                      // +60
-            rejected_total: Some(13),                       // +3
-            probe_unix_ns: Some(1_700_000_003_000_000_000), // +3s
+            verified_total: Some(160),
+            rejected_total: Some(13),
+            probe_unix_ns: Some(1_700_000_003_000_000_000),
         };
-        // 60 / 3s = 20/s; 3 / 3s = 1/s.
         assert_eq!(cur.rate_against(&prev), Some((20, 1)));
     }
 
@@ -1643,8 +1425,6 @@ mod tests {
             rejected_total: Some(0),
             probe_unix_ns: Some(1_700_000_000_000_000_000),
         };
-        // Missing prev totals → can't derive a rate. The caller
-        // falls back to the legacy `*_per_sec` fields.
         assert_eq!(cur.rate_against(&prev), None);
     }
 
@@ -1658,9 +1438,7 @@ mod tests {
             rejected_total: Some(0),
             probe_unix_ns: Some(1_700_000_000_000_000_000),
         };
-        // Equal timestamps → no rate.
         assert_eq!(s.rate_against(&s), None);
-        // Backward time → no rate.
         let future = ValidationStats {
             probe_unix_ns: Some(1_699_999_999_000_000_000),
             ..s
@@ -1679,8 +1457,6 @@ mod tests {
         assert_eq!(stats.rejected_per_sec, 2);
     }
 
-    // ── SecurityKeyInfo helpers — §4.1 identity grouping ───────────
-
     #[test]
     fn security_key_info_identity_and_key_id() {
         let k = SecurityKeyInfo {
@@ -1694,8 +1470,6 @@ mod tests {
 
     #[test]
     fn security_key_info_handles_missing_key_component() {
-        // Defensive: the wire shouldn't emit such entries, but if it
-        // does the helpers degrade gracefully.
         let k = SecurityKeyInfo {
             name: "/lab/alice".into(),
             has_cert: false,

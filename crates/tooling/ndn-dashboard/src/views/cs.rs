@@ -11,7 +11,6 @@ pub fn ContentStore() -> Element {
     let mut erase_prefix: Signal<String> = use_signal(String::new);
 
     rsx! {
-        // ── Stats ────────────────────────────────────────────────────────────
         if let Some(ref info) = *cs {
             div { class: "cards",
                 div { class: "card",
@@ -34,7 +33,6 @@ pub fn ContentStore() -> Element {
             div { class: "empty", "No Content Store data." }
         }
 
-        // ── Set capacity ─────────────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Set Capacity" }
             div { class: "form-row",
@@ -64,7 +62,6 @@ pub fn ContentStore() -> Element {
             }
         }
 
-        // ── Erase by prefix ──────────────────────────────────────────────────
         div { class: "section",
             div { class: "section-title", "Erase Entries" }
             div { class: "form-row",

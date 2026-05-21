@@ -1,30 +1,7 @@
-//! `SecurityGate` (§2) — modal first-run gate for the security-first
-//! dashboard. Fires on Connected whenever
-//! [`crate::security_state::derive_posture`] returns anything other
-//! than `Hardened` AND the user hasn't accepted the current variant
-//! this session.
-//!
-//! Three panels:
-//! - `NoIdentity` — §2.2: import SafeBag, join via NDNCERT, or create
-//!   a new identity. Skip checkbox carries the consequence text.
-//! - `IdentityExpired` — §2.3: renew or rotate. Skip is "continue with
-//!   the expired cert (testing only)".
-//! - `TrustSchemaWeakened` — §2.4: restore / accept / investigate.
-//!
-//! Per §6 the gate is **modal** — no close button. Either the user
-//! resolves the posture by completing a flow, or they explicitly
-//! check the skip box. Skip records acceptance in
-//! [`crate::security_state::GATE_ACCEPTED`] keyed by the posture
-//! kind; a fresh Connected event resets that acceptance.
-//!
-//! v1 action wiring: the gate's three NoIdentity actions
-//! ("Import SafeBag", "Join via NDNCERT", "Create new identity")
-//! navigate to the existing Security view's matching tab. The deep
-//! sub-flows (§5 SafeBag import modal, §5.2 enrollment wizard, §5.4
-//! YubiKey path) land in Phase C; the gate's job is to force the
-//! choice, not to implement each sub-flow.
+//! Modal first-run gate that fires when `derive_posture` returns anything but
+//! `Hardened` and the user hasn't accepted the current variant this session.
 
-#![allow(dead_code)] // wires into the layout root once app.rs adopts it
+#![allow(dead_code)]
 
 use dioxus::prelude::*;
 
@@ -41,16 +18,11 @@ use crate::views::View;
 pub fn SecurityGate() -> Element {
     let ctx = use_context::<AppCtx>();
 
-    // Derive the live posture every render. The signals we read are
-    // populated by the connection coroutine after security-status
-    // polling lands; before the first poll arrives `identity_name`
-    // is empty which (correctly) drops us into NoIdentity.
     let identity_name_handle = ctx.identity_name.read();
     let identity_is_ephemeral_handle = ctx.identity_is_ephemeral.read();
     let identity_name: &str = identity_name_handle.as_str();
     let identity_is_ephemeral: bool = *identity_is_ephemeral_handle;
     let cert_expiry = *ctx.cert_valid_until_unix_s.read();
-    // Wall clock — native std on desktop, web_time on wasm32.
     #[cfg(not(target_arch = "wasm32"))]
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -78,8 +50,6 @@ pub fn SecurityGate() -> Element {
     drop(accepted_handle);
 
     rsx! {
-        // Backdrop — clicks pass through to nothing (modal; no
-        // close-on-backdrop-click per §6 "no close button").
         div {
             style: "position:fixed;inset:0;background:rgba(0,0,0,0.55);\
                     z-index:9999;display:flex;align-items:center;\
@@ -95,18 +65,12 @@ pub fn SecurityGate() -> Element {
                     PostureKind::TrustSchemaWeakened => rsx! {
                         TrustSchemaWeakenedPanel { posture: posture.clone() }
                     },
-                    // The gate short-circuits before reaching here for
-                    // Hardened / Unsupported (see `suppresses_gate`);
-                    // these arms are unreachable but the exhaustive
-                    // match keeps `PostureKind` evolution safe.
                     PostureKind::Hardened | PostureKind::Unsupported => rsx! {},
                 }
             }
         }
     }
 }
-
-// ── §2.2 — NoIdentity ────────────────────────────────────────────────
 
 #[component]
 #[allow(non_snake_case)]
@@ -170,8 +134,6 @@ fn NoIdentityPanel() -> Element {
     }
 }
 
-// ── §2.3 — IdentityExpired ───────────────────────────────────────────
-
 #[component]
 #[allow(non_snake_case)]
 fn IdentityExpiredPanel(posture: SecurityPosture) -> Element {
@@ -181,7 +143,6 @@ fn IdentityExpiredPanel(posture: SecurityPosture) -> Element {
             identity_name,
             days_ago,
         } => (identity_name.clone(), *days_ago),
-        // Unreachable in normal flow; render an empty panel instead of panicking.
         _ => return rsx! {},
     };
 
@@ -229,7 +190,6 @@ fn IdentityExpiredPanel(posture: SecurityPosture) -> Element {
     }
 }
 
-// ── §2.4 — TrustSchemaWeakened ───────────────────────────────────────
 
 #[component]
 #[allow(non_snake_case)]
@@ -289,8 +249,6 @@ fn TrustSchemaWeakenedPanel(posture: SecurityPosture) -> Element {
         }
     }
 }
-
-// ── Building blocks ──────────────────────────────────────────────────
 
 #[component]
 #[allow(non_snake_case)]
@@ -363,8 +321,6 @@ fn SkipRow(label: String, checked: Signal<bool>, on_skip: EventHandler<()>) -> E
     }
 }
 
-// ── Navigation glue ──────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityTab {
     Identities,
@@ -375,14 +331,11 @@ pub enum SecurityTab {
 }
 
 impl SecurityTab {
-    /// Numeric tab id matching `views::security`'s constants. Kept
-    /// inside the security module so the constants stay private to
-    /// the view file; the gate only needs to write the right number.
+    /// Mirrors `views::security::TAB_*` constants; keep in sync.
     pub fn tab_id(self) -> u8 {
         match self {
-            // Mirror `views::security::TAB_*` constants. Keep in sync.
             Self::Identities => 0,
-            Self::Anchors => 1, // Trust & Schema combined tab
+            Self::Anchors => 1,
             Self::Schema => 1,
             Self::Ca => 4,
             Self::Audit => 8,
@@ -390,11 +343,6 @@ impl SecurityTab {
     }
 }
 
-/// Stable identifier for the currently-connected forwarder, used as
-/// the §2 gate-acceptance key (so accepting `NoIdentity` on
-/// `ndn-fwd` doesn't suppress the gate on `nfd`). Desktop reads the
-/// selected `ForwarderProfile`; web uses a per-page constant since
-/// the web build only connects to one URL per session.
 #[cfg(feature = "desktop")]
 fn current_forwarder_id() -> String {
     crate::forwarder_profile::selected_profile()
@@ -409,13 +357,5 @@ fn current_forwarder_id() -> String {
 
 fn jump_to_security_view(tab: SecurityTab) {
     *crate::app_shared::ACTIVE_VIEW.write() = View::Security;
-    // Deep-link into the requested tab. Security() reads
-    // ACTIVE_SECURITY_TAB on first paint and on every change so the
-    // gate's [Go to X] buttons land where the user expects.
     *crate::app_shared::ACTIVE_SECURITY_TAB.write() = Some(tab.tab_id());
 }
-
-// ── Tests ────────────────────────────────────────────────────────────
-
-// Component-level tests need a Dioxus runtime; see
-// `crate::security_state::tests` for the derive/gate-fire logic.
