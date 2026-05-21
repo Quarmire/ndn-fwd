@@ -1,26 +1,6 @@
-/// ndn-sec — NDN key and certificate management tool.
-///
-/// Manages a file-based Public Info Base (PIB) that stores Ed25519 keys and
-/// their self-signed certificates for use by `ndn-fwd` and other NDN tools.
-///
-/// # Quick start
-///
-/// ```sh
-/// # Generate the router's identity key (self-signed, 1-year validity):
-/// ndn-sec keygen /ndn/router1
-///
-/// # Make it a trust anchor so other nodes can validate its certificates:
-/// ndn-sec anchor add /ndn/router1
-///
-/// # Inspect the stored certificate:
-/// ndn-sec certdump /ndn/router1
-///
-/// # List all keys in the PIB:
-/// ndn-sec list
-///
-/// # Use a custom PIB path instead of ~/.ndn/pib:
-/// ndn-sec --pib /etc/ndn/pib keygen /ndn/site1/router-a
-/// ```
+//! `ndn-sec` — manage a file-based PIB of Ed25519 keys and self-signed
+//! certificates for `ndn-fwd` and other NDN tools.
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,7 +14,6 @@ use ndn_security::{
     spki,
 };
 
-// ─── CLI definition ───────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(
@@ -113,7 +92,6 @@ enum AnchorCmd {
     List,
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -147,7 +125,6 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── Commands ─────────────────────────────────────────────────────────────────
 
 fn cmd_keygen(
     pib_path: &PathBuf,
@@ -159,7 +136,6 @@ fn cmd_keygen(
     let key_name = parse_name(name_str)?;
     let pib = FilePib::new(pib_path)?;
 
-    // With --skip-if-exists: if a key already exists for this identity, do nothing.
     if skip_if_exists
         && let Ok(existing_pib) = FilePib::open(pib_path)
         && find_cert_name(&existing_pib, &key_name).is_some()
@@ -167,14 +143,13 @@ fn cmd_keygen(
         return Ok(());
     }
 
-    // Build cert name per Certificate Format v2:
-    // <identity>/KEY/<keyid>/<issuer>/<version>
+    // Cert name: `<identity>/KEY/<keyid>/<issuer>/<version>` per
+    // Certificate Format v2.
     let cert_name = build_cert_name(&key_name);
 
-    // Generate key stored under the cert name.
     let signer = pib.generate_ed25519(&cert_name)?;
 
-    // SPKI-wrap the public key per Certificate Format v2 §3.
+    // Certificate Format v2 §3: SPKI-wrap the raw public key.
     let raw_pk = signer.public_key_bytes();
     let pk: Bytes = {
         let mut arr = [0u8; spki::ED25519_KEY_LEN];
@@ -182,7 +157,6 @@ fn cmd_keygen(
         spki::wrap_ed25519(&arr)
     };
 
-    // Issue self-signed certificate.
     let now = now_ns();
     let validity_ns = days * 24 * 3600 * 1_000_000_000;
     let cert = Certificate {
@@ -311,7 +285,6 @@ fn cmd_anchor_list(pib_path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Resolve the PIB path: CLI flag → $NDN_PIB → ~/.ndn/pib.
 fn resolve_pib_path(arg: Option<&str>) -> PathBuf {

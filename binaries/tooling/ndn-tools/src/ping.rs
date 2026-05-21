@@ -1,24 +1,5 @@
-//! `ndn-ping` — measure round-trip time to a named prefix.
-//!
-//! Connects to a running `ndn-fwd` forwarder via Unix socket + optional SHM data plane.
-//!
-//! ## Server mode
-//!
-//! Registers a prefix and responds to ping Interests with empty Data packets.
-//!
-//! ```text
-//! ndn-ping server [--prefix /ndn] [--freshness 0] [--sign]
-//! ```
-//!
-//! ## Client mode
-//!
-//! Sends ping Interests sequentially and measures RTT.
-//! Prints per-packet timing and a final summary.
-//!
-//! ```text
-//! ndn-ping client [--prefix /ndn] [--count 0] [--interval 1000]
-//!                  [--lifetime 4000]
-//! ```
+//! `ndn-ping` — measure RTT to a named prefix. Connects to ndn-fwd over a
+//! Unix socket with an optional SHM data plane.
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -26,8 +7,6 @@ use tokio::sync::mpsc;
 
 use ndn_tools_core::common::{ConnectConfig, EventLevel, ToolEvent};
 use ndn_tools_core::ping::{PingClientParams, PingServerParams};
-
-// ─── CLI ────────────────────────────────────────────────────────────────────
 
 #[derive(Args, Clone)]
 struct ConnectOpts {
@@ -99,8 +78,6 @@ enum Command {
     },
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -108,7 +85,6 @@ async fn main() -> Result<()> {
 
     let (tx, mut rx) = mpsc::channel::<ToolEvent>(256);
 
-    // Print events to stderr/stdout as they arrive.
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.level {

@@ -1,9 +1,7 @@
-//! Embeddable NDN iperf tool logic (bandwidth measurement).
-//!
-//! Two modes:
-//! - **Server** — registers a prefix, responds to Interests, supports session negotiation
-//!   and reverse-mode (server becomes consumer).
-//! - **Client** — sliding-window consumer with AIMD/CUBIC/Fixed congestion control.
+//! NDN iperf (bandwidth measurement). Server registers a prefix, negotiates
+//! per-flow sessions, optionally runs reverse-mode (server-as-consumer).
+//! Client is a sliding-window consumer with AIMD/CUBIC/Fixed congestion
+//! control.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,30 +21,16 @@ use ndn_transport::CongestionController;
 
 use crate::common::{ConnectConfig, ToolData, ToolEvent};
 
-// ── Per-flow signing state ────────────────────────────────────────────────────
-
-/// Per-flow signing mode, set during session negotiation.
 #[derive(Clone)]
 enum FlowSignMode {
-    /// No signature fields — non-conformant, benchmarking only.
     None,
-    /// NDN DigestSha256 (fast path, single allocation, in-place hash).
     DigestSha256,
-    /// BLAKE3 digest (DigestBlake3, type 6, registered on the NDN TLV SignatureType registry).
     DigestBlake3,
-    /// HMAC-SHA256 or Ed25519 via a boxed `Signer`.
     Custom(Arc<dyn NdnSigner>),
 }
 
 type FlowSigners = Arc<std::sync::RwLock<HashMap<String, FlowSignMode>>>;
 
-/// Map a negotiated sign-mode string to a `FlowSignMode`.
-///
-/// - `"none"`:         no signature (benchmarking only)
-/// - `"blake3"`:       DigestBlake3 (type 6, NDN TLV registry)
-/// - `"hmac"`:         HMAC-SHA256 keyed by `flow_id`
-/// - `"ed25519"`:      server-wide ephemeral Ed25519 key
-/// - `"digest_sha256"` / `""` / unrecognised: DigestSha256
 fn make_sign_mode(sign_mode: &str, flow_id: &str, ed25519: &Arc<Ed25519Signer>) -> FlowSignMode {
     match sign_mode {
         "none" => FlowSignMode::None,
@@ -62,7 +46,6 @@ fn make_sign_mode(sign_mode: &str, flow_id: &str, ed25519: &Arc<Ed25519Signer>) 
     }
 }
 
-/// Apply per-packet signing to a `DataBuilder` according to the negotiated mode.
 fn sign_data(builder: DataBuilder, mode: &FlowSignMode) -> bytes::Bytes {
     match mode {
         FlowSignMode::None => builder.sign_none(),
@@ -78,8 +61,6 @@ fn sign_data(builder: DataBuilder, mode: &FlowSignMode) -> bytes::Bytes {
     }
 }
 
-// ── Parameter types ───────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct IperfServerParams {
     pub conn: ConnectConfig,
@@ -87,7 +68,6 @@ pub struct IperfServerParams {
     pub payload_size: usize,
     pub freshness_ms: u64,
     pub quiet: bool,
-    /// Interval for reporting statistics, in milliseconds.
     pub interval_ms: u64,
 }
 
@@ -97,7 +77,7 @@ pub struct IperfClientParams {
     pub prefix: String,
     pub duration_secs: u64,
     pub initial_window: usize,
-    /// Congestion control: "aimd", "cubic", or "fixed".
+    /// "aimd", "cubic", or "fixed".
     pub cc: String,
     pub min_window: Option<f64>,
     pub max_window: Option<f64>,
@@ -106,15 +86,12 @@ pub struct IperfClientParams {
     pub cubic_c: Option<f64>,
     pub lifetime_ms: u64,
     pub quiet: bool,
-    /// Interval for reporting per-interval statistics, in milliseconds.
     pub interval_ms: u64,
     pub reverse: bool,
     pub node_prefix: Option<String>,
-    /// Signing mode for session negotiation: "none" | "ed25519" | "hmac".
+    /// "none" | "digest_sha256" | "blake3" | "hmac" | "ed25519".
     pub sign_mode: String,
 }
-
-// ── Internal connection helper ────────────────────────────────────────────────
 
 async fn connect_client(conn: &ConnectConfig) -> Result<ForwarderClient> {
     if conn.use_shm {
@@ -123,8 +100,6 @@ async fn connect_client(conn: &ConnectConfig) -> Result<ForwarderClient> {
         Ok(ForwarderClient::connect_unix_only(&conn.face_socket).await?)
     }
 }
-
-// ── Shared helpers ────────────────────────────────────────────────────────────
 
 fn extract_seq(raw: &Bytes) -> Option<u64> {
     let data = Data::decode(raw.clone()).ok()?;
@@ -170,8 +145,6 @@ fn throughput_bps(bytes: u64, duration: Duration) -> f64 {
     }
 }
 
-// ── Interval counters (lock-free) ─────────────────────────────────────────────
-
 struct IntervalCounters {
     bytes: AtomicU64,
     pkts: AtomicU64,
@@ -196,7 +169,6 @@ impl IntervalCounters {
         self.rtt_sum.fetch_add(rtt_us, Ordering::Relaxed);
         self.rtt_count.fetch_add(1, Ordering::Relaxed);
     }
-    /// Atomically drain and return (bytes, pkts, rtt_sum, rtt_count).
     fn drain(&self) -> (u64, u64, u64, u64) {
         (
             self.bytes.swap(0, Ordering::Relaxed),
@@ -206,8 +178,6 @@ impl IntervalCounters {
         )
     }
 }
-
-// ── Session negotiation types ─────────────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize, Default)]
 struct SessionRequest {
@@ -230,8 +200,6 @@ struct SessionResponse {
     reverse: bool,
     session_id: String,
 }
-
-// ── Server ────────────────────────────────────────────────────────────────────
 
 pub async fn run_server(params: IperfServerParams, tx: mpsc::Sender<ToolEvent>) -> Result<()> {
     let prefix: Name = params.prefix.parse()?;
@@ -286,12 +254,11 @@ pub async fn run_server(params: IperfServerParams, tx: mpsc::Sender<ToolEvent>) 
         ))
         .await;
 
-    // Server-wide ephemeral Ed25519 key (benchmark only — key is fixed, not secret).
+    // Fixed-seed key — benchmark only, not a secret.
     let ed25519_signer = Arc::new(Ed25519Signer::from_seed(
         &[0x49u8; 32],
         "/iperf-server-key".parse().unwrap(),
     ));
-    // Per-flow signer state: populated by session negotiation, consumed by data loop.
     let flow_signers: FlowSigners = Arc::new(std::sync::RwLock::new(HashMap::new()));
 
     let counters = Arc::new(IntervalCounters::new());
@@ -371,10 +338,9 @@ pub async fn run_server(params: IperfServerParams, tx: mpsc::Sender<ToolEvent>) 
         let components = interest.name.components();
         let prefix_len = prefix.components().len();
 
-        // Session negotiation: /<prefix>/<flow-id>/session[/<params-digest>]
-        // The Interest carries AppParameters, so a ParametersSha256DigestComponent
-        // is appended to the name by the encoder — giving prefix_len + 3 total
-        // components rather than prefix_len + 2.  Use >= to accept both.
+        // Session negotiation: /<prefix>/<flow-id>/session[/<params-digest>].
+        // The AppParameters digest component may or may not be appended, so
+        // accept both `prefix_len + 2` and `prefix_len + 3`.
         if components.len() >= prefix_len + 2 {
             let marker = std::str::from_utf8(&components[prefix_len + 1].value).unwrap_or("");
             if marker == "session" {
@@ -401,7 +367,6 @@ pub async fn run_server(params: IperfServerParams, tx: mpsc::Sender<ToolEvent>) 
             }
         }
 
-        // Normal data serving — look up per-flow signer (set during session negotiation).
         let flow_id_str = components
             .get(prefix_len)
             .and_then(|c| std::str::from_utf8(&c.value).ok())
@@ -499,7 +464,6 @@ async fn handle_session_negotiation(
         _ => "digest_sha256",
     };
 
-    // Register per-flow sign mode so the main data loop can sign packets for this flow.
     let sign_mode = make_sign_mode(agreed_sign, &flow_id, defaults.ed25519_signer);
     defaults
         .flow_signers
@@ -536,7 +500,6 @@ async fn handle_session_negotiation(
     }
     client.send(builder.build()).await?;
 
-    // Reverse mode: spawn a consumer task that fetches from the client.
     if req.reverse && !req.callback.is_empty() {
         let callback_prefix: Name = req.callback.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
         let duration = req.duration;
@@ -627,7 +590,7 @@ async fn run_reverse_consumer(
                         }),
                     )
                     .await;
-                let _ = &flow_id2; // suppress unused warning
+                let _ = &flow_id2;
             }
         })
     };
@@ -747,7 +710,6 @@ async fn run_reverse_consumer(
     let elapsed = start.elapsed();
     let lost = sent.saturating_sub(received);
 
-    // Publish result so the client can retrieve it.
     let result_name = server_prefix.clone().append(&flow_id).append("result");
     let result_json = json!({
         "flow_id": flow_id,
@@ -776,8 +738,6 @@ async fn run_reverse_consumer(
 
     Ok(())
 }
-
-// ── Client ────────────────────────────────────────────────────────────────────
 
 pub async fn run_client(params: IperfClientParams, tx: mpsc::Sender<ToolEvent>) -> Result<()> {
     let prefix: Name = params.prefix.parse()?;
@@ -817,7 +777,6 @@ pub async fn run_client(params: IperfClientParams, tx: mpsc::Sender<ToolEvent>) 
         CongestionController::Fixed { .. } => "fixed",
     };
 
-    // Unique flow ID.
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -839,10 +798,9 @@ pub async fn run_client(params: IperfClientParams, tx: mpsc::Sender<ToolEvent>) 
         None
     };
 
-    // Reverse mode: connect and register the callback prefix BEFORE sending the
-    // session negotiation.  The server spawns its consumer immediately after
-    // sending the session response, so the FIB entry must already exist or the
-    // first batch of Interests will be dropped and retried (or given up).
+    // Register callback prefix BEFORE session negotiation: the server spawns
+    // its consumer immediately on receiving the session response, and the FIB
+    // entry must exist or the first batch of Interests is dropped.
     let producer_client: Option<ForwarderClient> = if let Some(ref cb_prefix) = callback_prefix {
         let pc = connect_client(&params.conn).await?;
         pc.register_prefix(cb_prefix).await?;
@@ -856,7 +814,6 @@ pub async fn run_client(params: IperfClientParams, tx: mpsc::Sender<ToolEvent>) 
         None
     };
 
-    // Session negotiation.
     let session_name = flow_prefix.clone().append("session");
     let session_req = json!({
         "duration": params.duration_secs, "signing": params.sign_mode, "size": 0,
@@ -1108,8 +1065,8 @@ pub async fn run_client(params: IperfClientParams, tx: mpsc::Sender<ToolEvent>) 
         }
     };
 
-    // Drop the interval reporter so its tx2 clone is released, allowing the
-    // bridge channel to close and signal completion to the dashboard.
+    // Abort the interval reporter so its tx2 clone is dropped and the bridge
+    // channel can close to signal completion.
     if let Some(h) = interval_task {
         h.abort();
     }
@@ -1217,12 +1174,9 @@ pub async fn run_client(params: IperfClientParams, tx: mpsc::Sender<ToolEvent>) 
     Ok(())
 }
 
-/// Called by `run_client` in reverse mode.
-///
-/// `client` is already connected and has `callback_prefix` registered — the
-/// caller must register the prefix BEFORE sending the session negotiation so
-/// the server can start sending Interests immediately upon receiving the
-/// session response.
+/// `client` must already have `callback_prefix` registered before session
+/// negotiation completes; the server begins sending Interests as soon as it
+/// returns the session response.
 async fn run_reverse_producer(
     client: ForwarderClient,
     callback_prefix: &Name,
@@ -1236,7 +1190,6 @@ async fn run_reverse_producer(
         "  reverse mode: serving data on {callback_prefix} for {duration_secs}s  sign={sign_mode}"
     ))).await;
 
-    // Build a per-session ephemeral Ed25519 key for the client producer side.
     let ed25519_signer = Arc::new(Ed25519Signer::from_seed(
         &[0x52u8; 32],
         "/iperf-client-key".parse().unwrap(),

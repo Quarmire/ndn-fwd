@@ -1,9 +1,7 @@
-//! Embeddable NDN peek tool logic — single and segmented fetch.
-//!
-//! Always uses ndn-cxx compatible naming:
-//! - Segmented fetch sends the initial Interest with CanBePrefix, discovers the
-//!   versioned prefix from the response, and fetches subsequent segments using
-//!   SegmentNameComponent (TLV 0x32). Compatible with `ndnputchunks` producers.
+//! Single and segmented fetch. Segmented fetch sends the discovery Interest
+//! with CanBePrefix, learns the versioned prefix from the first response, and
+//! fetches remaining segments using SegmentNameComponent (TLV 0x32), per
+//! ndnputchunks naming.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -18,30 +16,21 @@ use ndn_packet::{Data, Name};
 
 use crate::common::{ConnectConfig, ToolData, ToolEvent};
 
-// ── Parameter type ────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct PeekParams {
     pub conn: ConnectConfig,
     /// Name to fetch (or versioned prefix for segmented mode).
     pub name: String,
-    /// Interest lifetime in milliseconds.
     pub lifetime_ms: u64,
-    /// File path to write assembled content. `None` → emit as ToolEvent text.
+    /// Output path. `None` emits content as a `ToolEvent` text line.
     pub output: Option<String>,
-    /// Segmented pipeline depth. `None` → single-packet fetch.
+    /// Segmented pipeline depth. `None` selects single-packet fetch.
     pub pipeline: Option<usize>,
-    /// Emit content as hex instead of UTF-8 text.
     pub hex: bool,
-    /// Emit metadata only (name, content size, sig type).
     pub meta_only: bool,
-    /// Emit per-segment progress events.
     pub verbose: bool,
-    /// Set CanBePrefix on the Interest (single-fetch mode).
     pub can_be_prefix: bool,
 }
-
-// ── Single fetch ──────────────────────────────────────────────────────────────
 
 async fn fetch_one(
     client: &ForwarderClient,
@@ -62,11 +51,6 @@ async fn fetch_one(
     Data::decode(raw).map_err(|e| anyhow::anyhow!("decode: {e}"))
 }
 
-// ── Segmented fetch (ndn-cxx) ─────────────────────────────────────────────────
-
-/// Segmented fetch using SegmentNameComponent (TLV 0x32), compatible with
-/// ndnputchunks producers. Sends the initial Interest with CanBePrefix to
-/// discover the versioned name, then fetches all segments.
 async fn fetch_segmented(
     client: &ForwarderClient,
     prefix: &Name,
@@ -75,7 +59,6 @@ async fn fetch_segmented(
     verbose: bool,
     tx: &mpsc::Sender<ToolEvent>,
 ) -> Result<Bytes> {
-    // Discovery: CanBePrefix so we match any version.
     let wire = InterestBuilder::new(prefix.clone())
         .lifetime(lifetime)
         .can_be_prefix()
@@ -98,12 +81,10 @@ async fn fetch_segmented(
             .await;
     }
 
-    // The response name should end with a SegmentNameComponent (type 0x32).
     let comps = first.name.components();
     let versioned_prefix = if comps.last().map(|c| c.typ) == Some(ndn_packet::tlv_type::SEGMENT) {
         Name::from_components(comps[..comps.len() - 1].iter().cloned())
     } else {
-        // Not a segmented response — treat as single packet.
         return Ok(first.content().cloned().unwrap_or_else(Bytes::new));
     };
 
@@ -152,15 +133,10 @@ async fn fetch_segmented(
     let mut seq: u64 = 0;
 
     loop {
-        // Fill the pipeline window. When multiple slots are open (the
-        // common case at window-fill time and after processing a burst
-        // of Data responses), batch them into a single SHM ring
-        // transition. For the steady-state single-slot refill (one Data
-        // in → one Interest out), skip the Vec allocation overhead and
-        // send directly. This avoids the regression observed in small-
-        // segment cells where 98% of sends are single-Interest refills
-        // and the batch path's Vec alloc was more expensive than the old
-        // per-send() call.
+        // Steady-state refill (one Data in → one Interest out) is the hot
+        // path; using `send_batch` for a single Interest costs a Vec alloc
+        // that measurably regresses small-segment fetches. Batch only when
+        // 2+ slots are open.
         {
             let mut batch: Vec<(usize, Bytes)> = Vec::new();
             while in_flight.len() + batch.len() < pipeline && next_seg < total_segs {
@@ -247,12 +223,11 @@ async fn fetch_segmented(
     reassemble(segments)
 }
 
-/// Decode FinalBlockId as a SegmentNameComponent (TLV 0x32, big-endian integer).
+/// Decode FinalBlockId as a SegmentNameComponent (TLV 0x32).
 fn decode_final_block_id_segment(fb: &[u8]) -> Option<usize> {
     if fb.len() < 2 {
         return None;
     }
-    // Expect TLV type 0x32 (SegmentNameComponent).
     if fb[0] != 0x32 {
         return None;
     }
@@ -284,9 +259,6 @@ fn reassemble(segments: Vec<Option<Bytes>>) -> Result<Bytes> {
     Ok(out.freeze())
 }
 
-// ── Main entry points ─────────────────────────────────────────────────────────
-
-/// Fetch a named Data packet (single) or segmented object, emitting events to `tx`.
 pub async fn run_peek(params: PeekParams, tx: mpsc::Sender<ToolEvent>) -> Result<()> {
     let name = params
         .name

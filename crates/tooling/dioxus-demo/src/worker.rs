@@ -1,35 +1,13 @@
-//! Phase 6 SharedWorker entrypoint.
+//! SharedWorker entry point. Loaded inside the per-origin
+//! `SharedWorker` scope: optionally dials a single
+//! `BrowserWebTransportFace` upstream, builds a face-agnostic [`Engine`],
+//! pre-registers producer prefixes, installs a [`WorkerListener`], and
+//! registers each tab `MessagePort` as an inbound face.
 //!
-//! Loaded inside the per-origin `SharedWorker` scope. The JS bootstrap
-//! `importScripts(...)` the wasm-bindgen output, calls `init()`, then
-//! invokes [`worker_main`]. From that point on the worker:
-//!
-//! - optionally dials a single `BrowserWebTransportFace` upstream
-//!   (skipped when `upstream_url` is empty — the cache-hit witness
-//!   runs without any forwarder),
-//! - constructs a face-agnostic [`Engine`](crate::engine::Engine),
-//! - pre-registers any producer prefixes passed by the bootstrap,
-//! - installs a [`WorkerListener`](ndn_face_shared_worker::WorkerListener)
-//!   on the `SharedWorkerGlobalScope` and stashes it for the bootstrap
-//!   to drain pre-buffered ports into via [`accept_port_from_js`],
-//! - loops `accept_one` and registers each tab `MessagePort` as an
-//!   inbound face via [`Engine::add_face`](crate::engine::Engine::add_face).
-//!
-//! ## SharedWorker connect-event race
-//!
-//! The W3C SharedWorker `connect` event for the very first tab fires
-//! after the bootstrap script's first task finishes — i.e. after
-//! `worker_main` *starts* but possibly before its `init_worker_scope`
-//! runs. To avoid losing that first port, the bootstrap installs a
-//! synchronous `onconnect` that buffers ports into a JS array; once
-//! the wasm is initialized and `worker_main` has returned (the
-//! listener is stashed), the bootstrap drains the buffer through
-//! [`accept_port_from_js`] and replaces `onconnect` with a forwarder
-//! that calls the same function for every subsequent connect.
-//!
-//! Lifecycle: the worker dies when its last connected port closes (W3C
-//! `SharedWorker` rule); the engine, CS, pending table, and upstream
-//! WT face all go with it.
+//! The first tab's `connect` event can fire before `init_worker_scope`
+//! runs. The JS bootstrap installs a synchronous `onconnect` that
+//! buffers ports and drains them through [`accept_port_from_js`] once
+//! the listener is stashed.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -50,20 +28,12 @@ fn worker_log(msg: &str) {
 }
 
 thread_local! {
-    /// Listener installed by `worker_main`. The bootstrap calls
-    /// [`accept_port_from_js`] for every buffered + future port; that
-    /// helper looks the listener up here.
     static LISTENER: RefCell<Option<Arc<WorkerListener>>> = const { RefCell::new(None) };
 }
 
-/// Worker entrypoint.
-///
-/// `upstream_url` is the WebTransport URL the worker dials out to —
-/// empty string skips the dial (no upstream face; producers + CS still
-/// work; `Engine::express` returns "no upstream"). `producers` is a
-/// comma-separated list of prefix strings to register locally before
-/// accepting tab ports — every tab connecting after this point can
-/// express against `<prefix>/counter` and observe the worker's CS.
+/// `upstream_url` empty skips the WT dial (producers + CS still work).
+/// `producers` is a comma-separated prefix list registered locally before
+/// any tab ports are accepted.
 #[wasm_bindgen]
 pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
@@ -93,16 +63,10 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
         Some(Arc::new(face) as Arc<dyn ErasedFace>)
     };
 
-    // Open the per-origin IdbPib once and pull both:
-    //  - a Validator seeded from persisted trust anchors, and
-    //  - a Signer reconstructed from the first persisted SafeBag.
-    //
-    // Both are idempotent — a fresh first-run page finds neither and
-    // the engine boots permissive + DigestSha256-signed.  After an
-    // enrollment flow has populated trust anchors / SafeBag, the same
-    // worker_main call upgrades to full signature enforcement on both
-    // directions: inbound Data validated by the validator, outbound
-    // mgmt responses signed by the persisted identity.
+    // On a first-run page IdbPib has neither anchors nor a SafeBag, and the
+    // engine boots permissive + DigestSha256-signed. After enrollment
+    // populates both, subsequent worker_main calls upgrade to validated
+    // inbound Data and persisted-identity-signed mgmt responses.
     let (validator, signer): (
         Option<Arc<ndn_security::Validator>>,
         Option<Arc<dyn ndn_security::Signer>>,
@@ -138,14 +102,11 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
         }
     };
 
-    // Audit N.12 parity with native — when no persisted identity
-    // exists yet, fall back to an ephemeral in-memory ECDSA-P256
-    // signer for mgmt-response signing.  Same choice ndn-fwd makes:
-    // ECDSA is the lowest common denominator (ndn-cxx's `KeyType`
-    // enum has no Ed25519).  An IdbPib-persisted Ed25519 SafeBag
-    // takes precedence — `build_signer` returns whichever algorithm
-    // the SafeBag carries — but the auto-init fallback picks the
-    // interop-safe default.
+    // Without a persisted identity, fall back to an ephemeral in-memory
+    // ECDSA-P256 signer for mgmt responses — ECDSA is the
+    // lowest-common-denominator with ndn-cxx, which has no Ed25519
+    // `KeyType`. An IdbPib-persisted SafeBag, when present, takes
+    // precedence regardless of algorithm.
     let signer = match signer {
         Some(s) => Some(s),
         None => match ndn_security::KeyChain::ephemeral_ecdsa("/dioxus-demo/ephemeral") {
@@ -201,9 +162,6 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
     let listener_for_loop = Arc::clone(&listener);
     runtime.spawn(Box::pin(async move {
         loop {
-            // Pull a fresh face id from the engine's face table so
-            // the tab port doesn't collide with the AppFace (which
-            // also lives in the same table).
             let id = engine_for_loop.forwarder().faces().alloc_id();
             match listener_for_loop
                 .accept_one(id, Arc::clone(&runtime_for_loop))
@@ -227,10 +185,8 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
     Ok(())
 }
 
-/// Accept a [`MessagePort`] handed in by the JS bootstrap. Called
-/// once per port that arrived via the bootstrap's pre-buffer (before
-/// the Rust-side `onconnect` was installed) and once per subsequent
-/// connect event the bootstrap forwards.
+/// Accept a [`MessagePort`] handed in by the JS bootstrap (once per
+/// pre-buffered or subsequent connect event).
 #[wasm_bindgen]
 pub fn accept_port_from_js(port: MessagePort) {
     LISTENER.with(|cell| {

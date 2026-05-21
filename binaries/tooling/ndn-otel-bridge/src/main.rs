@@ -1,37 +1,13 @@
-//! `ndn-otel-bridge` — OTLP/HTTP-protobuf bridge for NDN-native spans.
+//! `ndn-otel-bridge` — consume spans from an `ndn-fwd` observability
+//! prefix and POST them to an OTLP/HTTP-protobuf endpoint.
 //!
-//! Consumes spans from an `ndn-fwd` observability prefix and forwards
-//! them to a standard OTLP backend (Jaeger / Tempo / Honeycomb /
-//! Datadog) so operators who want existing OTel tooling don't have to
-//! abandon it.
+//! Flow: poll `/<prefix>/recent` for `(trace_id, span_id)` pairs, fetch each
+//! `/<prefix>/traces/.../spans/...` span as OTLP protobuf bytes, batch, and
+//! POST to `<endpoint>/v1/traces`.
 //!
-//! See `docs/wiki/src/operations/opentelemetry.md` for the operator
-//! guide and `.claude/prompts/observability/phase3-otel-and-trace-id.md`
-//! §C for the design.
-//!
-//! ## Flow
-//!
-//! ```text
-//!   ndn-fwd (publisher)
-//!        │
-//!        ▼  Interest /<prefix>/recent
-//!   bridge.poll()  ────►  list of (trace_id, span_id)
-//!        │
-//!        ▼  Interest /<prefix>/traces/.../spans/...
-//!   bridge.fetch_span()  ────►  OTLP Span protobuf bytes
-//!        │
-//!        ▼  batch
-//!   bridge.flush()  ────►  POST /v1/traces  (OTLP/HTTP-protobuf)
-//!                          to <endpoint>
-//! ```
-//!
-//! ## Why OTLP/HTTP-protobuf, not /gRPC
-//!
-//! gRPC needs tonic + h2 + a tower stack — too heavy for a sidecar
-//! that does one thing.  OTLP also defines an HTTP/1.1+protobuf
-//! profile (`Content-Type: application/x-protobuf`, POST to
-//! `/v1/traces`) accepted by every OTLP collector.  reqwest handles
-//! the transport in ~10 LOC.
+//! OTLP/HTTP-protobuf is used rather than gRPC because a tonic + h2 + tower
+//! stack is far too heavy for a sidecar; every OTLP collector accepts the
+//! HTTP profile.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -248,23 +224,9 @@ fn decode_pair(trace_hex: &str, span_hex: &str) -> Option<([u8; 16], [u8; 8])> {
     Some((trace_id, span_id))
 }
 
-// ── OTLP/HTTP-protobuf encoding ───────────────────────────────────
-
-/// Wrap a batch of pre-encoded `Span` protobufs in an
-/// `ExportTraceServiceRequest` payload.
-///
-/// `ExportTraceServiceRequest`
-///   = field 1: repeated ResourceSpans
-///
-/// `ResourceSpans`
-///   = field 1: Resource
-///     field 2: repeated ScopeSpans
-///
-/// `Resource`
-///   = field 1: repeated KeyValue ("service.name" = service)
-///
-/// `ScopeSpans`
-///   = field 2: repeated Span (already-encoded `body`)
+/// Wrap pre-encoded `Span` protobufs in an `ExportTraceServiceRequest`:
+/// field 1 `ResourceSpans` { field 1 `Resource` (service.name), field 2
+/// `ScopeSpans` { field 2 `Span` … } }.
 fn encode_export_request(service_name: &str, spans: &[bytes::Bytes]) -> bytes::Bytes {
     let resource = encode_resource(service_name);
     let mut scope_spans = BytesMut::with_capacity(spans.iter().map(|s| s.len() + 4).sum::<usize>());
@@ -282,13 +244,10 @@ fn encode_export_request(service_name: &str, spans: &[bytes::Bytes]) -> bytes::B
 
 fn encode_resource(service_name: &str) -> BytesMut {
     let mut kv = BytesMut::new();
-    // KeyValue.key (field 1, string)
-    encode_len_prefixed(&mut kv, 1, b"service.name");
-    // KeyValue.value (field 2, AnyValue)
+    encode_len_prefixed(&mut kv, 1, b"service.name"); // KeyValue.key
     let mut any = BytesMut::new();
     encode_len_prefixed(&mut any, 1, service_name.as_bytes()); // AnyValue.string_value
-    encode_len_prefixed(&mut kv, 2, &any);
-
+    encode_len_prefixed(&mut kv, 2, &any); // KeyValue.value
     let mut out = BytesMut::new();
     encode_len_prefixed(&mut out, 1, &kv); // Resource.attributes
     out

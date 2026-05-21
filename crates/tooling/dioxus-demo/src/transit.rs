@@ -1,36 +1,8 @@
-//! Phase 7 browser-as-transit witness: host + peer wasm-bindgen entrypoints.
-//!
-//! ## Topology
-//!
-//! ```text
-//!   transit-peer-tab        WebRTC datachannel        transit-host-tab
-//!   ┌──────────────┐    ┌─────────────────────────┐  ┌──────────────────┐
-//!   │ TransitPeer  │ ←─ │  out-of-band signaling  │ →│ TransitHost      │
-//!   │   create_offer│   │  (Playwright as conduit) │  │   accept_offer  │
-//!   │   set_answer  │   └─────────────────────────┘  │   ↓ adds wrt face│
-//!   │   express     │  ───── DTLS / SCTP ──────────── │  to engine       │
-//!   └──────────────┘                                  │ ForwarderEngine  │
-//!                                                     │   /transit-test  │
-//!                                                     │     producer     │
-//!                                                     └──────────────────┘
-//! ```
-//!
-//! Tab 3 (`transit-peer`) talks to tab A (`transit-host`) over a
-//! single peer-to-peer WebRTC datachannel. Tab A has a real
-//! `ForwarderEngine` with two faces: an internal `AppFace` (serving
-//! the `/transit-test` producer) and the inbound `WebRtcFaceAdapter`
-//! that wraps tab 3's channel. When tab 3 expresses an Interest
-//! for `/transit-test/counter`, tab A's engine pipeline:
-//!
-//! 1. receives on `WebRtcFaceAdapter`, opens a PIT entry,
-//! 2. CS lookup — miss on the first call, hit on subsequent calls,
-//! 3. FIB lookup — `/transit-test → AppFace`,
-//! 4. forwards to AppFace; demo's app pump synthesises the Data,
-//! 5. PIT match → satisfy → Data goes back over the WebRTC face
-//!    to tab 3.
-//!
-//! This is the engine's *transit* path — the same forwarding chain
-//! native `ndn-fwd` runs.
+//! Browser-as-transit witness: wasm-bindgen [`TransitHost`] and
+//! [`TransitPeer`] entry points. The peer dials a WebRTC datachannel to the
+//! host, whose `ForwarderEngine` exercises its full PIT/FIB/CS pipeline
+//! between the inbound [`WebRtcFaceAdapter`] and an internal `AppFace`
+//! producer.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -58,27 +30,22 @@ fn peer_log(msg: &str) {
     web_sys::console::log_1(&format!("[transit-peer] {msg}").into());
 }
 
-/// Tab-A entrypoint. Hosts a real `ForwarderEngine` with one local
-/// producer prefix (`/transit-test`). Exposes `accept_offer` for
-/// the WebRTC handshake driven by Playwright.
+/// Host-tab entry point: a real `ForwarderEngine` plus a connector that
+/// negotiates each incoming peer.
 #[wasm_bindgen]
 pub struct TransitHost {
     engine: Arc<Engine>,
-    /// Connector kept alive for the host's lifetime — accept_offer
-    /// uses it to negotiate each incoming peer.
     connector: WebRtcConnector,
-    /// Pending face state stashed between accept_offer and the
-    /// channel actually opening (the open future runs as a separate
-    /// awaiter in finalize_pending).
+    /// Set by `accept_offer`, consumed by `finalize_peer` when the channel
+    /// opens.
     pending: RefCell<Option<PendingFace>>,
 }
 
 #[wasm_bindgen]
 impl TransitHost {
-    /// Construct a host engine. `producers` is a comma-separated
-    /// list of prefixes registered locally; the demo's app pump
-    /// serves `<prefix>/counter` Data with a monotonically
-    /// increasing payload, the same as the SharedWorker entrypoint.
+    /// `producers` is a comma-separated list of prefixes registered
+    /// locally. The app pump serves `<prefix>/counter` Data with a
+    /// monotonically increasing payload.
     #[wasm_bindgen(constructor)]
     pub async fn new(producers: String) -> Result<TransitHost, JsValue> {
         console_error_panic_hook::set_once();
@@ -109,10 +76,8 @@ impl TransitHost {
         })
     }
 
-    /// Accept an SDP offer (JSON-encoded) from a peer and return
-    /// the host's SDP answer (JSON-encoded). The actual
-    /// `WebRtcFace` is materialised by `finalize_peer` once the
-    /// peer reports the channel open on its end.
+    /// Accept a JSON-encoded SDP offer and return the JSON-encoded answer.
+    /// The `WebRtcFace` itself is materialised by `finalize_peer`.
     pub async fn accept_offer(&self, offer_json: String) -> Result<String, JsValue> {
         let offer: SessionDescription = serde_json::from_str(&offer_json)
             .map_err(|e| JsValue::from_str(&format!("parse offer: {e}")))?;
@@ -127,8 +92,7 @@ impl TransitHost {
             .map_err(|e| JsValue::from_str(&format!("serialise answer: {e}")))
     }
 
-    /// Block until the SCTP channel is open, then add the resulting
-    /// `WebRtcFace` to the engine.
+    /// Await the SCTP channel and add the resulting `WebRtcFace` to the engine.
     pub async fn finalize_peer(&self) -> Result<(), JsValue> {
         let pending = self
             .pending
@@ -149,9 +113,8 @@ impl TransitHost {
     }
 }
 
-/// Tab-3 entrypoint. Drives a single WebRtcConnector from the
-/// offerer side, negotiates with the host via Playwright, then
-/// pushes Interests through the channel + reads Data back.
+/// Peer-tab entry point: drives the WebRtcConnector from the offerer side
+/// and expresses Interests over the resulting channel.
 #[wasm_bindgen]
 pub struct TransitPeer {
     connector: WebRtcConnector,
@@ -177,7 +140,6 @@ impl TransitPeer {
         })
     }
 
-    /// Generate a fresh SDP offer (JSON-encoded) for the host.
     pub async fn create_offer(&self) -> Result<String, JsValue> {
         let (offer, pending) = self
             .connector
@@ -190,8 +152,8 @@ impl TransitPeer {
             .map_err(|e| JsValue::from_str(&format!("serialise offer: {e}")))
     }
 
-    /// Accept the host's SDP answer and finalize the channel.
-    /// After this returns, `express` is usable.
+    /// Accept the host's SDP answer and finalize the channel; `express`
+    /// becomes usable afterwards.
     pub async fn set_answer(&self, answer_json: String) -> Result<(), JsValue> {
         let answer: SessionDescription = serde_json::from_str(&answer_json)
             .map_err(|e| JsValue::from_str(&format!("parse answer: {e}")))?;
@@ -214,8 +176,6 @@ impl TransitPeer {
         ));
         *self.face.borrow_mut() = Some(Arc::clone(&adapter));
 
-        // Spawn the recv pump that reads Data back from the host
-        // and wakes `express` callers.
         let pending_data = Arc::clone(&self.pending_data);
         runtime.spawn(Box::pin(async move {
             loop {
@@ -241,8 +201,6 @@ impl TransitPeer {
         Ok(())
     }
 
-    /// Express an Interest over the WebRTC channel and resolve
-    /// to the matching Data's `content` bytes.
     pub async fn express(&self, name: String, lifetime_ms: u32) -> Result<Uint8Array, JsValue> {
         let parsed: Name = name.parse().map_err(|_| JsValue::from_str("bad name"))?;
         let key = parsed.to_string();
@@ -315,7 +273,5 @@ fn nni_bytes(val: u64) -> ([u8; 8], usize) {
     }
 }
 
-// Anchor unused imports to silence lints when only one of host/peer
-// paths is exercised under a given build.
 #[allow(dead_code)]
 fn _anchor(_: Interest) {}

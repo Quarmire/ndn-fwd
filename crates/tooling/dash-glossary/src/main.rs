@@ -1,16 +1,7 @@
-//! `dash-glossary check` — CI guard for the dashboard education seam.
-//!
-//! Scans `crates/tooling/ndn-dashboard/src/**.rs` for `EduGloss { term:
-//! "X", ... }` callsites and fails when `X` is missing from
-//! `crates/tooling/ndn-dashboard/glossary.toml`. See §9.1 of
-//! (internal).
-//!
-//! Usage:
-//!   dash-glossary check [<repo-root>]
-//!
-//! Exits 0 on success, 1 on missing terms or parse errors. Designed to
-//! drop into `.github/workflows/ci.yml` next to the existing
-//! `document::eval` grep guard.
+//! `dash-glossary check [<repo-root>]` — CI guard for the dashboard
+//! education seam. Scans `crates/tooling/ndn-dashboard/src/**.rs` for
+//! `EduGloss { term: "X", ... }` callsites and exits 1 when `X` is missing
+//! from `crates/tooling/ndn-dashboard/glossary.toml`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -70,8 +61,6 @@ fn main() -> ExitCode {
             }
         };
         for (line_no, line) in text.lines().enumerate() {
-            // Skip line comments — `EduGloss { term: "…" }` mentions in
-            // module-level doc comments shouldn't trip the guard.
             if line.trim_start().starts_with("//") {
                 continue;
             }
@@ -133,10 +122,8 @@ fn walk_rust_sources(dir: &Path, visit: &mut dyn FnMut(&Path)) {
     }
 }
 
-/// Extract every `EduGloss { term: "<X>"` (or `term : "<X>"`) on one
-/// line. Cheap hand-rolled scanner — no regex dep. Handles plain
-/// double-quoted string literals; escape sequences are not unescaped,
-/// since terms in glossary.toml don't carry escape characters today.
+/// Hand-rolled scanner: extracts every `EduGloss { term: "<X>" }` on a
+/// line. Plain double-quoted string literals only; no escape unescaping.
 fn extract_terms(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let needle = "EduGloss";
@@ -145,9 +132,8 @@ fn extract_terms(line: &str) -> Vec<String> {
     while let Some(start) = line[search_from..].find(needle) {
         let abs = search_from + start;
         let after = abs + needle.len();
-        // Allow whitespace, `{`, then `term`, then `:`, then a quoted
-        // string. The strictness avoids false positives on
-        // `EduGlossSomething` or doc-comment mentions.
+        // Require `EduGloss` + ws + `{` + `term` + `:` + quoted string so
+        // identifiers like `EduGlossSomething` don't false-positive.
         let rest = &line[after..];
         let rest_trim = rest.trim_start();
         if !rest_trim.starts_with('{') {
@@ -170,13 +156,12 @@ fn extract_terms(line: &str) -> Vec<String> {
             search_from = after;
             continue;
         }
-        // Find the closing quote.
         let body = &after_colon[1..];
         if let Some(end) = body.find('"') {
             out.push(body[..end].to_string());
         }
         search_from = after;
-        let _ = bytes; // silence unused on edge platforms
+        let _ = bytes;
     }
     out
 }

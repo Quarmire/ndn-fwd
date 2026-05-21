@@ -1,25 +1,6 @@
-//! `ndn-peek` — fetch a named Data packet and print its content.
-//!
-//! Always uses ndn-cxx compatible naming for segmented fetch.
-//! The `--ndn-cxx` flag is no longer needed (and is removed).
-//!
-//! ## Single-packet fetch (default)
-//!
-//! ```text
-//! ndn-peek /example/data
-//! ndn-peek /example/data --output /tmp/data.bin
-//! ndn-peek --can-be-prefix /example
-//! ```
-//!
-//! ## Segmented fetch
-//!
-//! ```text
-//! ndn-peek --pipeline 16 /example/data --output /tmp/data.bin
-//! ```
-//!
-//! Sends the initial Interest with CanBePrefix, discovers the versioned prefix
-//! from the first response, then fetches remaining segments with
-//! SegmentNameComponent (TLV 0x32). Compatible with `ndnputchunks` producers.
+//! `ndn-peek` — fetch a named Data packet (single or segmented) and print
+//! or save the content. Segmented fetch uses ndnputchunks-compatible naming
+//! (CanBePrefix discovery + SegmentNameComponent).
 
 use anyhow::Result;
 use clap::Parser;

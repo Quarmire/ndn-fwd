@@ -1,9 +1,6 @@
-//! Embeddable NDN put tool logic — publish a chunked object as named Data segments.
-//!
-//! Always uses ndn-cxx compatible naming:
-//! Segments are served under `/<prefix>/v=<µs-timestamp>/<seg>` using
-//! VersionNameComponent (TLV 0x36) and SegmentNameComponent (TLV 0x32).
-//! Compatible with `ndnpeekdata --pipeline` and `ndngetfile` consumers.
+//! Publish a chunked object as named Data segments. Segments are served under
+//! `/<prefix>/v=<µs-timestamp>/<seg>` using VersionNameComponent (TLV 0x36)
+//! and SegmentNameComponent (TLV 0x32), matching ndnputchunks naming.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -21,26 +18,19 @@ use ndn_security::Signer;
 
 use crate::common::{ConnectConfig, ToolEvent};
 
-// ── Parameter type ────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct PutParams {
     pub conn: ConnectConfig,
-    /// Base name prefix. Segments will be served under `/<prefix>/v=<ts>/<seg>`.
+    /// Base name. Segments are served under `/<name>/v=<ts>/<seg>`.
     pub name: String,
-    /// Content to publish (already in memory).
     pub data: Bytes,
-    /// Segment size in bytes.
     pub chunk_size: usize,
-    /// Sign each Data segment with Ed25519.
     pub sign: bool,
-    /// Sign each Data segment with HMAC-SHA256.
     pub hmac: bool,
     /// Data freshness period in milliseconds (0 = omit).
     pub freshness_ms: u64,
-    /// Stop serving after this many seconds (0 = serve until cancelled/disconnected).
+    /// 0 = serve until cancelled or disconnected.
     pub timeout_secs: u64,
-    /// Suppress per-Interest log lines.
     pub quiet: bool,
 }
 
@@ -53,13 +43,8 @@ impl PutParams {
     }
 }
 
-// ── Run ───────────────────────────────────────────────────────────────────────
-
-/// Publish `params.data` as segmented ndn-cxx compatible Data.
-///
-/// Registers the base name, creates a versioned prefix, and responds to every
-/// incoming Interest for that prefix until cancelled or the timeout is reached.
-/// Emits [`ToolEvent`]s to `tx` as Interests are served.
+/// Registers the base name, derives a versioned prefix, and responds to every
+/// Interest until cancelled, disconnected, or the timeout elapses.
 pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Result<()> {
     let name: Name = params.name.parse().map_err(|e| anyhow::anyhow!("{e}"))?;
     let total_bytes = params.data.len();
@@ -72,25 +57,22 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
     let seg_count = producer.segment_count();
     let last_seg = seg_count.saturating_sub(1);
 
-    // Build the versioned prefix: /<name>/v=<µs-timestamp>
     let ts_us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0);
     let served_prefix = name.clone().append_component(NameComponent::version(ts_us));
 
-    // Size the SHM ring for the largest Data we'll emit: chunk_size
-    // plus signature/name overhead (handled inside the SHM face). Let
-    // the caller override via ConnectConfig.mtu; otherwise derive from
-    // chunk_size so producers emitting large segments don't silently
-    // exceed the default ~266 KiB slot.
+    // Size the SHM ring for the largest emitted Data; the SHM face adds
+    // signature and name overhead. Derive from chunk_size when the caller
+    // doesn't override so large segments don't silently overflow the
+    // default slot.
     let mtu_hint = params.conn.mtu.or(Some(chunk_size));
     let client = if params.conn.use_shm {
         ForwarderClient::connect_with_mtu(&params.conn.face_socket, mtu_hint).await?
     } else {
         ForwarderClient::connect_unix_only(&params.conn.face_socket).await?
     };
-    // Register the base name so the router delivers Interests for any version.
     client.register_prefix(&name).await?;
 
     let transport = if client.is_shm() { "SHM" } else { "Unix" };
@@ -173,7 +155,6 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
             Err(_) => continue,
         };
 
-        // Extract SegmentNameComponent (TLV 0x32) from the last name component.
         let last_is_seg = interest
             .name
             .components()
@@ -183,7 +164,6 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
         let seg_idx: usize = match last_is_seg {
             Some(i) if (i as usize) < seg_count => i as usize,
             Some(_) => {
-                // Segment number out of range — skip.
                 unknown += 1;
                 if !params.quiet {
                     let _ = tx
@@ -195,12 +175,7 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
                 }
                 continue;
             }
-            None => {
-                // CanBePrefix discovery Interest (no SegmentNameComponent).
-                // Respond with segment 0 under the versioned prefix — compatible
-                // with ndn-cxx ndnputchunks behaviour and with `ndn-peek --can-be-prefix`.
-                0
-            }
+            None => 0, // CanBePrefix discovery Interest: respond with seg 0.
         };
 
         let seg_bytes = match producer.segment(seg_idx) {
@@ -208,11 +183,10 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
             None => continue,
         };
 
-        // Build the Data name.  For explicit-segment Interests use the Interest
-        // name as-is.  For CanBePrefix discovery Interests (no SegmentNameComponent
-        // in the name) append segment 0 under the versioned prefix, matching
-        // ndn-cxx ndnputchunks behaviour.  NDNts get-segmented --ver=cbp then
-        // finds the VersionNameComponent at name[-2] (before the segment).
+        // Explicit-segment Interests reuse the Interest name as-is. CanBePrefix
+        // discovery Interests get a synthesized name under the versioned
+        // prefix so NDNts `get-segmented --ver=cbp` finds the version at
+        // `name[-2]` (before the segment).
         let data_name = if last_is_seg.is_some() {
             (*interest.name).clone()
         } else {

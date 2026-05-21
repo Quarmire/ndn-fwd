@@ -30,11 +30,10 @@ pub fn App() -> Element {
     let last_error = use_signal(|| None::<String>);
     let interest_name = use_signal(|| "/demo/hello".to_owned());
 
-    let ctx = use_context_provider(|| EngineCtx {
+    let _ = use_context_provider(|| EngineCtx {
         handle: Signal::new(None),
         runtime: default_runtime(),
     });
-    let _ = ctx; // context registered; consumed via use_context
 
     rsx! {
         Header { face_status }
@@ -98,10 +97,9 @@ fn FacePanel(
                         );
                     }
                     if let Ok(prefix) = parsed {
-                        // NDNCERT enrollment against /demo/CA — issued
-                        // cert chains to the localhop trust anchor, so
-                        // /localhop/nfd/rib/register signed with this
-                        // identity is accepted by ndn-fwd.
+                        // NDNCERT enrollment against /demo/CA: the issued cert
+                        // chains to the localhop trust anchor, so ndn-fwd
+                        // accepts /localhop/nfd/rib/register signed with it.
                         let ca_prefix: Name = "/demo/CA".parse().expect("static demo CA prefix");
                         let ident_name: Name = format!("/demo/browser/{}", random_short_id())
                             .parse()
@@ -341,23 +339,10 @@ fn random_short_id() -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-// ─── WebRTC peer panel ───────────────────────────────────────────────────────
-//
-// Two-tab manual demo. Tab A clicks "Create offer", copies the
-// printed bundle, pastes it into tab B's "Accept offer" box. Tab
-// B clicks "Accept", copies its answer bundle, pastes it back
-// into tab A's "Finalize with answer" box. Both tabs go to
-// "Connected"; "Send ping" round-trips a payload over the
-// peer-to-peer SCTP/DTLS datachannel — no NDN forwarder in the
-// path.
-//
-// This panel exists to validate the wasm WebRtcConnector at
-// runtime. Compilation passing is necessary but not sufficient;
-// `web_sys::RtcPeerConnection` callbacks have to actually fire,
-// the closure-bag bookkeeping has to keep them alive, and the
-// SDP/ICE flow has to round-trip. The HTTP relay path
-// automates this, but two-tab manual paste is the simplest
-// reproducible witness for the panel itself.
+// Two-tab manual WebRTC demo. Tab A creates an offer, tab B accepts it and
+// returns an answer, tab A finalizes. After both reach Connected, "Send
+// ping" round-trips bytes over the peer-to-peer datachannel with no NDN
+// forwarder in the path.
 
 #[derive(Clone, Debug, PartialEq)]
 enum RtcStatus {
@@ -372,12 +357,7 @@ enum RtcStatus {
 #[component]
 #[cfg(not(target_arch = "wasm32"))]
 fn WebRtcPanel() -> Element {
-    // Native build — the wasm WebRtcConnector and the
-    // PendingState fields below only exist under
-    // `cfg(target_arch = "wasm32")`. Render a placeholder so
-    // dioxus-demo still compiles for `cargo build` /
-    // `cargo clippy` on the host toolchain. The user-facing demo
-    // is wasm-only by construction.
+    // Native compile-check placeholder; the real panel is wasm-only.
     rsx! {
         section { class: "panel rtc-panel",
             h2 { "WebRTC Peer (browser-as-peer demo)" }
@@ -403,7 +383,6 @@ fn WebRtcPanel() -> Element {
     let face: Signal<Option<std::rc::Rc<std::cell::RefCell<Option<ndn_face_webrtc::WebRtcFace>>>>> =
         use_signal(|| None);
 
-    // Offerer flow.
     let create_offer = {
         let mut status = status;
         let mut offer_blob = offer_blob;
@@ -434,8 +413,9 @@ fn WebRtcPanel() -> Element {
                                 return;
                             }
                         }
-                        // Stash pending + connector for the finalize step.
-                        // Box::leak is fine: this panel's lifetime == page tab.
+                        // Leak the connector: its lifetime matches the page tab,
+                        // and finalize runs asynchronously after this closure
+                        // returns.
                         let connector: &'static _ = Box::leak(Box::new(connector));
                         let state = PendingState {
                             connector,
@@ -450,7 +430,6 @@ fn WebRtcPanel() -> Element {
         }
     };
 
-    // Answerer flow: accept a pasted offer bundle, produce an answer.
     let accept_offer = {
         let mut status = status;
         let mut answer_blob = answer_blob;
@@ -509,7 +488,6 @@ fn WebRtcPanel() -> Element {
         }
     };
 
-    // Offerer's finalize: paste the answerer's bundle.
     let finalize = {
         let mut status = status;
         let mut answer_input = answer_input;
@@ -557,8 +535,6 @@ fn WebRtcPanel() -> Element {
         }
     };
 
-    // Send ping over the live datachannel; the receiver echoes
-    // it back via its own recv-loop (set up below).
     let send_ping = {
         let face = face;
         let last_message = last_message;
@@ -588,9 +564,8 @@ fn WebRtcPanel() -> Element {
         }
     };
 
-    // Background: poll the live face for inbound bytes; echo
-    // them back with a "pong: " prefix so two tabs ping each
-    // other naturally.
+    // Background recv loop: echo "ping…" as "pong: ping…" so two tabs ping
+    // each other naturally.
     use_effect({
         let face = face;
         let mut last_message = last_message;
@@ -606,7 +581,6 @@ fn WebRtcPanel() -> Element {
                     while let Ok(bytes) = chan.recv().await {
                         let text = String::from_utf8_lossy(&bytes).to_string();
                         last_message.set(Some(format!("recv: {text}")));
-                        // Auto-echo: reply with "pong: …" once.
                         if text.starts_with("ping") {
                             let echo = format!("pong: {text}");
                             let _ = chan.send(bytes::Bytes::from(echo)).await;
@@ -719,14 +693,9 @@ fn WebRtcPanel() -> Element {
     }
 }
 
-/// State held between offer/answer create and finalize. We need
-/// to keep the connector + pending face together because the
-/// async tasks that drive the handshake outlive the synchronous
-/// onclick callback that started them.
-///
-/// `'static` connector via `Box::leak` is intentional: the panel
-/// lives as long as the page tab, and a leaked `WebRtcConnector`
-/// is a couple of hundred bytes.
+/// Handshake state shared between offer/answer creation and finalize. The
+/// `'static` connector is intentional: it outlives the onclick callback that
+/// spawned the async finalize, and the panel lives as long as the page tab.
 #[cfg(target_arch = "wasm32")]
 struct PendingState {
     connector: &'static ndn_face_webrtc::WebRtcConnector,

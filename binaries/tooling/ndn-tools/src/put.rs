@@ -1,9 +1,5 @@
-//! `ndn-put` — publish a file as named Data segments.
-//!
-//! Always uses ndn-cxx compatible naming:
-//! `/<prefix>/v=<µs-timestamp>/<seg>` with VersionNameComponent (0x36)
-//! and SegmentNameComponent (0x32). Compatible with `ndnpeekdata --pipeline`
-//! and `ndngetfile` consumers.
+//! `ndn-put` — publish a file as named Data segments under
+//! `/<prefix>/v=<ts>/<seg>` (ndnputchunks-compatible).
 
 use anyhow::{Context, Result};
 use bytes::Bytes;

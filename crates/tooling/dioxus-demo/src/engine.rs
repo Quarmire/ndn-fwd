@@ -1,23 +1,13 @@
-//! In-browser ndn-rs node — phase 7: real `ForwarderEngine`.
-//!
-//! Replaces the phase-4..phase-6 hand-rolled mini-engine with the
-//! actual `ndn_engine::ForwarderEngine` driven by [`WasmEngineBuilder`].
-//! What lives in this module now is the application-tier glue:
+//! Application-tier glue around a real [`ForwarderEngine`] (built via
+//! [`WasmEngineBuilder`]) for the demo:
 //!
 //! - an internal [`AppFace`] that bridges the engine's pipeline with the
-//!   demo's consumer/producer state via two mpsc channels,
-//! - a pending-Interest map keyed by Data name (for `Engine::express`),
-//! - a producer registry (for `Engine::register_producer_local`) that
-//!   serves `/<prefix>/counter` Data,
-//! - the same external API the rest of the crate already uses
-//!   ([`Engine::connect`], [`Engine::new`], [`Engine::add_face`],
-//!   [`Engine::express`], [`Engine::register_producer*`]) so the
-//!   Dioxus UI, the SharedWorker entrypoint, and the SharedClient
-//!   wasm-bindgen wrapper compile unchanged.
+//!   demo's consumer/producer state over two mpsc channels,
+//! - a pending-Interest map keyed by Data name driving `Engine::express`,
+//! - a producer registry serving `/<prefix>/counter` Data.
 //!
-//! The PIT, FIB, CS, strategy chain, dispatcher, expiry tasks all
-//! live inside `ForwarderEngine`. This module no longer carries
-//! its own.
+//! PIT, FIB, CS, strategy chain, dispatcher, and expiry tasks live inside
+//! `ForwarderEngine`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -78,26 +68,18 @@ pub struct DataResponse {
 
 type PendingMap = Mutex<HashMap<String, oneshot::Sender<DataResponse>>>;
 
-/// One registered producer prefix; counter served at `/<prefix>/counter`.
 struct Producer {
     counter: Arc<AtomicU64>,
 }
 
-/// Internal [`Face`] that bridges the demo's consumer/producer state
-/// with the [`ForwarderEngine`] pipeline.
-///
-/// The face is added to the engine's face table during construction.
-/// The engine reads from `from_demo` (Interests + Data the demo
-/// pushes) and writes to `to_demo` (Interests + Data the engine
-/// dispatches to this face). The demo holds the inverse channel
-/// ends.
+/// Bridges the demo's consumer/producer state with the [`ForwarderEngine`]
+/// pipeline via a pair of mpsc channels. The engine reads `from_demo`
+/// (demo→engine) and writes `to_demo` (engine→demo); the demo holds the
+/// inverse ends. The receiver is `Mutex`-wrapped because `recv_bytes` takes
+/// `&self` while the underlying mpsc rx needs `&mut`.
 struct AppFace {
     id: FaceId,
-    /// Engine reads here (demo→engine). Wrapped in Mutex because
-    /// `Face::recv` takes `&self` and the underlying mpsc receiver
-    /// needs &mut.
     from_demo: Mutex<mpsc::Receiver<Bytes>>,
-    /// Engine writes here (engine→demo).
     to_demo: mpsc::Sender<Bytes>,
 }
 
@@ -120,57 +102,42 @@ impl Transport for AppFace {
     }
 }
 
-/// Phase-7 engine: thin wrapper around `ForwarderEngine` plus the
-/// demo's consumer/producer state.
+/// Thin wrapper around [`ForwarderEngine`] plus the demo's consumer/producer
+/// state.
 pub struct Engine {
     inner: ForwarderEngine,
-    /// Drop drives the engine's cancellation; held so the engine
-    /// outlives this struct exactly. Wrapped in Mutex<Option> so
-    /// `Drop` can take it for `shutdown().await`-less cleanup —
-    /// the engine's tasks observe the CancellationToken and exit.
     _shutdown: ShutdownHandle,
     runtime: Arc<dyn Runtime>,
-    /// Demo-side end of the AppFace channel pair.
     to_engine: mpsc::Sender<Bytes>,
-    /// AppFace's id inside the engine's face table — used to point
-    /// FIB entries at AppFace for locally-served prefixes.
+    /// Face id of the AppFace; used to point FIB entries at locally-served
+    /// prefixes.
     app_face_id: FaceId,
-    /// Optional upstream face id — populated when `connect()` dialed
-    /// out a WebTransport face. Default-FIB route `/ → upstream` is
-    /// installed at construction.
+    /// Set when `connect()` dialed a WebTransport face. A default `/ →
+    /// upstream` FIB route is installed at construction.
     upstream_face_id: Option<FaceId>,
     pending: Arc<PendingMap>,
     producers: Arc<RwLock<HashMap<String, Arc<Producer>>>>,
 }
 
 impl Engine {
-    /// Construct an engine. If `upstream` is `Some`, that face is
-    /// installed and a default FIB route (`/ → upstream`) is added so
-    /// `Engine::express` reaches the host forwarder. If `None`, the
-    /// engine is producer-only / cache-only — typical for the
-    /// SharedWorker entrypoint that hosts the engine for tabs.
+    /// If `upstream` is `Some`, the engine installs that face and a default
+    /// `/ → upstream` FIB route so `Engine::express` reaches the host
+    /// forwarder. If `None`, the engine is producer/cache-only (the
+    /// SharedWorker entrypoint that hosts an engine for tabs).
     pub fn new(runtime: Arc<dyn Runtime>, upstream: Option<Arc<dyn ErasedFace>>) -> Self {
         Self::new_with_security(runtime, upstream, None, None)
     }
 
-    /// Construct the engine with an optional [`Validator`] (for
-    /// inbound Data verification) and an optional [`Signer`] (for
-    /// mgmt-response Data signing).  Both come from `IdbPib` in the
-    /// SharedWorker flow; both default to `None` in test harnesses.
-    ///
-    /// - `validator = Some(v)` → engine's `ValidationStage` enforces
-    ///   signatures against the validator's trust anchors.
-    /// - `signer = Some(s)` → mgmt responses on `/localhost/nfd/...`
-    ///   are signed by `s` with a real `KeyLocator` rather than the
-    ///   fallback `DigestSha256`.
+    /// `validator` enforces inbound Data signatures via `ValidationStage`.
+    /// `mgmt_response_signer` signs `/localhost/nfd/...` responses with a
+    /// real `KeyLocator`; without it, responses fall back to
+    /// `DigestSha256`. Both come from `IdbPib` in the SharedWorker flow.
     pub fn new_with_security(
         runtime: Arc<dyn Runtime>,
         upstream: Option<Arc<dyn ErasedFace>>,
         validator: Option<Arc<Validator>>,
         mgmt_response_signer: Option<Arc<dyn Signer>>,
     ) -> Self {
-        // Suppress unused-variable warnings on non-wasm builds where
-        // mount_management is gated out.
         #[cfg(not(target_arch = "wasm32"))]
         let _ = &mgmt_response_signer;
         let mut builder =
@@ -183,7 +150,6 @@ impl Engine {
         }
         let (engine, shutdown) = builder.build().expect("WasmEngineBuilder build");
 
-        // AppFace channels.
         let (to_engine_tx, to_engine_rx) = mpsc::channel::<Bytes>(64);
         let (from_engine_tx, from_engine_rx) = mpsc::channel::<Bytes>(64);
         let app_face_id = engine.faces().alloc_id();
@@ -216,9 +182,8 @@ impl Engine {
             to_engine_tx.clone(),
         );
 
-        // Mount NFD-compatible management — `/localhost/nfd/...` Interests
-        // now reach a real dispatcher inside the wasm engine (status,
-        // rib/list, faces/list, fib/list, etc.).
+        // Mount NFD-compatible management so `/localhost/nfd/...` Interests
+        // reach the dispatcher inside the wasm engine.
         #[cfg(target_arch = "wasm32")]
         {
             let mgmt_cancel = CancellationToken::new();
@@ -229,10 +194,6 @@ impl Engine {
                 localhop_command_validator: None,
                 require_signed_commands: false,
                 command_replay_cache: None,
-                // N.12 — sign control responses with the persisted
-                // identity when one exists (worker_main passes a
-                // Signer reconstructed from IdbPib's SafeBag).
-                // Falls back to DigestSha256 when None.
                 command_response_signer: mgmt_response_signer,
                 log_inspector: None,
                 coding_handler: None,
@@ -254,8 +215,7 @@ impl Engine {
         }
     }
 
-    /// Tab-side convenience constructor — dial WebTransport upstream,
-    /// wrap as the upstream face.
+    /// Dial WebTransport upstream and wrap it as the engine's upstream face.
     pub async fn connect(runtime: Arc<dyn Runtime>, url: &str) -> Result<Self, EngineError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -279,17 +239,15 @@ impl Engine {
         }
     }
 
-    /// Attach an inbound face to the engine. The engine spawns its
-    /// own per-face reader + sender tasks. Used by the SharedWorker
-    /// entrypoint to register each tab `MessagePort` as a face.
+    /// Attach an inbound face. The engine spawns its own per-face reader
+    /// and sender tasks. Used by the SharedWorker entrypoint to register
+    /// each tab `MessagePort` as a face.
     pub fn add_face<F: Face + 'static>(&self, face: F) {
         self.inner.add_face(face, CancellationToken::new());
     }
 
-    /// Express an Interest, returning the matching Data when it
-    /// arrives. Routes through the engine's PIT/FIB/CS pipeline; if
-    /// the upstream FIB route is configured, the Interest reaches
-    /// the host forwarder.
+    /// Express an Interest through the engine's PIT/FIB/CS pipeline,
+    /// returning the matching Data.
     pub async fn express(
         &self,
         name: Name,
@@ -323,8 +281,7 @@ impl Engine {
         }
     }
 
-    /// Send a pre-encoded Interest wire. The PIT key must equal the
-    /// name the response Data will carry.
+    /// `pending_key` must equal the name the response Data will carry.
     pub async fn express_wire(
         &self,
         wire: Bytes,
@@ -355,10 +312,9 @@ impl Engine {
         }
     }
 
-    /// Register a producer prefix locally — adds a FIB entry pointing
-    /// `prefix` at the AppFace so inbound Interests for that prefix
-    /// reach the demo's recv pump for producer dispatch. Returns the
-    /// shared `AtomicU64` backing the `<prefix>/counter` Data.
+    /// Add a FIB entry pointing `prefix` at the AppFace so inbound
+    /// Interests reach the demo's recv pump. Returns the shared `AtomicU64`
+    /// backing the `<prefix>/counter` Data.
     pub async fn register_producer_local(&self, prefix: Name) -> Arc<AtomicU64> {
         let counter = Arc::new(AtomicU64::new(0));
         self.producers.write().await.insert(
@@ -377,14 +333,12 @@ impl Engine {
         counter
     }
 
-    /// Register a producer + send the legacy `/localhost/nfd/rib/register`
-    /// Interest upstream. Tab-side use: the demo CA's host forwarder
-    /// sees the route announcement.
+    /// Register a producer and announce the route upstream via the legacy
+    /// `/localhost/nfd/rib/register` form.
     pub async fn register_producer(&self, prefix: Name) -> Result<Arc<AtomicU64>, EngineError> {
         let counter = self.register_producer_local(prefix.clone()).await;
 
-        // Splice ControlParameters into the Interest name (legacy NFD form,
-        // matching the existing tab-side path).
+        // ControlParameters are spliced into the Interest name (legacy NFD form).
         let params_blob = encode_control_parameters(&prefix);
         let mut cmd_name: Name = "/localhost/nfd/rib/register"
             .parse()
@@ -392,8 +346,7 @@ impl Engine {
         cmd_name = cmd_name.append_component(ndn_packet::NameComponent::generic(params_blob));
         let wire = encode_interest(&cmd_name, Duration::from_millis(2000), None);
 
-        // Fire-and-forget — we don't await the management response, the
-        // local registration is what matters for the demo.
+        // Fire-and-forget: the local registration is what the demo relies on.
         let _ = self.to_engine.send(wire).await;
         Ok(counter)
     }
@@ -445,11 +398,9 @@ impl Engine {
     }
 }
 
-// ── App-face recv pump ────────────────────────────────────────────────────────
-
-/// Dispatch packets the engine sends to the AppFace. Interests
-/// arrive when a registered producer prefix matched; Data arrives
-/// when an `Engine::express` resolved through the engine pipeline.
+/// Dispatch packets the engine sends to the AppFace: Interests when a
+/// registered producer prefix matched, Data when an `Engine::express`
+/// resolved through the engine pipeline.
 fn spawn_app_recv_pump(
     runtime: Arc<dyn Runtime>,
     mut from_engine: mpsc::Receiver<Bytes>,
@@ -490,9 +441,8 @@ fn spawn_app_recv_pump(
                 if let Some(producer) = matched {
                     let n = producer.counter.fetch_add(1, Ordering::Relaxed) + 1;
                     let payload = n.to_string();
-                    // 60s FreshnessPeriod so the engine's CS keeps the Data
-                    // long enough to satisfy subsequent Interests (the
-                    // phase-6 cache-hit witness needs this).
+                    // Long FreshnessPeriod so the CS satisfies subsequent
+                    // Interests for the cache-hit witness.
                     let wire = encode_data_digest_sha256(
                         &interest.name,
                         payload.as_bytes(),
@@ -506,8 +456,6 @@ fn spawn_app_recv_pump(
         }
     }));
 }
-
-// ── Wire encoders (wasm-friendly: pure-Rust SHA-256, no ring) ────────────────
 
 fn encode_interest(name: &Name, lifetime: Duration, app_params: Option<&[u8]>) -> Bytes {
     use ndn_packet::tlv_type;

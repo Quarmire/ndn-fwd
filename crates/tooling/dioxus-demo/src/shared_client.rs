@@ -1,11 +1,7 @@
-//! Tab-side SharedWorker client (Phase 6 witness driver).
-//!
-//! Exposed as a `#[wasm_bindgen]` class so a Playwright spec can
-//! instantiate it from JS and drive Interest expression directly,
-//! bypassing the Dioxus UI. The class wraps a
-//! [`SharedWorkerProxyFace`] talking to the per-origin worker; every
-//! Interest goes over the shared engine, so two tabs of the same
-//! origin observe the worker's PIT and CS.
+//! Tab-side SharedWorker client (`#[wasm_bindgen]`) wrapping
+//! [`SharedWorkerProxyFace`]. Witnesses drive Interest expression directly
+//! from JS, bypassing the Dioxus UI; each Interest reaches the per-origin
+//! worker's shared engine so tabs share its PIT and CS.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,10 +31,9 @@ pub struct SharedClient {
 
 #[wasm_bindgen]
 impl SharedClient {
-    /// Connect to the per-origin SharedWorker at `worker_url` (joining
-    /// the existing instance if other tabs are already connected) and
-    /// install a recv pump that wakes pending [`SharedClient::express_interest`]
-    /// callers as Data arrives back through the proxy face.
+    /// Connect to the per-origin SharedWorker, joining the existing
+    /// instance if other tabs are already connected. Spawns a recv pump
+    /// that completes pending [`SharedClient::express_interest`] calls.
     #[wasm_bindgen(constructor)]
     pub fn new(worker_url: String, worker_name: Option<String>) -> Result<SharedClient, JsValue> {
         console_error_panic_hook::set_once();
@@ -66,10 +61,8 @@ impl SharedClient {
                     .and_then(|lp| lp.fragment)
                     .unwrap_or(raw);
                 if let Ok(data) = Data::decode(inner.clone()) {
-                    // Longest-prefix match against pending Interests so
-                    // dataset responses (Data named `<base>/v=.../seg=N`)
-                    // satisfy the bare `<base>` Interest the witness or
-                    // mgmt client issued.
+                    // Longest-prefix match: dataset replies named
+                    // `<base>/v=.../seg=N` satisfy the bare `<base>` Interest.
                     let mut pending_lock = pending_pump.lock().await;
                     let best: Option<String> = pending_lock
                         .keys()
@@ -87,11 +80,6 @@ impl SharedClient {
                         && let Some(tx) = pending_lock.remove(&k)
                     {
                         drop(pending_lock);
-                        // Deliver the full Data wire so callers can
-                        // either decode it themselves (e.g. a witness
-                        // verifying SignatureInfo) or use the
-                        // express_interest convenience that strips out
-                        // the Content for them.
                         let _ = tx.send(inner);
                     }
                 }
@@ -101,17 +89,14 @@ impl SharedClient {
         Ok(SharedClient { face, pending })
     }
 
-    /// Send an Interest for `name`, wait up to `lifetime_ms` for the
-    /// matching Data, and resolve to its `content` bytes. Rejects with
-    /// "timeout" when no Data arrives.
+    /// Send an Interest, await the matching Data, and resolve to its
+    /// `content` bytes. Rejects with "timeout" when no Data arrives.
     pub async fn express_interest(
         &self,
         name: String,
         lifetime_ms: u32,
     ) -> Result<Uint8Array, JsValue> {
         let wire = self.express_interest_wire(name, lifetime_ms).await?;
-        // Decode the full Data wire and extract just the Content for
-        // back-compat with callers that only want the payload.
         let bytes = bytes::Bytes::copy_from_slice(&wire.to_vec());
         let data =
             Data::decode(bytes).map_err(|e| JsValue::from_str(&format!("decode Data: {e:?}")))?;
@@ -121,10 +106,8 @@ impl SharedClient {
         Ok(arr)
     }
 
-    /// Like [`Self::express_interest`] but returns the **full Data
-    /// wire** (post-NDNLPv2 unwrap) — Name + MetaInfo + Content +
-    /// SignatureInfo + SignatureValue.  Witnesses that need to
-    /// verify the signature on the mgmt response use this.
+    /// Returns the full Data wire (post-NDNLPv2 unwrap), used by
+    /// signature-verifying witnesses.
     pub async fn express_interest_wire(
         &self,
         name: String,
@@ -161,14 +144,9 @@ impl SharedClient {
     }
 }
 
-/// Minimal Interest encoder mirroring the one in `crate::engine` —
-/// duplicated here to keep this module self-contained and avoid
-/// pulling the engine module into the SharedClient build path.
-///
-/// Always sets `CanBePrefix` and `MustBeFresh` so dataset responses
-/// (NFD `*/list` verbs) — whose Data names carry a `/v=/seg=` suffix
-/// and FreshnessPeriod=0 — can satisfy this Interest. Exact-name
-/// producers are unaffected.
+/// Always sets `CanBePrefix` and `MustBeFresh` so NFD `*/list` dataset
+/// replies (Data named `<base>/v=.../seg=N`, FreshnessPeriod=0) can satisfy
+/// the bare-name Interest.
 fn encode_interest(name: &Name, lifetime: Duration) -> Bytes {
     use ndn_packet::tlv_type;
     use ndn_tlv::TlvWriter;
@@ -205,6 +183,5 @@ fn nni_bytes(val: u64) -> ([u8; 8], usize) {
     }
 }
 
-// Suppress unused_imports for Interest under a possible compile path.
 #[allow(dead_code)]
 fn _interest_anchor(_: Interest) {}

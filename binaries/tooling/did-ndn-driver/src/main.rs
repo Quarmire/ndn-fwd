@@ -1,24 +1,5 @@
-//! DIF Universal Resolver driver for the `did:ndn` DID method.
-//!
-//! Implements the DIF DID Resolution HTTP binding:
-//! <https://w3c-ccg.github.io/did-resolution/#bindings-https>
-//!
-//! # Usage
-//!
-//! ```sh
-//! did-ndn-driver --port 8080
-//! ```
-//!
-//! # DIF Universal Resolver integration
-//!
-//! Add to `uni-resolver-web/src/main/resources/application.yml`:
-//!
-//! ```yaml
-//! - pattern: "^did:ndn:.+"
-//!   url: "http://did-ndn-driver:8080/1.0/identifiers/"
-//! ```
-//!
-//! Then submit a PR to <https://github.com/decentralized-identity/universal-resolver>.
+//! DIF Universal Resolver driver for `did:ndn`. Implements the DIF DID
+//! Resolution HTTP binding (w3c-ccg.github.io/did-resolution/#bindings-https).
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -34,9 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
 
-/// DIF DID Resolution result envelope.
-///
-/// <https://w3c-ccg.github.io/did-resolution/#did-resolution-result>
+/// DIF DID Resolution result envelope
+/// (`w3c-ccg.github.io/did-resolution/#did-resolution-result`).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DidResolutionResult {
@@ -83,14 +63,10 @@ async fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
-    // Stub mode: `UniversalResolver::new()` registers a
-    // fetcher-less `NdnDidResolver` that returns
-    // `DidResolutionError::InternalError` for every `did:ndn:*`
-    // request. See (internal)
-    // Tier 3.3 — to make the driver self-sufficient, build a
-    // `CertFetcher` against a local forwarder face and call
-    // `UniversalResolver::with_cert_fetcher(fetcher)` instead.
-    // That work is out of scope for Tier 1.
+    // `UniversalResolver::new()` builds a fetcher-less `NdnDidResolver`:
+    // every `did:ndn:*` request returns `InternalError`. To resolve for
+    // real, wire `UniversalResolver::with_cert_fetcher(...)` against a
+    // forwarder face.
     let state = Arc::new(AppState {
         resolver: UniversalResolver::new(),
     });

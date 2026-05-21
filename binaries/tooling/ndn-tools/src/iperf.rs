@@ -1,15 +1,6 @@
-//! `ndn-iperf` — NDN bandwidth measurement tool.
-//!
-//! See `ndn_tools_core::iperf` for the embedded library implementation.
-//!
-//! # Proprietary tool (audit H.03)
-//!
-//! `ndn-iperf` is ndn-rs-specific: there is no ndn-cxx `ndniperf`
-//! equivalent and no NDN-WG specification of the wire convention.
-//! The default `/iperf` prefix, the segment naming, and the
-//! `--sign-mode` parameter are local to this implementation.
-//! Two `ndn-iperf` peers interoperate; cross-implementation use
-//! against ndn-cxx tools is not expected.
+//! `ndn-iperf` — NDN bandwidth measurement (ndn-rs-specific; no ndn-cxx
+//! equivalent and no NDN-WG wire spec). Two `ndn-iperf` peers interoperate
+//! with each other only.
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -18,8 +9,6 @@ use tokio::sync::mpsc;
 use ndn_tools_core::common::ConnectConfig;
 use ndn_tools_core::common::{EventLevel, ToolEvent};
 use ndn_tools_core::iperf::{IperfClientParams, IperfServerParams, run_client, run_server};
-
-// ── CLI ──────────────────────────────────────────────────────────────────────
 
 #[derive(Args, Clone)]
 struct ConnectOpts {
@@ -99,19 +88,15 @@ enum Command {
     },
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
     let (tx, mut rx) = mpsc::channel::<ToolEvent>(512);
-    // Spawn the event consumer; capture the handle so we can await it after the
-    // command finishes.  When the command drops `tx`, `rx.recv()` returns `None`
-    // and the consumer exits naturally.  Awaiting the handle ensures every queued
-    // event is printed before the process exits (avoids a Tokio runtime-shutdown
-    // race that could silently drop the results summary).
+    // Await the consumer after the command completes: dropping `tx` ends
+    // `rx.recv()`, and awaiting the join handle ensures the results
+    // summary prints before the runtime shuts down.
     let consumer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.level {
@@ -186,7 +171,6 @@ async fn main() -> Result<()> {
             .await
         }
     };
-    // Wait for all queued events to be printed.
     let _ = consumer.await;
     result
 }

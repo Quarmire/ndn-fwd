@@ -1,6 +1,5 @@
-//! Embeddable NDN ping tool logic.
-//!
-//! Provides server and client modes for measuring round-trip time to a named prefix.
+//! Server and client for the NDN ping tool: round-trip time measurement
+//! over a named prefix.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,44 +15,30 @@ use ndn_security::Signer;
 
 use crate::common::{ConnectConfig, EventLevel, ToolData, ToolEvent};
 
-// ── Parameter types ───────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct PingServerParams {
     pub conn: ConnectConfig,
-    /// Name prefix to register and respond on.
     pub prefix: String,
     /// Data freshness period in milliseconds (0 = omit).
     pub freshness_ms: u64,
-    /// Sign Data packets with Ed25519.
     pub sign: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct PingClientParams {
     pub conn: ConnectConfig,
-    /// Name prefix to ping.
     pub prefix: String,
     /// Number of pings to send (0 = unlimited).
     pub count: u64,
-    /// Interval between pings in milliseconds.
     pub interval_ms: u64,
-    /// Interest lifetime in milliseconds.
     pub lifetime_ms: u64,
 }
 
-// ── Server ────────────────────────────────────────────────────────────────────
-
-/// Run the ping server. Registers `params.prefix` and responds to every
-/// incoming Interest with an empty Data packet.
-///
-/// Emits [`ToolEvent`]s to `tx` until the router disconnects, `tx` is dropped,
-/// or the task is cancelled.
 pub async fn run_server(params: PingServerParams, tx: mpsc::Sender<ToolEvent>) -> Result<()> {
     let parent: Name = params.prefix.parse()?;
-    // H.02 — match ndn-cxx ndnping: server registers `<prefix>/ping`,
-    // not the bare prefix, so an ndn-cxx ndnping client at the same
-    // `<prefix>` interoperates without re-tuning the FIB.
+    // Match ndn-cxx ndnping: server registers `<prefix>/ping`, not the bare
+    // prefix, so an ndn-cxx ndnping client at `<prefix>` interoperates
+    // without re-tuning the FIB.
     let prefix = parent.clone().append("ping");
     let client = if params.conn.use_shm {
         ForwarderClient::connect(&params.conn.face_socket).await?
@@ -85,7 +70,6 @@ pub async fn run_server(params: PingServerParams, tx: mpsc::Sender<ToolEvent>) -
 
     let mut served: u64 = 0;
     loop {
-        // Exit cleanly if the caller stopped listening.
         if tx.is_closed() {
             break;
         }
@@ -132,11 +116,9 @@ pub async fn run_server(params: PingServerParams, tx: mpsc::Sender<ToolEvent>) -
     Ok(())
 }
 
-// ── Client ────────────────────────────────────────────────────────────────────
-
-/// Run the ping client. Sends `params.count` ping Interests (0 = unlimited)
-/// and measures RTT. Emits per-packet [`ToolEvent`]s with [`ToolData::PingResult`]
-/// and a final [`ToolData::PingSummary`].
+/// Sends `params.count` ping Interests (0 = unlimited) and measures RTT.
+/// Emits per-packet [`ToolData::PingResult`] events and a final
+/// [`ToolData::PingSummary`].
 pub async fn run_client(params: PingClientParams, tx: mpsc::Sender<ToolEvent>) -> Result<()> {
     let prefix: Name = params.prefix.parse()?;
     let mut consumer = Consumer::connect(&params.conn.face_socket).await?;
@@ -265,9 +247,6 @@ pub async fn run_client(params: PingClientParams, tx: mpsc::Sender<ToolEvent>) -
     Ok(())
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Compute and emit the RTT statistics line, returning the key values.
 async fn compute_rtt_stats(
     rtt_results: &mut [u64],
     tx: &mpsc::Sender<ToolEvent>,

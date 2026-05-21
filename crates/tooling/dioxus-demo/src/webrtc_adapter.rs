@@ -1,12 +1,7 @@
-//! Face-trait adapter for the wasm [`WebRtcFace`].
-//!
-//! On wasm, [`ndn_face_webrtc::WebRtcFace`] holds an
-//! `Rc<WasmRtcChannel>` and an `RtcPeerConnection`, both `!Send`.
-//! The engine's [`Face`](ndn_transport::Face) trait requires
-//! `Send + Sync + 'static`. Same channel-actor pattern as
-//! `SharedWorkerProxyFace` solves it: spawn a single pump that
-//! owns the `!Send` handles, expose two `mpsc` channels that the
-//! face struct holds.
+//! `Send + Sync` adapter around the wasm [`WebRtcFace`]. The inner face
+//! owns `!Send` JS handles (`Rc<WasmRtcChannel>`, `RtcPeerConnection`);
+//! this wrapper moves them into a pump task and exposes two `mpsc`
+//! channels that satisfy the engine's [`Face`] trait bounds.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,13 +14,8 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 use web_sys::RtcPeerConnection;
 
-/// `Face`-implementing wrapper around the wasm
-/// [`WebRtcFace`](ndn_face_webrtc::WebRtcFace).
-///
-/// Owns nothing `!Send`; the JS handles live inside the pump task.
-/// Drop on the wrapper closes the outbound channel; the pump exits
-/// and the underlying `RtcPeerConnection` is dropped (closing the
-/// SCTP/DTLS session via the JS GC path).
+/// Dropping closes the outbound mpsc, the pump exits, and JS GC tears down
+/// the underlying `RtcPeerConnection` (closing SCTP/DTLS).
 pub struct WebRtcFaceAdapter {
     id: FaceId,
     tx_out: mpsc::Sender<Bytes>,
@@ -39,10 +29,8 @@ impl WebRtcFaceAdapter {
         let (tx_in, rx_in) = mpsc::channel::<Bytes>(64);
 
         let channel = face.channel();
-        // The pump owns both the channel (Rc<WasmRtcChannel>) and the
-        // bare `WebRtcFace` (which holds the `RtcPeerConnection`)
-        // inside the `move` closure. Together they keep the JS
-        // peer-connection alive for the pump's whole lifetime.
+        // Pump owns both the channel and the bare `WebRtcFace`, which keeps
+        // the `RtcPeerConnection` alive for the pump's lifetime.
         runtime.spawn(Box::pin(pump(face, channel, rx_out, tx_in)));
 
         Self {
@@ -78,13 +66,10 @@ async fn pump(
     mut rx_out: mpsc::Receiver<Bytes>,
     tx_in: mpsc::Sender<Bytes>,
 ) {
-    // Spawn a parallel task on the same single-threaded runtime
-    // that drains inbound bytes and pushes them into tx_in.
-    // RtcChannel::recv on wasm is `?Send` and holds a `RefMut`
-    // across the await; we can't poll it inside a `select!` that
-    // also drives the outbound branch without re-entrancy issues.
-    // Two separate `spawn_local`-driven loops are simpler and
-    // correct on a single-threaded runtime.
+    // `RtcChannel::recv` on wasm is `?Send` and holds a `RefMut` across
+    // await, so polling it inside a `select!` with the outbound branch
+    // would re-enter. Use two separate `spawn_local` loops on the
+    // single-threaded runtime instead.
     let recv_channel = Rc::clone(&channel);
     wasm_bindgen_futures::spawn_local(async move {
         loop {
@@ -107,7 +92,5 @@ async fn pump(
     }
 }
 
-// Suppress unused imports warning when only some platform code-paths
-// are active during compilation.
 #[allow(dead_code)]
 fn _peer_connection_marker(_: RtcPeerConnection) {}

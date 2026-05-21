@@ -1,19 +1,7 @@
-//! NDNCERT 0.3 enrollment helper — C.13 live CA interop witness tool.
-//!
-//! Performs a full NEW → CHALLENGE (pin, 2 rounds) → cert-fetch enrollment
-//! against a running `ndncert-ca-server`.
-//!
-//! Usage:
-//!   enroll-ndncert \
-//!     --face-socket /run/nfd-ndncert/nfd.sock \
-//!     --ca-prefix /test/ndncert/CA \
-//!     --name /test/requester \
-//!     [--pin CODE]
-//!
-//! If --pin is omitted the binary performs NEW + round-1 CHALLENGE (trigger),
-//! prints "WAITING_FOR_PIN" and the request_id to stderr, then reads one line
-//! from stdin as the PIN.  The witness script feeds the PIN by parsing the CA
-//! container logs after the trigger round.
+//! NDNCERT 0.3 enrollment helper. Runs NEW → CHALLENGE (pin, 2 rounds) →
+//! cert-fetch against `ndncert-ca-server`. Without `--pin` the helper sends
+//! the trigger round, prints `WAITING_FOR_PIN <request_id>` on stderr, and
+//! reads the PIN from stdin.
 
 use std::io::BufRead as _;
 use std::sync::Arc;
@@ -45,10 +33,9 @@ async fn main() -> anyhow::Result<()> {
     let ca_prefix: Name = ca_prefix_str.parse().context("invalid ca-prefix")?;
     let requester_name: Name = name_str.parse().context("invalid name")?;
 
-    // Generate a fresh ephemeral ECDSA P-256 key. Upstream ndn-cxx (and thus
-    // ndncert-ca-server) cannot verify Ed25519 signatures: its TLV decoder
-    // recognizes SignatureEd25519 as a constant but VerifierFilter forces
-    // EVP_DigestVerifyInit with SHA256, which fails for Ed25519 EVP_PKEYs.
+    // Use ECDSA-P256: ndn-cxx (and so `ndncert-ca-server`) cannot verify
+    // Ed25519 — its VerifierFilter forces EVP_DigestVerifyInit with SHA256,
+    // which fails for Ed25519 EVP_PKEYs.
     let mut seed = [0u8; 32];
     getrandom::getrandom(&mut seed)?;
     let ts_ms = std::time::SystemTime::now()
@@ -66,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut session = EnrollmentSession::new(key_name.clone(), Arc::clone(&signer), 86400);
 
-    // ── Step 1: NEW ──────────────────────────────────────────────────────────
+    // Step 1: NEW.
     let new_params = session.new_request_body().await?;
     let new_name = ca_prefix.clone().append("CA").append("NEW");
 
@@ -96,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         hex_encode(&request_id_bytes)
     );
 
-    // ── Step 2a: CHALLENGE round 1 (trigger — no code, selects "pin") ────────
+    // Step 2a: CHALLENGE trigger round — selects "pin", no code yet.
     let trigger_params = session.challenge_request_body("pin", serde_json::Map::new())?;
     let challenge_name = ca_prefix
         .clone()
@@ -123,7 +110,6 @@ async fn main() -> anyhow::Result<()> {
     session.handle_challenge_response(trigger_content)?;
 
     if session.is_complete() {
-        // CA accepted without a PIN (nop-equivalent; not expected with real pin).
         return finish(&mut consumer, &session, &ca_prefix).await;
     }
 
@@ -132,7 +118,6 @@ async fn main() -> anyhow::Result<()> {
         session.challenge_status_message()
     );
 
-    // ── Step 2b: Obtain PIN ───────────────────────────────────────────────────
     let pin = if let Some(p) = pin_opt {
         p
     } else {
@@ -152,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
         bail!("PIN is empty");
     }
 
-    // ── Step 2c: CHALLENGE round 2 (submit PIN code) ─────────────────────────
+    // Step 2c: CHALLENGE submit round.
     let mut code_params = serde_json::Map::new();
     code_params.insert("code".to_string(), serde_json::Value::String(pin));
     let submit_params = session.challenge_request_body("pin", code_params)?;
@@ -212,12 +197,9 @@ async fn finish(
 
     eprintln!("enrollment complete — issued cert name: {cert_name}");
 
-    // ── Step 3: Fetch and decode the issued certificate (best-effort) ─────────
-    // Upstream ndncert-ca-server registers only `<ca-prefix>/CA` for the
-    // protocol endpoints; the issued cert lives at `<requester-id>/KEY/...`
-    // which the CA does not serve from its own face — production deployments
-    // pair the CA with an external NDN repo. The witness passes when the CA
-    // returns IssuedCertName; cert fetch is best-effort.
+    // Step 3 (best-effort): fetch the issued cert. `ndncert-ca-server`
+    // registers only `<ca-prefix>/CA`; the issued cert at
+    // `<requester>/KEY/...` is normally served by a paired NDN repo.
     let ca_prefix_str = ca_prefix.to_string();
     let (issuer_str, fetched) = match consumer.fetch(cert_name.clone()).await {
         Ok(cert_data) => {

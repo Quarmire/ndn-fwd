@@ -1,13 +1,9 @@
 //! Shared types for streaming tool output to callers.
 
-/// A single event emitted by a running tool.
 #[derive(Debug, Clone)]
 pub struct ToolEvent {
-    /// Human-readable text line (suitable for display in a log pane).
     pub text: String,
-    /// Severity level for colouring and filtering.
     pub level: EventLevel,
-    /// Optional structured payload for driving rich UI widgets.
     pub structured: Option<ToolData>,
 }
 
@@ -19,9 +15,8 @@ pub enum EventLevel {
     Summary,
 }
 
-/// Structured data variants emitted alongside text events.
-/// The dashboard uses these to update live widgets (speed dial, result cards, etc.)
-/// without having to parse the human-readable text.
+/// Structured payloads emitted alongside text events so UIs can drive live
+/// widgets without parsing the text line.
 #[derive(Debug, Clone)]
 pub enum ToolData {
     PingResult {
@@ -56,7 +51,6 @@ pub enum ToolData {
         rtt_avg_us: u64,
         rtt_p99_us: u64,
     },
-    /// Emitted by the server when a client session is negotiated.
     IperfClientConnected {
         flow_id: String,
         duration_secs: u64,
@@ -64,19 +58,15 @@ pub enum ToolData {
         payload_size: usize,
         reverse: bool,
     },
-    /// Emitted after a single or segmented peek completes.
     PeekResult {
         name: String,
         bytes_received: u64,
-        /// Set when content was written to a file.
         saved_to: Option<String>,
     },
-    /// Emitted during segmented fetch to update a progress widget.
     FetchProgress {
         received: usize,
         total: usize,
     },
-    /// Emitted during file transfer (send/recv) to update a progress bar.
     TransferProgress {
         bytes_done: u64,
         bytes_total: Option<u64>,
@@ -121,16 +111,11 @@ impl ToolEvent {
 /// Connection parameters for tools that connect to an external router.
 #[derive(Debug, Clone)]
 pub struct ConnectConfig {
-    /// Path to the router face socket.
     pub face_socket: String,
-    /// Use shared memory for the data plane (set false for `--no-shm` behaviour).
     pub use_shm: bool,
-    /// Maximum Data content body the tool expects to send or receive,
-    /// in bytes. Used to size the SHM ring slot via `faces/create`'s
-    /// `mtu` ControlParameter. `None` uses the router's default slot
-    /// size, which comfortably covers Data packets up to a 256 KiB
-    /// content body. Set this to `Some(chunk_size)` when the tool
-    /// plans to emit larger segments (e.g. 1 MiB rayon sweeps).
+    /// Maximum Data content body the tool expects to send or receive, in
+    /// bytes. Sizes the SHM ring slot via `faces/create`'s `mtu`
+    /// ControlParameter. `None` uses the router default (~256 KiB content).
     pub mtu: Option<usize>,
 }
 

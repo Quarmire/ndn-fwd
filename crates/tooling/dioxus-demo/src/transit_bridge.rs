@@ -1,30 +1,9 @@
-//! WebRTC ↔ SharedWorker tab-side bridge (the worker-bridge pattern
-//! from `crates/extension/ndn-face-webrtc/docs/worker-bridge.md`).
-//!
-//! ## Topology
-//!
-//! ```text
-//!   peer tab                  bridge tab                       SharedWorker
-//!   ┌──────────────┐          ┌─────────────────────┐          ┌──────────────────┐
-//!   │ TransitPeer  │ ─ WebRTC ┼─▶ WebRtcFaceAdapter │          │  ForwarderEngine │
-//!   │ (window ctx)  │ datachan │       ↕             │ ↓ ports  │  (mgmt + CS +    │
-//!   │               │          │   byte pump (2x)   │ ←──────▶ │   producer)      │
-//!   │               │          │       ↕             │          │                  │
-//!   │               │          │  SharedWorkerProxy │          │  /cache-test     │
-//!   └──────────────┘          └─────────────────────┘          │   AppFace        │
-//!                                                              └──────────────────┘
-//! ```
-//!
-//! The bridge tab doesn't run its own engine — it's just a byte pump
-//! between two faces.  The SharedWorker treats the bridge's
-//! `WorkerPortFace` like any other tab; FIB routes, CS lookups, and
-//! the mgmt dispatcher all apply.  Each end-to-end Interest takes
-//! exactly one detour through the bridge tab's JS event loop, which
-//! is the minimum the W3C-imposed window-scoped `RTCPeerConnection`
-//! constraint allows.
-//!
-//! See the doc file for the rationale and a code sketch that this
-//! module reifies.
+//! Tab-side WebRTC ↔ SharedWorker bridge. The bridge tab runs no engine of
+//! its own; it owns two faces (a [`WebRtcFaceAdapter`] to the peer and a
+//! [`SharedWorkerProxyFace`] to the worker) and two background pumps that
+//! shuttle bytes between them. Each Interest detours once through the
+//! window's JS event loop — the minimum the W3C window-scoped
+//! `RTCPeerConnection` rule allows.
 
 #![cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
 
@@ -43,20 +22,9 @@ fn bridge_log(msg: &str) {
     web_sys::console::log_1(&format!("[transit-bridge] {msg}").into());
 }
 
-/// A tab-side WebRTC ↔ SharedWorker byte pump.
-///
-/// Lifecycle:
-/// 1. `new(worker_url, worker_name)` connects to the SharedWorker
-///    via a [`SharedWorkerProxyFace`] (registering the bridge as a
-///    new face inside the worker's engine).
-/// 2. `accept_offer(offer_json)` accepts an SDP offer from a peer
-///    and returns the SDP answer to forward back.
-/// 3. `start()` finalizes the WebRTC channel and spawns the two
-///    pump tasks (`rtc → worker` and `worker → rtc`).  After this
-///    the bridge runs until either face errors / closes.
-///
-/// The bridge holds no engine — it owns two faces and the two
-/// background tasks that pump between them.
+/// Lifecycle: `new` connects the worker face, `accept_offer` produces the
+/// SDP answer, `start` finalizes the WebRTC channel and spawns the two
+/// pump tasks. Runs until either face closes.
 #[wasm_bindgen]
 pub struct TransitBridge {
     connector: WebRtcConnector,
@@ -94,8 +62,7 @@ impl TransitBridge {
         })
     }
 
-    /// Accept an SDP offer from a peer; return the SDP answer.
-    /// The WebRTC channel is materialised lazily by [`start`].
+    /// The WebRTC channel itself is materialised lazily by `start`.
     pub async fn accept_offer(&self, offer_json: String) -> Result<String, JsValue> {
         let offer: SessionDescription = serde_json::from_str(&offer_json)
             .map_err(|e| JsValue::from_str(&format!("parse offer: {e}")))?;
@@ -110,9 +77,7 @@ impl TransitBridge {
             .map_err(|e| JsValue::from_str(&format!("serialise answer: {e}")))
     }
 
-    /// Block until the WebRTC channel is open, then spawn the
-    /// rtc↔worker pumps and return.  After this call the bridge
-    /// runs in the background until either face closes.
+    /// Await the WebRTC channel, spawn both pumps, return.
     pub async fn start(&self) -> Result<(), JsValue> {
         let pending = self
             .pending
@@ -131,8 +96,7 @@ impl TransitBridge {
         ));
         let worker = Arc::clone(&self.worker_face);
 
-        // peer → worker: every Interest from the peer goes into the
-        // worker's engine through the bridge's WorkerPortFace.
+        // peer → worker
         let r = Arc::clone(&rtc);
         let w = Arc::clone(&worker);
         self.runtime.spawn(Box::pin(async move {
@@ -152,8 +116,7 @@ impl TransitBridge {
             }
         }));
 
-        // worker → peer: every Data the engine forwards out through
-        // the bridge's face goes back over the WebRTC datachannel.
+        // worker → peer
         let r = Arc::clone(&rtc);
         let w = Arc::clone(&worker);
         self.runtime.spawn(Box::pin(async move {

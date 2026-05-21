@@ -1,29 +1,11 @@
-/// ndn-ctl — send management commands to a running ndn-fwd forwarder.
-///
-/// Commands follow the `<noun> <verb>` pattern (like NFD's `nfdc`):
-///
-/// ```sh
-/// ndn-ctl route add /ndn --face 1 --cost 10
-/// ndn-ctl route list
-/// ndn-ctl face create udp4://192.168.1.1:6363
-/// ndn-ctl face list
-/// ndn-ctl strategy set /ndn --strategy /localhost/nfd/strategy/best-route
-/// ndn-ctl cs info
-/// ndn-ctl neighbors list
-/// ndn-ctl service list
-/// ndn-ctl service browse
-/// ndn-ctl service browse /ndn/sensors
-/// ndn-ctl service announce /ndn/app
-/// ndn-ctl service withdraw /ndn/app
-/// ndn-ctl status
-/// ndn-ctl shutdown
-/// ```
+//! `ndn-ctl` — send management commands to a running ndn-fwd. Follows
+//! NFD's `nfdc` `<noun> <verb>` pattern (`route add`, `face list`,
+//! `strategy set`, …).
+
 use clap::{Parser, Subcommand};
 
 use ndn_config::ControlResponse;
 use ndn_ipc::MgmtClient;
-
-// ─── CLI definition ───────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(
@@ -269,7 +251,6 @@ enum SecurityAction {
     },
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -283,7 +264,6 @@ async fn main() -> anyhow::Result<()> {
     run_nfd(&cli).await
 }
 
-// ─── NFD transport (primary) ────────────────────────────────────────────────
 
 async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
     use anyhow::Context as _;
@@ -517,7 +497,6 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── Security subcommands (local PIB, no router) ────────────────────────────
 
 fn run_security(action: &SecurityAction) -> anyhow::Result<()> {
     use ndn_security::{FilePib, SecurityManager};
@@ -638,7 +617,6 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
-// ─── Output helpers ──────────────────────────────────────────────────────────
 
 fn face_kind(uri: &str) -> &'static str {
     if uri.starts_with("udp4://") || uri.starts_with("udp6://") || uri.starts_with("udp://") {
@@ -711,7 +689,6 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
-// ─── Output ──────────────────────────────────────────────────────────────────
 
 fn print_face_list(faces: &[ndn_config::FaceStatus]) {
     let mut out = String::new();

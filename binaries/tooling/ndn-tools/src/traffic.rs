@@ -1,13 +1,5 @@
-//! `ndn-traffic` — NDN traffic generator.
-//!
-//! Embeds a forwarding engine with producer/consumer `InProcFace` pairs and
+//! `ndn-traffic` — embeds a forwarding engine with `InProcFace` pairs and
 //! drives configurable Interest/Data traffic through the full pipeline.
-//!
-//! Usage:
-//! ```text
-//! ndn-traffic [--mode echo|sink] [--count N] [--rate PPS] [--size BYTES]
-//!             [--prefix NAME] [--concurrency C]
-//! ```
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +15,6 @@ use ndn_packet::lp::is_lp_packet;
 use ndn_packet::{Interest, Name};
 use ndn_transport::FaceId;
 
-// ─── CLI ─────────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(name = "ndn-traffic", about = "NDN traffic generator")]
@@ -53,7 +44,6 @@ struct Cli {
     concurrency: u64,
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn build_name(prefix: &Name, flow: u64, seq: u64) -> Name {
     prefix
@@ -109,7 +99,6 @@ fn print_stats(results: &[FlowResult], elapsed: Duration, size: usize) {
     println!("  elapsed: {:.2}s", elapsed.as_secs_f64());
 }
 
-// ─── Producer ────────────────────────────────────────────────────────────────
 
 async fn run_producer(handle: InProcHandle, payload: Arc<Vec<u8>>) {
     loop {
@@ -128,7 +117,6 @@ async fn run_producer(handle: InProcHandle, payload: Arc<Vec<u8>>) {
     }
 }
 
-// ─── Consumer ────────────────────────────────────────────────────────────────
 
 async fn run_consumer(
     handle: InProcHandle,
@@ -172,7 +160,6 @@ async fn run_consumer(
     result
 }
 
-// ─── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -193,12 +180,10 @@ async fn main() -> Result<()> {
         cli.concurrency,
     );
 
-    // ── Build engine with faces ──────────────────────────────────────────────
-
     let concurrency = cli.concurrency.max(1);
     let buf_size = 4096;
 
-    // Consumer faces: FaceId(1) .. FaceId(concurrency)
+    // Consumer faces use FaceId(1)..=FaceId(concurrency).
     let mut consumer_handles: Vec<InProcHandle> = Vec::new();
     let mut builder = EngineBuilder::new(EngineConfig {
         pipeline_channel_cap: buf_size,
@@ -211,7 +196,6 @@ async fn main() -> Result<()> {
         builder = builder.face(face);
     }
 
-    // Producer face (echo mode only).
     let producer_face_id = FaceId(concurrency + 1);
     let mut producer_handle: Option<InProcHandle> = None;
     if echo_mode {
@@ -222,12 +206,9 @@ async fn main() -> Result<()> {
 
     let (engine, shutdown) = builder.build().await?;
 
-    // FIB route: prefix -> producer face.
     if echo_mode {
         engine.fib().add_nexthop(&prefix, producer_face_id, 0);
     }
-
-    // ── Spawn producer ───────────────────────────────────────────────────────
 
     let producer_task = if let Some(handle) = producer_handle {
         let payload = Arc::new(vec![0xAAu8; cli.size]);
@@ -235,8 +216,6 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-
-    // ── Spawn consumers ──────────────────────────────────────────────────────
 
     let per_flow = cli.count / concurrency;
     let rate_interval = if cli.rate > 0 {
@@ -261,13 +240,9 @@ async fn main() -> Result<()> {
     }
     let elapsed = start.elapsed();
 
-    // ── Report ───────────────────────────────────────────────────────────────
-
     print_stats(&results, elapsed, cli.size);
 
-    // ── Shutdown ─────────────────────────────────────────────────────────────
-
-    drop(results); // drop consumer handles (already moved)
+    drop(results);
     if let Some(task) = producer_task {
         task.abort();
         let _ = task.await;

@@ -1,23 +1,8 @@
-//! `ndn-bench` — `InProcFace` channel-overhead microbenchmark.
-//!
-//! # Scope (audit H.09)
-//!
-//! This binary measures the round-trip overhead of the
-//! `InProcHandle ↔ InProcFace` mpsc channel only.  It does **not**
-//! wire the `InProcFace` to a `ForwarderEngine` pipeline, and it
-//! does **not** emit signed Data packets — the payload is a fixed
-//! 3-byte dummy TLV (`\x05\x01\x00`).  The reported throughput is
-//! therefore an upper bound on what the engine could push through a
-//! single in-process face, not a measurement of:
-//!
-//! - end-to-end NDN forwarding throughput,
-//! - signing throughput (Ed25519, RSA, ECDSA, …), or
-//! - Content Store admission overhead.
-//!
-//! For real benchmarks against the engine, drive `ndn-iperf`
-//! through a wired-up `ForwarderEngine` instead.
-//!
-//! Usage: ndn-bench [--interests <n>] [--concurrency <c>] [--name <prefix>]
+//! `ndn-bench` — `InProcHandle ↔ InProcFace` channel microbenchmark. Does
+//! NOT wire to a `ForwarderEngine` pipeline and does NOT sign packets
+//! (3-byte dummy TLV). Reports an upper bound on per-face channel
+//! throughput; for end-to-end forwarding numbers use `ndn-iperf` against a
+//! wired-up engine.
 
 use std::time::Instant;
 
@@ -29,7 +14,6 @@ use ndn_faces::local::InProcFace;
 use ndn_packet::Name;
 use ndn_transport::FaceId;
 
-/// Latency statistics over a sample of round-trip measurements.
 struct LatencyStats {
     samples: Vec<u64>, // microseconds
 }
@@ -83,7 +67,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // ── Engine setup ──────────────────────────────────────────────────────────
     let (_engine, shutdown) = EngineBuilder::new(EngineConfig::default()).build().await?;
 
     let prefix: Name = prefix_str.parse().unwrap_or_else(|_| Name::root());
@@ -92,9 +75,6 @@ async fn main() -> Result<()> {
         total_interests, concurrency, prefix_str
     );
 
-    // ── Simulated benchmark loop ──────────────────────────────────────────────
-    // A real implementation would wire AppFace to the engine pipeline.
-    // Here we measure the overhead of the AppFace channel round-trip only.
     let mut stats = LatencyStats::new();
     let start = Instant::now();
     let batch = total_interests / concurrency.max(1);
@@ -104,26 +84,20 @@ async fn main() -> Result<()> {
     for worker in 0..concurrency {
         let pfx = prefix.clone();
         set.spawn(async move {
-            // Measure the overhead of the InProcFace channel send path.
-            // InProcFace::new creates (engine-side face, app-side handle).
-            // The "engine" receives via face.recv(); the "app" sends via handle.
             let (face, handle) = InProcFace::new(FaceId(worker), 128);
             use ndn_transport::Transport;
-            let _face_id = face.id(); // confirm the face is alive
+            let _face_id = face.id();
 
             let mut rtts = Vec::new();
             for seq in 0..batch {
                 let name = pfx.clone().append(format!("{seq}"));
                 use ndn_packet::Interest;
-                let interest = Interest::new(name);
-                let _ = interest; // interests would be sent through the handle in a real bench
+                let _ = Interest::new(name);
 
                 let t0 = Instant::now();
-                // Encode and send a dummy packet through the handle to the face.
                 let dummy = bytes::Bytes::from_static(b"\x05\x01\x00");
                 let _ = handle.send(dummy).await;
                 rtts.push(t0.elapsed().as_micros() as u64);
-                // Drain the packet to avoid blocking the next iteration.
                 let _ = face.recv_bytes().await;
             }
             rtts

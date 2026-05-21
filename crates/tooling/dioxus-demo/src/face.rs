@@ -1,11 +1,4 @@
-//! Face wiring: open a [`BrowserWebTransportFace`] from the browser tab.
-//!
-//! The fully wired engine integration (FIB, PIT, strategy table) is left
-//! as the natural next step once Phase 4's UI scaffold is approved. For
-//! now this module exposes the connect helper and a thin send/recv
-//! pump that the consumer/producer panels can drive directly. The face
-//! itself is a real `Face`, so swapping in `EngineBuilder::face(...)`
-//! later is mechanical.
+//! Tab-side helper that opens a [`BrowserWebTransportFace`].
 
 use std::sync::Arc;
 
