@@ -1,0 +1,27 @@
+[package]
+name = "ndn-otel-bridge"
+description = "Sidecar that consumes NDN-native spans from an ndn-fwd observability prefix and forwards via OTLP/HTTP-protobuf to Jaeger / Tempo / Honeycomb / Datadog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.scope]
+classification = "tooling"
+
+[[bin]]
+name = "ndn-otel-bridge"
+path = "src/main.rs"
+
+[dependencies]
+ndn-app           = { workspace = true }
+ndn-packet        = { workspace = true, features = ["std"] }
+ndn-observability = { workspace = true }
+
+anyhow            = { workspace = true }
+bytes             = { workspace = true, features = ["std"] }
+clap              = { version = "4", features = ["derive"] }
+reqwest           = { workspace = true }
+tokio             = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+tracing           = { workspace = true }
+tracing-subscriber = { workspace = true }
+humantime         = "2"
