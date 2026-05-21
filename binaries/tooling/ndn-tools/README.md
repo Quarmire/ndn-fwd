@@ -1,114 +1,150 @@
 # ndn-tools
 
-NDN command-line tools for testing, debugging, and performance measurement.
+Operator CLIs for working with an NDN forwarder. One crate, seven
+binaries: `ndn-peek`, `ndn-put`, `ndn-ping`, `ndn-sec`, `ndn-ctl`,
+`ndn-traffic`, `ndn-iperf`.
 
-## Tools
-
-### ndn-peek
-
-Fetch a single Data packet by name.
+## Get started
 
 ```bash
-ndn-peek /ndn/example/data --timeout-ms 4000
+cargo build --release -p ndn-tools
+./target/release/ndn-ctl status
+./target/release/ndn-peek /ndn/example/data
 ```
 
-### ndn-put
+Each binary takes `--help` for its full option set.
 
-Publish Data segments from a file.
+## Configure
+
+Every tool talks to the forwarder over its management socket. The
+default is `/run/ndn-fwd/mgmt.sock` (override with
+`--socket <path>`). `$NDN_SOCKET` sets the default for the current
+shell.
+
+`RUST_LOG=info` for status; `RUST_LOG=debug` for protocol-level
+detail.
+
+## Build
+
+### Cargo
+
+```bash
+cargo build --release -p ndn-tools
+# Produces: ndn-peek, ndn-put, ndn-ping, ndn-sec, ndn-ctl, ndn-traffic, ndn-iperf
+```
+
+### Nix
+
+```bash
+nix profile install github:Quarmire/ndn-rs#ndn-tools    # installs all seven
+nix run github:Quarmire/ndn-rs#ndn-ctl -- status        # one-shot
+```
+
+## Run
+
+### `ndn-ctl` — management
+
+Wraps the NFD-compatible management surface
+(`/localhost/nfd/<module>/<verb>`).
+
+```bash
+ndn-ctl status                                  # router status snapshot
+ndn-ctl rib register /ndn/example --face 1 --cost 10
+ndn-ctl faces list
+ndn-ctl cs info
+ndn-ctl security identity-status
+ndn-ctl strategy-choice set /ndn/example /localhost/nfd/strategy/best-route
+```
+
+`ndn-ctl --help` lists every verb. The wire shape matches NFD so any
+NFD-compatible tooling (e.g. `nfdc`) talks to the same socket.
+
+### `ndn-peek` — fetch one Data
+
+```bash
+ndn-peek /ndn/example/data
+ndn-peek /ndn/example/file --timeout-ms 4000
+ndn-peek /ndn/example/data --hex                # raw wire output
+```
+
+### `ndn-put` — publish from stdin
 
 ```bash
 ndn-put /ndn/example/file --chunk-size 8192 < data.bin
 ```
 
-### ndn-ping
+Segments the input, signs each chunk with the local KeyChain, and
+serves them under the given prefix until interrupted.
 
-Send probe Interests and measure round-trip time.
+### `ndn-ping` — reachability + latency
 
 ```bash
 ndn-ping /ndn/example --count 10 --interval-ms 100
 ```
 
-### ndn-traffic
+Sends probe Interests every `--interval-ms` and reports per-Interest
+round-trip time plus loss rate.
 
-Configurable NDN traffic generator. Embeds a forwarding engine with
-producer/consumer AppFace pairs and drives Interest/Data traffic through
-the full pipeline.
+### `ndn-sec` — identity / key / cert management
 
 ```bash
-# Echo mode (producer responds with Data):
-ndn-traffic --mode echo --count 10000 --concurrency 4
-
-# Sink mode (no producer — all Interests Nack):
-ndn-traffic --mode sink --count 1000
-
-# Rate-limited:
-ndn-traffic --mode echo --count 5000 --rate 1000 --size 2048
+ndn-sec keygen /ndn/mysite/router1               # mint Ed25519 identity
+ndn-sec certdump /ndn/mysite/router1             # cert in PEM/wire form
+ndn-sec --pib-dir /var/lib/ndn-fwd/pib list
+ndn-sec anchor add /path/to/anchor.cert
 ```
 
-Options:
+The PIB directory defaults to `$NDN_PIB` or the platform default;
+override with `--pib-dir <path>`.
+
+### `ndn-traffic` — synthetic load
+
+Embeds a forwarder engine with producer/consumer face pairs and
+drives Interest/Data through the full pipeline.
+
+```bash
+ndn-traffic --mode echo  --count 10000 --concurrency 4
+ndn-traffic --mode sink  --count 1000
+ndn-traffic --mode echo  --count 5000 --rate 1000 --size 2048
+```
 
 | Flag | Default | Description |
-|------|---------|-------------|
+|---|---|---|
 | `--mode` | `echo` | `echo` (producer replies) or `sink` (all Nack) |
 | `--count` | `10000` | Total Interests to send |
-| `--rate` | `0` | Target pps (0 = unlimited) |
+| `--rate` | `0` | Target packets/s (0 = unlimited) |
 | `--size` | `1024` | Data payload size in bytes |
 | `--prefix` | `/traffic` | Name prefix |
 | `--concurrency` | `1` | Parallel consumer flows |
 
-Output includes throughput (pps, Mbps), latency percentiles
-(min/avg/p50/p95/p99/max), and loss rate.
+Output: throughput (pps + Mbps), latency percentiles
+(min/avg/p50/p95/p99/max), loss rate.
 
-### ndn-iperf
+### `ndn-iperf` — sustained throughput
 
-NDN bandwidth measurement tool. Measures sustained throughput between a
-producer and consumer through the embedded forwarding engine using
-sliding-window flow control.
+Sliding-window flow control between an in-process producer/consumer
+pair.
 
 ```bash
-# Default: 10s test, 8KB payload, window of 64:
-ndn-iperf
-
-# Custom parameters:
+ndn-iperf                                       # 10s, 8KB, window 64
 ndn-iperf --duration 5 --size 1024 --window 128
 ```
 
-Options:
-
 | Flag | Default | Description |
-|------|---------|-------------|
+|---|---|---|
 | `--duration` | `10` | Test duration in seconds |
 | `--size` | `8192` | Data payload size in bytes |
 | `--window` | `64` | Max outstanding Interests |
 | `--prefix` | `/iperf` | Name prefix |
 
-Output includes total bytes transferred, throughput in Mbps, packet
-counts, and RTT statistics.
+Output: total bytes, Mbps, packet counts, RTT statistics.
 
-### ndn-sec
+## License
 
-Security key and certificate management.
+Licensed under either [MIT](../../../LICENSE-MIT) or
+[Apache-2.0](../../../LICENSE-APACHE) at your option.
 
-```bash
-ndn-sec generate --name /ndn/example/KEY
-ndn-sec show --pib-dir ./keys
-```
+## Acknowledgements
 
-### ndn-ctl
-
-Send management commands to a running forwarder.
-
-```bash
-ndn-ctl add-route /ndn/prefix 0 10
-ndn-ctl list-faces
-ndn-ctl get-stats
-```
-
-## Building
-
-```bash
-cargo build -p ndn-tools
-
-# Release build for benchmarking:
-cargo build -p ndn-tools --release
-```
+Verb shape follows the NFD management protocol. `ndn-peek` /
+`ndn-put` / `ndn-ping` mirror the corresponding ndn-cxx tools.
