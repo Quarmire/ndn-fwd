@@ -14,7 +14,7 @@ use ndn_face_webrtc::{IceServers, PendingFace, SessionDescription, WebRtcConnect
 use ndn_packet::lp::LpPacket;
 use ndn_packet::{Data, Interest, Name};
 use ndn_runtime::default_runtime;
-use ndn_transport::{Face, FaceError, FaceId};
+use ndn_transport::{FaceError, FaceId, Transport};
 use std::collections::HashMap;
 use tokio::sync::{Mutex, oneshot};
 use wasm_bindgen::prelude::*;
@@ -179,7 +179,7 @@ impl TransitPeer {
         let pending_data = Arc::clone(&self.pending_data);
         runtime.spawn(Box::pin(async move {
             loop {
-                let raw = match Face::recv(&*adapter).await {
+                let raw = match Transport::recv_bytes(&*adapter).await {
                     Ok(b) => b,
                     Err(_) => break,
                 };
@@ -217,7 +217,7 @@ impl TransitPeer {
             .map(Arc::clone)
             .ok_or_else(|| JsValue::from_str("face not connected; call set_answer first"))?;
         peer_log(&format!("express {key}"));
-        Face::send(&*face, wire)
+        Transport::send_bytes(&*face, wire)
             .await
             .map_err(|e: FaceError| JsValue::from_str(&format!("send: {e:?}")))?;
 

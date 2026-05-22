@@ -19,7 +19,7 @@ use ndn_face_shared_worker::{WorkerListener, init_worker_scope};
 use ndn_face_webtransport_wasm::BrowserWebTransportFace;
 use ndn_packet::Name;
 use ndn_runtime::default_runtime;
-use ndn_transport::{ErasedFace, FaceId};
+use ndn_transport::{Face, FaceId, Transport};
 
 use crate::engine::Engine;
 
@@ -53,14 +53,14 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
 
     let runtime = default_runtime();
 
-    let upstream: Option<Arc<dyn ErasedFace>> = if upstream_url.is_empty() {
+    let upstream: Option<Arc<Face>> = if upstream_url.is_empty() {
         None
     } else {
         let face =
             BrowserWebTransportFace::connect(FaceId(1), &upstream_url, &[], Arc::clone(&runtime))
                 .await
                 .map_err(|e| JsValue::from_str(&format!("upstream connect: {e:?}")))?;
-        Some(Arc::new(face) as Arc<dyn ErasedFace>)
+        Some(Arc::new(Face::from_transport(face)))
     };
 
     // On a first-run page IdbPib has neither anchors nor a SafeBag, and the
@@ -170,7 +170,7 @@ pub async fn worker_main(upstream_url: String, producers: String) -> Result<(), 
                 Ok(port_face) => {
                     worker_log(&format!(
                         "tab port accepted as {}",
-                        ndn_transport::Face::id(&port_face)
+                        Transport::id(&port_face)
                     ));
                     engine_for_loop.add_face(port_face);
                 }

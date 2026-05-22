@@ -23,7 +23,7 @@ use ndn_packet::{Data, Interest, Name, SignatureType};
 use ndn_runtime::Runtime;
 use ndn_security::{Signer, Validator};
 use ndn_tlv::TlvWriter;
-use ndn_transport::{ErasedFace, FaceError, FaceId, FaceKind, Transport};
+use ndn_transport::{Face, FaceError, FaceId, FaceKind, Transport};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -124,7 +124,7 @@ impl Engine {
     /// `/ → upstream` FIB route so `Engine::express` reaches the host
     /// forwarder. If `None`, the engine is producer/cache-only (the
     /// SharedWorker entrypoint that hosts an engine for tabs).
-    pub fn new(runtime: Arc<dyn Runtime>, upstream: Option<Arc<dyn ErasedFace>>) -> Self {
+    pub fn new(runtime: Arc<dyn Runtime>, upstream: Option<Arc<Face>>) -> Self {
         Self::new_with_security(runtime, upstream, None, None)
     }
 
@@ -134,7 +134,7 @@ impl Engine {
     /// `DigestSha256`. Both come from `IdbPib` in the SharedWorker flow.
     pub fn new_with_security(
         runtime: Arc<dyn Runtime>,
-        upstream: Option<Arc<dyn ErasedFace>>,
+        upstream: Option<Arc<Face>>,
         validator: Option<Arc<Validator>>,
         mgmt_response_signer: Option<Arc<dyn Signer>>,
     ) -> Self {
@@ -234,7 +234,7 @@ impl Engine {
             )
             .await
             .map_err(EngineError::Connect)?;
-            let face: Arc<dyn ErasedFace> = Arc::new(face);
+            let face: Arc<Face> = Arc::new(Face::from_transport(face));
             Ok(Self::new(runtime, Some(face)))
         }
     }
@@ -242,7 +242,7 @@ impl Engine {
     /// Attach an inbound face. The engine spawns its own per-face reader
     /// and sender tasks. Used by the SharedWorker entrypoint to register
     /// each tab `MessagePort` as a face.
-    pub fn add_face<F: Face + 'static>(&self, face: F) {
+    pub fn add_face<F: Transport + 'static>(&self, face: F) {
         self.inner.add_face(face, CancellationToken::new());
     }
 

@@ -13,7 +13,7 @@ use ndn_face_shared_worker::SharedWorkerProxyFace;
 use ndn_packet::lp::LpPacket;
 use ndn_packet::{Data, Interest, Name};
 use ndn_runtime::default_runtime;
-use ndn_transport::{Face, FaceError, FaceId};
+use ndn_transport::{FaceError, FaceId, Transport};
 use tokio::sync::{Mutex, oneshot};
 use wasm_bindgen::prelude::*;
 
@@ -52,7 +52,7 @@ impl SharedClient {
         let pending_pump = Arc::clone(&pending);
         runtime.spawn(Box::pin(async move {
             loop {
-                let raw = match Face::recv(&*face_pump).await {
+                let raw = match Transport::recv_bytes(&*face_pump).await {
                     Ok(b) => b,
                     Err(_) => break,
                 };
@@ -122,7 +122,7 @@ impl SharedClient {
         self.pending.lock().await.insert(key.clone(), tx);
 
         client_log(&format!("express {key}"));
-        Face::send(&*self.face, wire)
+        Transport::send_bytes(&*self.face, wire)
             .await
             .map_err(|e: FaceError| JsValue::from_str(&format!("send: {e:?}")))?;
 

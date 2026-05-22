@@ -13,7 +13,7 @@ use std::sync::Arc;
 use ndn_face_shared_worker::SharedWorkerProxyFace;
 use ndn_face_webrtc::{IceServers, PendingFace, SessionDescription, WebRtcConnector};
 use ndn_runtime::{Runtime, default_runtime};
-use ndn_transport::{Face, FaceId};
+use ndn_transport::{FaceId, Transport};
 use wasm_bindgen::prelude::*;
 
 use crate::webrtc_adapter::WebRtcFaceAdapter;
@@ -101,9 +101,9 @@ impl TransitBridge {
         let w = Arc::clone(&worker);
         self.runtime.spawn(Box::pin(async move {
             loop {
-                match Face::recv(&*r).await {
+                match Transport::recv_bytes(&*r).await {
                     Ok(bytes) => {
-                        if Face::send(&*w, bytes).await.is_err() {
+                        if Transport::send_bytes(&*w, bytes).await.is_err() {
                             bridge_log("worker face send closed; rtc→worker pump exits");
                             break;
                         }
@@ -121,9 +121,9 @@ impl TransitBridge {
         let w = Arc::clone(&worker);
         self.runtime.spawn(Box::pin(async move {
             loop {
-                match Face::recv(&*w).await {
+                match Transport::recv_bytes(&*w).await {
                     Ok(bytes) => {
-                        if Face::send(&*r, bytes).await.is_err() {
+                        if Transport::send_bytes(&*r, bytes).await.is_err() {
                             bridge_log("rtc face send closed; worker→rtc pump exits");
                             break;
                         }
