@@ -124,6 +124,7 @@ pub fn init() -> EngineHandle {
             coding_handler: Some(coding_handler as Arc<dyn ndn_mgmt::CodingHandler>),
             rate_limit_handler: Some(rl_handler as Arc<dyn ndn_mgmt::RateLimitMgmtBackend>),
             compute_handler: None,
+            ble_handler: None,
         };
         let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
         runtime.spawn(Box::pin(fut));
@@ -174,4 +175,36 @@ impl EngineHandle {
             from_engine: rx,
         })
     }
+
+    /// Open a Web Bluetooth central face and attach it to the in-page engine.
+    ///
+    /// Pops the browser device chooser, so it must run under a user gesture.
+    /// Requires the dashboard wasm bundle to be built with
+    /// `--cfg=web_sys_unstable_apis`; otherwise the face reports `Unsupported`.
+    pub async fn connect_ble(&self) -> Result<FaceId, String> {
+        let id = self.inner.engine.faces().alloc_id();
+        // `None` framing → auto-select via the capability characteristic.
+        let face = ndn_face_webble::WebBleFace::connect(id, Arc::clone(&self.inner.runtime), None)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.inner.engine.add_face(face, CancellationToken::new());
+        elog(&format!("BLE face connected id={}", id.0));
+        Ok(id)
+    }
+}
+
+/// Fire-and-forget BLE connect for UI click handlers. Spawns on the local
+/// runtime; transient activation from the originating click stays valid for
+/// the `requestDevice` chooser. No-op (logged) if the in-page engine is off.
+pub fn spawn_connect_ble() {
+    let Some(h) = handle() else {
+        elog("connect_ble: no in-page engine (run with ?engine=local)");
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        match h.connect_ble().await {
+            Ok(id) => elog(&format!("BLE connect ok; face id={}", id.0)),
+            Err(e) => elog(&format!("BLE connect failed: {e}")),
+        }
+    });
 }

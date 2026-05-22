@@ -65,6 +65,7 @@ browser-engine = [
   "dep:ndn-transport",
   "dep:ndn-coding",
   "dep:ndn-ratelimit",
+  "dep:ndn-face-webble",
   "dep:wasm-bindgen-futures",
   "dep:web-time",
   "dep:tokio-util",
@@ -136,6 +137,7 @@ ndn-runtime   = { workspace = true, optional = true }
 ndn-transport = { workspace = true, optional = true }
 ndn-coding    = { workspace = true, optional = true }
 ndn-ratelimit = { workspace = true, optional = true }
+ndn-face-webble = { workspace = true, optional = true }
 wasm-bindgen        = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
 web-time      = { version = "1", optional = true }

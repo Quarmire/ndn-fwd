@@ -1,0 +1,8 @@
+# Web Bluetooth (the ndn-face-webble central) lives behind web-sys's unstable
+# APIs gate. Setting the cfg here — rather than in the workspace root config —
+# scopes it to dashboard wasm builds (`dx serve`, `wasm-pack`, `cargo build
+# --target wasm32-unknown-unknown` run from this directory) so the rest of the
+# workspace is unaffected. Without it, ndn-face-webble compiles to its
+# `Unsupported` stub and the "Connect Bluetooth Device" button is a no-op.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

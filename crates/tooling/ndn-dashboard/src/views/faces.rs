@@ -29,6 +29,35 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// "Connect Bluetooth Device" action — only meaningful with the in-page
+/// engine (`?engine=local`) in a Web Bluetooth-capable browser. Renders
+/// nothing on desktop or when the in-page engine is inactive.
+#[cfg(all(target_arch = "wasm32", feature = "browser-engine"))]
+#[component]
+fn BleConnectButton() -> Element {
+    if !crate::browser_engine::is_active() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "form-row", style: "margin-top:8px;",
+            button {
+                class: "btn btn-secondary",
+                onclick: move |_| crate::browser_engine::spawn_connect_ble(),
+                "Connect Bluetooth Device"
+            }
+            div { style: "font-size:12px;color:var(--text-muted);align-self:center;",
+                "Dials an NDN-BLE peripheral (macOS / Linux / ESP32) as a GATT central. Browser opens a device chooser."
+            }
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "browser-engine")))]
+#[component]
+fn BleConnectButton() -> Element {
+    rsx! {}
+}
+
 #[component]
 pub fn Faces() -> Element {
     let ctx = use_context::<AppCtx>();
@@ -182,8 +211,12 @@ pub fn Faces() -> Element {
                 }
             }
             div { style: "margin-top:8px;font-size:12px;color:var(--text-muted);",
-                "Supported: udp4://<ip>:6363  tcp4://<ip>:6363  ws://<ip>:9696  unix:///path  shm://name  ether://<iface>"
+                "Supported: udp4://<ip>:6363  tcp4://<ip>:6363  ws://<ip>:9696  unix:///path  shm://name  ether://<iface>  ble://<name>"
             }
+            div { style: "margin-top:2px;font-size:11px;color:var(--text-muted);",
+                "ble:// (central) requires the forwarder built with --features bluetooth. The BLE peripheral is a config listener ([listeners.ble]), not a face you create here."
+            }
+            BleConnectButton {}
             div { style: "margin-top:4px;font-size:11px;color:var(--text-muted);",
                 "Click a row to expand URIs and detailed counters."
             }

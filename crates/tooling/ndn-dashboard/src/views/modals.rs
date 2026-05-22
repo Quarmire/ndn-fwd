@@ -179,6 +179,7 @@ fn assemble_config(
         listeners: Default::default(),
         demo_ca: Default::default(),
         observability: Default::default(),
+        reflexive: Default::default(),
     };
     cfg.to_toml_string().unwrap_or_default()
 }
