@@ -1100,9 +1100,11 @@ pub struct FailureDiagnosis {
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct ChallengeAttestation {
-    /// Free-form discriminator emitted by the issuance policy
-    /// (e.g. `"DeviceApproval"`, `"PinChallenge"`).
+    /// The challenge type the CA recorded in the cert's
+    /// `AdditionalDescription` (e.g. `"device-approval"`, `"token"`,
+    /// `"all-of"`).
     pub kind: String,
+    /// Rendered summary (`performed_at` + evidence) for display.
     #[serde(default)]
     pub detail: String,
 }

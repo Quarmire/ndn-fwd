@@ -5,9 +5,9 @@
 use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 use crate::edu_gloss::EduGloss;
 use crate::types::{
-    AnchorInfo, CaInfo, FailureDiagnosis, MgmtAccessPolicySnapshot, SchemaRuleApplied,
-    SchemaRuleInfo, SecurityKeyInfo, TrustChainStep, TrustValidationResult, TrustVerdict,
-    ValidationStats,
+    AnchorInfo, CaInfo, ChallengeAttestation, FailureDiagnosis, MgmtAccessPolicySnapshot,
+    SchemaRuleApplied, SchemaRuleInfo, SecurityKeyInfo, TrustChainStep, TrustValidationResult,
+    TrustVerdict, ValidationStats,
 };
 use crate::views::onboarding::encode_did_ndn;
 use crate::views::security_did::{
@@ -2063,7 +2063,7 @@ fn TrustPathBody(target: String, result: TrustValidationResult) -> Element {
             FailureDiagnosisPanel { diagnosis: diag.clone() }
         }
 
-        ChallengeAttestationsPanel { count: result.challenge_attestations.len() }
+        ChallengeAttestationsPanel { attestations: result.challenge_attestations.clone() }
     }
 }
 
@@ -2190,12 +2190,36 @@ fn FailureDiagnosisPanel(diagnosis: FailureDiagnosis) -> Element {
 }
 
 #[component]
-fn ChallengeAttestationsPanel(count: usize) -> Element {
+fn ChallengeAttestationsPanel(attestations: Vec<ChallengeAttestation>) -> Element {
+    if attestations.is_empty() {
+        return rsx! {
+            div {
+                style: "background:var(--surface2);border:1px dashed var(--border-subtle);border-radius:6px;padding:8px 10px;font-size:11px;color:var(--text-muted);",
+                title: "NDNCERT records how each challenge was satisfied in the cert's AdditionalDescription. Empty when the cert was issued without attestations enabled.",
+                "Challenge attestations: "
+                span { class: "mono", "none recorded" }
+            }
+        };
+    }
     rsx! {
-        div { style: "background:var(--surface2);border:1px dashed var(--border-subtle);border-radius:6px;padding:8px 10px;font-size:11px;color:var(--text-muted);",
-            "Challenge attestations: "
-            span { class: "mono", "{count}" }
-            " · reserved (populates with the in-progress challenge_attestation cert field)"
+        div { style: "background:var(--surface2);border:1px solid var(--border-subtle);border-radius:6px;padding:8px 10px;margin-top:10px;",
+            div {
+                style: "font-size:11px;color:var(--text-muted);margin-bottom:6px;",
+                title: "How the subject proved control during NDNCERT enrollment — carried in the cert's signed AdditionalDescription.",
+                "Challenge attestations"
+            }
+            for att in attestations.iter() {
+                div { style: "display:flex;gap:8px;align-items:baseline;padding:3px 0;",
+                    span {
+                        class: "mono",
+                        style: "background:var(--surface3,#1c2333);border:1px solid var(--border-subtle);border-radius:4px;padding:1px 6px;font-size:11px;color:var(--text);",
+                        "{att.kind}"
+                    }
+                    if !att.detail.is_empty() {
+                        span { style: "font-size:11px;color:var(--text-muted);", "{att.detail}" }
+                    }
+                }
+            }
         }
     }
 }
