@@ -199,6 +199,7 @@ impl Engine {
                 coding_handler: None,
                 rate_limit_handler: None,
                 compute_handler: None,
+                webtransport_status_handler: None,
                 ble_handler: None,
                 approval_handler: None,
             };

@@ -713,6 +713,13 @@ fn face_config_label(face: &FaceConfig) -> (&'static str, String) {
         ),
         FaceConfig::Serial { path, baud } => ("Serial", format!("path={path} baud={baud}")),
         FaceConfig::EtherMulticast { interface } => ("EtherMC", format!("iface={interface}")),
+        FaceConfig::WebTransport { remote, webpki, .. } => (
+            "WT",
+            format!(
+                "remote={remote} tls={}",
+                if *webpki { "webpki" } else { "cert-hash" }
+            ),
+        ),
     }
 }
 
