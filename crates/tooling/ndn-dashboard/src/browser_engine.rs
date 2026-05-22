@@ -123,6 +123,7 @@ pub fn init() -> EngineHandle {
             log_inspector: None,
             coding_handler: Some(coding_handler as Arc<dyn ndn_mgmt::CodingHandler>),
             rate_limit_handler: Some(rl_handler as Arc<dyn ndn_mgmt::RateLimitMgmtBackend>),
+            compute_handler: None,
         };
         let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
         runtime.spawn(Box::pin(fut));
