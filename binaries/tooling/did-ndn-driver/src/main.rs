@@ -10,7 +10,7 @@ use axum::{
     response::Json,
     routing::get,
 };
-use ndn_did::{DidError, UniversalResolver};
+use ndn_security::did::{DidError, UniversalResolver};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
