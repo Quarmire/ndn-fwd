@@ -200,6 +200,7 @@ impl Engine {
                 rate_limit_handler: None,
                 compute_handler: None,
                 ble_handler: None,
+                approval_handler: None,
             };
             let fut = ndn_mgmt::mount_management(&engine, mgmt_cancel, mgmt_config, mgmt_handles);
             runtime.spawn(Box::pin(fut));
