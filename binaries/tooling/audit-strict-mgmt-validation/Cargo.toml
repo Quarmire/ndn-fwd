@@ -13,7 +13,7 @@ name = "audit-strict-mgmt-validation"
 path = "src/main.rs"
 
 [dependencies]
-ndn-faces    = { workspace = true }
+ndn-face-native    = { workspace = true }
 ndn-packet   = { workspace = true, features = ["std"] }
 ndn-security = { workspace = true }
 ndn-transport = { workspace = true }

@@ -21,7 +21,7 @@ pub struct FaceSetupState {
     pub auto_udp_pre_alloc: Vec<(FaceId, String, std::net::Ipv4Addr)>,
     pub auto_ether_pre_alloc: Vec<(FaceId, String)>,
     pub auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
-    pub auto_ether_ifaces: Vec<ndn_faces::iface::InterfaceInfo>,
+    pub auto_ether_ifaces: Vec<ndn_face_native::iface::InterfaceInfo>,
 }
 
 /// Spawn every face listener, WebTransport / WebRTC listener, auto-
@@ -73,7 +73,7 @@ async fn run_face_setup_inner(
     auto_udp_pre_alloc: Vec<(FaceId, String, std::net::Ipv4Addr)>,
     auto_ether_pre_alloc: Vec<(FaceId, String)>,
     auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
-    auto_ether_ifaces: Vec<ndn_faces::iface::InterfaceInfo>,
+    auto_ether_ifaces: Vec<ndn_face_native::iface::InterfaceInfo>,
 ) {
     use crate::parse_bind_addr;
     let engine = engine.clone();
@@ -117,7 +117,7 @@ async fn run_face_setup_inner(
                     };
                     let eng = engine.clone();
                     tokio::spawn(async move {
-                        match ndn_faces::net::UdpFace::bind(local, peer, face_id).await {
+                        match ndn_face_native::net::UdpFace::bind(local, peer, face_id).await {
                             Ok(face) => {
                                 let c = CancellationToken::new();
                                 tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, "udp pre-connected face created");
@@ -179,7 +179,7 @@ async fn run_face_setup_inner(
                 let eng = engine.clone();
                 let c = cancel.child_token();
                 tokio::spawn(async move {
-                    match ndn_faces::net::MulticastUdpFace::new(iface, port, group_addr, id).await {
+                    match ndn_face_native::net::MulticastUdpFace::new(iface, port, group_addr, id).await {
                         Ok(face) => {
                             eng.add_face_with_persistency(
                                 face,
@@ -259,7 +259,7 @@ async fn run_face_setup_inner(
                 #[cfg(feature = "serial")]
                 {
                     let id = engine.faces().alloc_id();
-                    match ndn_faces::serial::serial_face_open(id, path, *baud) {
+                    match ndn_face_native::serial::serial_face_open(id, path, *baud) {
                         Ok(face) => {
                             let c = cancel.child_token();
                             engine.add_face(face, c);
@@ -284,7 +284,7 @@ async fn run_face_setup_inner(
                         .find(|(_, ci)| *ci == face_idx)
                         .map(|(id, _)| *id)
                         .unwrap_or_else(|| engine.faces().alloc_id());
-                    match ndn_faces::l2::MulticastEtherFace::new(id, interface) {
+                    match ndn_face_native::l2::MulticastEtherFace::new(id, interface) {
                         Ok(face) => {
                             let c = cancel.child_token();
                             engine.add_face_with_persistency(
@@ -341,7 +341,7 @@ async fn run_face_setup_inner(
     #[cfg(target_os = "linux")]
     for (pre_id, iface_name) in &auto_ether_pre_alloc {
         let id = *pre_id;
-        match ndn_faces::l2::MulticastEtherFace::new(id, iface_name) {
+        match ndn_face_native::l2::MulticastEtherFace::new(id, iface_name) {
             Ok(face) => {
                 let c = cancel.child_token();
                 engine.add_face_with_persistency(
@@ -360,7 +360,7 @@ async fn run_face_setup_inner(
     if auto_ether_pre_alloc.is_empty() {
         for iface_info in &auto_ether_ifaces {
             let id = engine.faces().alloc_id();
-            match ndn_faces::l2::MulticastEtherFace::new(id, &iface_info.name) {
+            match ndn_face_native::l2::MulticastEtherFace::new(id, &iface_info.name) {
                 Ok(face) => {
                     let c = cancel.child_token();
                     engine.add_face_with_persistency(
@@ -393,7 +393,7 @@ async fn run_face_setup_inner(
         let eng = engine.clone();
         let c = cancel.child_token();
         tokio::spawn(async move {
-            match ndn_faces::net::MulticastUdpFace::ndn_default(addr, id).await {
+            match ndn_face_native::net::MulticastUdpFace::ndn_default(addr, id).await {
                 Ok(face) => {
                     let face = if udp_ad_hoc { face.ad_hoc() } else { face };
                     eng.add_face_with_persistency(
@@ -417,7 +417,7 @@ async fn run_face_setup_inner(
             let eng = engine.clone();
             let c = cancel.child_token();
             tokio::spawn(async move {
-                match ndn_faces::net::MulticastUdpFace::ndn_default(addr, id).await {
+                match ndn_face_native::net::MulticastUdpFace::ndn_default(addr, id).await {
                     Ok(face) => {
                         let face = if udp_ad_hoc { face.ad_hoc() } else { face };
                         eng.add_face_with_persistency(
@@ -437,9 +437,9 @@ async fn run_face_setup_inner(
 
     if fwd_config.face_system.watch_interfaces {
         let (watcher_tx, mut watcher_rx) =
-            tokio::sync::mpsc::channel::<ndn_faces::iface_watcher::InterfaceEvent>(64);
+            tokio::sync::mpsc::channel::<ndn_face_native::iface_watcher::InterfaceEvent>(64);
         let watcher_cancel = cancel.child_token();
-        tokio::spawn(ndn_faces::iface_watcher::watch_interfaces(
+        tokio::spawn(ndn_face_native::iface_watcher::watch_interfaces(
             watcher_tx,
             watcher_cancel,
         ));
@@ -455,17 +455,17 @@ async fn run_face_setup_inner(
                     event = watcher_rx.recv() => {
                         let Some(event) = event else { break };
                         match event {
-                            ndn_faces::iface_watcher::InterfaceEvent::Added(iface_name) => {
+                            ndn_face_native::iface_watcher::InterfaceEvent::Added(iface_name) => {
                                 #[cfg(target_os = "linux")]
                                 if watcher_fwd_cfg.ether.auto_multicast
-                                    && ndn_faces::iface::interface_allowed(
+                                    && ndn_face_native::iface::interface_allowed(
                                         &iface_name,
                                         &watcher_fwd_cfg.ether.whitelist,
                                         &watcher_fwd_cfg.ether.blacklist,
                                     )
                                 {
                                     let id = watcher_engine.faces().alloc_id();
-                                    match ndn_faces::l2::MulticastEtherFace::new(id, &iface_name) {
+                                    match ndn_face_native::l2::MulticastEtherFace::new(id, &iface_name) {
                                         Ok(face) => {
                                             watcher_engine.add_face_with_persistency(
                                                 face,
@@ -481,13 +481,13 @@ async fn run_face_setup_inner(
                                 }
 
                                 if watcher_fwd_cfg.udp.auto_multicast
-                                    && ndn_faces::iface::interface_allowed(
+                                    && ndn_face_native::iface::interface_allowed(
                                         &iface_name,
                                         &watcher_fwd_cfg.udp.whitelist,
                                         &watcher_fwd_cfg.udp.blacklist,
                                     )
                                 {
-                                    let ifaces = ndn_faces::iface::list_interfaces();
+                                    let ifaces = ndn_face_native::iface::list_interfaces();
                                     if let Some(info) = ifaces.iter().find(|i| i.name == iface_name) {
                                         for &addr in &info.ipv4_addrs {
                                             let id = watcher_engine.faces().alloc_id();
@@ -495,7 +495,7 @@ async fn run_face_setup_inner(
                                             let cancel3 = watcher_cancel2.child_token();
                                             let name2 = iface_name.clone();
                                             tokio::spawn(async move {
-                                                match ndn_faces::net::MulticastUdpFace::ndn_default(addr, id).await {
+                                                match ndn_face_native::net::MulticastUdpFace::ndn_default(addr, id).await {
                                                     Ok(face) => {
                                                         let face = if watcher_udp_ad_hoc { face.ad_hoc() } else { face };
                                                         eng.add_face_with_persistency(face, cancel3, ndn_transport::FacePersistency::Permanent);
@@ -510,7 +510,7 @@ async fn run_face_setup_inner(
                                     }
                                 }
                             }
-                            ndn_faces::iface_watcher::InterfaceEvent::Removed(iface_name) => {
+                            ndn_face_native::iface_watcher::InterfaceEvent::Removed(iface_name) => {
                                 // Faces on this interface use `dev://<iface>` as `local_uri`.
                                 let target_uri = format!("dev://{iface_name}");
                                 let face_table = watcher_engine.faces();

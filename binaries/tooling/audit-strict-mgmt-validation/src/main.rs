@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use ndn_faces::local::{IpcFace, ipc_face_connect};
+use ndn_face_native::local::{IpcFace, ipc_face_connect};
 use ndn_packet::encode::InterestBuilder;
 use ndn_packet::lp;
 use ndn_packet::{Data, Name};

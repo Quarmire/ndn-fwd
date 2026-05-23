@@ -60,7 +60,7 @@ RUN cargo build --release --bin ndn-fwd
 FROM debian:trixie-slim
 
 # `libdbus-1-3` is required at runtime because workspace feature unification
-# (resolver 2 with `--bin ndn-fwd`) can still propagate `ndn-faces/bluetooth`
+# (resolver 2 with `--bin ndn-fwd`) can still propagate `ndn-face-native/bluetooth`
 # into the build graph via other workspace members, pulling `bluer` and
 # `libdbus-sys`.  Symptom without it: ndn-fwd exits at startup with
 # `error while loading shared libraries: libdbus-1.so.3`.

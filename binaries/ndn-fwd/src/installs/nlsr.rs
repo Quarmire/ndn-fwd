@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use ndn_engine::{EngineBuilder, InstallableProtocol, PostBuildQueue, RoutingProtocol};
-use ndn_faces::local::InProcFace;
+use ndn_face_native::local::InProcFace;
 use ndn_packet::Name;
 use ndn_transport::FaceId;
 use tokio_util::sync::CancellationToken;
@@ -91,7 +91,7 @@ pub async fn prepare(
             "[::]:0".parse().unwrap()
         };
         let face_id = builder.alloc_face_id();
-        match ndn_faces::net::UdpFace::bind(local, peer, face_id).await {
+        match ndn_face_native::net::UdpFace::bind(local, peer, face_id).await {
             Ok(face) => {
                 builder.add_face(face);
                 let neighbour_name = n.name.parse().unwrap_or_else(|_| Name::root());
@@ -204,7 +204,7 @@ impl InstallableProtocol for NlsrInstaller {
 
 fn spawn_hello_producer(
     nlsr: Arc<ndn_routing::NlsrProtocol>,
-    handle: ndn_faces::local::InProcHandle,
+    handle: ndn_face_native::local::InProcHandle,
     cancel: CancellationToken,
 ) {
     let hello_proto = nlsr.hello_protocol();
@@ -230,7 +230,7 @@ fn spawn_hello_producer(
 
 fn spawn_sync_producer(
     nlsr: Arc<ndn_routing::NlsrProtocol>,
-    handle: ndn_faces::local::InProcHandle,
+    handle: ndn_face_native::local::InProcHandle,
     cancel: CancellationToken,
 ) {
     let sync_in_tx = nlsr.sync_inbound_sender();
@@ -273,7 +273,7 @@ fn spawn_sync_producer(
 
 fn spawn_lsa_producer(
     nlsr: Arc<ndn_routing::NlsrProtocol>,
-    handle: ndn_faces::local::InProcHandle,
+    handle: ndn_face_native::local::InProcHandle,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {

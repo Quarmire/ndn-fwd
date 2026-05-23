@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 ndn-app       = { workspace = true }
-ndn-faces     = { workspace = true }
+ndn-face-native     = { workspace = true }
 ndn-engine    = { workspace = true }
 ndn-packet    = { workspace = true, features = ["std"] }
 ndn-transport = { workspace = true }

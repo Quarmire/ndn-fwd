@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use tokio::task::JoinSet;
 
 use ndn_engine::{EngineBuilder, EngineConfig};
-use ndn_faces::local::InProcFace;
+use ndn_face_native::local::InProcFace;
 use ndn_packet::Name;
 use ndn_transport::FaceId;
 

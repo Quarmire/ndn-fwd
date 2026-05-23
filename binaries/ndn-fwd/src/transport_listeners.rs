@@ -233,7 +233,7 @@ pub async fn run_wt_listener(
     tracing::info!(target: "face.wt", "WebTransport listener stopped");
 }
 
-/// BLE peripheral listener: binds the GATT server via [`ndn_faces::l2::BleListener`]
+/// BLE peripheral listener: binds the GATT server via [`ndn_face_native::l2::BleListener`]
 /// and registers one face per connecting central.
 #[cfg(all(feature = "bluetooth", any(target_os = "linux", target_os = "macos")))]
 pub async fn run_ble_listener(
@@ -242,7 +242,7 @@ pub async fn run_ble_listener(
     adapter: Option<String>,
     local_name: Option<String>,
 ) {
-    use ndn_faces::l2::BleListener;
+    use ndn_face_native::l2::BleListener;
 
     let mut listener = match BleListener::bind(adapter.as_deref(), local_name.as_deref()).await {
         Ok(l) => l,
@@ -398,7 +398,7 @@ pub async fn run_ws_listener(
         };
 
         let face_id = engine.faces().alloc_id();
-        let face = ndn_faces::net::WebSocketFace::from_stream(
+        let face = ndn_face_native::net::WebSocketFace::from_stream(
             face_id,
             ws,
             peer.to_string(),

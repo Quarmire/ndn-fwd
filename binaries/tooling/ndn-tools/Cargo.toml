@@ -45,7 +45,7 @@ ndn-packet     = { workspace = true, features = ["std"] }
 ndn-security   = { workspace = true }
 ndn-config     = { workspace = true }
 ndn-transport  = { workspace = true }
-ndn-faces     = { workspace = true }
+ndn-face-native     = { workspace = true }
 bytes          = { workspace = true, features = ["std"] }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
