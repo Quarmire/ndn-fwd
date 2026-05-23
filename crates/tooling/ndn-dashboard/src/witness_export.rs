@@ -7,7 +7,7 @@
 //! path — `InterestBuilder::app_parameters(ControlParameters::encode())`
 //! → `gloo-net WebSocket` → `ndn-fwd` ws face → mgmt dispatcher —
 //! works inside a real browser. Native-only validation lives in
-//! `crates/spec/ndn-mgmt/tests/web_wire_e2e.rs`.
+//! `crates/ndn-mgmt/tests/web_wire_e2e.rs`.
 //!
 //! The JS surface is intentionally narrow: each call builds a fresh
 //! client, connects, sends one command, and resolves. No cross-call

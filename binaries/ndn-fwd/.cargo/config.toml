@@ -1,0 +1,18 @@
+# Cargo local configuration for ndn-rs.
+#
+# The `console` Cargo profile (defined in the workspace Cargo.toml) builds
+# ndn-fwd with tokio-console support.  tokio requires --cfg tokio_unstable to
+# expose its internal task instrumentation to console-subscriber; pass it via
+# RUSTFLAGS since profile-level rustflags are not yet stable in Cargo.
+#
+# Build command:
+#   RUSTFLAGS="--cfg tokio_unstable" \
+#     cargo build -p ndn-fwd --features console --profile console
+#
+# Connect with tokio-console (install once with `cargo install tokio-console`):
+#   tokio-console          # default: connects to 127.0.0.1:6669
+#
+# Override the gRPC bind address:
+#   TOKIO_CONSOLE_BIND=0.0.0.0:9999 \
+#     RUSTFLAGS="--cfg tokio_unstable" \
+#     cargo run -p ndn-fwd --features console --profile console

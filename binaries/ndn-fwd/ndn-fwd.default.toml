@@ -1,0 +1,95 @@
+# ndn-fwd default configuration
+#
+# Used by the Docker image and as a starting point for local deployments.
+# Copy this file, adjust as needed, and pass with: ndn-fwd --config <path>
+#
+# Environment variable expansion is supported for string fields:
+#   pib_path = "${HOME}/.ndn/pib"
+
+[engine]
+cs_capacity_mb      = 64
+pipeline_channel_cap = 4096
+
+[cs]
+variant          = "lru"
+capacity_mb      = 64
+admission_policy = "default"
+
+# ── Faces ──────────────────────────────────────────────────────────────────────
+
+[[face]]
+kind = "udp"
+bind = "0.0.0.0:6363"
+
+[[face]]
+kind = "tcp"
+bind = "0.0.0.0:6363"
+
+[[face]]
+kind = "web-socket"
+bind = "0.0.0.0:9696"
+
+# Uncomment to join the NDN testbed multicast group on a local interface:
+# [[face]]
+# kind      = "multicast"
+# group     = "224.0.23.170"
+# port      = 56363
+# interface = "eth0"
+
+# ── Management ────────────────────────────────────────────────────────────────
+
+[management]
+face_socket = "/run/ndn-fwd/ndn-fwd.sock"
+
+# ── Security ──────────────────────────────────────────────────────────────────
+
+[security]
+# Automatically generate an identity on first startup.
+auto_init = true
+# NDN identity name for this forwarder.
+# identity = "/ndn/router/docker"
+profile   = "default"
+
+# ── Routing ──────────────────────────────────────────────────────────────────
+#
+# Two routing protocols ship with ndn-fwd: NLSR (link-state, NFD-interop)
+# and ndn-dv (distance-vector, per `ndnd/dv/SPEC.md`). Both off by
+# default — enable at most one per forwarder.
+
+# [routing.nlsr]
+# enabled = false
+# network = "/ndn"
+# router  = "/ndn/site/router1"
+
+# [routing.dv]
+# enabled        = false
+# network        = "/ndn"
+# router         = "/ndn/site/router1"
+# adv_sync_secs  = 30
+# pfx_sync_secs  = 30
+# router_dead_secs = 60
+#
+# [[routing.dv.neighbor]]
+# name     = "/ndn/site/router2"
+# face_uri = "udp4://10.0.0.2:6363"
+#
+# Trust policy. Defaults to "insecure" — wire-compat with ndnd
+# `KeyChainUri = "insecure"`. The operator's `[security].identity`
+# provides the signer for outgoing Data.
+#
+#   mode = "insecure"  → no signing, accept everything
+#   mode = "static"    → pre-shared keys for verification
+#   mode = "lvs"       → LVS schema + pre-shared keys
+#
+# [routing.dv.trust]
+# mode        = "lvs"
+# schema_file = "/etc/ndn-fwd/dv-trust.lvs"
+#
+# [[routing.dv.trust.trusted_key]]
+# name            = "/ndn/site/router2/KEY/dv"
+# public_key_file = "/etc/ndn-fwd/keys/router2.bin"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+[logging]
+level = "info"

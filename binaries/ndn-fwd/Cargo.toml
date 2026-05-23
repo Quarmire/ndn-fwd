@@ -1,0 +1,83 @@
+[package]
+name = "ndn-fwd"
+description = "Standalone NDN forwarder binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[package.metadata.scope]
+classification = "spec"
+
+[[bin]]
+name = "ndn-fwd"
+path = "src/main.rs"
+
+[features]
+default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "fec", "rate-limit"]
+spsc-shm    = ["ndn-faces/spsc-shm", "ndn-mgmt/spsc-shm"]
+websocket   = ["ndn-faces/websocket", "dep:tokio-tungstenite"]
+serial      = ["ndn-faces/serial"]
+l2          = ["ndn-faces/l2"]
+# BLE faces: ble:// (central) and ble-peripheral:// (server). Opt-in, not
+# default — on Linux `bluer` needs libdbus dev headers at build time.
+bluetooth   = ["ndn-faces/bluetooth", "ndn-mgmt/bluetooth", "dep:async-trait"]
+webtransport = ["dep:ndn-face-webtransport", "ndn-mgmt/webtransport", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
+# Browser-as-peer WebRTC datachannel faces + signaling-relay listener.
+# Pulls in the full webrtc stack (DTLS/SCTP/ICE/SRTP), so it is opt-in.
+webrtc      = ["dep:ndn-face-webrtc", "dep:ndn-rtc-signaling-relay"]
+yubikey-piv = ["ndn-security/yubikey-piv", "ndn-mgmt/yubikey-piv"]
+# Enable tokio-console task inspector.
+# Requires RUSTFLAGS="--cfg tokio_unstable" at build time (tokio requirement).
+console     = ["dep:console-subscriber"]
+# Producer-side systematic FEC. Pulls in ndn-coding (draft). Operator
+# enables policies via [[coding.policy]] in the TOML config.
+fec         = ["dep:ndn-coding"]
+# In-engine rate limiting. Pulls in ndn-ratelimit. Operator enables
+# policies via [[rate-limit.policy]] in the TOML config.
+rate-limit  = ["dep:ndn-ratelimit"]
+# Real SMTP delivery for the NDNCERT `email` challenge (lettre/rustls). Opt-in;
+# without it the email challenge logs the code (LoggingEmailSender).
+smtp        = ["dep:lettre"]
+
+[dependencies]
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname"], optional = true }
+base64           = { workspace = true }
+ndn-engine       = { workspace = true }
+ndn-mgmt         = { workspace = true }
+ndn-observability = { workspace = true }
+humantime        = "2"
+ndn-coding       = { workspace = true, optional = true }
+ndn-ratelimit    = { workspace = true, optional = true }
+ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd"] }
+ndn-app          = { workspace = true }
+ndn-faces        = { workspace = true }
+ndn-face-webtransport = { workspace = true, optional = true }
+ndn-acme              = { workspace = true, optional = true }
+rustls-pemfile        = { workspace = true, optional = true }
+sha2                  = { version = "0.10", optional = true }
+ndn-strategy     = { workspace = true }
+ndn-store        = { workspace = true }
+ndn-security     = { workspace = true }
+ndn-cert         = { workspace = true }
+ndn-identity     = { workspace = true }
+ndn-face-webrtc  = { workspace = true, optional = true }
+ndn-rtc-signaling-relay = { workspace = true, optional = true }
+dashmap          = { workspace = true }
+ndn-config       = { workspace = true }
+ndn-routing      = { workspace = true }
+ndn-sync         = { workspace = true }
+getrandom        = "0.2"
+ndn-packet       = { workspace = true, features = ["std"] }
+ndn-transport    = { workspace = true }
+bytes            = { workspace = true, features = ["std"] }
+serde_json       = { workspace = true }
+tokio            = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "io-util"] }
+tokio-util           = { workspace = true, features = ["rt"] }
+tokio-tungstenite    = { workspace = true, optional = true }
+tracing              = { workspace = true }
+tracing-subscriber   = { workspace = true }
+tracing-appender     = "0.2"
+console-subscriber   = { workspace = true, optional = true }
+anyhow           = { workspace = true }
+libc             = { workspace = true }
+async-trait      = { workspace = true, optional = true }

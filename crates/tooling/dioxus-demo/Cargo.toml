@@ -63,8 +63,8 @@ ndn-mgmt      = { workspace = true }
 ndn-config    = { workspace = true }
 ndn-store     = { workspace = true }
 ndn-face-webtransport-wasm = { workspace = true }
-ndn-cert      = { path = "../../spec/ndn-cert", default-features = false, features = ["wasm-client"] }
-ndn-security  = { path = "../../spec/ndn-security", default-features = false }
+ndn-cert      = { path = "../../ndn-cert", default-features = false, features = ["wasm-client"] }
+ndn-security  = { path = "../../ndn-security", default-features = false }
 ndn-face-webrtc = { workspace = true }
 ndn-face-shared-worker = { workspace = true, optional = true }
 ndn-pib-idb            = { workspace = true, optional = true }

@@ -1,6 +1,6 @@
 # Multi-stage Docker image for the did-ndn-driver DID method server.
 #
-# Uses cargo-chef for dependency layer caching.  See binaries/spec/ndn-fwd/Dockerfile
+# Uses cargo-chef for dependency layer caching.  See binaries/ndn-fwd/Dockerfile
 # for a full explanation of the planner → cacher → builder pattern.
 #
 # Build (from repo root):
