@@ -251,9 +251,29 @@ pub async fn run_quic_listener(
             return;
         }
     };
-    let hostnames = cfg.hostnames.unwrap_or_else(|| vec!["localhost".to_string()]);
-    let listener = match QuicListener::bind(bind_addr, QuicServerTls::SelfSigned { hostnames }).await
-    {
+    let tls = match (cfg.cert_pem.as_deref(), cfg.key_pem.as_deref()) {
+        (Some(cert_path), Some(key_path)) => {
+            match (std::fs::read(cert_path), std::fs::read(key_path)) {
+                (Ok(cert_chain_pem), Ok(private_key_pem)) => QuicServerTls::Pem {
+                    cert_chain_pem,
+                    private_key_pem,
+                },
+                (c, k) => {
+                    let err = c.err().or(k.err()).unwrap();
+                    tracing::error!(target: "face.quic", error=%err, "quic-listener: reading cert_pem/key_pem failed");
+                    return;
+                }
+            }
+        }
+        (None, None) => QuicServerTls::SelfSigned {
+            hostnames: cfg.hostnames.unwrap_or_else(|| vec!["localhost".to_string()]),
+        },
+        _ => {
+            tracing::error!(target: "face.quic", "quic-listener: cert_pem and key_pem must be set together");
+            return;
+        }
+    };
+    let listener = match QuicListener::bind(bind_addr, tls).await {
         Ok(l) => l,
         Err(e) => {
             tracing::error!(target: "face.quic", addr=%bind_addr, error=%e, "quic-listener: bind failed");

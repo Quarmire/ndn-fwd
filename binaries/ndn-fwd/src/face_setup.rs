@@ -258,12 +258,21 @@ async fn run_face_setup_inner(
             ndn_config::FaceConfig::Quic {
                 remote,
                 cert_sha256,
+                webpki,
             } => {
                 #[cfg(feature = "quic")]
                 {
                     let authority = remote.strip_prefix("quic://").unwrap_or(remote).to_owned();
-                    let Some(hash) = ndn_config::parse_cert_sha256_hex(cert_sha256) else {
-                        tracing::error!(target: "face.quic", remote=%remote, "quic dial face: invalid cert_sha256");
+                    let tls = if *webpki {
+                        Some(ndn_face_quic::QuicClientTls::WebPki)
+                    } else {
+                        cert_sha256
+                            .as_deref()
+                            .and_then(ndn_config::parse_cert_sha256_hex)
+                            .map(|h| ndn_face_quic::QuicClientTls::CertHashes(vec![h]))
+                    };
+                    let Some(tls) = tls else {
+                        tracing::error!(target: "face.quic", remote=%remote, "quic dial face: invalid/missing cert_sha256 (or webpki)");
                         continue;
                     };
                     let id = engine.faces().alloc_id();
@@ -272,9 +281,7 @@ async fn run_face_setup_inner(
                     tokio::spawn(async move {
                         // The connector (endpoint) is dropped after connect; the
                         // face's streams keep the connection + driver alive.
-                        match ndn_face_quic::QuicConnector::new(
-                            ndn_face_quic::QuicClientTls::CertHashes(vec![hash]),
-                        ) {
+                        match ndn_face_quic::QuicConnector::new(tls) {
                             Ok(connector) => match connector.connect_authority(id, &authority).await {
                                 Ok(face) => {
                                     eng.add_face(face, c);
@@ -288,7 +295,7 @@ async fn run_face_setup_inner(
                 }
                 #[cfg(not(feature = "quic"))]
                 {
-                    let _ = (remote, cert_sha256);
+                    let _ = (remote, cert_sha256, webpki);
                     tracing::warn!(target: "face.quic", "quic dial face ignored (quic feature not compiled in)");
                 }
             }
