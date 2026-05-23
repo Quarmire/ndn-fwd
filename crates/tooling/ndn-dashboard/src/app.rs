@@ -1484,7 +1484,7 @@ async fn poll_all(
     mut validation_history: Signal<VecDeque<(u64, u64)>>,
 ) -> Result<(), String> {
     match client.status().await {
-        Ok(r) => status.set(Some(ForwarderStatus::parse(&r.status_text))),
+        Ok(gs) => status.set(Some(ForwarderStatus::from_general(&gs))),
         Err(e) => return Err(e.to_string()),
     }
     match client.face_list().await {

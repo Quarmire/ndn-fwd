@@ -85,6 +85,7 @@ witness-export = [
 
 [dependencies]
 ndn-config = { workspace = true, optional = true }
+ndn-mgmt-wire = { workspace = true }
 # Desktop gets full std (with ring/blake3); web gets std-wasm (no native crypto)
 ndn-packet = { workspace = true }
 ndn-tlv    = { workspace = true }

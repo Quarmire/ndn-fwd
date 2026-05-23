@@ -141,30 +141,27 @@ impl LogEntry {
     }
 }
 
-/// Parsed from `status/general` response: `"faces=5 fib=10 pit=3 cs=100"`.
+/// Forwarder status from the NFD ForwarderStatus (`status/general`) dataset.
+/// `n_faces` is not part of this dataset (it comes from `faces/list`); it stays
+/// 0 here and is shown from the faces view.
 #[derive(Debug, Clone, Default)]
 pub struct ForwarderStatus {
     pub n_faces: u64,
     pub n_fib: u64,
     pub n_pit: u64,
     pub n_cs: u64,
+    pub nfd_version: String,
 }
 
 impl ForwarderStatus {
-    pub fn parse(text: &str) -> Self {
-        let mut s = Self::default();
-        for token in text.split_whitespace() {
-            if let Some((k, v)) = token.split_once('=') {
-                match k {
-                    "faces" => s.n_faces = v.parse().unwrap_or(0),
-                    "fib" => s.n_fib = v.parse().unwrap_or(0),
-                    "pit" => s.n_pit = v.parse().unwrap_or(0),
-                    "cs" => s.n_cs = v.parse().unwrap_or(0),
-                    _ => {}
-                }
-            }
+    pub fn from_general(gs: &ndn_mgmt_wire::GeneralStatus) -> Self {
+        Self {
+            n_faces: 0,
+            n_fib: gs.n_fib_entries,
+            n_pit: gs.n_pit_entries,
+            n_cs: gs.n_cs_entries,
+            nfd_version: gs.nfd_version.clone(),
         }
-        s
     }
 }
 

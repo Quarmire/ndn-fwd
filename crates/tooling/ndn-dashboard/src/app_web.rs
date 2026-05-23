@@ -516,10 +516,10 @@ async fn poll_all_web(
     use ndn_config::nfd_dataset;
 
     if let Ok(resp) = client.status_general().await
-        && resp.is_ok()
+        && let Ok(gs) = ndn_mgmt_wire::GeneralStatus::decode(resp.body.clone())
     {
         let mut status_sig = *status;
-        status_sig.set(Some(ForwarderStatus::parse(&resp.status_text)));
+        status_sig.set(Some(ForwarderStatus::from_general(&gs)));
     }
 
     if let Ok(resp) = client.list_faces().await

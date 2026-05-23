@@ -483,8 +483,24 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
             }
         },
         Command::Status => {
-            let resp = mgmt.status().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-            print_control_response(&resp);
+            let s = mgmt.status().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{}", s.nfd_version);
+            println!(
+                "tables: fib={} pit={} cs={} name-tree={} measurements={}",
+                s.n_fib_entries,
+                s.n_pit_entries,
+                s.n_cs_entries,
+                s.n_name_tree_entries,
+                s.n_measurements_entries,
+            );
+            println!(
+                "in:  interests={} data={} nacks={}",
+                s.n_in_interests, s.n_in_data, s.n_in_nacks,
+            );
+            println!(
+                "out: interests={} data={} nacks={}",
+                s.n_out_interests, s.n_out_data, s.n_out_nacks,
+            );
         }
         Command::Shutdown => {
             let resp = mgmt.shutdown().await.map_err(|e| anyhow::anyhow!("{e}"))?;
