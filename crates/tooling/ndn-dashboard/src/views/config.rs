@@ -720,6 +720,7 @@ fn face_config_label(face: &FaceConfig) -> (&'static str, String) {
                 if *webpki { "webpki" } else { "cert-hash" }
             ),
         ),
+        FaceConfig::Quic { remote, .. } => ("QUIC", format!("remote={remote} tls=cert-hash")),
     }
 }
 

@@ -13,7 +13,7 @@ name = "ndn-fwd"
 path = "src/main.rs"
 
 [features]
-default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "fec", "rate-limit"]
+default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "quic", "fec", "rate-limit"]
 spsc-shm    = ["ndn-face-native/spsc-shm", "ndn-mgmt/spsc-shm"]
 websocket   = ["ndn-face-native/websocket", "dep:tokio-tungstenite"]
 serial      = ["ndn-face-native/serial"]
@@ -22,6 +22,8 @@ l2          = ["ndn-face-native/l2"]
 # default — on Linux `bluer` needs libdbus dev headers at build time.
 bluetooth   = ["ndn-face-native/bluetooth", "ndn-mgmt/bluetooth", "dep:async-trait"]
 webtransport = ["dep:ndn-face-webtransport", "ndn-mgmt/webtransport", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
+# Raw-QUIC forwarder-to-forwarder backbone face (TLS 1.3, connection migration).
+quic        = ["dep:ndn-face-quic", "ndn-mgmt/quic"]
 # Browser-as-peer WebRTC datachannel faces + signaling-relay listener.
 # Pulls in the full webrtc stack (DTLS/SCTP/ICE/SRTP), so it is opt-in.
 webrtc      = ["dep:ndn-face-webrtc", "dep:ndn-rtc-signaling-relay"]
@@ -52,6 +54,7 @@ ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd"] }
 ndn-app          = { workspace = true }
 ndn-face-native        = { workspace = true }
 ndn-face-webtransport = { workspace = true, optional = true }
+ndn-face-quic         = { workspace = true, optional = true }
 ndn-acme              = { workspace = true, optional = true }
 rustls-pemfile        = { workspace = true, optional = true }
 sha2                  = { version = "0.10", optional = true }

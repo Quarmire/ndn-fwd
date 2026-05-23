@@ -233,6 +233,57 @@ pub async fn run_wt_listener(
     tracing::info!(target: "face.wt", "WebTransport listener stopped");
 }
 
+/// Raw-QUIC backbone listener: binds a self-signed QUIC endpoint and registers
+/// one face per accepted connection. Logs the leaf cert SHA-256 so operators can
+/// pin it on dialers (`quic://host:port?cert=<hex>` / `[[face]] cert_sha256`).
+#[cfg(feature = "quic")]
+pub async fn run_quic_listener(
+    cfg: ndn_config::QuicListenerConfig,
+    engine: ForwarderEngine,
+    cancel: CancellationToken,
+) {
+    use ndn_face_quic::{QuicListener, QuicServerTls};
+
+    let bind_addr: std::net::SocketAddr = match cfg.listen.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::error!(target: "face.quic", listen=%cfg.listen, error=%e, "quic-listener: invalid listen address");
+            return;
+        }
+    };
+    let hostnames = cfg.hostnames.unwrap_or_else(|| vec!["localhost".to_string()]);
+    let listener = match QuicListener::bind(bind_addr, QuicServerTls::SelfSigned { hostnames }).await
+    {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(target: "face.quic", addr=%bind_addr, error=%e, "quic-listener: bind failed");
+            return;
+        }
+    };
+    if let Some(hash) = listener.leaf_cert_sha256() {
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        tracing::info!(target: "face.quic", addr=%listener.local_addr(), cert_sha256=%hex, "QUIC listener ready (pin this hash on dialers)");
+    }
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            r = async {
+                let id = engine.faces().alloc_id();
+                listener.accept(id).await.map(|f| (id, f))
+            } => match r {
+                Ok((id, face)) => {
+                    let peer = ndn_transport::Transport::remote_uri(&face).unwrap_or_default();
+                    engine.add_face(face, cancel.child_token());
+                    tracing::info!(target: "face.quic", face=%id, peer=%peer, "quic-listener: accepted connection");
+                }
+                Err(e) => tracing::warn!(target: "face.quic", error=%e, "quic-listener: accept error"),
+            },
+        }
+    }
+    tracing::info!(target: "face.quic", "QUIC listener stopped");
+}
+
 /// BLE peripheral listener: binds the GATT server via [`ndn_face_native::l2::BleListener`]
 /// and registers one face per connecting central.
 #[cfg(all(feature = "bluetooth", any(target_os = "linux", target_os = "macos")))]

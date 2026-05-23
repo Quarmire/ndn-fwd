@@ -255,6 +255,43 @@ async fn run_face_setup_inner(
                     tracing::warn!(target: "face.wt", "web-transport dial face ignored (webtransport feature not compiled in)");
                 }
             }
+            ndn_config::FaceConfig::Quic {
+                remote,
+                cert_sha256,
+            } => {
+                #[cfg(feature = "quic")]
+                {
+                    let authority = remote.strip_prefix("quic://").unwrap_or(remote).to_owned();
+                    let Some(hash) = ndn_config::parse_cert_sha256_hex(cert_sha256) else {
+                        tracing::error!(target: "face.quic", remote=%remote, "quic dial face: invalid cert_sha256");
+                        continue;
+                    };
+                    let id = engine.faces().alloc_id();
+                    let eng = engine.clone();
+                    let c = cancel.child_token();
+                    tokio::spawn(async move {
+                        // The connector (endpoint) is dropped after connect; the
+                        // face's streams keep the connection + driver alive.
+                        match ndn_face_quic::QuicConnector::new(
+                            ndn_face_quic::QuicClientTls::CertHashes(vec![hash]),
+                        ) {
+                            Ok(connector) => match connector.connect_authority(id, &authority).await {
+                                Ok(face) => {
+                                    eng.add_face(face, c);
+                                    tracing::info!(target: "face.quic", face=%id, remote=%authority, "QUIC dial face connected");
+                                }
+                                Err(e) => tracing::error!(target: "face.quic", remote=%authority, error=%e, "QUIC dial failed"),
+                            },
+                            Err(e) => tracing::error!(target: "face.quic", error=%e, "QUIC connector setup failed"),
+                        }
+                    });
+                }
+                #[cfg(not(feature = "quic"))]
+                {
+                    let _ = (remote, cert_sha256);
+                    tracing::warn!(target: "face.quic", "quic dial face ignored (quic feature not compiled in)");
+                }
+            }
             ndn_config::FaceConfig::Serial { path, baud } => {
                 #[cfg(feature = "serial")]
                 {
@@ -315,6 +352,15 @@ async fn run_face_setup_inner(
         let eng = engine.clone();
         let c = cancel.clone();
         tokio::spawn(async move { run_wt_listener(wt_cfg, eng, c).await });
+    }
+
+    #[cfg(feature = "quic")]
+    if let Some(quic_cfg) = fwd_config.listeners.quic.clone()
+        && quic_cfg.enabled
+    {
+        let eng = engine.clone();
+        let c = cancel.clone();
+        tokio::spawn(async move { crate::transport_listeners::run_quic_listener(quic_cfg, eng, c).await });
     }
 
     // Polls the signaling relay, accepts SDP offers as `WebRtcFace`s, and
