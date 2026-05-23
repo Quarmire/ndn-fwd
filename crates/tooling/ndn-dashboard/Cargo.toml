@@ -71,7 +71,7 @@ browser-engine = [
   "dep:tokio-util",
 ]
 # Browser-side witness surface (Tier-1 §2c, native counterpart is
-# `crates/spec/ndn-mgmt/tests/web_wire_e2e.rs`). Exposes the
+# `crates/ndn-mgmt/tests/web_wire_e2e.rs`). Exposes the
 # dashboard's `WsMgmtClient` to JS via `wasm-bindgen` so Playwright
 # can drive `/localhost/nfd/{module}/{verb}` against a real `ndn-fwd`
 # over a real browser WebSocket. Off by default; enabled only when
