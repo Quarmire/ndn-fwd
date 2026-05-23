@@ -127,6 +127,19 @@ enum FaceAction {
         /// Face ID to destroy.
         face_id: u32,
     },
+    /// Update per-face NDNLPv2 flags (`faces/update`).
+    Update {
+        /// Face ID to update.
+        face_id: u32,
+        /// Desired flag bits (bit 0 = LocalFields, 1 = LpReliability,
+        /// 2 = CongestionMarking). e.g. `0x2` to request LpReliability.
+        #[arg(long, value_parser = parse_u64_maybe_hex)]
+        flags: u64,
+        /// Which bits to write; bits outside the mask are preserved.
+        /// Defaults to `flags` (write exactly the requested bits).
+        #[arg(long, value_parser = parse_u64_maybe_hex)]
+        mask: Option<u64>,
+    },
     /// List all faces, optionally filtered by URI scheme or remote /
     /// local URI glob pattern.  Multiple filters AND together; an
     /// empty filter matches everything.
@@ -354,6 +367,17 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
             FaceAction::Destroy { face_id } => {
                 let resp = mgmt
                     .face_destroy(*face_id as u64)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                print_params(&resp);
+            }
+            FaceAction::Update {
+                face_id,
+                flags,
+                mask,
+            } => {
+                let resp = mgmt
+                    .face_update(*face_id as u64, *flags, mask.unwrap_or(*flags))
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 print_params(&resp);
@@ -633,6 +657,16 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+/// Parse a flag/mask argument as decimal or `0x`-prefixed hex.
+fn parse_u64_maybe_hex(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        s.parse::<u64>()
+    };
+    parsed.map_err(|_| format!("invalid flag value '{s}' (use decimal or 0x-hex)"))
+}
 
 fn face_kind(uri: &str) -> &'static str {
     if uri.starts_with("udp4://") || uri.starts_with("udp6://") || uri.starts_with("udp://") {
