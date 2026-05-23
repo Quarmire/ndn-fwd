@@ -223,12 +223,12 @@ async fn run_face_setup_inner(
                         .map(|rest| format!("https://{rest}"))
                         .unwrap_or_else(|| remote.clone());
                     let tls = if *webpki {
-                        Some(ndn_face_webtransport::WtClientTls::WebPki)
+                        Some(ndn_transport::ClientTls::WebPki)
                     } else {
                         cert_sha256
                             .as_deref()
                             .and_then(ndn_config::parse_cert_sha256_hex)
-                            .map(|h| ndn_face_webtransport::WtClientTls::CertHashes(vec![h]))
+                            .map(|h| ndn_transport::ClientTls::CertHashes(vec![h]))
                     };
                     let Some(tls) = tls else {
                         tracing::error!(target: "face.wt", remote=%remote, "web-transport dial face: invalid/missing cert_sha256 (or webpki)");
@@ -264,12 +264,12 @@ async fn run_face_setup_inner(
                 {
                     let authority = remote.strip_prefix("quic://").unwrap_or(remote).to_owned();
                     let tls = if *webpki {
-                        Some(ndn_face_quic::QuicClientTls::WebPki)
+                        Some(ndn_transport::ClientTls::WebPki)
                     } else {
                         cert_sha256
                             .as_deref()
                             .and_then(ndn_config::parse_cert_sha256_hex)
-                            .map(|h| ndn_face_quic::QuicClientTls::CertHashes(vec![h]))
+                            .map(|h| ndn_transport::ClientTls::CertHashes(vec![h]))
                     };
                     let Some(tls) = tls else {
                         tracing::error!(target: "face.quic", remote=%remote, "quic dial face: invalid/missing cert_sha256 (or webpki)");

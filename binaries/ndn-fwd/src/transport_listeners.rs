@@ -30,6 +30,36 @@ impl ndn_mgmt::WtCertStatusBackend for WtCertStatusReader {
     }
 }
 
+/// Resolve a config `CertSourceConfig` (self-signed / PEM / ACME) to PEM cert
+/// material — the one path shared by the WebTransport and raw-QUIC listeners.
+/// `profile` only changes the self-signed validity window
+/// ([`ndn_acme::SelfSignedProfile`]): browser-pinnable for WebTransport,
+/// long-lived for a pinned QUIC backbone.
+#[cfg(any(feature = "webtransport", feature = "quic"))]
+async fn resolve_cert_source(
+    cert_source: &ndn_config::CertSourceConfig,
+    profile: ndn_acme::SelfSignedProfile,
+) -> Result<ndn_acme::CertMaterial, String> {
+    // `ndn-config` keeps its own mirror of the enum (to stay wasm-clean and
+    // ACME-stack-free); round-trip it into `ndn_acme::CertSource` via JSON.
+    let cert_source: ndn_acme::CertSource = serde_json::to_string(cert_source)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or_else(|| "cert_source could not be parsed".to_string())?;
+    // Only ACME paths consult the DNS provider; Cloudflare is the only one wired.
+    let dns_provider: Option<std::sync::Arc<dyn ndn_acme::DnsProvider>> =
+        Some(std::sync::Arc::new(ndn_acme::CloudflareDnsProvider::new()));
+    cert_source
+        .resolve(dns_provider, profile)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(any(feature = "webtransport", feature = "quic"))]
+fn hex32(h: &[u8; 32]) -> String {
+    h.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// For each configured session-id spawn a loop that calls
 /// `WebRtcListener::accept_one`, registers the resulting face, then
 /// re-accepts. One peer per session-id at a time.
@@ -117,28 +147,18 @@ pub async fn run_wt_listener(
         }
     };
 
-    let cert_source: ndn_acme::CertSource = match serde_json::to_string(&cfg.cert_source)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-    {
-        Some(s) => s,
-        None => {
-            tracing::error!(target: "face.wt", "wt-listener: cert_source could not be parsed");
-            return;
-        }
-    };
-
-    // Only ACME paths need a DNS provider; Cloudflare is the only one wired.
-    let dns_provider: Option<std::sync::Arc<dyn ndn_acme::DnsProvider>> =
-        Some(std::sync::Arc::new(ndn_acme::CloudflareDnsProvider::new()));
-
-    let material = match cert_source.resolve(dns_provider).await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!(target: "face.wt", error=%e, "wt-listener: cert resolve failed");
-            return;
-        }
-    };
+    // Browser-pinnable: self-signed certs stay under Chrome's 14-day
+    // `serverCertificateHashes` limit.
+    let material =
+        match resolve_cert_source(&cfg.cert_source, ndn_acme::SelfSignedProfile::BrowserPinnable)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(target: "face.wt", error=%e, "wt-listener: cert resolve failed");
+                return;
+            }
+        };
 
     // Read-only cert-status surface: notAfter / days-remaining / renewal state.
     // Logged and published to the `webtransport/cert-status` mgmt dataset.
@@ -160,19 +180,7 @@ pub async fn run_wt_listener(
         }
     }
 
-    let cert_sha256_hex: Option<String> = {
-        use sha2::{Digest, Sha256};
-        rustls_pemfile::certs(&mut material.cert_chain_pem.as_slice())
-            .next()
-            .and_then(|r| r.ok())
-            .map(|leaf| {
-                let digest = Sha256::digest(leaf.as_ref());
-                digest
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            })
-    };
+    let cert_sha256_hex: Option<String> = material.leaf_sha256().as_ref().map(hex32);
     if let Some(ref hex) = cert_sha256_hex {
         tracing::info!(
             target: "face.wt",
@@ -233,9 +241,11 @@ pub async fn run_wt_listener(
     tracing::info!(target: "face.wt", "WebTransport listener stopped");
 }
 
-/// Raw-QUIC backbone listener: binds a self-signed QUIC endpoint and registers
-/// one face per accepted connection. Logs the leaf cert SHA-256 so operators can
-/// pin it on dialers (`quic://host:port?cert=<hex>` / `[[face]] cert_sha256`).
+/// Raw-QUIC backbone listener: binds a QUIC endpoint and registers one face per
+/// accepted connection. The cert comes from the shared [`resolve_cert_source`]
+/// path (self-signed / PEM / ACME), so a QUIC backbone provisions exactly like
+/// a WebTransport listener. Logs the leaf cert SHA-256 so operators can pin it
+/// on dialers (`quic://host:port?cert=<hex>` / `[[face]] cert_sha256`).
 #[cfg(feature = "quic")]
 pub async fn run_quic_listener(
     cfg: ndn_config::QuicListenerConfig,
@@ -251,27 +261,23 @@ pub async fn run_quic_listener(
             return;
         }
     };
-    let tls = match (cfg.cert_pem.as_deref(), cfg.key_pem.as_deref()) {
-        (Some(cert_path), Some(key_path)) => {
-            match (std::fs::read(cert_path), std::fs::read(key_path)) {
-                (Ok(cert_chain_pem), Ok(private_key_pem)) => QuicServerTls::Pem {
-                    cert_chain_pem,
-                    private_key_pem,
-                },
-                (c, k) => {
-                    let err = c.err().or(k.err()).unwrap();
-                    tracing::error!(target: "face.quic", error=%err, "quic-listener: reading cert_pem/key_pem failed");
-                    return;
-                }
+
+    // Backbone: a pinned dialer trusts the leaf hash, not the expiry, so a
+    // self-signed source gets a long-lived cert (no restart-time pin churn).
+    let material =
+        match resolve_cert_source(&cfg.cert_source, ndn_acme::SelfSignedProfile::Backbone).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(target: "face.quic", error=%e, "quic-listener: cert resolve failed");
+                return;
             }
-        }
-        (None, None) => QuicServerTls::SelfSigned {
-            hostnames: cfg.hostnames.unwrap_or_else(|| vec!["localhost".to_string()]),
-        },
-        _ => {
-            tracing::error!(target: "face.quic", "quic-listener: cert_pem and key_pem must be set together");
-            return;
-        }
+        };
+    if let Some(hex) = material.leaf_sha256().as_ref().map(hex32) {
+        tracing::info!(target: "face.quic", addr=%bind_addr, cert_sha256=%hex, "QUIC listener ready (pin this hash on dialers)");
+    }
+    let tls = QuicServerTls::Pem {
+        cert_chain_pem: material.cert_chain_pem,
+        private_key_pem: material.private_key_pem,
     };
     let listener = match QuicListener::bind(bind_addr, tls).await {
         Ok(l) => l,
@@ -280,10 +286,6 @@ pub async fn run_quic_listener(
             return;
         }
     };
-    if let Some(hash) = listener.leaf_cert_sha256() {
-        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-        tracing::info!(target: "face.quic", addr=%listener.local_addr(), cert_sha256=%hex, "QUIC listener ready (pin this hash on dialers)");
-    }
 
     loop {
         tokio::select! {
