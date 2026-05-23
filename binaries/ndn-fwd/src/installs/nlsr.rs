@@ -119,11 +119,18 @@ pub async fn prepare(
 
 impl InstallableProtocol for NlsrInstaller {
     fn install(self: Arc<Self>, builder: &mut EngineBuilder, post_build: &mut PostBuildQueue) {
+        // Consumer faces whose Interests carry an NDNLPv2 NextHopFaceId
+        // (PSync/Hello pin each Interest to a neighbour face). The forwarder
+        // honours NextHopFaceId only from faces that opted into LocalFields
+        // (the FaceUpdateCommand contract NLSR-over-NFD relies on); enable it
+        // post-build on exactly these local consumer faces.
+        let mut local_fields_face_ids = Vec::new();
         let mut hello_neighbor_handles = Vec::with_capacity(self.neighbour_face_ids.len());
         for (neighbour_name, _) in &self.neighbour_face_ids {
             let hello_consumer_id = builder.alloc_face_id();
             let (hf, hh) = InProcFace::new(hello_consumer_id, 64);
             builder.add_face(hf);
+            local_fields_face_ids.push(hello_consumer_id);
             hello_neighbor_handles.push((neighbour_name.clone(), hh));
             tracing::info!(
                 target: "routing.nlsr",
@@ -136,6 +143,7 @@ impl InstallableProtocol for NlsrInstaller {
         let sync_lsa_consumer_id = builder.alloc_face_id();
         let (sync_lsa_face, sync_lsa_handle) = InProcFace::new(sync_lsa_consumer_id, 256);
         builder.add_face(sync_lsa_face);
+        local_fields_face_ids.push(sync_lsa_consumer_id);
 
         let hello_producer_id = builder.alloc_face_id();
         let (hp_face, hello_producer_handle) = InProcFace::new(hello_producer_id, 64);
@@ -182,6 +190,14 @@ impl InstallableProtocol for NlsrInstaller {
         post_build.add_fib_entry(hello_fib_prefix.clone(), hello_producer_id, 0);
         post_build.add_fib_entry(sync_fib_prefix.clone(), sync_producer_id, 0);
         post_build.add_fib_entry(lsa_fib_prefix.clone(), lsa_producer_id, 0);
+
+        // Opt the NextHopFaceId-emitting consumer faces into LocalFields so the
+        // forwarder honours their pinned Interests (see comment at face alloc).
+        post_build.defer(move |engine, _cancel| {
+            for face_id in local_fields_face_ids {
+                engine.set_local_fields(face_id, true);
+            }
+        });
 
         let nlsr_for_hello = Arc::clone(&nlsr);
         let nlsr_for_sync = Arc::clone(&nlsr);
