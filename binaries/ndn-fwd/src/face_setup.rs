@@ -16,8 +16,10 @@ use crate::transport_listeners::run_webrtc_listener;
 use crate::transport_listeners::{run_ws_listener, run_wt_listener};
 
 pub struct FaceSetupState {
-    pub pre_allocated_multicast: Vec<(FaceId, usize)>,
-    pub pre_allocated_ether_mc: Vec<(FaceId, usize)>,
+    /// FaceId assigned to each `[[face]]` config entry, indexed by its
+    /// zero-based position (mirrors `[[route]] face`). Built in `main` so the
+    /// route table and this loop agree on which FaceId each entry gets.
+    pub face_ids_by_index: Vec<FaceId>,
     pub auto_udp_pre_alloc: Vec<(FaceId, String, std::net::Ipv4Addr)>,
     pub auto_ether_pre_alloc: Vec<(FaceId, String)>,
     pub auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
@@ -34,16 +36,13 @@ pub async fn run_face_setup(
     state: FaceSetupState,
 ) {
     let FaceSetupState {
-        pre_allocated_multicast,
-        pre_allocated_ether_mc,
+        face_ids_by_index,
         auto_udp_pre_alloc,
         auto_ether_pre_alloc,
         auto_udp_ifaces,
         auto_ether_ifaces,
     } = state;
     let cancel = cancel.clone();
-    #[cfg(not(target_os = "linux"))]
-    let _ = &pre_allocated_ether_mc;
     #[cfg(not(target_os = "linux"))]
     let _ = &auto_ether_pre_alloc;
     #[cfg(not(target_os = "linux"))]
@@ -53,8 +52,7 @@ pub async fn run_face_setup(
         engine,
         &cancel,
         fwd_config,
-        pre_allocated_multicast,
-        pre_allocated_ether_mc,
+        face_ids_by_index,
         auto_udp_pre_alloc,
         auto_ether_pre_alloc,
         auto_udp_ifaces,
@@ -68,13 +66,20 @@ async fn run_face_setup_inner(
     engine: &ForwarderEngine,
     cancel: &CancellationToken,
     fwd_config: &ForwarderConfig,
-    pre_allocated_multicast: Vec<(FaceId, usize)>,
-    pre_allocated_ether_mc: Vec<(FaceId, usize)>,
+    face_ids_by_index: Vec<FaceId>,
     auto_udp_pre_alloc: Vec<(FaceId, String, std::net::Ipv4Addr)>,
     auto_ether_pre_alloc: Vec<(FaceId, String)>,
     auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
     auto_ether_ifaces: Vec<ndn_face_native::iface::InterfaceInfo>,
 ) {
+    // Resolve a config-face index to its pre-assigned FaceId; fall back to a
+    // fresh id for the synthetic default listeners (empty `[[face]]`).
+    let id_for = |idx: usize| {
+        face_ids_by_index
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| engine.faces().alloc_id())
+    };
     use crate::parse_bind_addr;
     let engine = engine.clone();
     // With no `[[face]]` entries, start default UDP + TCP listeners on
@@ -109,7 +114,7 @@ async fn run_face_setup_inner(
                             continue;
                         }
                     };
-                    let face_id = engine.faces().alloc_id();
+                    let face_id = id_for(face_idx);
                     let local: std::net::SocketAddr = if peer.is_ipv4() {
                         "0.0.0.0:0".parse().unwrap()
                     } else {
@@ -170,11 +175,7 @@ async fn run_face_setup_inner(
                         continue;
                     }
                 };
-                let id = pre_allocated_multicast
-                    .iter()
-                    .find(|(_, idx)| *idx == face_idx)
-                    .map(|(fid, _)| *fid)
-                    .unwrap_or_else(|| engine.faces().alloc_id());
+                let id = id_for(face_idx);
                 let port = *port;
                 let eng = engine.clone();
                 let c = cancel.child_token();
@@ -234,7 +235,7 @@ async fn run_face_setup_inner(
                         tracing::error!(target: "face.wt", remote=%remote, "web-transport dial face: invalid/missing cert_sha256 (or webpki)");
                         continue;
                     };
-                    let id = engine.faces().alloc_id();
+                    let id = id_for(face_idx);
                     let eng = engine.clone();
                     let c = cancel.child_token();
                     tokio::spawn(async move {
@@ -275,7 +276,7 @@ async fn run_face_setup_inner(
                         tracing::error!(target: "face.quic", remote=%remote, "quic dial face: invalid/missing cert_sha256 (or webpki)");
                         continue;
                     };
-                    let id = engine.faces().alloc_id();
+                    let id = id_for(face_idx);
                     let eng = engine.clone();
                     let c = cancel.child_token();
                     tokio::spawn(async move {
@@ -302,7 +303,7 @@ async fn run_face_setup_inner(
             ndn_config::FaceConfig::Serial { path, baud } => {
                 #[cfg(feature = "serial")]
                 {
-                    let id = engine.faces().alloc_id();
+                    let id = id_for(face_idx);
                     match ndn_face_native::serial::serial_face_open(id, path, *baud) {
                         Ok(face) => {
                             let c = cancel.child_token();
@@ -323,11 +324,7 @@ async fn run_face_setup_inner(
             ndn_config::FaceConfig::EtherMulticast { interface } => {
                 #[cfg(target_os = "linux")]
                 {
-                    let id = pre_allocated_ether_mc
-                        .iter()
-                        .find(|(_, ci)| *ci == face_idx)
-                        .map(|(id, _)| *id)
-                        .unwrap_or_else(|| engine.faces().alloc_id());
+                    let id = id_for(face_idx);
                     match ndn_face_native::l2::MulticastEtherFace::new(id, interface) {
                         Ok(face) => {
                             let c = cancel.child_token();
@@ -365,7 +362,7 @@ async fn run_face_setup_inner(
                             continue;
                         }
                     };
-                    let id = engine.faces().alloc_id();
+                    let id = id_for(face_idx);
                     match ndn_face_native::l2::NamedEtherFace::new(
                         id,
                         ndn_packet::Name::root(),

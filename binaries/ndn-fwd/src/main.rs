@@ -541,6 +541,25 @@ async fn main() -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     let _ = &auto_ether_ifaces;
 
+    // Map each `[[face]]` config entry (by zero-based index) to a stable
+    // FaceId: reuse the ids discovery already pre-allocated for multicast /
+    // Ethernet-multicast faces, and allocate fresh ones for every other entry.
+    // Both `[[route]] face = N` resolution and the face-setup loop use this, so
+    // a route's `face` index always points at the face that entry creates.
+    let face_ids_by_index: Vec<ndn_transport::FaceId> = fwd_config
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| {
+            pre_allocated_multicast
+                .iter()
+                .chain(pre_allocated_ether_mc.iter())
+                .find(|(_, i)| *i == idx)
+                .map(|(id, _)| *id)
+                .unwrap_or_else(|| builder.alloc_face_id())
+        })
+        .collect();
+
     // NLSR and DV wire in via `InstallableProtocol`: async pre-build (UDP
     // binds) in `prepare`; InProcFace pairs, FIB writes, neighbour seeds,
     // and Producer mounts run via `install` + `PostBuildQueue`.
@@ -564,11 +583,21 @@ async fn main() -> Result<()> {
     post_build.apply(&engine, &cancel);
 
     for route in &fwd_config.routes {
+        // `route.face` is a zero-based index into `[[face]]` (see RouteConfig);
+        // resolve it to the FaceId that entry was assigned.
+        let Some(&face_id) = face_ids_by_index.get(route.face) else {
+            tracing::error!(
+                target: "engine",
+                prefix = %route.prefix,
+                face_index = route.face,
+                faces = face_ids_by_index.len(),
+                "route references a [[face]] index out of range; skipping",
+            );
+            continue;
+        };
         let name = parse_name(&route.prefix);
-        engine
-            .fib()
-            .add_nexthop(&name, ndn_transport::FaceId(route.face as u64), route.cost);
-        tracing::info!(target: "engine", prefix = %route.prefix, face = route.face, cost = route.cost, "route added");
+        engine.fib().add_nexthop(&name, face_id, route.cost);
+        tracing::info!(target: "engine", prefix = %route.prefix, face_index = route.face, face = face_id.0, cost = route.cost, "route added");
     }
 
     // `/localhost/nfd` + `/localhop/nfd` FIB entries are installed by
@@ -602,8 +631,7 @@ async fn main() -> Result<()> {
         &cancel,
         &fwd_config,
         FaceSetupState {
-            pre_allocated_multicast,
-            pre_allocated_ether_mc,
+            face_ids_by_index,
             auto_udp_pre_alloc,
             auto_ether_pre_alloc,
             auto_udp_ifaces,
