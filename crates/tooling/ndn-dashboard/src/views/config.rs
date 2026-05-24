@@ -359,6 +359,7 @@ fn render_cs_section(cs: CsConfig, editing: Signal<Option<ConfigSection>>) -> El
                         {kv_row("Shards", shards, restart_badge())}
                     }
                     {kv_row("Admission policy", &cs.admission_policy, restart_badge())}
+                    {kv_row("Unsolicited policy", &cs.unsolicited_policy, restart_badge())}
                 }
             }
 
@@ -384,6 +385,15 @@ fn render_cs_section(cs: CsConfig, editing: Signal<Option<ConfigSection>>) -> El
                         select {
                             option { value: "default",   selected: cs.admission_policy == "default",   "Satisfy PIT only" }
                             option { value: "admit-all", selected: cs.admission_policy == "admit-all", "Admit all Data" }
+                        }
+                    }
+                    div { class: "form-group",
+                        label { "Unsolicited policy" }
+                        select {
+                            option { value: "drop-all",      selected: cs.unsolicited_policy == "drop-all",      "Drop all" }
+                            option { value: "admit-local",   selected: cs.unsolicited_policy == "admit-local",   "Admit local" }
+                            option { value: "admit-network", selected: cs.unsolicited_policy == "admit-network", "Admit network" }
+                            option { value: "admit-all",     selected: cs.unsolicited_policy == "admit-all",     "Admit all" }
                         }
                     }
                     div { style: "display:flex;align-items:flex-end;",
