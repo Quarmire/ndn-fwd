@@ -723,6 +723,10 @@ fn face_config_label(face: &FaceConfig) -> (&'static str, String) {
         ),
         FaceConfig::Serial { path, baud } => ("Serial", format!("path={path} baud={baud}")),
         FaceConfig::EtherMulticast { interface } => ("EtherMC", format!("iface={interface}")),
+        FaceConfig::Ether {
+            interface,
+            peer_mac,
+        } => ("Ether", format!("iface={interface} peer={peer_mac}")),
         FaceConfig::WebTransport { remote, webpki, .. } => (
             "WT",
             format!(

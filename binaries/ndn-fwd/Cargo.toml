@@ -17,7 +17,7 @@ default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "quic", "fec
 spsc-shm    = ["ndn-face-native/spsc-shm", "ndn-mgmt/spsc-shm"]
 websocket   = ["ndn-face-native/websocket", "dep:tokio-tungstenite"]
 serial      = ["ndn-face-native/serial"]
-l2          = ["ndn-face-native/l2"]
+l2          = ["ndn-face-native/l2", "ndn-mgmt/l2"]
 # BLE faces: ble:// (central) and ble-peripheral:// (server). Opt-in, not
 # default — on Linux `bluer` needs libdbus dev headers at build time.
 bluetooth   = ["ndn-face-native/bluetooth", "ndn-mgmt/bluetooth", "dep:async-trait"]

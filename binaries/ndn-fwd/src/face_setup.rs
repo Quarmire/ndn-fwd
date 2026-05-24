@@ -349,6 +349,50 @@ async fn run_face_setup_inner(
                     tracing::warn!(target: "face.eth", "ether-multicast face only supported on Linux");
                 }
             }
+            ndn_config::FaceConfig::Ether {
+                interface,
+                peer_mac,
+            } => {
+                #[cfg(all(
+                    feature = "l2",
+                    any(target_os = "linux", target_os = "macos", target_os = "windows")
+                ))]
+                {
+                    let mac: ndn_transport::MacAddr = match peer_mac.parse() {
+                        Ok(m) => m,
+                        Err(_) => {
+                            tracing::error!(target: "face.eth", peer_mac=%peer_mac, "invalid ether peer-mac");
+                            continue;
+                        }
+                    };
+                    let id = engine.faces().alloc_id();
+                    match ndn_face_native::l2::NamedEtherFace::new(
+                        id,
+                        ndn_packet::Name::root(),
+                        mac,
+                        interface.clone(),
+                        ndn_face_native::l2::RadioFaceMetadata::default(),
+                    ) {
+                        Ok(face) => {
+                            let c = cancel.child_token();
+                            engine.add_face_with_persistency(
+                                face,
+                                c,
+                                ndn_transport::FacePersistency::Permanent,
+                            );
+                            tracing::info!(target: "face.eth", iface=%interface, peer=%peer_mac, face=%id, "unicast ethernet face opened");
+                        }
+                        Err(e) => {
+                            tracing::error!(target: "face.eth", iface=%interface, peer=%peer_mac, error=%e, "failed to open unicast ethernet face");
+                        }
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                {
+                    let _ = (interface, peer_mac);
+                    tracing::warn!(target: "face.eth", "ether unicast face not supported on this platform");
+                }
+            }
         }
     }
 
