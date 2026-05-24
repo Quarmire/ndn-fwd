@@ -142,8 +142,9 @@ async fn run_face_setup_inner(
                 {
                     let eng = engine.clone();
                     let c = cancel.clone();
+                    let rx_sockets = fwd_config.face_system.udp.rx_sockets;
                     tokio::spawn(async move {
-                        mgmt_ndn::run_udp_listener(addr, eng, c).await;
+                        mgmt_ndn::run_udp_listener(addr, eng, c, rx_sockets).await;
                     });
                 }
             }
