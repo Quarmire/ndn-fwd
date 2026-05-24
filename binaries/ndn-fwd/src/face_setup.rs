@@ -453,35 +453,6 @@ async fn run_face_setup_inner(
             }
         }
     }
-    #[cfg(target_os = "linux")]
-    if auto_ether_pre_alloc.is_empty() {
-        for iface_info in &auto_ether_ifaces {
-            let id = engine.faces().alloc_id();
-            match ndn_face_native::l2::MulticastEtherFace::new(id, &iface_info.name) {
-                Ok(face) => {
-                    let c = cancel.child_token();
-                    engine.add_face_with_persistency(
-                        face,
-                        c,
-                        ndn_transport::FacePersistency::Permanent,
-                    );
-                    tracing::info!(target: "face.eth", iface=%iface_info.name, face=%id, "auto multicast ethernet face opened");
-                }
-                Err(e) => {
-                    tracing::error!(target: "face.eth", iface=%iface_info.name, error=%e, "auto multicast ethernet face failed");
-                }
-            }
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    if !auto_ether_ifaces.is_empty() {
-        tracing::warn!(
-            target: "face.eth",
-            count = auto_ether_ifaces.len(),
-            "ether auto_multicast: EtherMulticast faces only supported on Linux, skipping"
-        );
-    }
-
     let udp_ad_hoc = fwd_config.face_system.udp.ad_hoc;
     for (pre_id, iface_name, addr) in &auto_udp_pre_alloc {
         let id = *pre_id;
@@ -506,126 +477,33 @@ async fn run_face_setup_inner(
             }
         });
     }
-    if auto_udp_pre_alloc.is_empty() {
-        for (iface_name, addr) in &auto_udp_ifaces {
-            let id = engine.faces().alloc_id();
-            let addr = *addr;
-            let iface_name = iface_name.clone();
-            let eng = engine.clone();
-            let c = cancel.child_token();
-            tokio::spawn(async move {
-                match ndn_face_native::net::MulticastUdpFace::ndn_default(addr, id).await {
-                    Ok(face) => {
-                        let face = if udp_ad_hoc { face.ad_hoc() } else { face };
-                        eng.add_face_with_persistency(
-                            face,
-                            c,
-                            ndn_transport::FacePersistency::Permanent,
-                        );
-                        tracing::info!(target: "face.udp", iface=%iface_name, addr=%addr, face=%id, "auto multicast UDP face opened");
-                    }
-                    Err(e) => {
-                        tracing::error!(target: "face.udp", iface=%iface_name, addr=%addr, error=%e, "auto multicast UDP face failed");
-                    }
-                }
-            });
+    // Auto-multicast enumeration + interface hotplug now live in the reusable
+    // `ndn_face_native::provision` module (shared with the mobile/in-browser
+    // engines via the `FaceSink` seam). When neighbour discovery pre-allocated
+    // the startup faces above, skip the provisioner's initial enumeration to
+    // avoid double-creating them — but still run the hotplug watcher so later
+    // interfaces are picked up.
+    let provision_cfg = ndn_face_native::provision::MulticastProvisionConfig {
+        udp_auto: fwd_config.face_system.udp.auto_multicast,
+        udp_ad_hoc,
+        udp_whitelist: fwd_config.face_system.udp.whitelist.clone(),
+        udp_blacklist: fwd_config.face_system.udp.blacklist.clone(),
+        ether_auto: fwd_config.face_system.ether.auto_multicast,
+        ether_whitelist: fwd_config.face_system.ether.whitelist.clone(),
+        ether_blacklist: fwd_config.face_system.ether.blacklist.clone(),
+        watch_interfaces: fwd_config.face_system.watch_interfaces,
+    };
+    let pre_allocated = !auto_udp_pre_alloc.is_empty() || !auto_ether_pre_alloc.is_empty();
+    if pre_allocated {
+        if provision_cfg.watch_interfaces {
+            ndn_face_native::provision::spawn_hotplug_watcher(
+                engine.clone(),
+                provision_cfg,
+                cancel.child_token(),
+            );
         }
-    }
-
-    if fwd_config.face_system.watch_interfaces {
-        let (watcher_tx, mut watcher_rx) =
-            tokio::sync::mpsc::channel::<ndn_face_native::iface_watcher::InterfaceEvent>(64);
-        let watcher_cancel = cancel.child_token();
-        tokio::spawn(ndn_face_native::iface_watcher::watch_interfaces(
-            watcher_tx,
-            watcher_cancel,
-        ));
-
-        let watcher_engine = engine.clone();
-        let watcher_fwd_cfg = fwd_config.face_system.clone();
-        let watcher_cancel2 = cancel.child_token();
-        let watcher_udp_ad_hoc = udp_ad_hoc;
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = watcher_cancel2.cancelled() => break,
-                    event = watcher_rx.recv() => {
-                        let Some(event) = event else { break };
-                        match event {
-                            ndn_face_native::iface_watcher::InterfaceEvent::Added(iface_name) => {
-                                #[cfg(target_os = "linux")]
-                                if watcher_fwd_cfg.ether.auto_multicast
-                                    && ndn_face_native::iface::interface_allowed(
-                                        &iface_name,
-                                        &watcher_fwd_cfg.ether.whitelist,
-                                        &watcher_fwd_cfg.ether.blacklist,
-                                    )
-                                {
-                                    let id = watcher_engine.faces().alloc_id();
-                                    match ndn_face_native::l2::MulticastEtherFace::new(id, &iface_name) {
-                                        Ok(face) => {
-                                            watcher_engine.add_face_with_persistency(
-                                                face,
-                                                watcher_cancel2.child_token(),
-                                                ndn_transport::FacePersistency::Permanent,
-                                            );
-                                            tracing::info!(target: "face.eth", iface=%iface_name, face=%id, "hotplug: multicast ethernet face added");
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(target: "face.eth", iface=%iface_name, error=%e, "hotplug: failed to open multicast ethernet face");
-                                        }
-                                    }
-                                }
-
-                                if watcher_fwd_cfg.udp.auto_multicast
-                                    && ndn_face_native::iface::interface_allowed(
-                                        &iface_name,
-                                        &watcher_fwd_cfg.udp.whitelist,
-                                        &watcher_fwd_cfg.udp.blacklist,
-                                    )
-                                {
-                                    let ifaces = ndn_face_native::iface::list_interfaces();
-                                    if let Some(info) = ifaces.iter().find(|i| i.name == iface_name) {
-                                        for &addr in &info.ipv4_addrs {
-                                            let id = watcher_engine.faces().alloc_id();
-                                            let eng = watcher_engine.clone();
-                                            let cancel3 = watcher_cancel2.child_token();
-                                            let name2 = iface_name.clone();
-                                            tokio::spawn(async move {
-                                                match ndn_face_native::net::MulticastUdpFace::ndn_default(addr, id).await {
-                                                    Ok(face) => {
-                                                        let face = if watcher_udp_ad_hoc { face.ad_hoc() } else { face };
-                                                        eng.add_face_with_persistency(face, cancel3, ndn_transport::FacePersistency::Permanent);
-                                                        tracing::info!(target: "face.udp", iface=%name2, addr=%addr, face=%id, "hotplug: multicast UDP face added");
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(target: "face.udp", iface=%name2, addr=%addr, error=%e, "hotplug: failed to open multicast UDP face");
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                            ndn_face_native::iface_watcher::InterfaceEvent::Removed(iface_name) => {
-                                // Faces on this interface use `dev://<iface>` as `local_uri`.
-                                let target_uri = format!("dev://{iface_name}");
-                                let face_table = watcher_engine.faces();
-                                for face_id in face_table.face_ids() {
-                                    if let Some(face) = face_table.get(face_id)
-                                        && face.local_uri().as_deref() == Some(&target_uri)
-                                        && let Some(tok) = watcher_engine.face_token(face_id)
-                                    {
-                                        tok.cancel();
-                                        tracing::info!(target: "face.system", iface=%iface_name, face=%face_id, "hotplug: face removed");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
+    } else {
+        ndn_face_native::provision::provision(&engine, &provision_cfg, cancel);
     }
 
     tracing::info!(target: "engine", "engine running");
