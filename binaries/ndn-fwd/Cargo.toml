@@ -37,6 +37,10 @@ fec         = ["dep:ndn-coding"]
 # In-engine rate limiting. Pulls in ndn-ratelimit. Operator enables
 # policies via [[rate-limit.policy]] in the TOML config.
 rate-limit  = ["dep:ndn-ratelimit"]
+# CCLF content-aware forwarding (research extension). Registers the
+# `/localhost/nfd/strategy/cclf` strategy and advertises this node's A-LAL
+# presence per `[cclf] presence_name`.
+cclf        = ["dep:ndn-strategy-cclf", "ndn-strategy-cclf/native"]
 # Real SMTP delivery for the NDNCERT `email` challenge (lettre/rustls). Opt-in;
 # without it the email challenge logs the code (LoggingEmailSender).
 smtp        = ["dep:lettre"]
@@ -50,6 +54,7 @@ ndn-observability = { workspace = true }
 humantime        = "2"
 ndn-coding       = { workspace = true, optional = true }
 ndn-ratelimit    = { workspace = true, optional = true }
+ndn-strategy-cclf = { workspace = true, optional = true }
 ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd"] }
 ndn-app          = { workspace = true }
 ndn-face-native        = { workspace = true }

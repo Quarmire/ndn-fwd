@@ -575,6 +575,22 @@ async fn main() -> Result<()> {
 
     let (engine, shutdown) = builder.build().await?;
 
+    // CCLF: advertise this node's network-layer presence so neighbors count it
+    // for density (A-LAL). The strategy is selected per-prefix via
+    // strategy-choice; this only opts the node into being *seen*.
+    #[cfg(feature = "cclf")]
+    if let Some(ref presence) = fwd_config.cclf.presence_name {
+        match presence.parse::<ndn_packet::Name>() {
+            Ok(name) => {
+                ndn_strategy_cclf::native::CclfStrategy::advertise_presence(&name);
+                tracing::info!(%presence, "CCLF: advertising A-LAL presence");
+            }
+            Err(e) => {
+                tracing::warn!(%presence, error = %e, "CCLF: invalid presence_name; not advertising")
+            }
+        }
+    }
+
     // Single cancel token shared by every spawned task (Producer mounts,
     // listeners, mgmt). Created before `post_build.apply` so installer-
     // deferred Producer tasks bind to the same shutdown signal.
