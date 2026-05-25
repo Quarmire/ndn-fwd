@@ -184,6 +184,19 @@ async fn main() -> Result<()> {
             max_per_face: fwd_config.reflexive.max_per_face,
             max_lifetime: std::time::Duration::from_millis(fwd_config.reflexive.max_lifetime_ms),
         },
+        data_plane: match fwd_config.engine.data_plane.as_str() {
+            "partitioned" => {
+                let workers = if fwd_config.engine.workers == 0 {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1)
+                } else {
+                    fwd_config.engine.workers
+                };
+                ndn_engine::DataPlane::Partitioned { workers }
+            }
+            _ => ndn_engine::DataPlane::Shared,
+        },
         ..EngineConfig::default()
     };
 
