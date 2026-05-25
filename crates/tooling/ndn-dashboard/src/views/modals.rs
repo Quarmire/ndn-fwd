@@ -7,7 +7,6 @@ use ndn_config::{
 
 use crate::app::{AppCtx, CONFIG_PRESETS, DashCmd, RouterCmd, ToastLevel, push_toast};
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum BuildFaceKind {
     Udp,
@@ -180,10 +179,10 @@ fn assemble_config(
         demo_ca: Default::default(),
         observability: Default::default(),
         reflexive: Default::default(),
+        cclf: Default::default(),
     };
     cfg.to_toml_string().unwrap_or_default()
 }
-
 
 #[component]
 pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>) -> Element {
@@ -1174,7 +1173,6 @@ pub fn StartRouterModal(on_close: EventHandler<()>, config_toml: Signal<String>)
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FaceKind {
     Udp,
@@ -1445,7 +1443,6 @@ pub fn FaceCreateModal(on_close: EventHandler<()>) -> Element {
         }
     }
 }
-
 
 #[component]
 pub fn RouteAddModal(on_close: EventHandler<()>) -> Element {
