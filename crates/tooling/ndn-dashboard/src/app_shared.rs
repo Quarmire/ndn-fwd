@@ -26,6 +26,10 @@ pub static ENROLLMENT_WIZARD_STATE: GlobalSignal<
 > = Signal::global(crate::views::enrollment_wizard::EnrollmentWizardState::default);
 pub static KEY_ROTATION_STATE: GlobalSignal<crate::views::key_rotation::KeyRotationState> =
     Signal::global(crate::views::key_rotation::KeyRotationState::default);
+/// §5.5 CA pending-approvals list state. Populated by
+/// `DashCmd::CaListApprovals`'s handler after `ca/list-approvals`.
+pub static CA_APPROVALS_STATE: GlobalSignal<crate::views::ca_approvals::CaApprovalsState> =
+    Signal::global(crate::views::ca_approvals::CaApprovalsState::default);
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,6 +136,8 @@ pub enum DashCmd {
         safebag_wire: Vec<u8>,
         passphrase: String,
     },
+    /// §5.5 list pending CA device-approval requests.
+    CaListApprovals,
 }
 
 #[cfg(feature = "desktop")]

@@ -162,3 +162,15 @@ term = "Key rotation"
 gloss = "Generate a new signing key under the same identity; the old key stays for in-flight verification until manually deleted."
 extended = "Recorded in the audit log so the chain documents when the rotation happened and who initiated it."
 wiki_anchor = "key-rotation"
+
+[[entries]]
+term = "ChallengeAttestation"
+gloss = "A record the CA writes into the cert's signed AdditionalDescription saying which challenge the subject satisfied (and how)."
+extended = "Lets the IssuancePolicy gate on the challenge kind — e.g. RequireAttestationKind('/high-trust', 'device-approval') rejects issuance unless the named challenge was used."
+wiki_anchor = "challenge-attestations"
+
+[[entries]]
+term = "Device approval"
+gloss = "An NDNCERT challenge type where an already-approved device authorises a new enrollment by publishing a signed approval Data on the CA's approval feed."
+extended = "Pending requests surface in the dashboard via ca/list-approvals; resolution happens off-mgmt via the canonical signed-Data path."
+wiki_anchor = "device-approval"

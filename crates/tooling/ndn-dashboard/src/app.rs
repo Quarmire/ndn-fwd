@@ -166,6 +166,10 @@ pub enum DashCmd {
         safebag_wire: Vec<u8>,
         passphrase: String,
     },
+    /// §5.5 — fire `/localhost/nfd/ca/list-approvals` and push the
+    /// decoded rows into `CA_APPROVALS_STATE`. Operator-driven (no
+    /// auto-poll); see `views/ca_approvals.rs` for the rationale.
+    CaListApprovals,
 }
 
 /// Commands sent to the router-management coroutine.
@@ -1848,6 +1852,7 @@ async fn run_cmd(
         DashCmd::SecurityValidateTrace(_) => None, // surfaces via the sidesheet, not a toast
         DashCmd::SecurityAnchorAdd { .. } => Some("Anchor promoted (TOFU)"),
         DashCmd::SecuritySafebagImport { .. } => Some("SafeBag imported"),
+        DashCmd::CaListApprovals => None, // refresh is silent; state-signal drives UI
         _ => None,
     };
 
@@ -2191,6 +2196,40 @@ async fn run_cmd(
             {
                 Ok(_) => Ok(()),
                 Err(e) => Err(e.to_string()),
+            }
+        }
+        DashCmd::CaListApprovals => {
+            use crate::views::ca_approvals::{CaApprovalsState, PendingApprovalRow};
+            let result = client.ca_list_approvals().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .ok();
+            match result {
+                Ok(rows) => {
+                    let mapped: Vec<PendingApprovalRow> = rows
+                        .into_iter()
+                        .map(|(id, cert_name, description)| PendingApprovalRow {
+                            id,
+                            cert_name,
+                            description,
+                        })
+                        .collect();
+                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                        rows: mapped,
+                        last_refresh_unix_s: now,
+                        last_error: None,
+                    };
+                    Ok(())
+                }
+                Err(e) => {
+                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                        rows: Vec::new(),
+                        last_refresh_unix_s: now,
+                        last_error: Some(e.to_string()),
+                    };
+                    Err(e.to_string())
+                }
             }
         }
         DashCmd::SecurityPolicySet(policy) => {

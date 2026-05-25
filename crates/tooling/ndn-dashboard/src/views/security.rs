@@ -1439,6 +1439,9 @@ fn CaTab() -> Element {
                 on_close: move |_: ()| promote_open.set(false),
             }
         }
+
+        // §5.5 — pending device-approval list.
+        crate::views::ca_approvals::CaApprovalsPanel {}
     }
 }
 

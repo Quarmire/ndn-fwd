@@ -490,7 +490,6 @@ fn render_view_web(view: View) -> Element {
     }
 }
 
-
 #[allow(clippy::too_many_arguments)]
 async fn poll_all_web(
     client: &mut WsMgmtClient,
@@ -691,6 +690,43 @@ async fn poll_all_web(
 /// Identity-status text parser (web mirror of the desktop helper in
 /// `app.rs`). Format per `ndn-mgmt::security_identity_status`:
 /// `identity=<name> is_ephemeral=<bool> pib_path=<path>`.
+/// Web-side mirror of `ndn_ipc::mgmt_client::decode_pending_approvals`.
+/// Inlined here so the web build doesn't pull the Unix-socket-only
+/// `ndn-ipc` crate. TLV codes match `ndn-mgmt/src/modules/ca.rs`.
+fn decode_pending_approvals_web(bytes: &[u8]) -> Vec<(String, String, String)> {
+    const TYPE_PENDING_APPROVAL: u64 = 0xCA;
+    const TYPE_REQUEST_ID: u64 = 0xCC;
+    const TYPE_CERT_NAME: u64 = 0xCE;
+    const TYPE_DESCRIPTION: u64 = 0xD0;
+    let mut out = Vec::new();
+    let mut reader = ndn_tlv::TlvReader::new(bytes::Bytes::copy_from_slice(bytes));
+    while !reader.is_empty() {
+        let Ok((typ, body)) = reader.read_tlv() else {
+            break;
+        };
+        if typ != TYPE_PENDING_APPROVAL {
+            continue;
+        }
+        let mut inner = ndn_tlv::TlvReader::new(body);
+        let (mut id, mut cert, mut desc) = (String::new(), String::new(), String::new());
+        while !inner.is_empty() {
+            let Ok((t, v)) = inner.read_tlv() else {
+                break;
+            };
+            match t {
+                TYPE_REQUEST_ID => id = String::from_utf8_lossy(&v).into_owned(),
+                TYPE_CERT_NAME => cert = String::from_utf8_lossy(&v).into_owned(),
+                TYPE_DESCRIPTION => desc = String::from_utf8_lossy(&v).into_owned(),
+                _ => {}
+            }
+        }
+        if !id.is_empty() && !cert.is_empty() {
+            out.push((id, cert, desc));
+        }
+    }
+    out
+}
+
 fn parse_identity_status_web(text: &str) -> (String, bool, Option<String>) {
     let mut name = String::new();
     let mut ephemeral = false;
@@ -1121,6 +1157,48 @@ async fn run_cmd_web(
             client
                 .security_safebag_import(&name, &safebag_wire, passphrase.as_bytes())
                 .await
+        }
+        DashCmd::CaListApprovals => {
+            use crate::views::ca_approvals::{CaApprovalsState, PendingApprovalRow};
+            let resp = client.ca_list_approvals().await;
+            // web_time::SystemTime for wasm — same shape as std::time on native.
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .ok();
+            match &resp {
+                Ok(r) if r.is_ok() => {
+                    let rows = decode_pending_approvals_web(&r.body);
+                    let mapped: Vec<PendingApprovalRow> = rows
+                        .into_iter()
+                        .map(|(id, cert_name, description)| PendingApprovalRow {
+                            id,
+                            cert_name,
+                            description,
+                        })
+                        .collect();
+                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                        rows: mapped,
+                        last_refresh_unix_s: now,
+                        last_error: None,
+                    };
+                }
+                Ok(r) => {
+                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                        rows: Vec::new(),
+                        last_refresh_unix_s: now,
+                        last_error: Some(format!("{} {}", r.status_code, r.status_text)),
+                    };
+                }
+                Err(e) => {
+                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                        rows: Vec::new(),
+                        last_refresh_unix_s: now,
+                        last_error: Some(e.to_string()),
+                    };
+                }
+            }
+            resp
         }
 
         // Recording flows + YubiKey detection are local-only on web

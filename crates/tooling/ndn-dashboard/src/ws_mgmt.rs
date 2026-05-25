@@ -259,6 +259,13 @@ impl WsMgmtClient {
         };
         self.send_cmd("security", "safebag-import", Some(&cp)).await
     }
+
+    /// `ca/list-approvals` — read-only introspection of the NDNCERT
+    /// CA's pending device-approval requests. Powers the §5.5
+    /// dashboard approver list.
+    pub async fn ca_list_approvals(&mut self) -> Result<MgmtResponse> {
+        self.send_cmd("ca", "list-approvals", None).await
+    }
 }
 
 /// Returns the input unchanged if it isn't LP-wrapped. Inlined from

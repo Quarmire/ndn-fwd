@@ -82,7 +82,6 @@ impl IdentityRole {
     }
 }
 
-
 /// What the wizard renders as the "NamespacePolicy decision" in step 2.
 /// The actual decision comes from the CA when we submit; this is the
 /// client-side check the wizard runs locally so the user sees the
@@ -120,7 +119,6 @@ pub fn preview_namespace_policy(name: &str, ca_prefix: &str) -> NamespacePolicyP
         }
     }
 }
-
 
 #[component]
 pub fn EnrollmentWizardModal(state: Signal<EnrollmentWizardState>) -> Element {
@@ -565,13 +563,20 @@ fn StepIssuance(
     ca_info: Option<CaInfo>,
 ) -> Element {
     let max_days = ca_info.as_ref().map(|c| c.max_validity_days).unwrap_or(0);
+    let expected_attestation_kind = challenge_type.clone();
     rsx! {
         div { style: "margin-bottom:14px;",
             div { style: "font-size:11px;font-weight:600;color:var(--text);margin-bottom:6px;",
                 "ChallengeHandler decision"
             }
             div { style: "padding:8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;font-size:11px;color:var(--text-muted);",
-                "Decided after submission — the wizard surfaces the CA's response below the action row once you click Issue."
+                "Decided after submission. The CA writes a "
+                EduGloss { term: "ChallengeAttestation" }
+                " for the satisfied challenge into the issued cert's signed "
+                span { class: "mono", "AdditionalDescription" }
+                " — surfaced under "
+                span { class: "mono", "challenge_attestations" }
+                " in the §4.2 trust-path inspector after issuance."
             }
         }
         div { style: "margin-bottom:14px;",
@@ -584,8 +589,13 @@ fn StepIssuance(
                     div { "✓ Validity cap " span { class: "mono", "{max_days}d" } " (from CA profile)" }
                 }
                 div { "✓ Issuer signs as " span { class: "mono", "{ca_prefix}" } }
+                div { "✓ Expected attestation kind: " span { class: "mono", "{expected_attestation_kind}" } }
                 div { style: "color:var(--text-muted);margin-top:4px;font-size:10px;",
-                    "Final IssuancePolicy decision lives forwarder-side — `AcceptAllIssuance` by default; replace via the F.7 hook ((internal))."
+                    "Final policy lives forwarder-side. Defaults to "
+                    span { class: "mono", "AcceptAllIssuance" }
+                    "; deployments installing "
+                    span { class: "mono", "RequireAttestationKind" }
+                    " (ndn-cert) reject issuance when the expected attestation isn't recorded."
                 }
             }
         }
@@ -602,7 +612,6 @@ fn StepIssuance(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

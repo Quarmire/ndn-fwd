@@ -1,6 +1,7 @@
 // `coding` and `rate_limit` currently call into `ndn-ipc::MgmtClient`
 // (Unix-socket only). Wiring them through `WsMgmtClient` for the web
 // build is tracked in (internal) §1d.
+pub mod ca_approvals;
 #[cfg(feature = "desktop")]
 pub mod coding;
 #[cfg(feature = "desktop")]
