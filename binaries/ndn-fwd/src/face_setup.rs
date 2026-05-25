@@ -374,28 +374,27 @@ async fn run_face_setup_inner(
                     // AF_XDP kernel-bypass backend (Linux + `af-xdp` feature).
                     #[cfg(all(target_os = "linux", feature = "af-xdp"))]
                     if want_afxdp {
-                        match bpf_object.clone() {
-                            Some(obj) => match ndn_face_native::l2::AfXdpFace::new(
-                                id,
-                                interface,
-                                0,
-                                mac,
-                                obj.into(),
-                            ) {
-                                Ok(face) => {
-                                    engine.add_face_with_persistency(
-                                        face,
-                                        cancel.child_token(),
-                                        ndn_transport::FacePersistency::Permanent,
-                                    );
-                                    tracing::info!(target: "face.eth", iface=%interface, peer=%peer_mac, face=%id, "af_xdp ethernet face opened");
-                                }
-                                Err(e) => {
-                                    tracing::error!(target: "face.eth", iface=%interface, error=%e, "failed to open af_xdp ethernet face");
-                                }
-                            },
-                            None => {
-                                tracing::error!(target: "face.eth", iface=%interface, "ether io=afxdp requires bpf-object");
+                        // A `bpf-object` path overrides the embedded default
+                        // redirect program (`bpf/redirect.bpf.o`).
+                        let opened = match bpf_object.clone() {
+                            Some(obj) => {
+                                ndn_face_native::l2::AfXdpFace::new(id, interface, 0, mac, obj.into())
+                            }
+                            None => ndn_face_native::l2::AfXdpFace::new_with_embedded_redirect(
+                                id, interface, 0, mac,
+                            ),
+                        };
+                        match opened {
+                            Ok(face) => {
+                                engine.add_face_with_persistency(
+                                    face,
+                                    cancel.child_token(),
+                                    ndn_transport::FacePersistency::Permanent,
+                                );
+                                tracing::info!(target: "face.eth", iface=%interface, peer=%peer_mac, face=%id, "af_xdp ethernet face opened");
+                            }
+                            Err(e) => {
+                                tracing::error!(target: "face.eth", iface=%interface, error=%e, "failed to open af_xdp ethernet face");
                             }
                         }
                         continue;
