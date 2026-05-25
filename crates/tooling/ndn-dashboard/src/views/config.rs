@@ -726,6 +726,7 @@ fn face_config_label(face: &FaceConfig) -> (&'static str, String) {
         FaceConfig::Ether {
             interface,
             peer_mac,
+            ..
         } => ("Ether", format!("iface={interface} peer={peer_mac}")),
         FaceConfig::WebTransport { remote, webpki, .. } => (
             "WT",

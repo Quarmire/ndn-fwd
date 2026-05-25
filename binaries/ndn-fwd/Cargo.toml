@@ -21,6 +21,9 @@ spsc-shm    = ["ndn-face-native/spsc-shm", "ndn-mgmt/spsc-shm"]
 websocket   = ["ndn-face-native/websocket", "dep:tokio-tungstenite"]
 serial      = ["ndn-face-native/serial"]
 l2          = ["ndn-face-native/l2", "ndn-mgmt/l2"]
+# AF_XDP kernel-bypass backend for the Ethernet face (Linux). Selected via
+# `[[face]] kind="ether" io="afxdp" bpf-object="…"`.
+af-xdp      = ["l2", "ndn-face-native/af-xdp"]
 # BLE faces: ble:// (central) and ble-peripheral:// (server). Opt-in, not
 # default — on Linux `bluer` needs libdbus dev headers at build time.
 bluetooth   = ["ndn-face-native/bluetooth", "ndn-mgmt/bluetooth", "dep:async-trait"]

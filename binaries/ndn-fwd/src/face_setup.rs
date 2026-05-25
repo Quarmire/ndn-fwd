@@ -350,6 +350,8 @@ async fn run_face_setup_inner(
             ndn_config::FaceConfig::Ether {
                 interface,
                 peer_mac,
+                io,
+                bpf_object,
             } => {
                 #[cfg(all(
                     feature = "l2",
@@ -364,6 +366,45 @@ async fn run_face_setup_inner(
                         }
                     };
                     let id = id_for(face_idx);
+                    let want_afxdp = io.as_deref() == Some("afxdp");
+                    // `bpf_object` is only consumed by the af-xdp branch below.
+                    #[cfg(not(all(target_os = "linux", feature = "af-xdp")))]
+                    let _ = &bpf_object;
+
+                    // AF_XDP kernel-bypass backend (Linux + `af-xdp` feature).
+                    #[cfg(all(target_os = "linux", feature = "af-xdp"))]
+                    if want_afxdp {
+                        match bpf_object.clone() {
+                            Some(obj) => match ndn_face_native::l2::AfXdpFace::new(
+                                id,
+                                interface,
+                                0,
+                                mac,
+                                obj.into(),
+                            ) {
+                                Ok(face) => {
+                                    engine.add_face_with_persistency(
+                                        face,
+                                        cancel.child_token(),
+                                        ndn_transport::FacePersistency::Permanent,
+                                    );
+                                    tracing::info!(target: "face.eth", iface=%interface, peer=%peer_mac, face=%id, "af_xdp ethernet face opened");
+                                }
+                                Err(e) => {
+                                    tracing::error!(target: "face.eth", iface=%interface, error=%e, "failed to open af_xdp ethernet face");
+                                }
+                            },
+                            None => {
+                                tracing::error!(target: "face.eth", iface=%interface, "ether io=afxdp requires bpf-object");
+                            }
+                        }
+                        continue;
+                    }
+                    #[cfg(not(all(target_os = "linux", feature = "af-xdp")))]
+                    if want_afxdp {
+                        tracing::warn!(target: "face.eth", iface=%interface, "ether io=afxdp needs ndn-fwd built --features af-xdp on Linux; using af_packet");
+                    }
+
                     match ndn_face_native::l2::NamedEtherFace::new(
                         id,
                         ndn_packet::Name::root(),
@@ -387,7 +428,7 @@ async fn run_face_setup_inner(
                 }
                 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
                 {
-                    let _ = (interface, peer_mac);
+                    let _ = (interface, peer_mac, io, bpf_object);
                     tracing::warn!(target: "face.eth", "ether unicast face not supported on this platform");
                 }
             }
