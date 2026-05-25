@@ -313,7 +313,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
             }
         };
         // `signer` is already `Arc<dyn Signer>` (FilePib::get_signer
-        // returns trait objects since 2026-05-11); pass through.
+        // returns trait objects); pass through.
         mgmt = mgmt.with_signer(signer);
     }
 
