@@ -24,7 +24,6 @@ use crate::views::security_did_ext::DidExtensionPanel;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
-
 /// Decode a `did:ndn:` DID into the underlying NDN name. Inverse of
 /// [`encode_did_ndn`]. Returns `None` when the input lacks the
 /// `did:ndn:` scheme prefix.
@@ -77,7 +76,6 @@ pub fn parse_resolve_input(input: &str) -> Option<String> {
     }
 }
 
-
 /// Display-only mirror of the rendered fields of a W3C DID Document.
 /// Constructed from the dashboard's `SecurityKeyInfo` list so the
 /// inspector renders even when no live resolver call has happened.
@@ -113,6 +111,11 @@ pub struct DidVerificationMethodView {
     /// Human label for the validity window (`"valid · 89d left"`,
     /// `"expired"`, `"permanent"`, …).
     pub validity_label: String,
+    /// W3C-compliant `publicKeyMultibase` value (base64url-prefix `u`
+    /// per multibase RFC) derived from the cert's `public_key`
+    /// bytes. Empty when the wire didn't carry public-key bytes
+    /// (cert absent, or pre-extension forwarder).
+    pub public_key_multibase: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,24 +133,45 @@ pub struct DidServiceView {
 /// `did:ndn:/lab`, per §4.7.1's example).
 pub fn did_doc_view_for_identity(identity_name: &str, keys: &[SecurityKeyInfo]) -> DidDocumentView {
     let did = format!("did:ndn:{}", encode_did_ndn(identity_name));
-    let verification_methods = keys
+    let vms: Vec<DidVerificationMethodView> = keys
         .iter()
         .map(|k| DidVerificationMethodView {
             id: format!("{did}#{kid}", kid = k.key_id()),
             key_id: k.key_id().to_owned(),
             has_cert: k.has_cert,
             validity_label: validity_label(k),
+            public_key_multibase: to_multibase_b64(&k.public_key_b64),
         })
         .collect();
+    // The "no publicKey bytes yet" caveat fires when at least one
+    // verification method has a cert but the wire didn't carry
+    // bytes — distinguishes "this forwarder predates the wire
+    // extension" from "this identity legitimately has no certs."
+    let publickey_unavailable = vms
+        .iter()
+        .any(|vm| vm.has_cert && vm.public_key_multibase.is_empty());
     let controllers = parent_controllers(identity_name);
     DidDocumentView {
         id: did,
-        verification_methods,
+        verification_methods: vms,
         controllers,
         services: Vec::new(),
         extensions: BTreeMap::new(),
-        publickey_unavailable: true,
+        publickey_unavailable,
     }
+}
+
+/// Convert a base64url-no-pad string (as emitted by the mgmt wire's
+/// `public_key=` field) into a W3C-compliant `publicKeyMultibase`
+/// value. The multibase prefix `u` denotes base64url-no-pad per
+/// the multibase RFC; the dashboard renders the result inside the
+/// DID Document panel verbatim. Empty input → empty output (the
+/// caller treats absence as "no public-key bytes available").
+fn to_multibase_b64(b64: &str) -> String {
+    if b64.is_empty() {
+        return String::new();
+    }
+    format!("u{b64}")
 }
 
 fn validity_label(k: &SecurityKeyInfo) -> String {
@@ -170,7 +194,6 @@ fn parent_controllers(identity_name: &str) -> Vec<String> {
     let parent = &trimmed[..slash];
     vec![format!("did:ndn:{}", encode_did_ndn(parent))]
 }
-
 
 /// Translate a §4.2 cert-layer `FailureDiagnosis` into DID-layer
 /// prose. The translation is best-effort and degrades to a generic
@@ -221,7 +244,6 @@ pub fn did_layer_failure_text(diagnosis: &FailureDiagnosis) -> (&'static str, St
     };
     (l2_kind, hint)
 }
-
 
 /// Enum-as-segmented-toggle state for `IdentityInspector`'s right pane.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -363,17 +385,27 @@ fn VerificationMethodRow(vm: DidVerificationMethodView) -> Element {
     };
     let badge_label = if vm.has_cert { "cert" } else { "no cert" };
     rsx! {
-        div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;margin-bottom:4px;",
-            div { style: "flex:1;min-width:0;",
-                div { class: "mono", style: "font-size:11px;color:var(--text);word-break:break-all;",
-                    "{vm.id}"
+        div { style: "display:flex;flex-direction:column;gap:6px;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;margin-bottom:4px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
+                div { style: "flex:1;min-width:0;",
+                    div { class: "mono", style: "font-size:11px;color:var(--text);word-break:break-all;",
+                        "{vm.id}"
+                    }
+                    div { style: "font-size:10px;color:var(--text-muted);margin-top:2px;",
+                        "KEY/", span { class: "mono", "{vm.key_id}" },
+                        span { style: "margin-left:8px;", "{vm.validity_label}" }
+                    }
                 }
-                div { style: "font-size:10px;color:var(--text-muted);margin-top:2px;",
-                    "KEY/", span { class: "mono", "{vm.key_id}" },
-                    span { style: "margin-left:8px;", "{vm.validity_label}" }
+                span { class: "{badge_class}", "{badge_label}" }
+            }
+            if !vm.public_key_multibase.is_empty() {
+                div { style: "font-size:10px;color:var(--text-muted);",
+                    span { class: "mono", "publicKeyMultibase: " }
+                    span { class: "mono",
+                           style: "color:var(--text);word-break:break-all;",
+                           "{vm.public_key_multibase}" }
                 }
             }
-            span { class: "{badge_class}", "{badge_label}" }
         }
     }
 }
@@ -466,7 +498,6 @@ pub fn DidResolutionL2Frame(result: TrustValidationResult) -> Element {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +559,7 @@ mod tests {
             name: name.to_owned(),
             has_cert,
             valid_until: valid_until.to_owned(),
+            public_key_b64: String::new(),
         }
     }
 
@@ -549,6 +581,42 @@ mod tests {
             doc.extensions.is_empty(),
             "v1 view-DidDocument carries no extensions until a mgmt verb surfaces them"
         );
+    }
+
+    #[test]
+    fn did_doc_view_emits_multibase_when_wire_carries_public_key() {
+        let mut k1 = keyinfo("/lab/alice/KEY/k1", true, "never");
+        k1.public_key_b64 = "ABCDef-_123".to_owned(); // base64url-no-pad sample
+        let doc = did_doc_view_for_identity("/lab/alice", &[k1]);
+        assert_eq!(
+            doc.verification_methods[0].public_key_multibase,
+            "uABCDef-_123"
+        );
+        assert!(
+            !doc.publickey_unavailable,
+            "caveat must suppress once at least one cert carries bytes"
+        );
+    }
+
+    #[test]
+    fn did_doc_view_caveat_fires_only_when_certed_key_lacks_bytes() {
+        // Mixed: one certed key with bytes, one certed key without — the
+        // panel still warns because at least one identity is unbacked.
+        let mut k1 = keyinfo("/lab/alice/KEY/k1", true, "never");
+        k1.public_key_b64 = "QQ".to_owned();
+        let k2 = keyinfo("/lab/alice/KEY/k2", true, "never");
+        let doc = did_doc_view_for_identity("/lab/alice", &[k1, k2]);
+        assert!(doc.publickey_unavailable);
+        // No certs at all → no caveat (legit "this identity has no keys" state)
+        let kless = keyinfo("/lab/alice/KEY/k3", false, "-");
+        let doc2 = did_doc_view_for_identity("/lab/alice", &[kless]);
+        assert!(!doc2.publickey_unavailable);
+    }
+
+    #[test]
+    fn to_multibase_b64_prefixes_u_or_returns_empty() {
+        assert_eq!(to_multibase_b64(""), "");
+        assert_eq!(to_multibase_b64("xyz"), "uxyz");
     }
 
     #[test]

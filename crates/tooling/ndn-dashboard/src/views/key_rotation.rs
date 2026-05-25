@@ -226,7 +226,6 @@ pub fn KeyRotationModal(state: Signal<KeyRotationState>) -> Element {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +235,7 @@ mod tests {
             name: name.to_owned(),
             has_cert,
             valid_until: "never".to_owned(),
+            public_key_b64: String::new(),
         }
     }
 

@@ -165,7 +165,6 @@ impl ForwarderStatus {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct FaceInfo {
     pub face_id: u64,
@@ -652,6 +651,12 @@ pub struct SecurityKeyInfo {
     pub name: String,
     pub has_cert: bool,
     pub valid_until: String,
+    /// Base64url-no-pad-encoded public-key bytes from the cert's
+    /// `public_key` field. Empty when the key has no cert or the
+    /// mgmt wire predates the `public_key=` extension. The §4.7 DID
+    /// lens emits this as a multibase-prefixed `publicKeyMultibase`
+    /// value when present.
+    pub public_key_b64: String,
 }
 
 impl SecurityKeyInfo {
@@ -732,12 +737,14 @@ impl SecurityKeyInfo {
             let mut name = String::new();
             let mut has_cert = false;
             let mut valid_until = "-".to_string();
+            let mut public_key_b64 = String::new();
             for token in line.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
                     match k {
                         "name" => name = v.to_string(),
                         "has_cert" => has_cert = v == "true",
                         "valid_until" => valid_until = v.to_string(),
+                        "public_key" if v != "-" => public_key_b64 = v.to_string(),
                         _ => {}
                     }
                 }
@@ -747,6 +754,7 @@ impl SecurityKeyInfo {
                     name,
                     has_cert,
                     valid_until,
+                    public_key_b64,
                 });
             }
         }
@@ -1462,6 +1470,7 @@ mod tests {
             name: "/lab/alice/KEY/k1".into(),
             has_cert: true,
             valid_until: "never".into(),
+            public_key_b64: String::new(),
         };
         assert_eq!(k.identity_name(), "/lab/alice");
         assert_eq!(k.key_id(), "k1");
@@ -1473,6 +1482,7 @@ mod tests {
             name: "/lab/alice".into(),
             has_cert: false,
             valid_until: "-".into(),
+            public_key_b64: String::new(),
         };
         assert_eq!(k.identity_name(), "/lab/alice");
         assert_eq!(k.key_id(), "");
