@@ -14,6 +14,15 @@ use crate::app::AppCtx;
 use dioxus::prelude::*;
 
 
+/// Persistence-layer mismatch fix: the original implementation used
+/// `~/.ndn/dashboard-onboarded` via `std::fs`, which silently no-ops
+/// in the wasm sandbox. The browser dashboard therefore re-showed
+/// onboarding on every page load. localStorage on wasm + the
+/// filesystem on native gives both targets working persistence.
+#[cfg(target_arch = "wasm32")]
+const ONBOARDED_LS_KEY: &str = "ndn-dashboard.onboarded";
+
+#[cfg(not(target_arch = "wasm32"))]
 fn onboarded_path() -> std::path::PathBuf {
     std::env::var("HOME")
         .map(|h| {
@@ -24,16 +33,33 @@ fn onboarded_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/.ndn-dashboard-onboarded"))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn is_onboarded() -> bool {
     onboarded_path().exists()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn mark_onboarded() {
     let path = onboarded_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&path, "1");
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn is_onboarded() -> bool {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|ls| ls.get_item(ONBOARDED_LS_KEY).ok().flatten())
+        .is_some()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn mark_onboarded() {
+    if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = ls.set_item(ONBOARDED_LS_KEY, "1");
+    }
 }
 
 

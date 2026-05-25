@@ -108,20 +108,25 @@ pub fn Security() -> Element {
                 }
             }
 
-            ResolveAnyDidBox {}
-
-            crate::views::safebag_import::SafeBagImportPicker {}
-
-            div { style: "display:flex;gap:6px;margin-bottom:16px;flex-wrap:wrap;",
-                for (label, tab_i) in tabs {
-                    {
-                        let tab_i = *tab_i;
-                        let is_active = *active_tab.read() == tab_i;
-                        rsx! {
-                            button {
-                                class: if is_active { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
-                                onclick: move |_| active_tab.set(tab_i),
-                                "{label}"
+            // Sticky sub-nav: the resolve-DID box, SafeBag picker,
+            // and tab bar stay visible while the active-tab body
+            // scrolls below them. `.view-sticky-nav` clamps total
+            // height + scrolls internally if the operator has many
+            // tabs / a long picker label on a short viewport.
+            div { class: "view-sticky-nav",
+                ResolveAnyDidBox {}
+                crate::views::safebag_import::SafeBagImportPicker {}
+                div { class: "tab-bar",
+                    for (label, tab_i) in tabs {
+                        {
+                            let tab_i = *tab_i;
+                            let is_active = *active_tab.read() == tab_i;
+                            rsx! {
+                                button {
+                                    class: if is_active { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
+                                    onclick: move |_| active_tab.set(tab_i),
+                                    "{label}"
+                                }
                             }
                         }
                     }
@@ -228,14 +233,11 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
 
         div {
             style: "display:flex;flex-wrap:wrap;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--border-subtle);",
-            button {
-                class: "btn btn-secondary",
-                onclick: move |_| push_toast(
-                    "Phase C: §5 sub-flow — SafeBagImportModal",
-                    ToastLevel::Info,
-                ),
-                "+ Import SafeBag"
-            }
+            // Mirror the conn-bar's "Import SafeBag…" file picker
+            // here. We render it as a styled <label>+hidden <input>
+            // pair so the browser natively triggers its file chooser
+            // — same affordance as the header picker.
+            crate::views::safebag_import::SafeBagImportPicker {}
             button {
                 class: "btn btn-secondary",
                 onclick: move |_| {

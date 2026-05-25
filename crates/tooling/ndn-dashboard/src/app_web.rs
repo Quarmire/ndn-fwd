@@ -332,13 +332,46 @@ pub fn AppWeb() -> Element {
     // desktop-only until the WsMgmtClient-backed variants land
     // ((internal) §1d).
     let web_hidden_views = [View::Tools, View::Session, View::Coding, View::RateLimit];
+    let app_root_class = if *DARK_MODE.read() {
+        "app-root"
+    } else {
+        "app-root light-mode"
+    };
 
     rsx! {
         document::Style { "{CSS}" }
 
+        // Single ancestor for every overlay — gate, modals, toast,
+        // drawer backdrop — so they all inherit light-mode CSS
+        // variables from the `light-mode` class. Previously only
+        // `.layout` carried the class, leaving every position:fixed
+        // sibling stuck on dark-mode colors. The `.app-root` rule
+        // also sets background:var(--bg) so body's `:root` dark bg
+        // doesn't peek through.
+        div {
+            class: "{app_root_class}",
+            WebToastOverlay {}
+
         // §2 security gate — modal first-run gate (same component on
         // desktop and web; reads AppCtx).
         crate::security_gate::SecurityGate {}
+
+        // Phase C modal mounts — every button that flips one of these
+        // signals depends on the corresponding modal being in the
+        // component tree. Desktop mounts these in app.rs; the web
+        // build was missing them, so every "+ Import SafeBag",
+        // "+ Join via NDNCERT", and "Renew" action was a no-op on
+        // mobile. Mounting them here gives the web build the same
+        // surface as desktop.
+        crate::views::safebag_import::SafeBagImportModal {
+            state: crate::app_shared::SAFEBAG_IMPORT_STATE.signal(),
+        }
+        crate::views::enrollment_wizard::EnrollmentWizardModal {
+            state: crate::app_shared::ENROLLMENT_WIZARD_STATE.signal(),
+        }
+        crate::views::key_rotation::KeyRotationModal {
+            state: crate::app_shared::KEY_ROTATION_STATE.signal(),
+        }
 
         if *show_onboarding.read() {
             Onboarding {
@@ -346,8 +379,24 @@ pub fn AppWeb() -> Element {
             }
         }
 
+        // Mobile sidebar drawer — backdrop closes the drawer on tap.
+        // Only meaningful at viewport <= 768px (handled by CSS); on
+        // desktop the .sidebar-backdrop is `display:none`.
+        if *SIDEBAR_OPEN.read() {
+            div {
+                class: "sidebar-backdrop",
+                onclick: move |_| { *SIDEBAR_OPEN.write() = false; },
+            }
+        }
+
         div {
-            class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
+            class: {
+                // light-mode lives on the `.app-root` ancestor now;
+                // this layout div just tracks the drawer state.
+                let mut c = String::from("layout");
+                if *SIDEBAR_OPEN.read() { c.push_str(" sidebar-open"); }
+                c
+            },
             nav { class: "sidebar",
                 div { class: "sidebar-logo",
                     style: "display:flex;align-items:center;justify-content:space-between;",
@@ -366,7 +415,11 @@ pub fn AppWeb() -> Element {
                         rsx! {
                             div {
                                 class: if is_active { "nav-item active" } else { "nav-item" },
-                                onclick: move |_| { *ACTIVE_VIEW.write() = view; },
+                                onclick: move |_| {
+                                    *ACTIVE_VIEW.write() = view;
+                                    // Auto-close drawer on mobile after pick.
+                                    *SIDEBAR_OPEN.write() = false;
+                                },
                                 "{view.label()}"
                             }
                         }
@@ -406,45 +459,85 @@ pub fn AppWeb() -> Element {
             }
 
             div { class: "main",
-                // Connection bar — WebSocket URL instead of socket path
+                // Connection bar — two-row on mobile. Status row
+                // (always visible) carries hamburger, conn state,
+                // identity chip, engine pill, refresh, theme toggle.
+                // Config row (URL + Connect) is hidden by default on
+                // mobile; tap the conn-state badge to expand. Desktop
+                // shows everything on one row.
                 div { class: "conn-bar",
-                    span {
-                        class: "{conn_state.read().badge_class()}",
-                        "{conn_state.read().label()}"
+                    // Status row.
+                    div { class: "conn-bar-status",
+                        button {
+                            class: "hamburger",
+                            aria_label: "Open menu",
+                            onclick: move |_| {
+                                let cur = *SIDEBAR_OPEN.read();
+                                *SIDEBAR_OPEN.write() = !cur;
+                            },
+                            "☰"
+                        }
+                        button {
+                            class: "conn-state-toggle {conn_state.read().badge_class()}",
+                            title: "Tap to show / hide the WebSocket URL field",
+                            aria_expanded: if *CONN_FIELD_OPEN.read() { "true" } else { "false" },
+                            onclick: move |_| {
+                                let cur = *CONN_FIELD_OPEN.read();
+                                *CONN_FIELD_OPEN.write() = !cur;
+                            },
+                            "{conn_state.read().label()}"
+                            // Rotating chevron — points down when collapsed
+                            // (room to expand), up when expanded (room to
+                            // collapse). Inline SVG-free via Unicode glyph.
+                            span {
+                                class: "conn-state-caret",
+                                style: if *CONN_FIELD_OPEN.read() {
+                                    "transform:rotate(180deg);"
+                                } else {
+                                    ""
+                                },
+                                " ▾"
+                            }
+                        }
+                        crate::security_surfaces::IdentityChip {}
+                        crate::views::engine_pill::EnginePill {}
+                        div { class: "conn-bar-spacer" }
+                        button {
+                            class: "icon-btn",
+                            title: "Refresh",
+                            onclick: move |_| cmd.send(DashCmd::Reconnect),
+                            "⟳"
+                        }
+                        button {
+                            class: "theme-toggle",
+                            title: if *DARK_MODE.read() { "Switch to Light Mode" } else { "Switch to Dark Mode" },
+                            onclick: move |_| {
+                                let next = !*DARK_MODE.read();
+                                *DARK_MODE.write() = next;
+                            },
+                            if *DARK_MODE.read() { "☀" } else { "🌙" }
+                        }
                     }
-                    crate::security_surfaces::IdentityChip {}
-                    // §8 engine pill — Desktop / Browser / Browser-engine-local.
-                    crate::views::engine_pill::EnginePill {}
-                    input {
-                        r#type: "text",
-                        placeholder: "WebSocket URL (ws://host:port)",
-                        value: "{ws_url}",
-                        oninput: move |e| ws_url.set(e.value()),
-                        style: "min-width:200px;",
+
+                    // Config row — URL + Connect inline. Hidden on
+                    // mobile unless CONN_FIELD_OPEN is true; always
+                    // shown on desktop via the `.conn-bar-config` CSS.
+                    div { class: if *CONN_FIELD_OPEN.read() { "conn-bar-config open" } else { "conn-bar-config" },
+                        input {
+                            r#type: "text",
+                            placeholder: "WebSocket URL (ws://host:port)",
+                            value: "{ws_url}",
+                            oninput: move |e| ws_url.set(e.value()),
+                        }
+                        button {
+                            class: "btn btn-secondary",
+                            onclick: move |_| {
+                                cmd.send(DashCmd::Reconnect);
+                                *CONN_FIELD_OPEN.write() = false;
+                            },
+                            "Connect"
+                        }
                     }
-                    button {
-                        class: "btn btn-secondary",
-                        onclick: move |_| cmd.send(DashCmd::Reconnect),
-                        "Connect"
-                    }
-                    button {
-                        class: "icon-btn",
-                        title: "Refresh",
-                        onclick: move |_| cmd.send(DashCmd::Reconnect),
-                        "⟳"
-                    }
-                    div { style: "flex:1;" }
-                    // Theme toggle
-                    button {
-                        class: "theme-toggle",
-                        title: if *DARK_MODE.read() { "Switch to Light Mode" } else { "Switch to Dark Mode" },
-                        onclick: move |_| {
-                            let next = !*DARK_MODE.read();
-                            *DARK_MODE.write() = next;
-                        },
-                        if *DARK_MODE.read() { "☀" } else { "🌙" }
-                    }
-                    // No router start/stop on web — just connection status
                 }
 
                 // View content
@@ -456,6 +549,44 @@ pub fn AppWeb() -> Element {
                         }
                     }
                     { render_view_web(*ACTIVE_VIEW.read()) }
+                }
+            } // close .main
+        } // close .layout
+        } // close .app-root wrapper
+    }
+}
+
+/// Toast overlay for the web build. Reads `app_shared::TOASTS` (the
+/// shared queue that `app_shared::push_toast` writes to). Mirrors the
+/// desktop `ToastOverlay` in `app.rs` but separated so the desktop
+/// path stays untouched.
+#[component]
+fn WebToastOverlay() -> Element {
+    let toasts = TOASTS.read();
+    if toasts.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "toast-container",
+            for toast in toasts.iter() {
+                {
+                    let id = toast.id;
+                    let icon = toast.level.icon();
+                    let msg = toast.message.clone();
+                    let cls = toast.level.css_class();
+                    rsx! {
+                        div { class: "toast {cls}",
+                            div { class: "toast-body",
+                                span { class: "toast-icon", "{icon}" }
+                                span { class: "toast-msg", "{msg}" }
+                            }
+                            button {
+                                class: "toast-close",
+                                onclick: move |_| { TOASTS.write().retain(|t| t.id != id); },
+                                "✕"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -693,6 +824,55 @@ async fn poll_all_web(
 /// Web-side mirror of `ndn_ipc::mgmt_client::decode_pending_approvals`.
 /// Inlined here so the web build doesn't pull the Unix-socket-only
 /// `ndn-ipc` crate. TLV codes match `ndn-mgmt/src/modules/ca.rs`.
+/// Pull `ca/list-approvals` and reconcile `CA_APPROVALS_STATE`. Used
+/// both by the operator-driven refresh button and by the
+/// post-approve/post-deny refresh paths so the operator's view stays
+/// in sync after each mutation. Always returns the underlying
+/// `MgmtResponse` so the caller's standard error-surfacing path runs.
+async fn refresh_ca_approvals_web(
+    client: &mut WsMgmtClient,
+) -> anyhow::Result<crate::ws_mgmt::MgmtResponse> {
+    use crate::views::ca_approvals::{CaApprovalsState, PendingApprovalRow};
+    let resp = client.ca_list_approvals().await;
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .ok();
+    match &resp {
+        Ok(r) if r.is_ok() => {
+            let rows = decode_pending_approvals_web(&r.body);
+            let mapped: Vec<PendingApprovalRow> = rows
+                .into_iter()
+                .map(|(id, cert_name, description)| PendingApprovalRow {
+                    id,
+                    cert_name,
+                    description,
+                })
+                .collect();
+            *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                rows: mapped,
+                last_refresh_unix_s: now,
+                last_error: None,
+            };
+        }
+        Ok(r) => {
+            *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                rows: Vec::new(),
+                last_refresh_unix_s: now,
+                last_error: Some(format!("{} {}", r.status_code, r.status_text)),
+            };
+        }
+        Err(e) => {
+            *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                rows: Vec::new(),
+                last_refresh_unix_s: now,
+                last_error: Some(e.to_string()),
+            };
+        }
+    }
+    resp
+}
+
 fn decode_pending_approvals_web(bytes: &[u8]) -> Vec<(String, String, String)> {
     const TYPE_PENDING_APPROVAL: u64 = 0xCA;
     const TYPE_REQUEST_ID: u64 = 0xCC;
@@ -1184,46 +1364,15 @@ async fn run_cmd_web(
                 .security_safebag_import(&name, &safebag_wire, passphrase.as_bytes())
                 .await
         }
-        DashCmd::CaListApprovals => {
-            use crate::views::ca_approvals::{CaApprovalsState, PendingApprovalRow};
-            let resp = client.ca_list_approvals().await;
-            // web_time::SystemTime for wasm — same shape as std::time on native.
-            let now = web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .ok();
-            match &resp {
-                Ok(r) if r.is_ok() => {
-                    let rows = decode_pending_approvals_web(&r.body);
-                    let mapped: Vec<PendingApprovalRow> = rows
-                        .into_iter()
-                        .map(|(id, cert_name, description)| PendingApprovalRow {
-                            id,
-                            cert_name,
-                            description,
-                        })
-                        .collect();
-                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
-                        rows: mapped,
-                        last_refresh_unix_s: now,
-                        last_error: None,
-                    };
-                }
-                Ok(r) => {
-                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
-                        rows: Vec::new(),
-                        last_refresh_unix_s: now,
-                        last_error: Some(format!("{} {}", r.status_code, r.status_text)),
-                    };
-                }
-                Err(e) => {
-                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
-                        rows: Vec::new(),
-                        last_refresh_unix_s: now,
-                        last_error: Some(e.to_string()),
-                    };
-                }
-            }
+        DashCmd::CaListApprovals => refresh_ca_approvals_web(client).await,
+        DashCmd::CaApprove { request_id } => {
+            let resp = client.ca_approve(&request_id).await;
+            let _ = refresh_ca_approvals_web(client).await;
+            resp
+        }
+        DashCmd::CaDeny { request_id, reason } => {
+            let resp = client.ca_deny(&request_id, &reason).await;
+            let _ = refresh_ca_approvals_web(client).await;
             resp
         }
 

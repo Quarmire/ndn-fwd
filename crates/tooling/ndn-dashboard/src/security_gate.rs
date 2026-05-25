@@ -53,11 +53,21 @@ pub fn SecurityGate() -> Element {
         div {
             style: "position:fixed;inset:0;background:rgba(0,0,0,0.55);\
                     z-index:9999;display:flex;align-items:center;\
-                    justify-content:center;",
+                    justify-content:center;\
+                    padding:env(safe-area-inset-top,12px) env(safe-area-inset-right,12px) \
+                            env(safe-area-inset-bottom,12px) env(safe-area-inset-left,12px);",
+            // Phone fix: the inner modal needs its own scroll viewport.
+            // Without max-height + overflow-y the modal overflows on tall
+            // content / short viewports and the user can't reach the
+            // checkbox or bottom buttons. Padding clamps narrower on
+            // phones via the .gate-modal class in styles.rs.
             div {
-                style: "background:#1a1a1a;color:#eee;border:1px solid #444;\
+                class: "gate-modal",
+                style: "background:var(--surface);color:var(--text);border:1px solid var(--border);\
                         border-radius:8px;max-width:720px;width:92%;\
-                        padding:28px 32px;box-shadow:0 6px 24px rgba(0,0,0,0.5);\
+                        max-height:calc(100dvh - 24px);overflow-y:auto;\
+                        -webkit-overflow-scrolling:touch;\
+                        padding:28px 32px;box-shadow:0 6px 24px var(--shadow);\
                         font-family:system-ui,sans-serif;",
                 match posture.kind() {
                     PostureKind::NoIdentity => rsx! { NoIdentityPanel {} },
@@ -81,16 +91,22 @@ fn NoIdentityPanel() -> Element {
         h2 { style: "margin:0 0 12px 0;font-size:18px;",
             "⚠  This forwarder has no persistent identity."
         }
-        p { style: "margin:0 0 18px 0;line-height:1.5;color:#bbb;",
+        p { style: "margin:0 0 18px 0;line-height:1.5;color:var(--text-muted);",
             "Right now, ndn-fwd signs management responses with an ephemeral key. \
              That key disappears on restart. Other devices have no way to verify \
              that this forwarder is the one they trusted yesterday."
         }
-        p { style: "margin:0 0 24px 0;line-height:1.5;color:#bbb;",
+        p { style: "margin:0 0 24px 0;line-height:1.5;color:var(--text-muted);",
             "For research and local testing, that's fine. For anything else, \
              set up a trust identity now."
         }
 
+        // The three Go-To buttons jump the view *and* dismiss the
+        // gate — choosing a path is itself an acknowledgement of the
+        // current ephemeral posture. The §2 design's "you must
+        // acknowledge before you can do anything" rule is satisfied
+        // by the act of selecting a remediation path. The gate
+        // re-fires per-forwarder, so reconnecting brings it back.
         GateChoice {
             icon: "🔑",
             title: "I have an existing identity",
@@ -98,7 +114,10 @@ fn NoIdentityPanel() -> Element {
                           ndn-fwd-tokens. The dashboard will load the identity, its key, \
                           and its cert into the local PIB.",
             action_label: "Go to Identities → Import",
-            on_action: move |_| jump_to_security_view(SecurityTab::Identities),
+            on_action: move |_| {
+                jump_to_security_view(SecurityTab::Identities);
+                accept(current_forwarder_id(), PostureKind::NoIdentity);
+            },
         }
         GateChoice {
             icon: "📡",
@@ -106,7 +125,10 @@ fn NoIdentityPanel() -> Element {
             description: "Enroll with an NDNCERT certificate authority. Used when there's \
                           already a trust anchor for /your/zone you want to belong to.",
             action_label: "Go to CA / NDNCERT",
-            on_action: move |_| jump_to_security_view(SecurityTab::Ca),
+            on_action: move |_| {
+                jump_to_security_view(SecurityTab::Ca);
+                accept(current_forwarder_id(), PostureKind::NoIdentity);
+            },
         }
         GateChoice {
             icon: "🛠",
@@ -114,7 +136,10 @@ fn NoIdentityPanel() -> Element {
             description: "Generate a self-signed identity. Useful for the first forwarder \
                           in a new zone — this identity becomes the zone's root anchor.",
             action_label: "Go to Identities → Generate",
-            on_action: move |_| jump_to_security_view(SecurityTab::Identities),
+            on_action: move |_| {
+                jump_to_security_view(SecurityTab::Identities);
+                accept(current_forwarder_id(), PostureKind::NoIdentity);
+            },
         }
 
         SkipRow {
@@ -150,11 +175,11 @@ fn IdentityExpiredPanel(posture: SecurityPosture) -> Element {
         h2 { style: "margin:0 0 12px 0;font-size:18px;",
             "⏰  Your identity certificate expired {days_ago} days ago."
         }
-        p { style: "margin:0 0 18px 0;line-height:1.5;color:#bbb;",
+        p { style: "margin:0 0 18px 0;line-height:1.5;color:var(--text-muted);",
             "Identity: "
             code { style: "color:#ddd;", "{identity_name}" }
         }
-        p { style: "margin:0 0 24px 0;line-height:1.5;color:#bbb;",
+        p { style: "margin:0 0 24px 0;line-height:1.5;color:var(--text-muted);",
             "Data signed by this identity from now on will not validate at other \
              forwarders that have not also expired their schemas."
         }
@@ -208,7 +233,7 @@ fn TrustSchemaWeakenedPanel(posture: SecurityPosture) -> Element {
             "⚠  Trust schema changed since last session."
         }
         if !anchors_removed.is_empty() {
-            p { style: "margin:0 0 8px 0;color:#bbb;", "Anchors removed:" }
+            p { style: "margin:0 0 8px 0;color:var(--text-muted);", "Anchors removed:" }
             ul { style: "margin:0 0 18px 18px;color:#ddd;",
                 for a in anchors_removed.iter() {
                     li { key: "{a}", code { "{a}" } }
@@ -216,14 +241,14 @@ fn TrustSchemaWeakenedPanel(posture: SecurityPosture) -> Element {
             }
         }
         if !rules_removed.is_empty() {
-            p { style: "margin:0 0 8px 0;color:#bbb;", "Schema rules removed:" }
+            p { style: "margin:0 0 8px 0;color:var(--text-muted);", "Schema rules removed:" }
             ul { style: "margin:0 0 18px 18px;color:#ddd;",
                 for r in rules_removed.iter() {
                     li { key: "{r}", code { "{r}" } }
                 }
             }
         }
-        p { style: "margin:0 0 24px 0;line-height:1.5;color:#bbb;",
+        p { style: "margin:0 0 24px 0;line-height:1.5;color:var(--text-muted);",
             "This may be a legitimate operator change, or unauthorized tampering."
         }
 
@@ -261,18 +286,20 @@ fn GateChoice(
 ) -> Element {
     rsx! {
         div {
-            style: "border:1px solid #333;border-radius:6px;padding:14px 16px;\
+            style: "border:1px solid var(--border);border-radius:6px;padding:14px 16px;\
                     margin:0 0 12px 0;",
             div { style: "display:flex;align-items:center;gap:10px;margin-bottom:6px;",
                 span { style: "font-size:20px;", "{icon}" }
-                span { style: "font-weight:600;color:#fff;", "{title}" }
+                span { style: "font-weight:600;color:var(--text);", "{title}" }
             }
-            p { style: "margin:0 0 12px 0;color:#aaa;font-size:13px;line-height:1.45;",
+            p { style: "margin:0 0 12px 0;color:var(--text-muted);font-size:13px;line-height:1.45;",
                 "{description}"
             }
             button {
-                style: "background:#2a2a2a;color:#eee;border:1px solid #555;\
-                        padding:6px 12px;border-radius:4px;cursor:pointer;",
+                style: "background:var(--surface2);color:var(--text);border:1px solid var(--border);\
+                        padding:10px 16px;border-radius:6px;cursor:pointer;\
+                        font-size:14px;min-height:44px;\
+                        white-space:nowrap;line-height:1.2;",
                 onclick: move |_| on_action.call(()),
                 "{action_label}"
             }
@@ -286,29 +313,46 @@ fn SkipRow(label: String, checked: Signal<bool>, on_skip: EventHandler<()>) -> E
     let mut checked_w = checked;
     let label_for_render = label.clone();
     rsx! {
-        hr { style: "border:none;border-top:1px solid #333;margin:18px 0 14px 0;" }
-        div { style: "display:flex;align-items:flex-start;gap:10px;",
+        hr { style: "border:none;border-top:1px solid var(--border);margin:18px 0 14px 0;" }
+        // The whole label-row is a tap target. The checkbox + label
+        // are linked via `for=skip-ack-cb` so tapping the text body
+        // toggles the box — the bare checkbox is too small for one-
+        // handed phone use. Padding bumps the row to a comfortable
+        // 44+px touch target without changing desktop appearance much.
+        label {
+            r#for: "skip-ack-cb",
+            style: "display:flex;align-items:flex-start;gap:12px;\
+                    padding:10px 4px;color:var(--text-muted);font-size:13px;\
+                    line-height:1.5;cursor:pointer;",
             input {
+                id: "skip-ack-cb",
                 r#type: "checkbox",
-                style: "margin-top:3px;",
+                // Scale up the native checkbox so it's actually
+                // reachable on phones.
+                style: "margin-top:2px;width:20px;height:20px;flex-shrink:0;cursor:pointer;",
                 checked: *checked.read(),
                 oninput: move |evt| {
                     checked_w.set(evt.value() == "true");
                 },
             }
-            label { style: "color:#bbb;font-size:13px;line-height:1.5;flex:1;",
-                "{label_for_render}"
-            }
+            span { style: "flex:1;", "{label_for_render}" }
         }
         div { style: "display:flex;justify-content:flex-end;margin-top:14px;",
             button {
-                style: if *checked.read() {
-                    "background:#5a3a3a;color:#fff;border:1px solid #a55;\
-                     padding:6px 14px;border-radius:4px;cursor:pointer;"
+                // Skip is a destructive ack — use .btn-danger so
+                // both dark + light modes pick up the themed colors
+                // from the CSS variable system. The themed --btn-d
+                // already has a sensible :hover variant.
+                class: if *checked.read() {
+                    "btn btn-danger"
                 } else {
-                    "background:#222;color:#666;border:1px solid #333;\
-                     padding:6px 14px;border-radius:4px;cursor:not-allowed;"
+                    "btn btn-secondary"
                 },
+                style: "min-height:44px;min-width:160px;padding:12px 20px;\
+                        font-size:14px;white-space:nowrap;line-height:1.2;\
+                        cursor:".to_owned()
+                    + if *checked.read() { "pointer;" } else { "not-allowed;" }
+                    + if *checked.read() { "" } else { "opacity:.55;" },
                 disabled: !*checked.read(),
                 onclick: move |_| {
                     if *checked.read() {

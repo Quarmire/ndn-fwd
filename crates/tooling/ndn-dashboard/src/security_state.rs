@@ -57,6 +57,31 @@ pub enum PostureKind {
     TrustSchemaWeakened,
 }
 
+impl PostureKind {
+    /// Short string code used by the gate-acceptance localStorage
+    /// serialization. Stable; do not renumber.
+    pub fn as_code(self) -> &'static str {
+        match self {
+            Self::Hardened => "H",
+            Self::Unsupported => "U",
+            Self::NoIdentity => "N",
+            Self::IdentityExpired => "E",
+            Self::TrustSchemaWeakened => "W",
+        }
+    }
+
+    pub fn from_code(s: &str) -> Option<Self> {
+        Some(match s {
+            "H" => Self::Hardened,
+            "U" => Self::Unsupported,
+            "N" => Self::NoIdentity,
+            "E" => Self::IdentityExpired,
+            "W" => Self::TrustSchemaWeakened,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActiveIdentity {
     None,
@@ -261,10 +286,54 @@ pub fn derive_sec_dot(state: &ChipState) -> SecDotView {
     }
 }
 
-/// Last posture the user accepted in the current session, keyed by
-/// `(forwarder_id, kind)`. Accepting on forwarder A does not suppress the gate
-/// on forwarder B.
-pub static GATE_ACCEPTED: GlobalSignal<Option<(String, PostureKind)>> = Signal::global(|| None);
+/// Last posture the user accepted, keyed by `(forwarder_id, kind)`.
+/// Accepting on forwarder A does not suppress the gate on forwarder B.
+///
+/// Persistence: written through to localStorage on wasm
+/// (key `"ndn-dashboard.gate-accepted"`) so the gate doesn't re-show
+/// on every page reload. On desktop, session-scoped is fine — the
+/// process lifetime is the natural acceptance window. `reset_acceptance()`
+/// (called on Connect / Reconnect) clears both layers.
+pub static GATE_ACCEPTED: GlobalSignal<Option<(String, PostureKind)>> =
+    Signal::global(load_gate_accepted_from_storage);
+
+#[cfg(target_arch = "wasm32")]
+const GATE_ACCEPTED_LS_KEY: &str = "ndn-dashboard.gate-accepted";
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_gate_accepted_from_storage() -> Option<(String, PostureKind)> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_gate_accepted_from_storage() -> Option<(String, PostureKind)> {
+    let raw = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|ls| ls.get_item(GATE_ACCEPTED_LS_KEY).ok().flatten())?;
+    // Format: `<forwarder_id>\n<posture_kind_code>` — newline is
+    // forbidden in forwarder ids so this is unambiguous.
+    let (fid, code) = raw.split_once('\n')?;
+    let kind = PostureKind::from_code(code)?;
+    Some((fid.to_owned(), kind))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_gate_accepted_to_storage(value: &Option<(String, PostureKind)>) {
+    let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return;
+    };
+    match value {
+        Some((fid, kind)) => {
+            let _ = ls.set_item(GATE_ACCEPTED_LS_KEY, &format!("{fid}\n{}", kind.as_code()));
+        }
+        None => {
+            let _ = ls.remove_item(GATE_ACCEPTED_LS_KEY);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_gate_accepted_to_storage(_value: &Option<(String, PostureKind)>) {}
 
 pub fn gate_should_fire(
     current: &SecurityPosture,
@@ -281,11 +350,14 @@ pub fn gate_should_fire(
 }
 
 pub fn accept(forwarder_id: impl Into<String>, kind: PostureKind) {
-    *GATE_ACCEPTED.write() = Some((forwarder_id.into(), kind));
+    let value = Some((forwarder_id.into(), kind));
+    save_gate_accepted_to_storage(&value);
+    *GATE_ACCEPTED.write() = value;
 }
 
 /// Call on Connect / Reconnect so a fresh connection re-fires the gate.
 pub fn reset_acceptance() {
+    save_gate_accepted_to_storage(&None);
     *GATE_ACCEPTED.write() = None;
 }
 

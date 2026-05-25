@@ -170,6 +170,12 @@ pub enum DashCmd {
     /// decoded rows into `CA_APPROVALS_STATE`. Operator-driven (no
     /// auto-poll); see `views/ca_approvals.rs` for the rationale.
     CaListApprovals,
+    /// §5.5 — fire `/localhost/nfd/ca/approve` for a single pending
+    /// request. The handler refreshes the approvals list on success.
+    CaApprove { request_id: String },
+    /// §5.5 — fire `/localhost/nfd/ca/deny` for a pending request.
+    /// `reason` defaults to "denied" when empty.
+    CaDeny { request_id: String, reason: String },
 }
 
 /// Commands sent to the router-management coroutine.
@@ -1853,6 +1859,8 @@ async fn run_cmd(
         DashCmd::SecurityAnchorAdd { .. } => Some("Anchor promoted (TOFU)"),
         DashCmd::SecuritySafebagImport { .. } => Some("SafeBag imported"),
         DashCmd::CaListApprovals => None, // refresh is silent; state-signal drives UI
+        DashCmd::CaApprove { .. } => Some("Approval published"),
+        DashCmd::CaDeny { .. } => Some("Denial published"),
         _ => None,
     };
 
@@ -2226,39 +2234,27 @@ async fn run_cmd(
                 Err(e) => Err(e.to_string()),
             }
         }
-        DashCmd::CaListApprovals => {
-            use crate::views::ca_approvals::{CaApprovalsState, PendingApprovalRow};
-            let result = client.ca_list_approvals().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .ok();
-            match result {
-                Ok(rows) => {
-                    let mapped: Vec<PendingApprovalRow> = rows
-                        .into_iter()
-                        .map(|(id, cert_name, description)| PendingApprovalRow {
-                            id,
-                            cert_name,
-                            description,
-                        })
-                        .collect();
-                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
-                        rows: mapped,
-                        last_refresh_unix_s: now,
-                        last_error: None,
-                    };
-                    Ok(())
-                }
-                Err(e) => {
-                    *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
-                        rows: Vec::new(),
-                        last_refresh_unix_s: now,
-                        last_error: Some(e.to_string()),
-                    };
-                    Err(e.to_string())
-                }
-            }
+        DashCmd::CaListApprovals => refresh_ca_approvals(client).await,
+        DashCmd::CaApprove { request_id } => {
+            let result = client
+                .ca_approve(&request_id)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            // Refresh the pending list so the just-approved row
+            // disappears from the operator's view. Refresh failures
+            // are non-fatal — surface only the original verb's error.
+            let _ = refresh_ca_approvals(client).await;
+            result
+        }
+        DashCmd::CaDeny { request_id, reason } => {
+            let result = client
+                .ca_deny(&request_id, &reason)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = refresh_ca_approvals(client).await;
+            result
         }
         DashCmd::SecurityPolicySet(policy) => {
             let body = policy.to_json();
@@ -2360,6 +2356,45 @@ fn unix_ns_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+/// Fetch the latest `ca/list-approvals` and update CA_APPROVALS_STATE.
+/// Shared by the explicit refresh command (operator tap) and the
+/// post-approve/post-deny refresh path so the operator's view stays
+/// in sync. Returns `Err(...)` on transport failure (status row
+/// renders the error).
+async fn refresh_ca_approvals(client: &MgmtClient) -> Result<(), String> {
+    use crate::views::ca_approvals::{CaApprovalsState, PendingApprovalRow};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .ok();
+    match client.ca_list_approvals().await {
+        Ok(rows) => {
+            let mapped: Vec<PendingApprovalRow> = rows
+                .into_iter()
+                .map(|(id, cert_name, description)| PendingApprovalRow {
+                    id,
+                    cert_name,
+                    description,
+                })
+                .collect();
+            *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                rows: mapped,
+                last_refresh_unix_s: now,
+                last_error: None,
+            };
+            Ok(())
+        }
+        Err(e) => {
+            *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
+                rows: Vec::new(),
+                last_refresh_unix_s: now,
+                last_error: Some(e.to_string()),
+            };
+            Err(e.to_string())
+        }
+    }
 }
 
 /// Pulls the initiator name from the same helper the audit bridge uses so the

@@ -266,6 +266,32 @@ impl WsMgmtClient {
     pub async fn ca_list_approvals(&mut self) -> Result<MgmtResponse> {
         self.send_cmd("ca", "list-approvals", None).await
     }
+
+    /// `ca/approve` — approve a pending request by id. Signed-command
+    /// gated; the recorded approver label is the conventional
+    /// `"approved-via-mgmt"` until the canonical signed-Data path lands.
+    pub async fn ca_approve(&mut self, request_id: &str) -> Result<MgmtResponse> {
+        let cp = ControlParameters {
+            uri: Some(request_id.to_owned()),
+            ..Default::default()
+        };
+        self.send_cmd("ca", "approve", Some(&cp)).await
+    }
+
+    /// `ca/deny` — deny a pending request with an optional reason
+    /// (encoded as `<id>:<reason>` in `uri`).
+    pub async fn ca_deny(&mut self, request_id: &str, reason: &str) -> Result<MgmtResponse> {
+        let uri = if reason.is_empty() {
+            request_id.to_owned()
+        } else {
+            format!("{request_id}:{reason}")
+        };
+        let cp = ControlParameters {
+            uri: Some(uri),
+            ..Default::default()
+        };
+        self.send_cmd("ca", "deny", Some(&cp)).await
+    }
 }
 
 /// Returns the input unchanged if it isn't LP-wrapped. Inlined from

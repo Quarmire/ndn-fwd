@@ -73,17 +73,49 @@ html{height:100%}
 body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);display:flex;height:100%;overflow:hidden}
 /* Dioxus desktop mounts into a bare <div> inside body with no size — override it. */
 body>div{height:100%;width:100%;overflow:hidden}
+/* `.app-root` is the single ancestor of every overlay (modals,
+   toasts, gate, drawer backdrop) in the web build. Carries the
+   `light-mode` class so CSS variables override across the whole
+   subtree, including position:fixed siblings. */
+.app-root{display:flex;width:100%;height:100%;background:var(--bg);color:var(--text)}
 .layout{display:flex;width:100%;height:100%}
 .sidebar{width:200px;min-width:200px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column}
 .sidebar-logo{padding:16px;font-size:15px;font-weight:600;color:var(--accent);border-bottom:1px solid var(--border);letter-spacing:.5px}
 .nav-item{padding:10px 16px;cursor:pointer;color:var(--text-muted);font-size:13px;border-left:3px solid transparent;transition:all .15s}
 .nav-item:hover{background:var(--border-subtle);color:var(--text)}
 .nav-item.active{background:var(--accent-dim);color:var(--accent);border-left-color:var(--accent)}
+/* Hamburger button — hidden by default (desktop); revealed on
+   phones via the mobile media query. */
+.hamburger{display:none;background:none;border:none;color:var(--text);font-size:22px;line-height:1;padding:4px 10px;cursor:pointer;font-family:inherit}
+.hamburger:hover{color:var(--accent)}
+/* Backdrop for the mobile drawer; hidden when SIDEBAR_OPEN is false
+   (Dioxus simply doesn't render it). When mounted, it covers the
+   whole viewport and dismisses the drawer on tap. */
+.sidebar-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:80;display:none}
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
-.conn-bar{display:flex;align-items:center;gap:10px;background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;font-size:13px;flex-shrink:0}
+/* The conn-bar is a flex column containing one status row + one
+   optional config row. Desktop renders both inline on the status
+   row via wider .conn-bar-status flex-flow; mobile stacks them. */
+.conn-bar{display:flex;flex-direction:column;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px;flex-shrink:0}
+.conn-bar-status{display:flex;align-items:center;gap:10px;padding:10px 20px}
+.conn-bar-config{display:flex;align-items:center;gap:10px;padding:0 20px 10px 20px}
+.conn-bar-config input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:4px;font-size:13px;font-family:monospace;min-width:0}
+.conn-bar-config input:focus{outline:none;border-color:var(--accent)}
+.conn-bar-spacer{flex:1}
+/* Conn-state badge becomes a clickable button on mobile (the
+   toggle for the config row). Keep the inherited badge styling
+   and just normalise the button defaults. */
+.conn-state-toggle{background:transparent;border:none;font:inherit;padding:0;cursor:pointer;color:inherit;display:inline-flex;align-items:center;gap:4px}
+.conn-state-caret{display:inline-block;transition:transform .15s;font-size:10px;opacity:.7}
 .conn-bar input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:4px;font-size:13px;font-family:monospace;flex:1;max-width:280px;min-width:120px}
 .conn-bar input:focus{outline:none;border-color:var(--accent)}
-.content{flex:1;overflow-y:auto;padding:24px;min-height:0}
+.content,.content-area{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:24px;min-height:0}
+/* Sticky sub-nav inside a view's content area — keeps the tab
+   bar + adjacent persistent controls pinned to the top of the
+   scroll viewport. The container caps its height to a fraction
+   of the visible content area so the body still has room. */
+.view-sticky-nav{position:sticky;top:0;z-index:30;background:var(--bg);margin:-12px -12px 12px -12px;padding:8px 12px 0 12px;border-bottom:1px solid var(--border-subtle);max-height:42vh;overflow-y:auto}
+.view-sticky-nav .tab-bar{display:flex;gap:6px;flex-wrap:wrap;padding-bottom:8px}
 .badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:600}
 .badge-green{background:var(--green-bg);color:var(--green)}
 .badge-red{background:var(--red-bg);color:var(--red)}
@@ -108,7 +140,7 @@ tr:hover td{background:var(--surface2)}
 label{font-size:11px;color:var(--text-muted)}
 input,select,textarea{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:4px;font-size:13px;font-family:inherit}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
-.btn{padding:7px 14px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500;font-family:inherit;transition:background .15s}
+.btn{padding:7px 14px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500;font-family:inherit;transition:background .15s;white-space:nowrap;line-height:1.2}
 .btn-primary{background:var(--btn-p);color:#fff}
 .btn-primary:hover{background:var(--btn-p-h)}
 .btn-danger{background:var(--btn-d);color:#fff}
@@ -325,38 +357,76 @@ input[type=range]:focus{outline:none;border-color:transparent}
    No JS — pure CSS media queries; Dioxus renders DOM, the
    browser handles layout. */
 @media (max-width: 768px) {
-  .layout{flex-direction:column}
+  /* Sidebar becomes a slide-out drawer. Default state: off-screen
+     to the left, full layout collapses to single-column. The
+     hamburger button (always visible on this width) toggles
+     SIDEBAR_OPEN, which adds `sidebar-open` to .layout. */
+  .hamburger{display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:44px}
+  .layout{flex-direction:column;position:relative}
   .sidebar{
-    width:100%;min-width:0;max-width:none;
-    flex-direction:row;border-right:none;
-    border-bottom:1px solid var(--border);
-    overflow-x:auto;overflow-y:hidden;
+    position:fixed;top:0;left:0;bottom:0;
+    width:min(280px,80vw);min-width:0;max-width:none;
+    flex-direction:column;border-right:1px solid var(--border);
+    border-bottom:none;overflow-x:hidden;overflow-y:auto;
     -webkit-overflow-scrolling:touch;
+    transform:translateX(-100%);
+    transition:transform .22s ease;
+    z-index:100;
+    box-shadow:6px 0 24px rgba(0,0,0,.35);
   }
-  .sidebar-logo{
-    padding:8px 12px;font-size:13px;
-    border-bottom:none;border-right:1px solid var(--border);
-    white-space:nowrap;flex-shrink:0;
-  }
-  .nav-item{
-    padding:8px 12px;border-left:none;
-    border-bottom:3px solid transparent;
-    white-space:nowrap;flex-shrink:0;
-  }
-  .nav-item.active{border-left-color:transparent;border-bottom-color:var(--accent)}
-  .sidebar-spacer{display:none}
-  .sidebar-bottom{
-    padding:6px 10px;border-top:none;
-    border-left:1px solid var(--border);
-    flex-shrink:0;
-  }
+  .layout.sidebar-open .sidebar{transform:translateX(0)}
+  .layout.sidebar-open .sidebar-backdrop{display:block}
+  .sidebar-logo{padding:14px 16px;font-size:14px;white-space:nowrap}
+  .nav-item{padding:12px 16px;min-height:44px;display:flex;align-items:center;white-space:nowrap}
+  .nav-item.active{border-left-color:var(--accent)}
+  .sidebar-spacer{flex:1}
+  .sidebar-bottom{padding:12px 14px;border-top:1px solid var(--border)}
   .gear-menu{
-    bottom:auto;top:calc(100% + 4px);
-    left:auto;right:0;
+    bottom:calc(100% + 4px);top:auto;left:12px;right:auto;
   }
-  .conn-bar{flex-wrap:wrap;padding:8px 12px;gap:6px}
-  .conn-bar input{width:100%;max-width:none;flex:1 1 100%}
-  .id-chip-label{max-width:120px}
+  /* Tight conn-bar: single-row status that won't wrap. The
+     status row gets the icon-buttons squeezed to 32×32 and the
+     identity chip + engine pill capped via overflow-hidden so
+     the refresh + theme-toggle stay on the same row. The config
+     row is hidden until the conn-state caret is tapped. */
+  .conn-bar-status{padding:6px 8px;gap:4px;flex-wrap:nowrap;overflow:hidden}
+  .conn-bar-status .icon-btn,.conn-bar-status .theme-toggle{
+    min-width:36px;min-height:36px;padding:4px 6px;flex-shrink:0
+  }
+  .conn-bar-status .hamburger{min-width:40px;min-height:40px;padding:4px 8px;flex-shrink:0}
+  .conn-bar-status .id-chip,.conn-bar-status .engine-pill{
+    flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%
+  }
+  .id-chip-label{max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .engine-pill span:last-child{max-width:0;overflow:hidden;display:inline-block}
+  .conn-bar-config{display:none;padding:0 8px 8px 8px}
+  .conn-bar-config.open{display:flex;gap:6px}
+  .conn-bar-config input{min-width:0;width:100%}
+  .conn-state-toggle{padding:4px 6px;border-radius:8px;background:var(--surface2);flex-shrink:0;min-height:32px;max-width:160px;overflow:hidden;text-overflow:ellipsis}
+  /* Sticky-nav on phones — flush with the conn-bar's bottom
+     edge thanks to .content-area's padding-top:0 above. The
+     sticky element owns its own 8px top padding. Horizontal
+     margins extend the background into the .content-area's
+     side padding so scroll bleed-through doesn't show at the
+     edges either. */
+  .view-sticky-nav{
+    margin:0 -12px 8px -12px;
+    padding:8px 12px 0 12px;
+    max-height:38vh;
+    background:var(--bg);
+    border-bottom:1px solid var(--border);
+    box-shadow:0 4px 8px -4px var(--shadow);
+  }
+  /* Tab bar inside the sticky nav: single horizontal scroller
+     instead of wrapping. Buttons stay compact, fingers can pan. */
+  .view-sticky-nav .tab-bar{
+    flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;
+    scrollbar-width:none;
+    padding-bottom:6px;margin:0 -8px;padding-left:8px;padding-right:8px;
+  }
+  .view-sticky-nav .tab-bar::-webkit-scrollbar{display:none}
+  .view-sticky-nav .tab-bar .btn{flex-shrink:0}
   .floating-pane{
     min-width:0;min-height:0;
     left:0!important;right:0!important;
@@ -369,8 +439,16 @@ input[type=range]:focus{outline:none;border-color:transparent}
   }
   .toast{min-width:0}
   /* Modals already use max-width:92vw — but their fixed inner
-     padding gets cramped on phones; trim it. */
-  .modal-card,.onboarding-card{padding:18px 16px}
+     padding gets cramped on phones; trim it. The security gate's
+     inline-styled .gate-modal needs the same treatment so the
+     checkbox + bottom buttons reach into the safe inset area. */
+  .modal-card,.onboarding-card,.gate-modal{padding:18px 16px}
+  /* Trim the inner-content padding so phone viewports don't
+     waste 48px on horizontal gutters. Padding-top is zero so the
+     sticky sub-nav sits flush with the conn-bar — no gap for
+     scrolling content to peek through. The sub-nav's own
+     `padding-top:8px` provides breathing room. */
+  .content,.content-area{padding:0 12px 12px 12px}
   /* Tooltip arrows can overflow the screen edge; clamp width. */
   [data-tooltip]::after{max-width:88vw}
 }

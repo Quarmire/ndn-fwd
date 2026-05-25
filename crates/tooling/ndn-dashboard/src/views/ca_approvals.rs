@@ -8,7 +8,7 @@
 //! sign-and-publish path (so the dashboard itself can approve) is
 //! tracked as a v1.5 follow-up.
 
-use crate::app::{AppCtx, ToastLevel, push_toast};
+use crate::app::AppCtx;
 use crate::edu_gloss::EduGloss;
 use dioxus::prelude::*;
 
@@ -83,13 +83,13 @@ pub fn CaApprovalsPanel() -> Element {
                 }
             }
 
-            // Honest v1.5 callout.
+            // v1 callout: mgmt-mediated, v2 canonical signed-Data.
             div { style: "margin-top:10px;padding:8px 10px;border:1px dashed var(--border-subtle);border-radius:4px;font-size:10px;color:var(--text-muted);line-height:1.5;",
-                "Approve / Deny in this dashboard publishes a "
+                "Approve / Deny are signed-command gated; v1 records the operator as "
+                span { class: "mono", "approved-via-mgmt" }
+                " (the SECURITY-module's signed-Interest auth boundary IS the cryptographic gate). v2 hardens this to a canonical "
                 EduGloss { term: "ChallengeAttestation" }
-                "-bearing approval Data on the CA's signed approval feed. v1 surfaces visibility only; the sign-and-publish path lands in v1.5. Use "
-                span { class: "mono", "enroll-ndncert --approve <id>" }
-                " or the cross-process approval bridge in the meantime."
+                "-bearing signed Data on the CA's approval feed (ndn-identity)."
             }
         }
     }
@@ -97,6 +97,9 @@ pub fn CaApprovalsPanel() -> Element {
 
 #[component]
 fn PendingApprovalCard(row: PendingApprovalRow) -> Element {
+    let ctx = use_context::<AppCtx>();
+    let approve_id = row.id.clone();
+    let deny_id = row.id.clone();
     rsx! {
         div { style: "border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px;background:var(--surface);",
             div { style: "display:flex;justify-content:space-between;align-items:flex-start;gap:8px;",
@@ -122,18 +125,21 @@ fn PendingApprovalCard(row: PendingApprovalRow) -> Element {
                 div { style: "display:flex;flex-direction:column;gap:4px;",
                     button {
                         class: "btn btn-primary btn-sm",
-                        onclick: move |_| push_toast(
-                            "Approve via signed Data on the approval feed; v1.5 wiring.",
-                            ToastLevel::Info,
-                        ),
+                        onclick: move |_| {
+                            ctx.cmd.send(crate::app::DashCmd::CaApprove {
+                                request_id: approve_id.clone(),
+                            });
+                        },
                         "Approve"
                     }
                     button {
                         class: "btn btn-secondary btn-sm",
-                        onclick: move |_| push_toast(
-                            "Deny via signed Data on the approval feed; v1.5 wiring.",
-                            ToastLevel::Info,
-                        ),
+                        onclick: move |_| {
+                            ctx.cmd.send(crate::app::DashCmd::CaDeny {
+                                request_id: deny_id.clone(),
+                                reason: String::new(),
+                            });
+                        },
                         "Deny"
                     }
                 }

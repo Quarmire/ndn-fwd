@@ -30,6 +30,13 @@ pub static KEY_ROTATION_STATE: GlobalSignal<crate::views::key_rotation::KeyRotat
 /// `DashCmd::CaListApprovals`'s handler after `ca/list-approvals`.
 pub static CA_APPROVALS_STATE: GlobalSignal<crate::views::ca_approvals::CaApprovalsState> =
     Signal::global(crate::views::ca_approvals::CaApprovalsState::default);
+/// Mobile-only: whether the hamburger-triggered sidebar drawer is
+/// open. Ignored on desktop (the sidebar is always present there).
+pub static SIDEBAR_OPEN: GlobalSignal<bool> = Signal::global(|| false);
+/// Mobile-only: whether the conn-bar's URL field + Connect button
+/// are expanded. Default false so the bar only shows status
+/// indicators; tap the connection-state badge to expand.
+pub static CONN_FIELD_OPEN: GlobalSignal<bool> = Signal::global(|| false);
 /// §5.2 enrollment-wizard live result state. The Issue button
 /// transitions the wizard to step 5 (Result) and the
 /// `DashCmd::SecurityEnroll` handler writes the CA's response (or
@@ -72,20 +79,25 @@ pub struct Toast {
     pub id: u64,
     pub message: String,
     pub level: ToastLevel,
-    pub created: std::time::Instant,
 }
 
 pub static TOASTS: GlobalSignal<VecDeque<Toast>> = Signal::global(VecDeque::new);
 static TOAST_ID: GlobalSignal<u64> = Signal::global(|| 0u64);
 
 pub fn push_toast(msg: impl Into<String>, level: ToastLevel) {
+    // Wasm has no monotonic clock by default — `std::time::Instant::now()`
+    // *panics* on wasm32, which previously killed Dioxus reactivity for
+    // the rest of the page lifetime on every `push_toast` call. The
+    // `created` field was dead code (no auto-dismiss consumer read it),
+    // so removing it eliminates the panic without needing `web-time` as
+    // a non-optional dep. If/when auto-dismiss lands, swap to
+    // `web_time::Instant` which has the same API and works on both.
     let mut id = TOAST_ID.write();
     *id += 1;
     TOASTS.write().push_back(Toast {
         id: *id,
         message: msg.into(),
         level,
-        created: std::time::Instant::now(),
     });
 }
 
@@ -145,6 +157,10 @@ pub enum DashCmd {
     },
     /// §5.5 list pending CA device-approval requests.
     CaListApprovals,
+    /// §5.5 approve a pending request.
+    CaApprove { request_id: String },
+    /// §5.5 deny a pending request with a reason.
+    CaDeny { request_id: String, reason: String },
 }
 
 #[cfg(feature = "desktop")]
