@@ -316,4 +316,62 @@ input[type=range]:focus{outline:none;border-color:transparent}
 .bc-section-title{font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;font-weight:600}
 .bc-face-row{display:flex;align-items:center;gap:8px;padding:5px 8px;background:var(--surface2);border-radius:4px;margin-bottom:4px;font-size:12px;font-family:monospace}
 .bc-face-row:last-child{margin-bottom:0}
+/* ── Responsive (phones + small tablets) ─────────────────────── */
+/* The dashboard's primary layout assumes a desktop window. On
+   viewports narrower than ~768px the sidebar collapses to a
+   horizontally-scrolling top strip, the conn-bar wraps onto
+   multiple rows, fixed-width floating panes drop their min-width,
+   and chip labels truncate harder so the conn-bar still fits.
+   No JS — pure CSS media queries; Dioxus renders DOM, the
+   browser handles layout. */
+@media (max-width: 768px) {
+  .layout{flex-direction:column}
+  .sidebar{
+    width:100%;min-width:0;max-width:none;
+    flex-direction:row;border-right:none;
+    border-bottom:1px solid var(--border);
+    overflow-x:auto;overflow-y:hidden;
+    -webkit-overflow-scrolling:touch;
+  }
+  .sidebar-logo{
+    padding:8px 12px;font-size:13px;
+    border-bottom:none;border-right:1px solid var(--border);
+    white-space:nowrap;flex-shrink:0;
+  }
+  .nav-item{
+    padding:8px 12px;border-left:none;
+    border-bottom:3px solid transparent;
+    white-space:nowrap;flex-shrink:0;
+  }
+  .nav-item.active{border-left-color:transparent;border-bottom-color:var(--accent)}
+  .sidebar-spacer{display:none}
+  .sidebar-bottom{
+    padding:6px 10px;border-top:none;
+    border-left:1px solid var(--border);
+    flex-shrink:0;
+  }
+  .gear-menu{
+    bottom:auto;top:calc(100% + 4px);
+    left:auto;right:0;
+  }
+  .conn-bar{flex-wrap:wrap;padding:8px 12px;gap:6px}
+  .conn-bar input{width:100%;max-width:none;flex:1 1 100%}
+  .id-chip-label{max-width:120px}
+  .floating-pane{
+    min-width:0;min-height:0;
+    left:0!important;right:0!important;
+    width:100vw;max-width:100vw;
+    border-radius:0;
+  }
+  .toast-container{
+    bottom:10px;right:10px;left:10px;
+    max-width:none;
+  }
+  .toast{min-width:0}
+  /* Modals already use max-width:92vw — but their fixed inner
+     padding gets cramped on phones; trim it. */
+  .modal-card,.onboarding-card{padding:18px 16px}
+  /* Tooltip arrows can overflow the screen edge; clamp width. */
+  [data-tooltip]::after{max-width:88vw}
+}
 ";
