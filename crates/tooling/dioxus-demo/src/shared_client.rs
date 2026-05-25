@@ -11,7 +11,7 @@ use bytes::Bytes;
 use js_sys::Uint8Array;
 use ndn_face_shared_worker::SharedWorkerProxyFace;
 use ndn_packet::lp::LpPacket;
-use ndn_packet::{Data, Interest, Name};
+use ndn_packet::{Data, Name};
 use ndn_runtime::default_runtime;
 use ndn_transport::{FaceError, FaceId, Transport};
 use tokio::sync::{Mutex, oneshot};
@@ -182,6 +182,3 @@ fn nni_bytes(val: u64) -> ([u8; 8], usize) {
         (be, 8)
     }
 }
-
-#[allow(dead_code)]
-fn _interest_anchor(_: Interest) {}

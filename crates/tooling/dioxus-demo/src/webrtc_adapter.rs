@@ -12,7 +12,6 @@ use ndn_runtime::Runtime;
 use ndn_transport::{FaceError, FaceId, FaceKind, Transport};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
-use web_sys::RtcPeerConnection;
 
 /// Dropping closes the outbound mpsc, the pump exits, and JS GC tears down
 /// the underlying `RtcPeerConnection` (closing SCTP/DTLS).
@@ -91,6 +90,3 @@ async fn pump(
         }
     }
 }
-
-#[allow(dead_code)]
-fn _peer_connection_marker(_: RtcPeerConnection) {}

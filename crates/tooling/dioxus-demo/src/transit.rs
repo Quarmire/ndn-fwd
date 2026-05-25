@@ -12,7 +12,7 @@ use bytes::Bytes;
 use js_sys::Uint8Array;
 use ndn_face_webrtc::{IceServers, PendingFace, SessionDescription, WebRtcConnector};
 use ndn_packet::lp::LpPacket;
-use ndn_packet::{Data, Interest, Name};
+use ndn_packet::{Data, Name};
 use ndn_runtime::default_runtime;
 use ndn_transport::{FaceError, FaceId, Transport};
 use std::collections::HashMap;
@@ -272,6 +272,3 @@ fn nni_bytes(val: u64) -> ([u8; 8], usize) {
         (be, 8)
     }
 }
-
-#[allow(dead_code)]
-fn _anchor(_: Interest) {}
