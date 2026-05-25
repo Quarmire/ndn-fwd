@@ -33,6 +33,10 @@ enum Step {
     ChooseName = 2,
     Challenge = 3,
     Issuance = 4,
+    /// Post-submission: wizard stays open and renders the CA's
+    /// response. `DashCmd::SecurityEnroll`'s handler writes the
+    /// outcome into `ENROLLMENT_RESULT`, which step 5 reads.
+    Result = 5,
 }
 
 impl Step {
@@ -42,12 +46,39 @@ impl Step {
             Step::ChooseName => "Choose name",
             Step::Challenge => "Prove identity",
             Step::Issuance => "Issuance",
+            Step::Result => "Result",
         }
     }
 
     fn ordinal(self) -> u8 {
         self as u8
     }
+}
+
+/// Outcome of an in-flight enrollment, populated by the
+/// `DashCmd::SecurityEnroll` dispatcher and rendered by step 5.
+///
+/// The current `security/ca-enroll` verb returns synchronously
+/// after spawning the NDNCERT round-trip, so `Submitted` is the
+/// terminal state most operators see today; the actual cert
+/// install happens asynchronously in the forwarder. When a future
+/// mgmt extension surfaces enrollment progress / completion, the
+/// `InFlight` and `Issued` variants populate from that stream.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnrollmentResult {
+    /// The Issue button fired and the dispatcher is waiting on
+    /// `security/ca-enroll`'s ControlResponse.
+    Submitting,
+    /// The CA accepted the request and spawned the round-trip.
+    /// `text` is the verb's status_text echo for debug surfacing.
+    Submitted { text: String },
+    /// The CA actually issued the cert (future state — populates
+    /// once the wire signals completion). `cert_name` is the
+    /// installed cert's full name.
+    #[allow(dead_code)]
+    Issued { cert_name: String },
+    /// Verb rejected the request, or the transport failed.
+    Failed { reason: String },
 }
 
 /// §11.9 operator-vs-user identity selection. Pinned at step 1.
@@ -152,6 +183,7 @@ pub fn EnrollmentWizardModal(state: Signal<EnrollmentWizardState>) -> Element {
         state.write().open = false;
         step.set(Step::ChooseCa);
         submit_error.set(None);
+        *crate::app_shared::ENROLLMENT_RESULT.write() = None;
     };
 
     let cur_step = *step.read();
@@ -173,7 +205,7 @@ pub fn EnrollmentWizardModal(state: Signal<EnrollmentWizardState>) -> Element {
                 div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;",
                     div {
                         div { style: "font-size:14px;font-weight:600;color:var(--text);",
-                            "NDNCERT enrollment · Step {cur_step.ordinal()} of 4 — {cur_step.label()}"
+                            "NDNCERT enrollment · Step {cur_step.ordinal()} of 5 — {cur_step.label()}"
                         }
                         div { style: "font-size:11px;color:var(--text-muted);margin-top:2px;",
                             EduGloss { term: "NDNCERT" }
@@ -221,6 +253,9 @@ pub fn EnrollmentWizardModal(state: Signal<EnrollmentWizardState>) -> Element {
                             ca_info: ca_info.clone(),
                         }
                     },
+                    Step::Result => rsx! {
+                        StepResult {}
+                    },
                 }
 
                 if let Some(err) = submit_error.read().clone() {
@@ -231,7 +266,7 @@ pub fn EnrollmentWizardModal(state: Signal<EnrollmentWizardState>) -> Element {
 
                 // Action row
                 div { style: "display:flex;gap:8px;justify-content:flex-end;margin-top:14px;border-top:1px solid var(--border-subtle);padding-top:12px;",
-                    if cur_step.ordinal() > 1 {
+                    if cur_step.ordinal() > 1 && cur_step != Step::Result {
                         button {
                             class: "btn btn-secondary btn-sm",
                             onclick: move |_| {
@@ -240,68 +275,80 @@ pub fn EnrollmentWizardModal(state: Signal<EnrollmentWizardState>) -> Element {
                                     Step::Issuance => Step::Challenge,
                                     Step::Challenge => Step::ChooseName,
                                     Step::ChooseName => Step::ChooseCa,
-                                    Step::ChooseCa => Step::ChooseCa,
+                                    Step::ChooseCa | Step::Result => Step::ChooseCa,
                                 };
                                 step.set(prev);
                             },
                             "Back"
                         }
                     }
-                    if cur_step != Step::Issuance {
-                        button {
-                            class: "btn btn-primary btn-sm",
-                            onclick: move |_| {
-                                submit_error.set(None);
-                                let cur = *step.read();
-                                match cur {
-                                    Step::ChooseCa => {
-                                        if ca_prefix.read().trim().is_empty() {
-                                            submit_error.set(Some(
-                                                "Choose a CA before continuing.".to_owned(),
-                                            ));
-                                            return;
+                    match cur_step {
+                        Step::Result => rsx! {
+                            button {
+                                class: "btn btn-primary btn-sm",
+                                onclick: move |_| close(),
+                                "Close"
+                            }
+                        },
+                        Step::Issuance => rsx! {
+                            button {
+                                class: "btn btn-primary btn-sm",
+                                onclick: move |_| {
+                                    *crate::app_shared::ENROLLMENT_RESULT.write() =
+                                        Some(EnrollmentResult::Submitting);
+                                    ctx.cmd.send(DashCmd::SecurityEnroll {
+                                        ca_prefix: ca_prefix.read().clone(),
+                                        challenge_type: challenge_type.read().clone(),
+                                        challenge_param: challenge_param.read().clone(),
+                                    });
+                                    step.set(Step::Result);
+                                },
+                                "Issue"
+                            }
+                        },
+                        _ => rsx! {
+                            button {
+                                class: "btn btn-primary btn-sm",
+                                onclick: move |_| {
+                                    submit_error.set(None);
+                                    let cur = *step.read();
+                                    match cur {
+                                        Step::ChooseCa => {
+                                            if ca_prefix.read().trim().is_empty() {
+                                                submit_error.set(Some(
+                                                    "Choose a CA before continuing.".to_owned(),
+                                                ));
+                                                return;
+                                            }
+                                            step.set(Step::ChooseName);
                                         }
-                                        step.set(Step::ChooseName);
-                                    }
-                                    Step::ChooseName => {
-                                        let prev = preview_namespace_policy(
-                                            &want_name.read(),
-                                            &ca_prefix.read(),
-                                        );
-                                        if !prev.under_ca_namespace {
-                                            submit_error.set(Some(prev.detail));
-                                            return;
+                                        Step::ChooseName => {
+                                            let prev = preview_namespace_policy(
+                                                &want_name.read(),
+                                                &ca_prefix.read(),
+                                            );
+                                            if !prev.under_ca_namespace {
+                                                submit_error.set(Some(prev.detail));
+                                                return;
+                                            }
+                                            step.set(Step::Challenge);
                                         }
-                                        step.set(Step::Challenge);
-                                    }
-                                    Step::Challenge => {
-                                        if challenge_param.read().trim().is_empty() {
-                                            submit_error.set(Some(
-                                                "Provide a challenge parameter (token / email / …) before continuing."
-                                                    .to_owned(),
-                                            ));
-                                            return;
+                                        Step::Challenge => {
+                                            if challenge_param.read().trim().is_empty() {
+                                                submit_error.set(Some(
+                                                    "Provide a challenge parameter (token / email / …) before continuing."
+                                                        .to_owned(),
+                                                ));
+                                                return;
+                                            }
+                                            step.set(Step::Issuance);
                                         }
-                                        step.set(Step::Issuance);
+                                        Step::Issuance | Step::Result => {}
                                     }
-                                    Step::Issuance => {}
-                                }
-                            },
-                            "Next"
-                        }
-                    } else {
-                        button {
-                            class: "btn btn-primary btn-sm",
-                            onclick: move |_| {
-                                ctx.cmd.send(DashCmd::SecurityEnroll {
-                                    ca_prefix: ca_prefix.read().clone(),
-                                    challenge_type: challenge_type.read().clone(),
-                                    challenge_param: challenge_param.read().clone(),
-                                });
-                                close();
-                            },
-                            "Issue"
-                        }
+                                },
+                                "Next"
+                            }
+                        },
                     }
                 }
             }
@@ -316,6 +363,7 @@ fn StepBar(current: Step) -> Element {
         Step::ChooseName,
         Step::Challenge,
         Step::Issuance,
+        Step::Result,
     ];
     rsx! {
         div { style: "display:flex;gap:6px;margin-bottom:14px;",
@@ -613,6 +661,83 @@ fn StepIssuance(
     }
 }
 
+#[component]
+fn StepResult() -> Element {
+    let result = crate::app_shared::ENROLLMENT_RESULT.read().clone();
+    match result {
+        None | Some(EnrollmentResult::Submitting) => rsx! {
+            div { style: "padding:18px;text-align:center;",
+                div { style: "font-size:32px;color:var(--text-muted);margin-bottom:10px;",
+                    "⏳"
+                }
+                div { style: "font-size:13px;color:var(--text);font-weight:600;margin-bottom:6px;",
+                    "Submitting to CA…"
+                }
+                div { style: "font-size:11px;color:var(--text-muted);line-height:1.5;",
+                    "The dashboard fired ", span { class: "mono", "security/ca-enroll" },
+                    " and is waiting on the CA's ControlResponse. NDNCERT proceeds asynchronously inside the forwarder once the verb returns."
+                }
+            }
+        },
+        Some(EnrollmentResult::Submitted { text }) => rsx! {
+            div { style: "padding:14px;",
+                div { style: "display:flex;gap:10px;align-items:flex-start;margin-bottom:10px;",
+                    div { style: "font-size:24px;color:var(--green,#3fb950);", "✓" }
+                    div { style: "flex:1;",
+                        div { style: "font-size:13px;color:var(--text);font-weight:600;",
+                            "Enrollment submitted"
+                        }
+                        div { style: "font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.5;",
+                            "The CA accepted the request. The forwarder's enrollment task is now talking NDNCERT to the CA in the background; the cert lands in the PIB on success."
+                        }
+                    }
+                }
+                if !text.is_empty() {
+                    div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;color:var(--text-muted);",
+                        span { style: "font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-right:6px;",
+                            "ControlResponse"
+                        }
+                        span { class: "mono", "{text}" }
+                    }
+                }
+                div { style: "font-size:10px;color:var(--text-muted);margin-top:10px;font-style:italic;",
+                    "Watch the §4.1 Identities tab — the new cert appears there once the round-trip finishes. The §4.6 audit log records the issuance event."
+                }
+            }
+        },
+        Some(EnrollmentResult::Issued { cert_name }) => rsx! {
+            div { style: "padding:14px;",
+                div { style: "display:flex;gap:10px;align-items:flex-start;",
+                    div { style: "font-size:24px;color:var(--green,#3fb950);", "✓" }
+                    div { style: "flex:1;",
+                        div { style: "font-size:13px;color:var(--text);font-weight:600;",
+                            "Certificate issued"
+                        }
+                        div { class: "mono", style: "font-size:11px;color:var(--purple);margin-top:6px;word-break:break-all;",
+                            "{cert_name}"
+                        }
+                    }
+                }
+            }
+        },
+        Some(EnrollmentResult::Failed { reason }) => rsx! {
+            div { style: "padding:14px;",
+                div { style: "display:flex;gap:10px;align-items:flex-start;",
+                    div { style: "font-size:24px;color:var(--red,#f85149);", "✗" }
+                    div { style: "flex:1;",
+                        div { style: "font-size:13px;color:var(--text);font-weight:600;",
+                            "Enrollment failed"
+                        }
+                        div { style: "font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.5;",
+                            "{reason}"
+                        }
+                    }
+                }
+            }
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,5 +799,40 @@ mod tests {
         assert_eq!(Step::ChooseName.ordinal(), 2);
         assert_eq!(Step::Challenge.ordinal(), 3);
         assert_eq!(Step::Issuance.ordinal(), 4);
+        assert_eq!(Step::Result.ordinal(), 5);
+    }
+
+    #[test]
+    fn enrollment_result_variants_compare_by_value() {
+        // Sanity: PartialEq across the variants the wizard branches on.
+        assert_eq!(EnrollmentResult::Submitting, EnrollmentResult::Submitting);
+        assert_ne!(
+            EnrollmentResult::Submitted {
+                text: "started".into(),
+            },
+            EnrollmentResult::Submitting,
+        );
+        assert_eq!(
+            EnrollmentResult::Failed { reason: "nope".into() },
+            EnrollmentResult::Failed { reason: "nope".into() },
+        );
+        assert_ne!(
+            EnrollmentResult::Failed { reason: "a".into() },
+            EnrollmentResult::Failed { reason: "b".into() },
+        );
+    }
+
+    #[test]
+    fn step_result_is_last_step() {
+        // Pin that Result is the terminal step the wizard can reach.
+        let all = [
+            Step::ChooseCa,
+            Step::ChooseName,
+            Step::Challenge,
+            Step::Issuance,
+            Step::Result,
+        ];
+        let max = all.iter().map(|s| s.ordinal()).max().unwrap();
+        assert_eq!(max, Step::Result.ordinal());
     }
 }

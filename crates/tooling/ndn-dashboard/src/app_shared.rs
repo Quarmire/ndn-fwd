@@ -30,6 +30,13 @@ pub static KEY_ROTATION_STATE: GlobalSignal<crate::views::key_rotation::KeyRotat
 /// `DashCmd::CaListApprovals`'s handler after `ca/list-approvals`.
 pub static CA_APPROVALS_STATE: GlobalSignal<crate::views::ca_approvals::CaApprovalsState> =
     Signal::global(crate::views::ca_approvals::CaApprovalsState::default);
+/// §5.2 enrollment-wizard live result state. The Issue button
+/// transitions the wizard to step 5 (Result) and the
+/// `DashCmd::SecurityEnroll` handler writes the CA's response (or
+/// error) here. The wizard reads this signal to render outcome.
+pub static ENROLLMENT_RESULT: GlobalSignal<
+    Option<crate::views::enrollment_wizard::EnrollmentResult>,
+> = Signal::global(|| None);
 pub static DARK_MODE: GlobalSignal<bool> = Signal::global(|| true);
 
 #[derive(Debug, Clone, Copy, PartialEq)]

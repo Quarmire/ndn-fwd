@@ -1117,22 +1117,48 @@ async fn run_cmd_web(
             ca_prefix,
             challenge_type,
             challenge_param,
-        } => match ca_prefix.parse::<Name>() {
-            Ok(n) => {
-                let params = ControlParameters {
-                    name: Some(n),
-                    uri: Some(format!("{challenge_type}:{challenge_param}")),
-                    ..Default::default()
-                };
-                client
-                    .send_cmd("security", "ca-enroll", Some(&params))
-                    .await
-            }
-            Err(e) => {
-                error_msg
-                    .to_owned()
-                    .set(Some(format!("invalid ca_prefix '{ca_prefix}': {e:?}")));
-                return;
+        } => {
+            use crate::views::enrollment_wizard::EnrollmentResult;
+            match ca_prefix.parse::<Name>() {
+                Ok(n) => {
+                    let params = ControlParameters {
+                        name: Some(n),
+                        uri: Some(format!("{challenge_type}:{challenge_param}")),
+                        ..Default::default()
+                    };
+                    let resp = client.send_cmd("security", "ca-enroll", Some(&params)).await;
+                    match &resp {
+                        Ok(r) if r.is_ok() => {
+                            *crate::app_shared::ENROLLMENT_RESULT.write() =
+                                Some(EnrollmentResult::Submitted {
+                                    text: format!("{} {}", r.status_code, r.status_text),
+                                });
+                        }
+                        Ok(r) => {
+                            *crate::app_shared::ENROLLMENT_RESULT.write() =
+                                Some(EnrollmentResult::Failed {
+                                    reason: format!("{} {}", r.status_code, r.status_text),
+                                });
+                        }
+                        Err(e) => {
+                            *crate::app_shared::ENROLLMENT_RESULT.write() =
+                                Some(EnrollmentResult::Failed {
+                                    reason: e.to_string(),
+                                });
+                        }
+                    }
+                    resp
+                }
+                Err(e) => {
+                    *crate::app_shared::ENROLLMENT_RESULT.write() =
+                        Some(EnrollmentResult::Failed {
+                            reason: format!("invalid ca_prefix '{ca_prefix}': {e:?}"),
+                        });
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid ca_prefix '{ca_prefix}': {e:?}")));
+                    return;
+                }
             }
         },
         DashCmd::DiscoveryConfigSet(params_str) => {

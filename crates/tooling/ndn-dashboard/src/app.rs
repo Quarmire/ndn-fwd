@@ -2017,14 +2017,42 @@ async fn run_cmd(
             ca_prefix,
             challenge_type,
             challenge_param,
-        } => match ca_prefix.parse::<ndn_packet::Name>() {
-            Ok(n) => client
-                .security_ca_enroll(&n, &challenge_type, &challenge_param)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
-        },
+        } => {
+            use crate::views::enrollment_wizard::EnrollmentResult;
+            match ca_prefix.parse::<ndn_packet::Name>() {
+                Ok(n) => match client
+                    .security_ca_enroll(&n, &challenge_type, &challenge_param)
+                    .await
+                {
+                    Ok(echo) => {
+                        // ca-enroll echoes ControlResponse "started" with the
+                        // identity name as `name` and (optionally) a status
+                        // hint as `uri`. Surface whichever is present.
+                        let text = match (echo.name.as_ref(), echo.uri.as_deref()) {
+                            (Some(n), Some(u)) if !u.is_empty() => format!("started · {n} · {u}"),
+                            (Some(n), _) => format!("started · {n}"),
+                            (None, Some(u)) if !u.is_empty() => format!("started · {u}"),
+                            _ => "started".to_owned(),
+                        };
+                        *crate::app_shared::ENROLLMENT_RESULT.write() =
+                            Some(EnrollmentResult::Submitted { text });
+                        Ok(())
+                    }
+                    Err(e) => {
+                        *crate::app_shared::ENROLLMENT_RESULT.write() =
+                            Some(EnrollmentResult::Failed { reason: e.to_string() });
+                        Err(e.to_string())
+                    }
+                },
+                Err(e) => {
+                    *crate::app_shared::ENROLLMENT_RESULT.write() =
+                        Some(EnrollmentResult::Failed {
+                            reason: format!("invalid CA prefix: {e}"),
+                        });
+                    Err(e.to_string())
+                }
+            }
+        }
         DashCmd::SecurityTokenAdd(description) => client
             .security_ca_token_add(&description)
             .await
