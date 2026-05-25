@@ -197,6 +197,7 @@ async fn main() -> Result<()> {
             }
             _ => ndn_engine::DataPlane::Shared,
         },
+        require_local_validation: fwd_config.engine.require_local_validation,
         ..EngineConfig::default()
     };
 
