@@ -11,6 +11,7 @@ use crate::core::{
     capability_matrix,
 };
 use crate::engine::{EngineDetail, EngineSummary, compact_count, poll_engine_summary};
+use crate::extensions::ExtensionRegistry;
 use crate::identity::TrustContextSummary;
 use crate::mutation::{
     CsCapacityCommand, CsEraseCommand, FaceCreateCommand, FaceDestroyCommand, MutationOperation,
@@ -22,6 +23,7 @@ use crate::mutation::{
     execute_shutdown_forwarder, execute_strategy_set, execute_strategy_unset,
     execute_typed_mutation, preflight_mutation,
 };
+use crate::network::NetworkViewModel;
 use crate::observe::{
     BridgeExportStatus, LogEvidenceRow, ObserveSummary, PitFanOutRow, SpanTreeRow, TraceView,
     correlated_logs_for_trace, filter_traces, pit_fanout_rows, poll_observe_summary,
@@ -1489,6 +1491,8 @@ fn EngineView(
     let profile_for_shutdown = profile.clone();
     let profile_for_reconnect = profile.clone();
     let profile_for_replay = profile.clone();
+    let network_model = NetworkViewModel::from_engine(&profile, &summary);
+    let extension_registry = ExtensionRegistry::for_profile(&profile);
     let read_only_label = if summary.read_only {
         "read-only"
     } else {
@@ -2161,6 +2165,112 @@ fn EngineView(
                                 });
                             },
                             "erase"
+                        }
+                    }
+                }
+            }
+            Panel { title: "Fleet And Discovery".to_string(),
+                div { class: "panel-toolbar",
+                    StatusChip {
+                        label: network_model.discovery.status.label().to_string(),
+                        tone: tone_for_feature(network_model.discovery.status).to_string(),
+                    }
+                    StatusChip {
+                        label: if network_model.discovery.writable { "mutable".to_string() } else { "read-only".to_string() },
+                        tone: if network_model.discovery.writable { "good".to_string() } else { "amber".to_string() },
+                    }
+                }
+                div { class: "detail-table",
+                    div { class: "kv", span { "Protocol" } strong { "{network_model.discovery.protocol}" } }
+                    div { class: "kv", span { "Prefix" } strong { "{network_model.discovery.service_prefix}" } }
+                }
+                div { class: "dense-table fleet-table",
+                    div { class: "table-head", span { "Peer" } span { "Face" } span { "Reach" } span { "Trust" } span { "Action" } }
+                    for neighbor in network_model.neighbors.clone() {
+                        div { class: "table-row",
+                            span { "{neighbor.peer}" }
+                            span { "{neighbor.face_uri}" }
+                            span { "{neighbor.reachability}" }
+                            span { "{neighbor.trust.label()}" }
+                            span { "{neighbor.enrollment_action}" }
+                        }
+                    }
+                }
+            }
+            Panel { title: "Routing And Radio".to_string(),
+                div { class: "dense-table routing-table",
+                    div { class: "table-head", span { "Protocol" } span { "State" } span { "Routes" } span { "Mode" } }
+                    for row in network_model.routing.clone() {
+                        div { class: "table-row",
+                            span { "{row.protocol}" }
+                            span {
+                                StatusChip { label: row.status.label().to_string(), tone: tone_for_feature(row.status).to_string() }
+                            }
+                            span { "{row.routes}" }
+                            span { if row.writable { "mutable" } else { "read-only" } }
+                        }
+                    }
+                }
+                div { class: "dense-table radio-table",
+                    div { class: "table-head", span { "Transport" } span { "Face" } span { "State" } span { "Support" } }
+                    for radio in network_model.radios.clone() {
+                        div { class: "table-row",
+                            span { "{radio.transport}" }
+                            span { "{radio.face}" }
+                            span { "{radio.state}" }
+                            span {
+                                StatusChip { label: radio.support.label().to_string(), tone: tone_for_feature(radio.support).to_string() }
+                            }
+                        }
+                    }
+                }
+            }
+            Panel { title: "Topology".to_string(),
+                div { class: "dense-table topology-table",
+                    div { class: "table-head", span { "Source" } span { "Target" } span { "Via" } span { "Evidence" } }
+                    for edge in network_model.topology.clone() {
+                        div { class: "table-row",
+                            span { "{edge.source}" }
+                            span { "{edge.target}" }
+                            span { "{edge.via}" }
+                            span { "{edge.evidence}" }
+                        }
+                    }
+                }
+            }
+            Panel { title: "Advanced Extensions".to_string(),
+                div { class: "dense-table extension-table",
+                    div { class: "table-head", span { "Surface" } span { "Capability" } span { "Docs" } }
+                    for surface in extension_registry.surfaces.clone() {
+                        div { class: "table-row",
+                            span { "{surface.title}" }
+                            span {
+                                StatusChip { label: surface.capability.label().to_string(), tone: tone_for_feature(surface.capability).to_string() }
+                            }
+                            span { "{surface.docs}" }
+                        }
+                    }
+                }
+                div { class: "metrics-grid",
+                    for coding in extension_registry.coding.clone() {
+                        div { class: "metric-card",
+                            span { "Coding {coding.role}" }
+                            strong { "{coding.prefix}" }
+                            span { "{coding.generation}" }
+                        }
+                    }
+                    for limit in extension_registry.rate_limits.clone() {
+                        div { class: "metric-card",
+                            span { "Rate {limit.scope}" }
+                            strong { "{limit.limit}" }
+                            span { "{limit.state.label()}" }
+                        }
+                    }
+                    for compute in extension_registry.compute.clone() {
+                        div { class: "metric-card",
+                            span { "Compute" }
+                            strong { "{compute.service}" }
+                            span { "{compute.diagnostics}" }
                         }
                     }
                 }
@@ -3839,6 +3949,18 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .config-diff-table { margin: 10px 0; }
 .config-diff-table .table-head, .config-diff-table .table-row {
   grid-template-columns: minmax(0, .8fr) minmax(0, 1fr) minmax(0, 1fr) .55fr;
+}
+.fleet-table, .routing-table, .radio-table, .topology-table, .extension-table { margin-top: 10px; }
+.fleet-table .table-head, .fleet-table .table-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) .7fr .9fr .8fr;
+}
+.routing-table .table-head, .routing-table .table-row,
+.radio-table .table-head, .radio-table .table-row,
+.topology-table .table-head, .topology-table .table-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) .65fr minmax(0, 1fr);
+}
+.extension-table .table-head, .extension-table .table-row {
+  grid-template-columns: minmax(0, .8fr) minmax(0, .8fr) minmax(0, 1.7fr);
 }
 .code-preview {
   width: 100%; min-height: 132px; resize: vertical; margin-top: 8px; padding: 10px;
