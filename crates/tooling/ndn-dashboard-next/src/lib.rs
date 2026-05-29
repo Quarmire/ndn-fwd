@@ -7,6 +7,7 @@
 //! desktop and browser targets.
 
 pub mod app;
+pub mod audit;
 pub mod client;
 pub mod config;
 pub mod core;

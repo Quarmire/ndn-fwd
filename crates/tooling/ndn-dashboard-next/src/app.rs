@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::audit::{AuditViewModel, LogLevel};
 use crate::client::{
     DashboardClient, MockDashboardClient, ProbeOutcome, ProbeTranscript, state_from_probe,
 };
@@ -213,6 +214,7 @@ pub fn App() -> Element {
     let attach_error = last_attach_error.read().clone();
 
     rsx! {
+        document::Link { rel: "manifest", href: "manifest.webmanifest" }
         style { "{STYLE}" }
         div { class: "app-shell {density_class} {nav_class}", "data-testid": "dashboard-next-root",
             a { class: "skip-link", href: "#dashboard-next-main", "Skip to workspace" }
@@ -485,6 +487,8 @@ fn ObserveView(summary: ObserveSummary) -> Element {
     let query = search.read().clone();
     let filtered = filter_traces(&summary.recent, &query);
     let selected = filtered.first().cloned();
+    let audit = AuditViewModel::demo();
+    let warn_logs = audit.filter_logs(LogLevel::Info, "");
     let trace_count = filtered.len();
     let total_trace_count = summary.recent.len();
     let trace_count_label = if query.trim().is_empty() {
@@ -555,6 +559,39 @@ fn ObserveView(summary: ObserveSummary) -> Element {
                     EmptyState {
                         title: "No trace selected".to_string(),
                         detail: "Recent spans, PIT fan-out, CS attribution, strategy rationale, and correlated logs will appear here once live span Data is available.".to_string()
+                    }
+                }
+            }
+            Panel { title: "Logs And Events".to_string(),
+                div { class: "panel-toolbar",
+                    StatusChip {
+                        label: if audit.events.enabled { "event stream".to_string() } else { "polling".to_string() },
+                        tone: if audit.events.enabled { "good".to_string() } else { "amber".to_string() },
+                    }
+                    span { class: "mono", "{audit.events.source}" }
+                }
+                div { class: "dense-table log-table",
+                    div { class: "table-head", span { "Level" } span { "Target" } span { "Trace" } span { "Message" } }
+                    for row in warn_logs {
+                        div { class: "table-row",
+                            span { "{row.level.label()}" }
+                            span { "{row.target}" }
+                            span { "{row.trace_id.clone().unwrap_or_else(|| \"-\".into())}" }
+                            span { "{row.message}" }
+                        }
+                    }
+                }
+                div { class: "modal-action-row",
+                    button {
+                        class: "tool-button",
+                        "aria-label": "Export filtered logs",
+                        onclick: move |_| {
+                            let rows = AuditViewModel::demo().filter_logs(LogLevel::Info, "");
+                            if let Ok(body) = AuditViewModel::export_logs_json(&rows) {
+                                let _ = platform::download_text("ndn-dashboard-next-logs.json", &body);
+                            }
+                        },
+                        "export logs"
                     }
                 }
             }
@@ -736,6 +773,7 @@ fn TrustView(profile: crate::core::ForwarderProfile, summary: TrustContextSummar
                 TrustTracePanel { summary: summary.clone(), on_open: move |modal| active_modal.set(Some(modal)) }
                 TrustMaintenancePanel { summary: summary.clone(), on_open: move |modal| active_modal.set(Some(modal)) }
             }
+            TrustAuditPanel {}
             if let Some(modal) = modal {
                 TrustModalView {
                     profile,
@@ -803,6 +841,26 @@ fn TrustOverview(summary: TrustContextSummary, on_open: EventHandler<TrustModal>
                     tone: if summary.pending_approvals > 0 { "amber".to_string() } else { "info".to_string() },
                     modal: if summary.pending_approvals > 0 { TrustModal::Approvals } else { TrustModal::Adopt },
                     on_open
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TrustAuditPanel() -> Element {
+    let audit = AuditViewModel::demo();
+    rsx! {
+        Panel { title: "Security Audit".to_string(),
+            div { class: "dense-table audit-table",
+                div { class: "table-head", span { "Action" } span { "Actor" } span { "Outcome" } span { "Trace" } }
+                for row in audit.security {
+                    div { class: "table-row",
+                        span { "{row.action}" }
+                        span { "{row.actor}" }
+                        span { "{row.outcome}" }
+                        span { "{row.trace_id.clone().unwrap_or_else(|| \"-\".into())}" }
+                    }
                 }
             }
         }
@@ -3961,6 +4019,10 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 }
 .extension-table .table-head, .extension-table .table-row {
   grid-template-columns: minmax(0, .8fr) minmax(0, .8fr) minmax(0, 1.7fr);
+}
+.log-table .table-head, .log-table .table-row,
+.audit-table .table-head, .audit-table .table-row {
+  grid-template-columns: .55fr minmax(0, 1fr) minmax(0, .9fr) minmax(0, 1.6fr);
 }
 .code-preview {
   width: 100%; min-height: 132px; resize: vertical; margin-top: 8px; padding: 10px;
