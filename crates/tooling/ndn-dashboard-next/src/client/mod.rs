@@ -8,6 +8,7 @@ use crate::core::{
     ForwarderKind, ForwarderProfile, PlatformKind, observe_from_capabilities,
     trust_from_capabilities,
 };
+use crate::operations::{AttachState, DashboardRunState, EngineBinding};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttachError {
@@ -469,9 +470,12 @@ fn feature_probe_step(endpoint: ProbeEndpoint, state: FeatureState) -> ProbeStep
 pub fn state_from_probe(platform: PlatformKind, probe: ProbeResult) -> DashboardState {
     let trust = trust_from_capabilities(&probe.profile.capabilities, probe.has_identity);
     let observe = observe_from_capabilities(&probe.profile.capabilities);
+    let binding = EngineBinding::from_profile(probe.profile.clone(), platform);
     DashboardState {
         platform,
         density: crate::core::Density::Compact,
+        run_state: DashboardRunState::Attached,
+        attach_state: AttachState::Attached { binding },
         profile: probe.profile,
         trust,
         observe,

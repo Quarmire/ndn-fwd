@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::operations::{AttachState, DashboardRunState, EngineBinding};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlatformKind {
     Browser,
@@ -483,6 +485,8 @@ impl Density {
 pub struct DashboardState {
     pub platform: PlatformKind,
     pub density: Density,
+    pub run_state: DashboardRunState,
+    pub attach_state: AttachState,
     pub profile: ForwarderProfile,
     pub trust: TrustPosture,
     pub observe: ObservePosture,
@@ -493,6 +497,8 @@ impl DashboardState {
         Self {
             platform,
             density: Density::Compact,
+            run_state: DashboardRunState::Detached,
+            attach_state: AttachState::Detached { last_error: None },
             profile: fixtures::unsupported_profile(),
             trust: TrustPosture::Unsupported,
             observe: ObservePosture::Unsupported,
@@ -503,6 +509,10 @@ impl DashboardState {
         Self {
             platform,
             density: Density::Compact,
+            run_state: DashboardRunState::Attached,
+            attach_state: AttachState::Attached {
+                binding: EngineBinding::from_profile(fixtures::ndnrs_profile(platform), platform),
+            },
             profile: fixtures::ndnrs_profile(platform),
             trust: TrustPosture::Valid,
             observe: ObservePosture::Enabled,

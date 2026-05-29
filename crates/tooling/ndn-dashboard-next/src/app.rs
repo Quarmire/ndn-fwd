@@ -31,6 +31,7 @@ use crate::observe::{
     correlated_logs_for_trace, filter_traces, pit_fanout_rows, poll_observe_summary,
     span_tree_rows,
 };
+use crate::operations::{OperationsHomeModel, RouterLifecycleAction};
 use crate::platform::{self, PlatformServices, density_storage_label, preference_key};
 use crate::tools::{
     IperfWorkflowConfig, PeekWorkflowConfig, PingWorkflowConfig, PutWorkflowConfig, ToolKind,
@@ -41,6 +42,7 @@ use crate::tools::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Workspace {
+    Operations,
     Observe,
     Trust,
     Engine,
@@ -49,7 +51,8 @@ enum Workspace {
 }
 
 impl Workspace {
-    const ALL: [Workspace; 5] = [
+    const ALL: [Workspace; 6] = [
+        Workspace::Operations,
         Workspace::Observe,
         Workspace::Trust,
         Workspace::Engine,
@@ -59,6 +62,7 @@ impl Workspace {
 
     fn label(self) -> &'static str {
         match self {
+            Self::Operations => "Operations",
             Self::Observe => "Observe",
             Self::Trust => "Trust",
             Self::Engine => "Engine",
@@ -69,6 +73,7 @@ impl Workspace {
 
     fn icon(self) -> &'static str {
         match self {
+            Self::Operations => "OP",
             Self::Observe => "OB",
             Self::Trust => "TR",
             Self::Engine => "EN",
@@ -79,6 +84,7 @@ impl Workspace {
 
     fn test_id(self) -> &'static str {
         match self {
+            Self::Operations => "operations",
             Self::Observe => "observe",
             Self::Trust => "trust",
             Self::Engine => "engine",
@@ -160,7 +166,7 @@ pub fn App() -> Element {
         platform::load_or_default_preferences(platform, client.attach_targets())
     };
     let initial_density = initial_preferences.density;
-    let mut active = use_signal(|| Workspace::Engine);
+    let mut active = use_signal(|| Workspace::Operations);
     let mut nav_collapsed = use_signal(|| false);
     let mut state = use_signal(move || {
         let mut state = DashboardState::detached(platform);
@@ -216,6 +222,12 @@ pub fn App() -> Element {
     let attach_error = last_attach_error.read().clone();
     let selected_target = prefs.selected_target().cloned();
     let start_notice = forwarder_notice.read().clone();
+    let operations = OperationsHomeModel::new(
+        current.platform,
+        current.attach_state.clone(),
+        current.profile.capabilities.clone(),
+        selected_target.as_ref(),
+    );
 
     rsx! {
         document::Link { rel: "manifest", href: "manifest.webmanifest" }
@@ -373,6 +385,17 @@ pub fn App() -> Element {
 
                 section { class: "workspace",
                     match workspace {
+                        Workspace::Operations => rsx! {
+                            OperationsView {
+                                model: operations.clone(),
+                                state: current.clone(),
+                                engine: engine.clone(),
+                                observe: observe.clone(),
+                                active_tools: tools.clone(),
+                                last_attach_error: attach_error.clone(),
+                                start_notice: start_notice.clone(),
+                            }
+                        },
                         Workspace::Observe => rsx! { ObserveView { summary: observe } },
                         Workspace::Trust => rsx! { TrustView { profile: current.profile.clone(), summary: trust } },
                         Workspace::Engine => rsx! {
@@ -711,21 +734,21 @@ fn OperatorConnectBand(
         .as_ref()
         .map(|target| target.endpoint.clone())
         .unwrap_or_else(|| "open Settings to add or choose a target".into());
-    let connection_label = if last_probe_at_unix_s.is_some() {
+    let attach_label = if last_probe_at_unix_s.is_some() {
         "attached"
     } else {
-        "not attached"
+        "detached"
     };
-    let connection_tone = if last_probe_at_unix_s.is_some() {
+    let attach_tone = if last_probe_at_unix_s.is_some() {
         "good"
     } else {
         "amber"
     };
     let launch_enabled = state.platform == PlatformKind::Desktop;
     rsx! {
-        section { class: "operator-band", "aria-label": "Forwarder connection controls",
+        section { class: "operator-band", "aria-label": "Engine attach controls",
             div { class: "operator-status",
-                StatusChip { label: connection_label.to_string(), tone: connection_tone.to_string() }
+                StatusChip { label: attach_label.to_string(), tone: attach_tone.to_string() }
                 div {
                     div { class: "operator-title", "Forwarder" }
                     div { class: "operator-main", "{state.profile.display_name()}" }
@@ -747,15 +770,15 @@ fn OperatorConnectBand(
                 button {
                     class: "tool-button primary",
                     disabled: !selected_available,
-                    "aria-label": "Connect to selected attach target",
+                    "aria-label": "Attach to selected engine target",
                     onclick: move |_| on_probe_selected.call(()),
-                    "connect"
+                    "attach"
                 }
                 button {
                     class: "tool-button",
-                    "aria-label": "Connect to default attach target",
+                    "aria-label": "Attach to default engine target",
                     onclick: move |_| on_probe_default.call(()),
-                    "connect default"
+                    "attach default"
                 }
                 button {
                     class: "tool-button primary",
@@ -791,7 +814,7 @@ fn OperatorConnectBand(
             } else if state.platform == PlatformKind::Browser && start_notice.is_none() {
                 div { class: "operator-message neutral", role: "status",
                     strong { "Browser target" }
-                    span { "Local process start is desktop-only; connect browser engine, remote web, or relay." }
+                    span { "Local process start is desktop-only; attach to an in-page engine, remote web target, or relay." }
                 }
             }
             if let Some(notice) = start_notice {
@@ -799,6 +822,164 @@ fn OperatorConnectBand(
                     strong { "{notice.title}" }
                     span { "{notice.detail}" }
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn OperationsView(
+    model: OperationsHomeModel,
+    state: DashboardState,
+    engine: EngineSummary,
+    observe: ObserveSummary,
+    active_tools: Vec<ToolRun>,
+    last_attach_error: Option<String>,
+    start_notice: Option<ForwarderActionNotice>,
+) -> Element {
+    let attached = model.attach_state.is_attached();
+    let target_label = model
+        .selected_target
+        .as_ref()
+        .map(|target| target.label.clone())
+        .unwrap_or_else(|| "no attach target selected".into());
+    let target_endpoint = model
+        .selected_target
+        .as_ref()
+        .map(|target| target.endpoint.clone())
+        .unwrap_or_else(|| "choose an attach target in Settings".into());
+    let target_status = model
+        .selected_target_status
+        .map(|status| status.label().to_string())
+        .unwrap_or_else(|| "not selected".into());
+    let target_tone = model
+        .selected_target_status
+        .map(|status| {
+            if status.is_available() {
+                "neutral"
+            } else {
+                "amber"
+            }
+        })
+        .unwrap_or("muted");
+    let active_tool_count = if attached {
+        active_tools
+            .iter()
+            .filter(|run| matches!(run.status, ToolStatus::Running | ToolStatus::Streaming))
+            .count()
+    } else {
+        0
+    };
+    let face_count = if attached {
+        engine.faces.len().to_string()
+    } else {
+        "not attached".to_string()
+    };
+    let route_count = if attached {
+        engine.routes.len().to_string()
+    } else {
+        "not attached".to_string()
+    };
+    let trace_count = if attached && model.capability_summary.observe_available {
+        observe.recent.len().to_string()
+    } else {
+        "unavailable".to_string()
+    };
+    rsx! {
+        div { class: "view-grid operations-grid", "data-testid": "workspace-operations",
+            Panel { title: "Operations Home".to_string(),
+                div { class: "panel-toolbar",
+                    StatusChip { label: model.run_state.label().to_string(), tone: if attached { "good".to_string() } else { "amber".to_string() } }
+                    StatusChip { label: state.trust.label().to_string(), tone: tone_for_trust(state.trust).to_string() }
+                    StatusChip { label: state.observe.label().to_string(), tone: tone_for_observe(state.observe).to_string() }
+                    StatusChip { label: state.platform_label(), tone: "neutral".to_string() }
+                }
+                div { class: "summary-grid",
+                    Metric { label: "Engine".to_string(), value: state.profile.display_name() }
+                    Metric { label: "Faces".to_string(), value: face_count }
+                    Metric { label: "Routes".to_string(), value: route_count }
+                    Metric { label: "Recent traces".to_string(), value: trace_count }
+                    Metric { label: "Active tool runs".to_string(), value: active_tool_count.to_string() }
+                }
+                if let Some(error) = last_attach_error {
+                    div { class: "operator-message bad", role: "alert",
+                        strong { "Attach failed" }
+                        span { "{error}" }
+                    }
+                } else if let Some(notice) = start_notice {
+                    div { class: "operator-message {notice.tone}", role: "status",
+                        strong { "{notice.title}" }
+                        span { "{notice.detail}" }
+                    }
+                } else if !attached {
+                    EmptyState {
+                        title: "Detached".to_string(),
+                        detail: "Select an attach target, start a local router on desktop, or attach to a browser-safe engine before live Engine, Trust, Observe, and Tools surfaces become active.".to_string()
+                    }
+                }
+            }
+            Panel { title: "Attach Target".to_string(),
+                div { class: "target-row selected",
+                    div {
+                        div { class: "target-name", "{target_label}" }
+                        div { class: "target-meta",
+                            span { class: "mono", "{target_endpoint}" }
+                        }
+                    }
+                    div { class: "target-badges",
+                        StatusChip { label: target_status, tone: target_tone.to_string() }
+                    }
+                }
+                div { class: "capability-list",
+                    CapabilityLine { label: "NFD baseline".to_string(), enabled: model.capability_summary.live_engine }
+                    CapabilityLine { label: "TrustContext".to_string(), enabled: model.capability_summary.trust_available }
+                    CapabilityLine { label: "Observability".to_string(), enabled: model.capability_summary.observe_available }
+                    CapabilityLine { label: "Tools".to_string(), enabled: model.capability_summary.tools_available }
+                }
+            }
+            Panel { title: "Lifecycle".to_string(),
+                div { class: "lifecycle-list",
+                    for action in model.lifecycle_actions.clone() {
+                        div { class: if action.enabled { "lifecycle-row enabled" } else { "lifecycle-row disabled" },
+                            div {
+                                div { class: "row-title", "{action.action.label()}" }
+                                if let Some(reason) = action.reason.clone() {
+                                    div { class: "row-sub", "{reason}" }
+                                } else if action.action == RouterLifecycleAction::ShutdownSigned {
+                                    div { class: "row-sub", "Requires mutation preflight and custodian authorization." }
+                                } else if action.action == RouterLifecycleAction::Detach {
+                                    div { class: "row-sub", "Closes this dashboard binding; the engine keeps running." }
+                                }
+                            }
+                            StatusChip {
+                                label: if action.enabled { "available".to_string() } else { "unavailable".to_string() },
+                                tone: if action.enabled { "good".to_string() } else { "muted".to_string() }
+                            }
+                        }
+                    }
+                }
+            }
+            Panel { title: "Quick Evidence".to_string(),
+                div { class: "dense-table evidence-table",
+                    div { class: "table-head", span { "Area" } span { "Evidence" } span { "State" } }
+                    div { class: "table-row", span { "Engine" } span { "{state.profile.endpoint}" } span { "{state.profile.capabilities.nfd_basic.label()}" } }
+                    div { class: "table-row", span { "Trust" } span { "TrustContext and custodian posture" } span { "{state.trust.label()}" } }
+                    div { class: "table-row", span { "Observe" } span { "{observe.prefix}" } span { "{observe.source.label()}" } }
+                    div { class: "table-row", span { "Tools" } span { "current dashboard run" } span { "{active_tool_count} active" } }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CapabilityLine(label: String, enabled: bool) -> Element {
+    rsx! {
+        div { class: "capability-line",
+            span { "{label}" }
+            StatusChip {
+                label: if enabled { "available".to_string() } else { "unavailable".to_string() },
+                tone: if enabled { "good".to_string() } else { "muted".to_string() }
             }
         }
     }
@@ -4268,6 +4449,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 
 .workspace { padding: var(--pad); min-width: 0; }
 .view-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr); gap: var(--gap); align-items: start; }
+.operations-grid { grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); }
 .observe-grid, .engine-grid, .tools-grid { grid-template-columns: minmax(0, 1fr) minmax(360px, .8fr); }
 .tools-grid-collapsed { grid-template-columns: minmax(0, 1fr) 54px; }
 .settings-grid { grid-template-columns: minmax(380px, 1fr) minmax(420px, 1.05fr); }
@@ -4304,6 +4486,16 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .row-title { font-weight: 700; font-size: var(--font-sm); }
 .row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .metric { color: var(--muted); font-size: var(--font-xs); white-space: nowrap; }
+.summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; }
+.capability-list, .lifecycle-list { display: grid; gap: 6px; }
+.capability-line, .lifecycle-row {
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center;
+  min-height: var(--row); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); padding: 7px 8px;
+}
+.lifecycle-row.disabled { opacity: .74; }
+.evidence-table .table-head, .evidence-table .table-row {
+  grid-template-columns: minmax(0, .65fr) minmax(0, 1.8fr) minmax(0, .8fr);
+}
 .stage-strip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; margin-bottom: 10px; }
 .stage { min-height: 42px; display: grid; place-items: center; border-radius: 6px; border: 1px solid var(--border); font-size: var(--font-xs); }
 .live-stage-strip { margin-top: 10px; }
@@ -4692,7 +4884,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .sidebar { display: none; }
   .operator-band { grid-template-columns: 1fr; }
   .operator-actions { justify-content: flex-start; }
-  .view-grid, .observe-grid, .engine-grid, .tools-grid, .tools-grid-collapsed { grid-template-columns: 1fr; }
+  .view-grid, .operations-grid, .observe-grid, .engine-grid, .tools-grid, .tools-grid-collapsed { grid-template-columns: 1fr; }
   .trust-main-grid, .trust-main-grid.secondary { grid-template-columns: 1fr; }
   .trust-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .modal-section-grid, .modal-kv-grid { grid-template-columns: 1fr; }
@@ -4703,7 +4895,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   }
   .tool-detail-rail .rail-toggle, .tool-detail-rail .rail-icon { width: 32px; min-height: 30px; }
   .bottom-nav {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; display: grid; grid-template-columns: repeat(5, 1fr);
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; display: grid; grid-template-columns: repeat(6, 1fr);
     border-top: 1px solid var(--border); background: rgba(11, 14, 17, 0.97); padding: 5px;
   }
   .bottom-item { text-align: center; padding: 8px 2px; font-size: 11px; }
@@ -4720,6 +4912,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .operator-message { align-items: flex-start; flex-direction: column; gap: 3px; }
   .workspace { padding: 8px; }
   .panel { border-radius: 6px; }
+  .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .capability-line, .lifecycle-row { grid-template-columns: 1fr; align-items: start; }
   .trace-row { grid-template-columns: 1fr 1fr; }
   .bridge-status { align-items: flex-start; flex-direction: column; }
   .log-row { grid-template-columns: 1fr; }
@@ -4771,6 +4965,9 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .matrix-head { display: none; }
   .matrix-row { grid-template-columns: 1fr; gap: 2px; padding: 6px; }
   .matrix-row span { padding: 2px 0; }
+  .evidence-table .table-head { display: none; }
+  .evidence-table .table-row { grid-template-columns: 1fr; padding: 6px; gap: 2px; }
+  .evidence-table .table-row span { padding: 2px 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

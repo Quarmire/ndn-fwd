@@ -17,6 +17,7 @@ pub mod identity;
 pub mod mutation;
 pub mod network;
 pub mod observe;
+pub mod operations;
 pub mod platform;
 pub mod tools;
 
