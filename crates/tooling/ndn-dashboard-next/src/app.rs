@@ -5,6 +5,7 @@ use dioxus::prelude::*;
 use crate::client::{
     DashboardClient, MockDashboardClient, ProbeOutcome, ProbeTranscript, state_from_probe,
 };
+use crate::config::{ConfigPreset, DashboardSettingsDraft, RouterConfigDraft};
 use crate::core::{
     DashboardPreferences, DashboardState, Density, FeatureState, PlatformKind, SavedAttachTarget,
     capability_matrix,
@@ -3114,6 +3115,35 @@ fn SettingsView(
         .map(|target| target.platform_status(state.platform).is_available())
         .unwrap_or(false);
     let rows = capability_matrix(&state.profile);
+    let mut selected_preset = use_signal(|| ConfigPreset::LocalLab);
+    let mut router_draft = use_signal(|| RouterConfigDraft::preset(ConfigPreset::LocalLab));
+    let mut dashboard_draft =
+        use_signal(|| DashboardSettingsDraft::for_platform(services.kind, preferences.density));
+    let current_router = RouterConfigDraft::preset(match state.platform {
+        PlatformKind::Browser => ConfigPreset::BrowserSandbox,
+        PlatformKind::Desktop => ConfigPreset::LocalLab,
+    });
+    let router_diff = router_draft.read().diff_from(&current_router);
+    let router_toml = router_draft
+        .read()
+        .render_toml()
+        .unwrap_or_else(|error| format!("# render error: {error}"));
+    let dashboard_json = dashboard_draft
+        .read()
+        .export_json()
+        .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"));
+    let router_toml_for_export = router_toml.clone();
+    let router_toml_for_start = router_toml.clone();
+    let config_write_tone = if RouterConfigDraft::can_write(state.platform) {
+        "good"
+    } else {
+        "amber"
+    };
+    let config_write_label = if RouterConfigDraft::can_write(state.platform) {
+        "write path"
+    } else {
+        "read-only"
+    };
 
     rsx! {
         div { class: "view-grid settings-grid", "data-testid": "workspace-settings",
@@ -3184,8 +3214,208 @@ fn SettingsView(
                     div { class: "kv", span { "Clipboard" } strong { "{services.clipboard}" } }
                     div { class: "kv", span { "Notifications" } strong { "{services.notifications}" } }
                 }
-                div { class: "compact-copy",
-                    "Browser deployment is treated as a static app with browser-safe attach transports. Desktop adds local socket and process workflows while sharing the same core state."
+            }
+            Panel { title: "Dashboard settings".to_string(),
+                div { class: "mutation-grid",
+                    label { class: "tool-field",
+                        span { "Node prefix" }
+                        input {
+                            r#type: "text",
+                            value: "{dashboard_draft.read().node_prefix}",
+                            "aria-label": "Dashboard node prefix",
+                            oninput: move |event| dashboard_draft.write().node_prefix = event.value()
+                        }
+                    }
+                    label { class: "tool-field",
+                        span { "Result limit" }
+                        input {
+                            r#type: "number",
+                            min: "10",
+                            value: "{dashboard_draft.read().max_tool_results}",
+                            "aria-label": "Maximum tool results",
+                            oninput: move |event| {
+                                if let Ok(value) = event.value().parse::<usize>() {
+                                    dashboard_draft.write().max_tool_results = value;
+                                }
+                            }
+                        }
+                    }
+                    label { class: "tool-check",
+                        input {
+                            r#type: "checkbox",
+                            checked: dashboard_draft.read().auto_start_ping_server,
+                            onchange: move |event| dashboard_draft.write().auto_start_ping_server = event.checked()
+                        }
+                        span { "ping server" }
+                    }
+                    label { class: "tool-check",
+                        input {
+                            r#type: "checkbox",
+                            checked: dashboard_draft.read().auto_start_iperf_server,
+                            onchange: move |event| dashboard_draft.write().auto_start_iperf_server = event.checked()
+                        }
+                        span { "iperf server" }
+                    }
+                }
+                textarea {
+                    class: "code-preview",
+                    readonly: true,
+                    "aria-label": "Dashboard settings export",
+                    value: "{dashboard_json}"
+                }
+            }
+            Panel { title: "Router config".to_string(),
+                div { class: "panel-toolbar",
+                    StatusChip { label: config_write_label.to_string(), tone: config_write_tone.to_string() }
+                    for preset in ConfigPreset::ALL {
+                        button {
+                            class: if *selected_preset.read() == preset { "tool-button primary" } else { "tool-button" },
+                            "aria-label": "Apply {preset.label()} config preset",
+                            onclick: move |_| {
+                                selected_preset.set(preset);
+                                router_draft.set(RouterConfigDraft::preset(preset));
+                            },
+                            "{preset.label()}"
+                        }
+                    }
+                }
+                div { class: "mutation-grid",
+                    label { class: "tool-field",
+                        span { "Router name" }
+                        input {
+                            r#type: "text",
+                            value: "{router_draft.read().router_name}",
+                            "aria-label": "Router name",
+                            oninput: move |event| router_draft.write().router_name = event.value()
+                        }
+                    }
+                    label { class: "tool-field",
+                        span { "Mgmt socket" }
+                        input {
+                            r#type: "text",
+                            value: "{router_draft.read().management_socket}",
+                            "aria-label": "Management socket",
+                            oninput: move |event| router_draft.write().management_socket = event.value()
+                        }
+                    }
+                    label { class: "tool-field",
+                        span { "CS bytes" }
+                        input {
+                            r#type: "number",
+                            min: "0",
+                            value: "{router_draft.read().cs_capacity_bytes}",
+                            "aria-label": "Content store capacity in bytes",
+                            oninput: move |event| {
+                                if let Ok(value) = event.value().parse::<u64>() {
+                                    router_draft.write().cs_capacity_bytes = value;
+                                }
+                            }
+                        }
+                    }
+                    label { class: "tool-field",
+                        span { "Discovery prefix" }
+                        input {
+                            r#type: "text",
+                            value: "{router_draft.read().discovery.service_prefix}",
+                            "aria-label": "Discovery service prefix",
+                            oninput: move |event| router_draft.write().discovery.service_prefix = event.value()
+                        }
+                    }
+                    label { class: "tool-field",
+                        span { "Face URI" }
+                        input {
+                            r#type: "text",
+                            value: "{router_draft.read().faces.first().map(|face| face.uri.clone()).unwrap_or_default()}",
+                            "aria-label": "Startup face URI",
+                            oninput: move |event| {
+                                let mut draft = router_draft.write();
+                                if let Some(face) = draft.faces.first_mut() {
+                                    face.uri = event.value();
+                                }
+                            }
+                        }
+                    }
+                    label { class: "tool-field",
+                        span { "Route prefix" }
+                        input {
+                            r#type: "text",
+                            value: "{router_draft.read().routes.first().map(|route| route.prefix.clone()).unwrap_or_default()}",
+                            "aria-label": "Startup route prefix",
+                            oninput: move |event| {
+                                let mut draft = router_draft.write();
+                                if let Some(route) = draft.routes.first_mut() {
+                                    route.prefix = event.value();
+                                }
+                            }
+                        }
+                    }
+                    label { class: "tool-field",
+                        span { "Trust context" }
+                        input {
+                            r#type: "text",
+                            value: "{router_draft.read().security.trust_context}",
+                            "aria-label": "Startup trust context",
+                            oninput: move |event| router_draft.write().security.trust_context = event.value()
+                        }
+                    }
+                    label { class: "tool-check",
+                        input {
+                            r#type: "checkbox",
+                            checked: router_draft.read().discovery.enabled,
+                            onchange: move |event| router_draft.write().discovery.enabled = event.checked()
+                        }
+                        span { "discovery" }
+                    }
+                    label { class: "tool-check",
+                        input {
+                            r#type: "checkbox",
+                            checked: router_draft.read().security.require_signed_commands,
+                            onchange: move |event| router_draft.write().security.require_signed_commands = event.checked()
+                        }
+                        span { "signed mgmt" }
+                    }
+                }
+                div { class: "dense-table config-diff-table",
+                    div { class: "table-head", span { "Field" } span { "Current" } span { "Draft" } span { "Apply" } }
+                    if router_diff.is_empty() {
+                        div { class: "table-row", span { "clean" } span { "-" } span { "-" } span { "live" } }
+                    }
+                    for diff in router_diff.clone() {
+                        div { class: "table-row",
+                            span { "{diff.field}" }
+                            span { "{diff.current}" }
+                            span { "{diff.draft}" }
+                            span {
+                                if diff.restart_required { "restart" } else { "runtime" }
+                            }
+                        }
+                    }
+                }
+                textarea {
+                    class: "code-preview tall",
+                    readonly: true,
+                    "aria-label": "Router TOML preview",
+                    value: "{router_toml}"
+                }
+                div { class: "modal-action-row",
+                    button {
+                        class: "tool-button",
+                        disabled: !RouterConfigDraft::can_write(state.platform),
+                        "aria-label": "Export router config TOML",
+                        onclick: move |_| {
+                            let _ = platform::download_text("ndn-dashboard-next-router.toml", &router_toml_for_export);
+                        },
+                        "export TOML"
+                    }
+                    button {
+                        class: "tool-button primary",
+                        disabled: !RouterConfigDraft::can_write(state.platform),
+                        "aria-label": "Stage router config for desktop start",
+                        onclick: move |_| {
+                            let _ = platform::download_text("ndn-dashboard-next-start.toml", &router_toml_for_start);
+                        },
+                        "stage start config"
+                    }
                 }
             }
             Panel { title: "Recent targets".to_string(),
@@ -3606,6 +3836,16 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .strategy-table .table-head, .strategy-table .table-row {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.7fr) .7fr;
 }
+.config-diff-table { margin: 10px 0; }
+.config-diff-table .table-head, .config-diff-table .table-row {
+  grid-template-columns: minmax(0, .8fr) minmax(0, 1fr) minmax(0, 1fr) .55fr;
+}
+.code-preview {
+  width: 100%; min-height: 132px; resize: vertical; margin-top: 8px; padding: 10px;
+  border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2);
+  color: var(--text); font: 11px/1.45 var(--mono); white-space: pre; overflow: auto;
+}
+.code-preview.tall { min-height: 240px; }
 .source-grid { display: grid; gap: 5px; margin-top: 10px; }
 .source-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px;
