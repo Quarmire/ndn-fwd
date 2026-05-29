@@ -7,7 +7,9 @@ use crate::client::{
     DashboardClient, MockDashboardClient, ProbeOutcome, ProbeResult, ProbeTranscript,
     state_from_probe,
 };
-use crate::config::{ConfigPreset, DashboardSettingsDraft, RouterConfigDraft};
+use crate::config::{
+    ConfigPreset, DashboardSettingsDraft, RouterConfigDraft, StartupFaceDraft, StartupRouteDraft,
+};
 use crate::core::{
     DashboardPreferences, DashboardState, Density, FeatureState, PlatformKind, SavedAttachTarget,
     capability_matrix,
@@ -31,7 +33,9 @@ use crate::observe::{
     correlated_logs_for_trace, filter_traces, pit_fanout_rows, poll_observe_summary,
     span_tree_rows,
 };
-use crate::operations::{OperationsHomeModel, RouterLifecycleAction};
+use crate::operations::{
+    OperationsHomeModel, RouterLifecycleAction, StartRouterModalModel, StartRouterTab,
+};
 use crate::platform::{self, PlatformServices, density_storage_label, preference_key};
 use crate::tools::{
     IperfWorkflowConfig, PeekWorkflowConfig, PingWorkflowConfig, PutWorkflowConfig, ToolKind,
@@ -178,6 +182,16 @@ pub fn App() -> Element {
     let mut last_probe_at = use_signal(|| None::<u64>);
     let mut last_attach_error = use_signal(|| None::<String>);
     let mut forwarder_notice = use_signal(|| None::<ForwarderActionNotice>);
+    let mut start_router_open = use_signal(|| false);
+    let mut start_router_tab = use_signal(|| StartRouterTab::QuickStart);
+    let mut start_router_draft = use_signal(move || {
+        RouterConfigDraft::preset(match platform {
+            PlatformKind::Browser => ConfigPreset::BrowserSandbox,
+            PlatformKind::Desktop => ConfigPreset::LocalLab,
+        })
+    });
+    let mut start_router_raw_toml = use_signal(String::new);
+    let mut start_router_parse_error = use_signal(|| None::<String>);
 
     let density = state.read().density;
     let density_class = match density {
@@ -344,25 +358,16 @@ pub fn App() -> Element {
                             }
                         }
                     },
-                    on_start_forwarder: move |toml: String| {
-                        match platform::start_local_forwarder_with_config(&toml) {
-                            Ok(launch) => {
-                                forwarder_notice.set(Some(ForwarderActionNotice::good(
-                                    "Local ndn-fwd started",
-                                    format!(
-                                        "pid {} using {}. Probe the local target to attach.",
-                                        launch.pid, launch.config_path
-                                    ),
-                                )));
-                                last_attach_error.set(None);
-                            }
-                            Err(err) => {
-                                forwarder_notice.set(Some(ForwarderActionNotice::bad(
-                                    "Could not start ndn-fwd",
-                                    err,
-                                )));
-                            }
+                    on_open_start_router: move |_| {
+                        start_router_tab.set(StartRouterTab::QuickStart);
+                        if start_router_raw_toml.read().is_empty() {
+                            let toml = start_router_draft
+                                .read()
+                                .render_toml()
+                                .unwrap_or_default();
+                            start_router_raw_toml.set(toml);
                         }
+                        start_router_open.set(true);
                     },
                     on_stop_forwarder: move |_| {
                         match platform::stop_local_forwarder() {
@@ -394,6 +399,10 @@ pub fn App() -> Element {
                                 active_tools: tools.clone(),
                                 last_attach_error: attach_error.clone(),
                                 start_notice: start_notice.clone(),
+                                on_open_start_router: move |_| {
+                                    start_router_tab.set(StartRouterTab::QuickStart);
+                                    start_router_open.set(true);
+                                },
                             }
                         },
                         Workspace::Observe => rsx! { ObserveView { summary: observe } },
@@ -602,6 +611,65 @@ pub fn App() -> Element {
                     }
                 }
             }
+            if *start_router_open.read() {
+                StartRouterModal {
+                    platform: current.platform,
+                    active_tab: *start_router_tab.read(),
+                    draft: start_router_draft.read().clone(),
+                    current_config: RouterConfigDraft::preset(match current.platform {
+                        PlatformKind::Browser => ConfigPreset::BrowserSandbox,
+                        PlatformKind::Desktop => ConfigPreset::LocalLab,
+                    }),
+                    raw_toml: start_router_raw_toml.read().clone(),
+                    parse_error: start_router_parse_error.read().clone(),
+                    start_notice: start_notice.clone(),
+                    on_close: move |_| start_router_open.set(false),
+                    on_tab: move |tab| start_router_tab.set(tab),
+                    on_update: move |draft: RouterConfigDraft| {
+                        let toml = draft.render_toml().unwrap_or_default();
+                        start_router_raw_toml.set(toml);
+                        start_router_parse_error.set(None);
+                        start_router_draft.set(draft);
+                    },
+                    on_raw_toml: move |raw: String| {
+                        start_router_raw_toml.set(raw);
+                        start_router_parse_error.set(None);
+                    },
+                    on_apply_raw: move |raw: String| {
+                        match RouterConfigDraft::parse_toml(&raw) {
+                            Ok(draft) => {
+                                start_router_draft.set(draft);
+                                start_router_parse_error.set(None);
+                            }
+                            Err(err) => start_router_parse_error.set(Some(err)),
+                        }
+                    },
+                    on_start: move |toml: String| {
+                        match platform::start_local_forwarder_with_config(&toml) {
+                            Ok(launch) => {
+                                forwarder_notice.set(Some(ForwarderActionNotice::good(
+                                    "Local ndn-fwd started",
+                                    format!(
+                                        "pid {} using {}. Probe the local target to attach.",
+                                        launch.pid, launch.config_path
+                                    ),
+                                )));
+                                last_attach_error.set(None);
+                                start_router_open.set(false);
+                            }
+                            Err(err) => {
+                                forwarder_notice.set(Some(ForwarderActionNotice::bad(
+                                    "Could not start ndn-fwd",
+                                    err,
+                                )));
+                            }
+                        }
+                    },
+                    on_export: move |toml: String| {
+                        let _ = platform::download_text("ndn-dashboard-next-router.toml", &toml);
+                    }
+                }
+            }
         }
     }
 }
@@ -718,7 +786,7 @@ fn OperatorConnectBand(
     start_notice: Option<ForwarderActionNotice>,
     on_probe_selected: EventHandler<()>,
     on_probe_default: EventHandler<()>,
-    on_start_forwarder: EventHandler<String>,
+    on_open_start_router: EventHandler<()>,
     on_stop_forwarder: EventHandler<()>,
     on_open_settings: EventHandler<()>,
 ) -> Element {
@@ -783,14 +851,10 @@ fn OperatorConnectBand(
                 button {
                     class: "tool-button primary",
                     disabled: !launch_enabled,
-                    title: if launch_enabled { "Start a local ndn-fwd process with the local lab preset" } else { "Browsers cannot start local processes" },
-                    "aria-label": "Start local ndn-fwd",
-                    onclick: move |_| {
-                        if let Ok(toml) = RouterConfigDraft::preset(ConfigPreset::LocalLab).render_toml() {
-                            on_start_forwarder.call(toml);
-                        }
-                    },
-                    "start local"
+                    title: if launch_enabled { "Open router startup workflow" } else { "Browsers cannot start local processes" },
+                    "aria-label": "Open Start Router workflow",
+                    onclick: move |_| on_open_start_router.call(()),
+                    "start router"
                 }
                 button {
                     class: "tool-button",
@@ -828,6 +892,389 @@ fn OperatorConnectBand(
 }
 
 #[component]
+fn StartRouterModal(
+    platform: PlatformKind,
+    active_tab: StartRouterTab,
+    draft: RouterConfigDraft,
+    current_config: RouterConfigDraft,
+    raw_toml: String,
+    parse_error: Option<String>,
+    start_notice: Option<ForwarderActionNotice>,
+    on_close: EventHandler<()>,
+    on_tab: EventHandler<StartRouterTab>,
+    on_update: EventHandler<RouterConfigDraft>,
+    on_raw_toml: EventHandler<String>,
+    on_apply_raw: EventHandler<String>,
+    on_start: EventHandler<String>,
+    on_export: EventHandler<String>,
+) -> Element {
+    let model = StartRouterModalModel::new(platform, active_tab, draft.clone(), current_config);
+    let name_value = draft.router_name.clone();
+    let socket_value = draft.management_socket.clone();
+    let cs_value = draft.cs_capacity_bytes.to_string();
+    let discovery_value = draft.discovery.service_prefix.clone();
+    let trust_context_value = draft.security.trust_context.clone();
+    let face_value = draft
+        .faces
+        .first()
+        .map(|face| face.uri.clone())
+        .unwrap_or_default();
+    let route_prefix_value = draft
+        .routes
+        .first()
+        .map(|route| route.prefix.clone())
+        .unwrap_or_default();
+    let route_cost_value = draft
+        .routes
+        .first()
+        .map(|route| route.cost.to_string())
+        .unwrap_or_else(|| "10".into());
+    let draft_for_name = draft.clone();
+    let draft_for_socket = draft.clone();
+    let draft_for_cs = draft.clone();
+    let draft_for_face = draft.clone();
+    let draft_for_route_prefix = draft.clone();
+    let draft_for_route_cost = draft.clone();
+    let draft_for_discovery = draft.clone();
+    let draft_for_trust = draft.clone();
+    let draft_for_discovery_toggle = draft.clone();
+    let draft_for_signed_toggle = draft.clone();
+    let quick_preview = model.preview_toml.clone();
+    let export_preview = model.preview_toml.clone();
+    let start_preview = model.preview_toml.clone();
+    let apply_raw = raw_toml.clone();
+
+    rsx! {
+        div { class: "modal-backdrop", role: "presentation",
+            div {
+                class: "trust-modal router-modal",
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "Start Router",
+                div { class: "modal-head",
+                    div {
+                        span { "Operations" }
+                        strong { "Start Router" }
+                    }
+                    button {
+                        class: "modal-close",
+                        "aria-label": "Close Start Router",
+                        onclick: move |_| on_close.call(()),
+                        "close"
+                    }
+                }
+                div { class: "router-tab-row", role: "tablist", "aria-label": "Start Router sections",
+                    for tab in StartRouterTab::ALL {
+                        button {
+                            class: if model.active_tab == tab { "tool-button primary" } else { "tool-button" },
+                            role: "tab",
+                            "aria-selected": if model.active_tab == tab { "true" } else { "false" },
+                            onclick: move |_| on_tab.call(tab),
+                            "{tab.label()}"
+                        }
+                    }
+                }
+                if let Some(blocker) = model.blocker.clone() {
+                    div { class: "operator-message amber", role: "status",
+                        strong { "Startup unavailable" }
+                        span { "{blocker}" }
+                    }
+                }
+                if let Some(notice) = start_notice {
+                    div { class: "operator-message {notice.tone}", role: "status",
+                        strong { "{notice.title}" }
+                        span { "{notice.detail}" }
+                    }
+                }
+                div { class: "modal-body router-modal-body",
+                    match model.active_tab {
+                        StartRouterTab::QuickStart => rsx! {
+                            div { class: "modal-section-grid",
+                                div { class: "modal-section",
+                                    div { class: "mini-section-title", "Startup target" }
+                                    div { class: "modal-kv-grid",
+                                        div { class: "kv", span { "Router" } strong { "{model.draft.router_name}" } }
+                                        div { class: "kv", span { "Management" } strong { class: "mono", "{model.draft.management_socket}" } }
+                                        div { class: "kv", span { "Content store" } strong { "{model.draft.cs_capacity_bytes} bytes" } }
+                                        div { class: "kv", span { "Signed mgmt" } strong { if model.draft.security.require_signed_commands { "required" } else { "not required" } } }
+                                    }
+                                }
+                                div { class: "modal-section",
+                                    div { class: "mini-section-title", "Startup forwarding" }
+                                    div { class: "trust-modal-table cols-3",
+                                        for face in model.draft.faces.iter().cloned() {
+                                            div { class: "trust-modal-row",
+                                                strong { "face" }
+                                                span { class: "mono", "{face.uri}" }
+                                                StatusChip { label: if face.persist { "persist".to_string() } else { "temporary".to_string() }, tone: "neutral".to_string() }
+                                            }
+                                        }
+                                        for route in model.draft.routes.iter().cloned() {
+                                            div { class: "trust-modal-row",
+                                                strong { "{route.prefix}" }
+                                                span { class: "mono", "{route.face_uri}" }
+                                                StatusChip { label: format!("cost {}", route.cost), tone: "info".to_string() }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "modal-section wide",
+                                    div { class: "mini-section-title", "Generated TOML" }
+                                    textarea {
+                                        class: "code-preview tall router-preview",
+                                        readonly: true,
+                                        "aria-label": "Generated router TOML",
+                                        value: "{quick_preview}"
+                                    }
+                                }
+                            }
+                        },
+                        StartRouterTab::BuildConfig => rsx! {
+                            div { class: "trust-modal-stack",
+                                div { class: "mutation-grid",
+                                    label { class: "tool-field",
+                                        span { "Router name" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{name_value}",
+                                            "aria-label": "Router name",
+                                            oninput: move |event| {
+                                                let mut next = draft_for_name.clone();
+                                                next.router_name = event.value();
+                                                on_update.call(next);
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-field",
+                                        span { "Mgmt socket" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{socket_value}",
+                                            "aria-label": "Management socket",
+                                            oninput: move |event| {
+                                                let mut next = draft_for_socket.clone();
+                                                next.management_socket = event.value();
+                                                on_update.call(next);
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-field",
+                                        span { "CS bytes" }
+                                        input {
+                                            r#type: "number",
+                                            min: "0",
+                                            value: "{cs_value}",
+                                            "aria-label": "Content store capacity",
+                                            oninput: move |event| {
+                                                if let Ok(value) = event.value().parse::<u64>() {
+                                                    let mut next = draft_for_cs.clone();
+                                                    next.cs_capacity_bytes = value;
+                                                    on_update.call(next);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-field",
+                                        span { "Face URI" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{face_value}",
+                                            "aria-label": "Startup face URI",
+                                            oninput: move |event| {
+                                                let mut next = draft_for_face.clone();
+                                                let uri = event.value();
+                                                if let Some(face) = next.faces.first_mut() {
+                                                    face.uri = uri.clone();
+                                                } else if !uri.is_empty() {
+                                                    next.faces.push(StartupFaceDraft { uri: uri.clone(), persist: true });
+                                                }
+                                                if let Some(route) = next.routes.first_mut() {
+                                                    route.face_uri = uri;
+                                                }
+                                                on_update.call(next);
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-field",
+                                        span { "Route prefix" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{route_prefix_value}",
+                                            "aria-label": "Startup route prefix",
+                                            oninput: move |event| {
+                                                let mut next = draft_for_route_prefix.clone();
+                                                let prefix = event.value();
+                                                if let Some(route) = next.routes.first_mut() {
+                                                    route.prefix = prefix;
+                                                } else if !prefix.is_empty() {
+                                                    let face_uri = next.faces.first().map(|face| face.uri.clone()).unwrap_or_default();
+                                                    next.routes.push(StartupRouteDraft { prefix, face_uri, cost: 10 });
+                                                }
+                                                on_update.call(next);
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-field",
+                                        span { "Route cost" }
+                                        input {
+                                            r#type: "number",
+                                            min: "0",
+                                            value: "{route_cost_value}",
+                                            "aria-label": "Startup route cost",
+                                            oninput: move |event| {
+                                                if let Ok(cost) = event.value().parse::<u64>() {
+                                                    let mut next = draft_for_route_cost.clone();
+                                                    if let Some(route) = next.routes.first_mut() {
+                                                        route.cost = cost;
+                                                    }
+                                                    on_update.call(next);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-field",
+                                        span { "Discovery prefix" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{discovery_value}",
+                                            "aria-label": "Discovery service prefix",
+                                            oninput: move |event| {
+                                                let mut next = draft_for_discovery.clone();
+                                                next.discovery.service_prefix = event.value();
+                                                on_update.call(next);
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-field",
+                                        span { "Trust context" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{trust_context_value}",
+                                            "aria-label": "Trust context",
+                                            oninput: move |event| {
+                                                let mut next = draft_for_trust.clone();
+                                                next.security.trust_context = event.value();
+                                                on_update.call(next);
+                                            }
+                                        }
+                                    }
+                                    label { class: "tool-check",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: draft.discovery.enabled,
+                                            onchange: move |event| {
+                                                let mut next = draft_for_discovery_toggle.clone();
+                                                next.discovery.enabled = event.checked();
+                                                on_update.call(next);
+                                            }
+                                        }
+                                        span { "discovery" }
+                                    }
+                                    label { class: "tool-check",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: draft.security.require_signed_commands,
+                                            onchange: move |event| {
+                                                let mut next = draft_for_signed_toggle.clone();
+                                                next.security.require_signed_commands = event.checked();
+                                                on_update.call(next);
+                                            }
+                                        }
+                                        span { "signed management" }
+                                    }
+                                }
+                            }
+                        },
+                        StartRouterTab::LoadToml => rsx! {
+                            div { class: "trust-modal-stack",
+                                textarea {
+                                    class: "code-preview tall router-preview",
+                                    "aria-label": "Router TOML input",
+                                    value: "{raw_toml}",
+                                    oninput: move |event| on_raw_toml.call(event.value())
+                                }
+                                if let Some(error) = parse_error {
+                                    div { class: "operator-message bad", role: "alert",
+                                        strong { "TOML parse failed" }
+                                        span { "{error}" }
+                                    }
+                                }
+                                div { class: "modal-action-row",
+                                    button {
+                                        class: "tool-button primary",
+                                        "aria-label": "Apply router TOML",
+                                        onclick: move |_| on_apply_raw.call(apply_raw.clone()),
+                                        "apply TOML"
+                                    }
+                                }
+                            }
+                        },
+                        StartRouterTab::Presets => rsx! {
+                            div { class: "preset-grid",
+                                for preset in ConfigPreset::ALL {
+                                    button {
+                                        class: "target-row preset-card",
+                                        "aria-label": "Apply {preset.label()} router preset",
+                                        onclick: move |_| on_update.call(RouterConfigDraft::preset(preset)),
+                                        div {
+                                            div { class: "target-name", "{preset.label()}" }
+                                            div { class: "target-meta", "{RouterConfigDraft::preset(preset).management_socket}" }
+                                        }
+                                        StatusChip {
+                                            label: if RouterConfigDraft::preset(preset).security.require_signed_commands { "signed".to_string() } else { "unsigned".to_string() },
+                                            tone: "neutral".to_string()
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        StartRouterTab::CurrentConfig => rsx! {
+                            div { class: "trust-modal-stack",
+                                div { class: "dense-table config-diff-table",
+                                    div { class: "table-head", span { "Field" } span { "Current" } span { "Draft" } span { "Apply" } }
+                                    if model.diff.is_empty() {
+                                        div { class: "table-row", span { "clean" } span { "-" } span { "-" } span { "live" } }
+                                    }
+                                    for diff in model.diff.clone() {
+                                        div { class: "table-row",
+                                            span { "{diff.field}" }
+                                            span { "{diff.current}" }
+                                            span { "{diff.draft}" }
+                                            span { if diff.restart_required { "restart" } else { "runtime" } }
+                                        }
+                                    }
+                                }
+                                textarea {
+                                    class: "code-preview tall router-preview",
+                                    readonly: true,
+                                    "aria-label": "Current draft router TOML",
+                                    value: "{model.preview_toml}"
+                                }
+                            }
+                        },
+                    }
+                }
+                div { class: "modal-action-row router-modal-actions",
+                    button {
+                        class: "tool-button",
+                        "aria-label": "Export router TOML",
+                        onclick: move |_| on_export.call(export_preview.clone()),
+                        "export TOML"
+                    }
+                    button {
+                        class: "tool-button primary",
+                        disabled: !model.can_start,
+                        "aria-label": "Start local ndn-fwd with router config",
+                        onclick: move |_| on_start.call(start_preview.clone()),
+                        "start ndn-fwd"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn OperationsView(
     model: OperationsHomeModel,
     state: DashboardState,
@@ -836,6 +1283,7 @@ fn OperationsView(
     active_tools: Vec<ToolRun>,
     last_attach_error: Option<String>,
     start_notice: Option<ForwarderActionNotice>,
+    on_open_start_router: EventHandler<()>,
 ) -> Element {
     let attached = model.attach_state.is_attached();
     let target_label = model
@@ -954,6 +1402,16 @@ fn OperationsView(
                             StatusChip {
                                 label: if action.enabled { "available".to_string() } else { "unavailable".to_string() },
                                 tone: if action.enabled { "good".to_string() } else { "muted".to_string() }
+                            }
+                            if action.action == RouterLifecycleAction::StartRouter {
+                                button {
+                                    class: "icon-button",
+                                    disabled: !action.enabled,
+                                    title: "Open Start Router",
+                                    "aria-label": "Open Start Router workflow",
+                                    onclick: move |_| on_open_start_router.call(()),
+                                    "+"
+                                }
                             }
                         }
                     }
@@ -4492,7 +4950,14 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center;
   min-height: var(--row); border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); padding: 7px 8px;
 }
+.lifecycle-row { grid-template-columns: minmax(0, 1fr) auto auto; }
 .lifecycle-row.disabled { opacity: .74; }
+.icon-button {
+  width: 32px; height: 32px; display: grid; place-items: center; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface-raised); color: var(--text);
+  font-weight: 800; line-height: 1;
+}
+.icon-button:hover { border-color: var(--accent); color: var(--accent); background: rgba(24, 170, 255, .10); }
 .evidence-table .table-head, .evidence-table .table-row {
   grid-template-columns: minmax(0, .65fr) minmax(0, 1.8fr) minmax(0, .8fr);
 }
@@ -4683,6 +5148,20 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .modal-section-grid .wide { grid-column: 1 / -1; }
 .modal-kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .modal-action-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.router-modal { max-width: min(1120px, calc(100vw - 28px)); }
+.router-tab-row {
+  display: flex; gap: 6px; overflow-x: auto; padding: 10px 12px; border-bottom: 1px solid var(--border);
+}
+.router-modal-body { padding-bottom: 4px; }
+.router-preview { min-height: 280px; }
+.router-modal-actions {
+  justify-content: flex-end; padding: 10px 12px 12px; border-top: 1px solid var(--border);
+}
+.preset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 8px; }
+.preset-card {
+  width: 100%; color: inherit; text-align: left; cursor: pointer;
+}
+.preset-card:hover { border-color: var(--accent); background: rgba(24, 170, 255, .08); }
 .preflight-panel {
   display: grid; gap: 7px; padding: 9px; border: 1px solid rgba(24, 170, 255, .30);
   border-radius: 7px; background: rgba(24, 170, 255, .055);

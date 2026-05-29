@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::{ConfigDiff, RouterConfigDraft};
 use crate::core::{
     AttachMode, CapabilitySet, ForwarderProfile, PlatformKind, SavedAttachTarget,
     TargetPlatformStatus,
@@ -196,6 +197,81 @@ impl LifecycleActionState {
             action,
             enabled: false,
             reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartRouterTab {
+    QuickStart,
+    BuildConfig,
+    LoadToml,
+    Presets,
+    CurrentConfig,
+}
+
+impl StartRouterTab {
+    pub const ALL: [Self; 5] = [
+        Self::QuickStart,
+        Self::BuildConfig,
+        Self::LoadToml,
+        Self::Presets,
+        Self::CurrentConfig,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::QuickStart => "Quick start",
+            Self::BuildConfig => "Build config",
+            Self::LoadToml => "Load TOML",
+            Self::Presets => "Presets",
+            Self::CurrentConfig => "Current config",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartRouterModalModel {
+    pub platform: PlatformKind,
+    pub active_tab: StartRouterTab,
+    pub draft: RouterConfigDraft,
+    pub current_config: RouterConfigDraft,
+    pub diff: Vec<ConfigDiff>,
+    pub can_start: bool,
+    pub blocker: Option<String>,
+    pub preview_toml: String,
+}
+
+impl StartRouterModalModel {
+    pub fn new(
+        platform: PlatformKind,
+        active_tab: StartRouterTab,
+        draft: RouterConfigDraft,
+        current_config: RouterConfigDraft,
+    ) -> Self {
+        let diff = draft.diff_from(&current_config);
+        let preview = draft.render_toml();
+        let (preview_toml, render_error) = match preview {
+            Ok(toml) => (toml, None),
+            Err(err) => (format!("# render error: {err}"), Some(err)),
+        };
+        let blocker = if !RouterConfigDraft::can_write(platform) {
+            Some(
+                "Browsers cannot spawn local ndn-fwd; attach to an in-page engine, remote web target, external companion, or relay."
+                    .to_string(),
+            )
+        } else {
+            render_error.map(|err| format!("Router config cannot be rendered: {err}"))
+        };
+        Self {
+            platform,
+            active_tab,
+            draft,
+            current_config,
+            diff,
+            can_start: blocker.is_none(),
+            blocker,
+            preview_toml,
         }
     }
 }
@@ -473,5 +549,39 @@ mod tests {
                 .expect("stop action")
                 .enabled
         );
+    }
+
+    #[test]
+    fn start_router_model_blocks_browser_startup() {
+        let draft = RouterConfigDraft::preset(crate::config::ConfigPreset::BrowserSandbox);
+        let model = StartRouterModalModel::new(
+            PlatformKind::Browser,
+            StartRouterTab::QuickStart,
+            draft.clone(),
+            draft,
+        );
+
+        assert!(!model.can_start);
+        assert!(
+            model
+                .blocker
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Browsers cannot spawn local ndn-fwd")
+        );
+    }
+
+    #[test]
+    fn start_router_model_allows_desktop_toml_preview() {
+        let draft = RouterConfigDraft::preset(crate::config::ConfigPreset::LocalLab);
+        let model = StartRouterModalModel::new(
+            PlatformKind::Desktop,
+            StartRouterTab::QuickStart,
+            draft.clone(),
+            draft,
+        );
+
+        assert!(model.can_start);
+        assert!(model.preview_toml.contains("router_name"));
     }
 }
