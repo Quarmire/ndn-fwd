@@ -489,6 +489,16 @@ pub struct DashboardState {
 }
 
 impl DashboardState {
+    pub fn detached(platform: PlatformKind) -> Self {
+        Self {
+            platform,
+            density: Density::Compact,
+            profile: fixtures::unsupported_profile(),
+            trust: TrustPosture::Unsupported,
+            observe: ObservePosture::Unsupported,
+        }
+    }
+
     pub fn mock_ndnrs(platform: PlatformKind) -> Self {
         Self {
             platform,
@@ -605,6 +615,16 @@ mod tests {
             observe_from_capabilities(&profile.capabilities),
             ObservePosture::Enabled
         );
+    }
+
+    #[test]
+    fn detached_state_does_not_claim_live_capabilities() {
+        let state = DashboardState::detached(PlatformKind::Desktop);
+
+        assert_eq!(state.profile.kind, ForwarderKind::Unknown);
+        assert_eq!(state.trust, TrustPosture::Unsupported);
+        assert_eq!(state.observe, ObservePosture::Unsupported);
+        assert_eq!(state.profile.capabilities, CapabilitySet::unsupported());
     }
 
     #[test]

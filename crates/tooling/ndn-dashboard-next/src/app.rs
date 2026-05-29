@@ -4,7 +4,8 @@ use dioxus::prelude::*;
 
 use crate::audit::{AuditViewModel, LogLevel};
 use crate::client::{
-    DashboardClient, MockDashboardClient, ProbeOutcome, ProbeTranscript, state_from_probe,
+    DashboardClient, MockDashboardClient, ProbeOutcome, ProbeResult, ProbeTranscript,
+    state_from_probe,
 };
 use crate::config::{ConfigPreset, DashboardSettingsDraft, RouterConfigDraft};
 use crate::core::{
@@ -159,10 +160,10 @@ pub fn App() -> Element {
         platform::load_or_default_preferences(platform, client.attach_targets())
     };
     let initial_density = initial_preferences.density;
-    let mut active = use_signal(|| Workspace::Observe);
+    let mut active = use_signal(|| Workspace::Engine);
     let mut nav_collapsed = use_signal(|| false);
     let mut state = use_signal(move || {
-        let mut state = DashboardState::mock_ndnrs(platform);
+        let mut state = DashboardState::detached(platform);
         state.density = initial_density;
         state
     });
@@ -170,6 +171,7 @@ pub fn App() -> Element {
     let mut last_probe = use_signal(|| None::<ProbeTranscript>);
     let mut last_probe_at = use_signal(|| None::<u64>);
     let mut last_attach_error = use_signal(|| None::<String>);
+    let mut forwarder_notice = use_signal(|| None::<ForwarderActionNotice>);
 
     let density = state.read().density;
     let density_class = match density {
@@ -212,6 +214,8 @@ pub fn App() -> Element {
     let probe = last_probe.read().clone();
     let probe_at = *last_probe_at.read();
     let attach_error = last_attach_error.read().clone();
+    let selected_target = prefs.selected_target().cloned();
+    let start_notice = forwarder_notice.read().clone();
 
     rsx! {
         document::Link { rel: "manifest", href: "manifest.webmanifest" }
@@ -273,6 +277,99 @@ pub fn App() -> Element {
                         state.set(next);
                     }
                 }
+                OperatorConnectBand {
+                    state: current.clone(),
+                    selected: selected_target.clone(),
+                    last_probe_at_unix_s: probe_at,
+                    last_attach_error: attach_error.clone(),
+                    start_notice: start_notice.clone(),
+                    on_probe_selected: move |_| {
+                        let selected = preferences.read().selected_target().cloned();
+                        if let Some(target) = selected {
+                            let client = MockDashboardClient::new(platform);
+                            match client.probe(&target.attach_target()) {
+                                Ok(probe) => {
+                                    apply_probe_result(
+                                        platform,
+                                        probe,
+                                        Some(target),
+                                        state,
+                                        preferences,
+                                        last_probe,
+                                        last_probe_at,
+                                        last_attach_error,
+                                    );
+                                    forwarder_notice.set(None);
+                                }
+                                Err(err) => {
+                                    last_attach_error.set(Some(err.message().to_string()));
+                                }
+                            }
+                        } else {
+                            last_attach_error.set(Some("Select an attach target first.".into()));
+                        }
+                    },
+                    on_probe_default: move |_| {
+                        let client = MockDashboardClient::new(platform);
+                        if let Some(target) = client.attach_targets().first().cloned() {
+                            match client.probe(&target) {
+                                Ok(probe) => {
+                                    apply_probe_result(
+                                        platform,
+                                        probe,
+                                        None,
+                                        state,
+                                        preferences,
+                                        last_probe,
+                                        last_probe_at,
+                                        last_attach_error,
+                                    );
+                                    forwarder_notice.set(None);
+                                }
+                                Err(err) => {
+                                    last_attach_error.set(Some(err.message().to_string()));
+                                }
+                            }
+                        }
+                    },
+                    on_start_forwarder: move |toml: String| {
+                        match platform::start_local_forwarder_with_config(&toml) {
+                            Ok(launch) => {
+                                forwarder_notice.set(Some(ForwarderActionNotice::good(
+                                    "Local ndn-fwd started",
+                                    format!(
+                                        "pid {} using {}. Probe the local target to attach.",
+                                        launch.pid, launch.config_path
+                                    ),
+                                )));
+                                last_attach_error.set(None);
+                            }
+                            Err(err) => {
+                                forwarder_notice.set(Some(ForwarderActionNotice::bad(
+                                    "Could not start ndn-fwd",
+                                    err,
+                                )));
+                            }
+                        }
+                    },
+                    on_stop_forwarder: move |_| {
+                        match platform::stop_local_forwarder() {
+                            Ok(message) => {
+                                forwarder_notice.set(Some(ForwarderActionNotice::neutral(
+                                    "Local ndn-fwd stopped",
+                                    message,
+                                )));
+                            }
+                            Err(err) => {
+                                forwarder_notice.set(Some(ForwarderActionNotice::bad(
+                                    "Could not stop ndn-fwd",
+                                    err,
+                                )));
+                            }
+                        }
+                    },
+                    on_open_settings: move |_| active.set(Workspace::Settings)
+                }
 
                 section { class: "workspace",
                     match workspace {
@@ -301,6 +398,7 @@ pub fn App() -> Element {
                                 last_probe: probe.clone(),
                                 last_probe_at_unix_s: probe_at,
                                 last_attach_error: attach_error.clone(),
+                                start_notice: start_notice.clone(),
                                 on_select_target: move |id: String| {
                                     let mut next = preferences.read().clone();
                                     next.select(&id);
@@ -313,18 +411,17 @@ pub fn App() -> Element {
                                         let client = MockDashboardClient::new(platform);
                                         match client.probe(&target.attach_target()) {
                                             Ok(probe) => {
-                                                let density = state.read().density;
-                                                let mut next = state_from_probe(platform, probe.clone());
-                                                next.density = density;
-                                                let mut next_prefs = preferences.read().clone();
-                                                next_prefs.density = density;
-                                                next_prefs.remember_connected(target, 1_717_300_000);
-                                                platform::save_preferences(next_prefs.clone());
-                                                preferences.set(next_prefs);
-                                                last_probe.set(Some(probe.transcript));
-                                                last_probe_at.set(Some(1_717_300_000));
-                                                last_attach_error.set(None);
-                                                state.set(next);
+                                                apply_probe_result(
+                                                    platform,
+                                                    probe,
+                                                    Some(target),
+                                                    state,
+                                                    preferences,
+                                                    last_probe,
+                                                    last_probe_at,
+                                                    last_attach_error,
+                                                );
+                                                forwarder_notice.set(None);
                                             }
                                             Err(err) => {
                                                 last_attach_error.set(Some(err.message().to_string()));
@@ -342,7 +439,6 @@ pub fn App() -> Element {
                                     state.set(next);
                                 },
                                 on_mock_browser: move |_| {
-                                    let density = state.read().density;
                                     if let Some(target) = preferences
                                         .read()
                                         .saved_targets
@@ -352,17 +448,20 @@ pub fn App() -> Element {
                                     {
                                         let client = MockDashboardClient::new(platform);
                                         if let Ok(probe) = client.probe(&target.attach_target()) {
-                                            let mut next = state_from_probe(platform, probe.clone());
-                                            next.density = density;
-                                            last_probe.set(Some(probe.transcript));
-                                            last_probe_at.set(Some(1_717_300_000));
-                                            last_attach_error.set(None);
-                                            state.set(next);
+                                            apply_probe_result(
+                                                platform,
+                                                probe,
+                                                Some(target),
+                                                state,
+                                                preferences,
+                                                last_probe,
+                                                last_probe_at,
+                                                last_attach_error,
+                                            );
                                         }
                                     }
                                 },
                                 on_mock_nfd: move |_| {
-                                    let density = state.read().density;
                                     if let Some(target) = preferences
                                         .read()
                                         .saved_targets
@@ -372,17 +471,20 @@ pub fn App() -> Element {
                                     {
                                         let client = MockDashboardClient::new(platform);
                                         if let Ok(probe) = client.probe(&target.attach_target()) {
-                                            let mut next = state_from_probe(platform, probe.clone());
-                                            next.density = density;
-                                            last_probe.set(Some(probe.transcript));
-                                            last_probe_at.set(Some(1_717_300_000));
-                                            last_attach_error.set(None);
-                                            state.set(next);
+                                            apply_probe_result(
+                                                platform,
+                                                probe,
+                                                Some(target),
+                                                state,
+                                                preferences,
+                                                last_probe,
+                                                last_probe_at,
+                                                last_attach_error,
+                                            );
                                         }
                                     }
                                 },
                                 on_mock_yanfd: move |_| {
-                                    let density = state.read().density;
                                     if let Some(target) = preferences
                                         .read()
                                         .saved_targets
@@ -392,12 +494,16 @@ pub fn App() -> Element {
                                     {
                                         let client = MockDashboardClient::new(platform);
                                         if let Ok(probe) = client.probe(&target.attach_target()) {
-                                            let mut next = state_from_probe(platform, probe.clone());
-                                            next.density = density;
-                                            last_probe.set(Some(probe.transcript));
-                                            last_probe_at.set(Some(1_717_300_000));
-                                            last_attach_error.set(None);
-                                            state.set(next);
+                                            apply_probe_result(
+                                                platform,
+                                                probe,
+                                                Some(target),
+                                                state,
+                                                preferences,
+                                                last_probe,
+                                                last_probe_at,
+                                                last_attach_error,
+                                            );
                                         }
                                     }
                                 },
@@ -406,13 +512,53 @@ pub fn App() -> Element {
                                     if let Some(target) = client.attach_targets().first().cloned()
                                         && let Ok(probe) = client.probe(&target)
                                     {
-                                        let density = state.read().density;
-                                        let mut next = state_from_probe(platform, probe.clone());
-                                        next.density = density;
-                                        last_probe.set(Some(probe.transcript));
-                                        last_probe_at.set(Some(1_717_300_000));
-                                        last_attach_error.set(None);
-                                        state.set(next);
+                                        apply_probe_result(
+                                            platform,
+                                            probe,
+                                            None,
+                                            state,
+                                            preferences,
+                                            last_probe,
+                                            last_probe_at,
+                                            last_attach_error,
+                                        );
+                                        forwarder_notice.set(None);
+                                    }
+                                },
+                                on_start_forwarder: move |toml: String| {
+                                    match platform::start_local_forwarder_with_config(&toml) {
+                                        Ok(launch) => {
+                                            forwarder_notice.set(Some(ForwarderActionNotice::good(
+                                                "Local ndn-fwd started",
+                                                format!(
+                                                    "pid {} using {}. Probe the local target to attach.",
+                                                    launch.pid, launch.config_path
+                                                ),
+                                            )));
+                                            last_attach_error.set(None);
+                                        }
+                                        Err(err) => {
+                                            forwarder_notice.set(Some(ForwarderActionNotice::bad(
+                                                "Could not start ndn-fwd",
+                                                err,
+                                            )));
+                                        }
+                                    }
+                                },
+                                on_stop_forwarder: move |_| {
+                                    match platform::stop_local_forwarder() {
+                                        Ok(message) => {
+                                            forwarder_notice.set(Some(ForwarderActionNotice::neutral(
+                                                "Local ndn-fwd stopped",
+                                                message,
+                                            )));
+                                        }
+                                        Err(err) => {
+                                            forwarder_notice.set(Some(ForwarderActionNotice::bad(
+                                                "Could not stop ndn-fwd",
+                                                err,
+                                            )));
+                                        }
                                     }
                                 }
                             }
@@ -478,6 +624,183 @@ impl PlatformLabel for DashboardState {
 fn StatusChip(label: String, tone: String) -> Element {
     rsx! {
         span { class: "chip {tone}", role: "status", "aria-label": "{label}", "{label}" }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ForwarderActionNotice {
+    tone: &'static str,
+    title: String,
+    detail: String,
+}
+
+impl ForwarderActionNotice {
+    fn good(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            tone: "good",
+            title: title.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn bad(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            tone: "bad",
+            title: title.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn neutral(title: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            tone: "neutral",
+            title: title.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+fn apply_probe_result(
+    platform: PlatformKind,
+    probe: ProbeResult,
+    connected_target: Option<SavedAttachTarget>,
+    mut state: Signal<DashboardState>,
+    mut preferences: Signal<DashboardPreferences>,
+    mut last_probe: Signal<Option<ProbeTranscript>>,
+    mut last_probe_at: Signal<Option<u64>>,
+    mut last_attach_error: Signal<Option<String>>,
+) {
+    let density = state.read().density;
+    let mut next = state_from_probe(platform, probe.clone());
+    next.density = density;
+    let mut next_prefs = preferences.read().clone();
+    next_prefs.density = density;
+    if let Some(target) = connected_target {
+        next_prefs.remember_connected(target, 1_717_300_000);
+    }
+    platform::save_preferences(next_prefs.clone());
+    preferences.set(next_prefs);
+    last_probe.set(Some(probe.transcript));
+    last_probe_at.set(Some(1_717_300_000));
+    last_attach_error.set(None);
+    state.set(next);
+}
+
+#[component]
+fn OperatorConnectBand(
+    state: DashboardState,
+    selected: Option<SavedAttachTarget>,
+    last_probe_at_unix_s: Option<u64>,
+    last_attach_error: Option<String>,
+    start_notice: Option<ForwarderActionNotice>,
+    on_probe_selected: EventHandler<()>,
+    on_probe_default: EventHandler<()>,
+    on_start_forwarder: EventHandler<String>,
+    on_stop_forwarder: EventHandler<()>,
+    on_open_settings: EventHandler<()>,
+) -> Element {
+    let selected_available = selected
+        .as_ref()
+        .map(|target| target.platform_status(state.platform).is_available())
+        .unwrap_or(false);
+    let selected_label = selected
+        .as_ref()
+        .map(|target| target.label.clone())
+        .unwrap_or_else(|| "no target selected".into());
+    let selected_endpoint = selected
+        .as_ref()
+        .map(|target| target.endpoint.clone())
+        .unwrap_or_else(|| "open Settings to add or choose a target".into());
+    let connection_label = if last_probe_at_unix_s.is_some() {
+        "attached"
+    } else {
+        "not attached"
+    };
+    let connection_tone = if last_probe_at_unix_s.is_some() {
+        "good"
+    } else {
+        "amber"
+    };
+    let launch_enabled = state.platform == PlatformKind::Desktop;
+    rsx! {
+        section { class: "operator-band", "aria-label": "Forwarder connection controls",
+            div { class: "operator-status",
+                StatusChip { label: connection_label.to_string(), tone: connection_tone.to_string() }
+                div {
+                    div { class: "operator-title", "Forwarder" }
+                    div { class: "operator-main", "{state.profile.display_name()}" }
+                    div { class: "operator-meta mono", "{state.profile.endpoint}" }
+                }
+            }
+            div { class: "operator-status target-status",
+                StatusChip {
+                    label: if selected_available { "target ready".to_string() } else { "target unavailable".to_string() },
+                    tone: if selected_available { "neutral".to_string() } else { "muted".to_string() }
+                }
+                div {
+                    div { class: "operator-title", "Selected target" }
+                    div { class: "operator-main", "{selected_label}" }
+                    div { class: "operator-meta mono", "{selected_endpoint}" }
+                }
+            }
+            div { class: "operator-actions",
+                button {
+                    class: "tool-button primary",
+                    disabled: !selected_available,
+                    "aria-label": "Connect to selected attach target",
+                    onclick: move |_| on_probe_selected.call(()),
+                    "connect"
+                }
+                button {
+                    class: "tool-button",
+                    "aria-label": "Connect to default attach target",
+                    onclick: move |_| on_probe_default.call(()),
+                    "connect default"
+                }
+                button {
+                    class: "tool-button primary",
+                    disabled: !launch_enabled,
+                    title: if launch_enabled { "Start a local ndn-fwd process with the local lab preset" } else { "Browsers cannot start local processes" },
+                    "aria-label": "Start local ndn-fwd",
+                    onclick: move |_| {
+                        if let Ok(toml) = RouterConfigDraft::preset(ConfigPreset::LocalLab).render_toml() {
+                            on_start_forwarder.call(toml);
+                        }
+                    },
+                    "start local"
+                }
+                button {
+                    class: "tool-button",
+                    disabled: !launch_enabled,
+                    "aria-label": "Stop dashboard-started local ndn-fwd",
+                    onclick: move |_| on_stop_forwarder.call(()),
+                    "stop local"
+                }
+                button {
+                    class: "tool-button",
+                    "aria-label": "Open attach and deployment settings",
+                    onclick: move |_| on_open_settings.call(()),
+                    "settings"
+                }
+            }
+            if let Some(message) = last_attach_error {
+                div { class: "operator-message bad", role: "alert",
+                    strong { "Attach failed" }
+                    span { "{message}" }
+                }
+            } else if state.platform == PlatformKind::Browser && start_notice.is_none() {
+                div { class: "operator-message neutral", role: "status",
+                    strong { "Browser target" }
+                    span { "Local process start is desktop-only; connect browser engine, remote web, or relay." }
+                }
+            }
+            if let Some(notice) = start_notice {
+                div { class: "operator-message {notice.tone}", role: "status",
+                    strong { "{notice.title}" }
+                    span { "{notice.detail}" }
+                }
+            }
+        }
     }
 }
 
@@ -3269,6 +3592,7 @@ fn SettingsView(
     last_probe: Option<ProbeTranscript>,
     last_probe_at_unix_s: Option<u64>,
     last_attach_error: Option<String>,
+    start_notice: Option<ForwarderActionNotice>,
     on_select_target: EventHandler<String>,
     on_probe_selected: EventHandler<()>,
     on_mock_ndnrs: EventHandler<()>,
@@ -3276,6 +3600,8 @@ fn SettingsView(
     on_mock_nfd: EventHandler<()>,
     on_mock_yanfd: EventHandler<()>,
     on_probe_default: EventHandler<()>,
+    on_start_forwarder: EventHandler<String>,
+    on_stop_forwarder: EventHandler<()>,
 ) -> Element {
     let selected_id = preferences.selected_target_id.clone();
     let selected_available = preferences
@@ -3325,10 +3651,10 @@ fn SettingsView(
                         "probe selected"
                     }
                     button { class: "tool-button", "aria-label": "Probe default attach target", onclick: move |_| on_probe_default.call(()), "probe default" }
-                    button { class: "tool-button", "aria-label": "Switch to ndn-rs mock profile", onclick: move |_| on_mock_ndnrs.call(()), "ndn-rs" }
-                    button { class: "tool-button", "aria-label": "Switch to browser engine mock profile", onclick: move |_| on_mock_browser.call(()), "browser engine" }
-                    button { class: "tool-button", "aria-label": "Switch to NFD mock profile", onclick: move |_| on_mock_nfd.call(()), "NFD" }
-                    button { class: "tool-button", "aria-label": "Switch to YaNFD mock profile", onclick: move |_| on_mock_yanfd.call(()), "YaNFD" }
+                    button { class: "tool-button", "aria-label": "Switch to ndn-rs fixture profile", onclick: move |_| on_mock_ndnrs.call(()), "fixture ndn-rs" }
+                    button { class: "tool-button", "aria-label": "Switch to browser engine fixture profile", onclick: move |_| on_mock_browser.call(()), "fixture browser" }
+                    button { class: "tool-button", "aria-label": "Switch to NFD fixture profile", onclick: move |_| on_mock_nfd.call(()), "fixture NFD" }
+                    button { class: "tool-button", "aria-label": "Switch to YaNFD fixture profile", onclick: move |_| on_mock_yanfd.call(()), "fixture YaNFD" }
                 }
                 if let Some(message) = last_attach_error {
                     div { class: "inline-alert", role: "alert", "{message}" }
@@ -3578,11 +3904,22 @@ fn SettingsView(
                     button {
                         class: "tool-button primary",
                         disabled: !RouterConfigDraft::can_write(state.platform),
-                        "aria-label": "Stage router config for desktop start",
-                        onclick: move |_| {
-                            let _ = platform::download_text("ndn-dashboard-next-start.toml", &router_toml_for_start);
-                        },
-                        "stage start config"
+                        "aria-label": "Start local ndn-fwd with this router config",
+                        onclick: move |_| on_start_forwarder.call(router_toml_for_start.clone()),
+                        "start local ndn-fwd"
+                    }
+                    button {
+                        class: "tool-button",
+                        disabled: !RouterConfigDraft::can_write(state.platform),
+                        "aria-label": "Stop dashboard-started local ndn-fwd",
+                        onclick: move |_| on_stop_forwarder.call(()),
+                        "stop local"
+                    }
+                }
+                if let Some(notice) = start_notice {
+                    div { class: "operator-message {notice.tone}", role: "status",
+                        strong { "{notice.title}" }
+                        span { "{notice.detail}" }
                     }
                 }
             }
@@ -3899,6 +4236,35 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 }
 .density-toggle:hover, .primary-action:hover, .tool-button:hover { border-color: var(--border-strong); background: var(--surface-3); }
 .primary-action, .tool-button.primary { border-color: rgba(24, 170, 255, .62); color: var(--accent); }
+.operator-band {
+  display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.2fr) auto; gap: 8px;
+  align-items: stretch; padding: 10px var(--pad); border-bottom: 1px solid var(--border);
+  background:
+    linear-gradient(90deg, rgba(24, 170, 255, .12), rgba(99, 240, 255, .03) 42%, transparent),
+    rgba(13, 18, 24, .94);
+}
+.operator-status {
+  min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center;
+  border: 1px solid rgba(48, 57, 70, .8); border-radius: 8px; padding: 7px 8px; background: rgba(17, 24, 32, .82);
+}
+.operator-title { color: var(--faint); font-size: 10px; text-transform: uppercase; }
+.operator-main { font-size: var(--font-sm); font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operator-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operator-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
+.operator-actions .tool-button { min-width: 74px; }
+.operator-message {
+  grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; min-height: 30px;
+  border-radius: 6px; border: 1px solid var(--border); padding: 6px 8px; font-size: var(--font-xs);
+  background: var(--surface-2);
+}
+.operator-message strong { white-space: nowrap; }
+.operator-message span { color: var(--muted); overflow-wrap: anywhere; }
+.operator-message.good { border-color: rgba(103, 208, 141, .42); background: rgba(103, 208, 141, .08); }
+.operator-message.good strong { color: var(--green); }
+.operator-message.bad { border-color: rgba(255, 127, 135, .48); background: rgba(255, 127, 135, .09); }
+.operator-message.bad strong { color: var(--red); }
+.operator-message.neutral { border-color: rgba(137, 183, 255, .42); background: rgba(137, 183, 255, .08); }
+.operator-message.neutral strong { color: var(--blue); }
 
 .workspace { padding: var(--pad); min-width: 0; }
 .view-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr); gap: var(--gap); align-items: start; }
@@ -4324,6 +4690,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 @media (max-width: 980px) {
   .app-shell, .app-shell.nav-collapsed { grid-template-columns: 1fr; padding-bottom: 56px; }
   .sidebar { display: none; }
+  .operator-band { grid-template-columns: 1fr; }
+  .operator-actions { justify-content: flex-start; }
   .view-grid, .observe-grid, .engine-grid, .tools-grid, .tools-grid-collapsed { grid-template-columns: 1fr; }
   .trust-main-grid, .trust-main-grid.secondary { grid-template-columns: 1fr; }
   .trust-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4345,6 +4713,11 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 @media (max-width: 640px) {
   .attach-bar { align-items: stretch; flex-direction: column; gap: 7px; }
   .chip-row { justify-content: flex-start; }
+  .operator-band { padding: 8px; }
+  .operator-status { grid-template-columns: 1fr; gap: 5px; }
+  .operator-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .operator-actions .tool-button { min-width: 0; }
+  .operator-message { align-items: flex-start; flex-direction: column; gap: 3px; }
   .workspace { padding: 8px; }
   .panel { border-radius: 6px; }
   .trace-row { grid-template-columns: 1fr 1fr; }

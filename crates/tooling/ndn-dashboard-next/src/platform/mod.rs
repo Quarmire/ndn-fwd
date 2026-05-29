@@ -5,6 +5,10 @@ use crate::core::{DashboardPreferences, Density, PlatformKind};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::process::{Child, Command, Stdio};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlatformServices {
@@ -13,6 +17,23 @@ pub struct PlatformServices {
     pub clipboard: &'static str,
     pub notifications: &'static str,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalForwarderLaunch {
+    pub pid: u32,
+    pub binary: String,
+    pub config_path: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ManagedForwarder {
+    child: Child,
+    binary: PathBuf,
+    config_path: PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static LOCAL_FORWARDER: OnceLock<Mutex<Option<ManagedForwarder>>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreferenceSnapshot {
@@ -184,6 +205,85 @@ pub fn download_text(filename: &str, text: &str) -> Result<String, String> {
     Ok(path.display().to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_local_forwarder_with_config(toml: &str) -> Result<LocalForwarderLaunch, String> {
+    let store = LOCAL_FORWARDER.get_or_init(|| Mutex::new(None));
+    let mut guard = store
+        .lock()
+        .map_err(|_| "local forwarder process state is unavailable".to_string())?;
+    if let Some(managed) = guard.as_mut() {
+        match managed.child.try_wait() {
+            Ok(None) => {
+                return Err(format!(
+                    "ndn-fwd is already running from this dashboard as pid {}",
+                    managed.child.id()
+                ));
+            }
+            Ok(Some(_)) | Err(_) => {
+                *guard = None;
+            }
+        }
+    }
+
+    let binary = find_binary("ndn-fwd").ok_or_else(|| {
+        "ndn-fwd was not found in PATH or next to the dashboard executable".to_string()
+    })?;
+    let config_path = std::env::temp_dir().join("ndn-dashboard-next-start.toml");
+    std::fs::write(&config_path, toml).map_err(|err| err.to_string())?;
+
+    let child = Command::new(&binary)
+        .arg("--config")
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|err| format!("failed to start ndn-fwd: {err}"))?;
+    let launch = LocalForwarderLaunch {
+        pid: child.id(),
+        binary: binary.display().to_string(),
+        config_path: config_path.display().to_string(),
+    };
+    *guard = Some(ManagedForwarder {
+        child,
+        binary,
+        config_path,
+    });
+    Ok(launch)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn start_local_forwarder_with_config(_toml: &str) -> Result<LocalForwarderLaunch, String> {
+    Err("browser deployment cannot start a local ndn-fwd process".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn stop_local_forwarder() -> Result<String, String> {
+    let store = LOCAL_FORWARDER.get_or_init(|| Mutex::new(None));
+    let mut guard = store
+        .lock()
+        .map_err(|_| "local forwarder process state is unavailable".to_string())?;
+    let Some(mut managed) = guard.take() else {
+        return Err("no dashboard-started ndn-fwd process is running".into());
+    };
+    let pid = managed.child.id();
+    managed
+        .child
+        .kill()
+        .map_err(|err| format!("failed to stop ndn-fwd pid {pid}: {err}"))?;
+    let _ = managed.child.wait();
+    Ok(format!(
+        "stopped ndn-fwd pid {pid} ({}) that used {}",
+        managed.binary.display(),
+        managed.config_path.display()
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn stop_local_forwarder() -> Result<String, String> {
+    Err("browser deployment cannot stop a local ndn-fwd process".into())
+}
+
 #[cfg(target_arch = "wasm32")]
 pub fn download_text(filename: &str, text: &str) -> Result<String, String> {
     use wasm_bindgen::JsCast;
@@ -234,6 +334,27 @@ fn platform_store(platform: PlatformKind) -> Box<dyn PreferenceStore> {
     {
         Box::new(FilePreferenceStore::new(platform))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn find_binary(name: &str) -> Option<PathBuf> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let candidate = parent.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub fn preference_key(platform: PlatformKind) -> String {
