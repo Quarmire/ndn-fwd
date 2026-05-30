@@ -317,6 +317,17 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 input[type=range]{-webkit-appearance:none;height:4px;background:var(--border);border-radius:2px;border:none;padding:0;width:100%}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer}
 input[type=range]:focus{outline:none;border-color:transparent}
+/* Neutralize Dioxus's dev-mode toast overlay. In 0.7.x desktop *debug*
+   builds the harness injects `#__dx-toast` (class `.dx-toast`) at
+   z-index:2147483647; under our `body{display:flex}` its absolutely-
+   positioned box ends up spanning the whole window with
+   pointer-events:auto, so it silently swallows every click and hover and
+   the entire UI appears frozen. Disable pointer events on the container
+   (keep them on the inner card so a real rebuild/error toast stays
+   clickable). Harmless in release builds, where the element is absent. */
+.dx-toast{pointer-events:none!important}
+.dx-toast .dx-toast-inner{pointer-events:auto}
+
 /* ── Toasts ────────────────────────────────────────────────── */
 @keyframes toast-in{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}
 .toast-container{position:fixed;bottom:20px;right:20px;z-index:600;display:flex;flex-direction:column;gap:8px;max-width:340px;pointer-events:none}
