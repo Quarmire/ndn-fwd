@@ -158,6 +158,13 @@ th{text-align:left;padding:6px 12px;font-size:11px;color:var(--text-muted);text-
 td{padding:8px 12px;border-bottom:1px solid var(--border-subtle);color:var(--text);vertical-align:middle}
 tr:last-child td{border-bottom:none}
 tr:hover td{background:var(--surface2)}
+/* ── Resizable table columns (resizable.rs) ──────────────────── */
+.resizable{table-layout:fixed;width:100%}
+.resizable th{position:relative}
+.resizable th,.resizable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-resize{position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;user-select:none}
+.col-resize:hover{background:var(--accent-dim)}
+.col-resize-overlay{position:fixed;inset:0;z-index:9000;cursor:col-resize}
 .form-row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--border-subtle)}
 .form-group{display:flex;flex-direction:column;gap:4px}
 label{font-size:11px;color:var(--text-muted)}

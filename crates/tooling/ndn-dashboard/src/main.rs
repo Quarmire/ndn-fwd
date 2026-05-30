@@ -26,6 +26,7 @@ mod security_gate;
 mod security_state;
 mod security_surfaces;
 mod fonts;
+mod resizable;
 pub mod settings;
 mod signed_data_chain;
 mod styles;

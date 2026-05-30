@@ -1,4 +1,5 @@
 use crate::app::{AppCtx, DashCmd};
+use crate::resizable::use_col_widths;
 #[cfg(feature = "desktop")]
 use crate::tool_runner::fmt_bytes;
 #[cfg(not(feature = "desktop"))]
@@ -68,6 +69,9 @@ pub fn Overview() -> Element {
     // `n_faces` is always 0); the live count comes from the `faces/list`
     // dataset, the same source the ACTIVE FACES table below renders.
     let n_faces = faces.len() as u64;
+    // Operator-resizable column widths for the ACTIVE FACES table (px);
+    // held in a signal so they survive the 3s poll re-render.
+    let face_cols = use_col_widths(&[70.0, 90.0, 280.0, 280.0, 120.0, 90.0]);
     let n_routes = status.as_ref().map(|s| s.n_fib).unwrap_or(0);
     let n_cs = status.as_ref().map(|s| s.n_cs).unwrap_or(0);
     let n_pit = status.as_ref().map(|s| s.n_pit).unwrap_or(0);
@@ -195,15 +199,17 @@ pub fn Overview() -> Element {
                 if faces.is_empty() {
                     div { class: "empty", "No faces. Click + Add Face to create one." }
                 } else {
-                    table {
+                    {face_cols.overlay()}
+                    table { class: "resizable",
+                        {face_cols.colgroup()}
                         thead {
                             tr {
-                                th { "ID" }
-                                th { "Kind" }
-                                th { "Remote URI" }
-                                th { "Local URI" }
-                                th { "Persistency" }
-                                th { "" }
+                                th { "ID" {face_cols.handle(0)} }
+                                th { "Kind" {face_cols.handle(1)} }
+                                th { "Remote URI" {face_cols.handle(2)} }
+                                th { "Local URI" {face_cols.handle(3)} }
+                                th { "Persistency" {face_cols.handle(4)} }
+                                th { "" {face_cols.handle(5)} }
                             }
                         }
                         tbody {
