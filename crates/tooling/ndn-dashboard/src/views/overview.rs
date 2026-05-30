@@ -64,7 +64,10 @@ pub fn Overview() -> Element {
     let cs_hit_history = ctx.cs_hit_history.read();
     let face_throughput = ctx.face_throughput.read();
 
-    let n_faces = status.as_ref().map(|s| s.n_faces).unwrap_or(0);
+    // ForwarderStatus carries no face count (NFD's GeneralStatus has none —
+    // `n_faces` is always 0); the live count comes from the `faces/list`
+    // dataset, the same source the ACTIVE FACES table below renders.
+    let n_faces = faces.len() as u64;
     let n_routes = status.as_ref().map(|s| s.n_fib).unwrap_or(0);
     let n_cs = status.as_ref().map(|s| s.n_cs).unwrap_or(0);
     let n_pit = status.as_ref().map(|s| s.n_pit).unwrap_or(0);
