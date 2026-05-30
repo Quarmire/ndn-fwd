@@ -12,5 +12,25 @@ fn main() {
         )
         .init();
 
+    launch_app();
+}
+
+#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+fn launch_app() {
+    use dioxus::desktop::{Config, WindowBuilder};
+
+    dioxus::LaunchBuilder::desktop()
+        .with_cfg(
+            Config::new().with_window(
+                WindowBuilder::new()
+                    .with_title("ndn-dashboard-next")
+                    .with_always_on_top(false),
+            ),
+        )
+        .launch(ndn_dashboard_next::App);
+}
+
+#[cfg(not(all(feature = "desktop", not(target_arch = "wasm32"))))]
+fn launch_app() {
     dioxus::launch(ndn_dashboard_next::App);
 }

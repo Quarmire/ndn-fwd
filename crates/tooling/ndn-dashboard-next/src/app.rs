@@ -12,7 +12,8 @@ use crate::config::{
 };
 use crate::core::{
     AttachMode, AttachTarget, DashboardPreferences, DashboardState, Density, FeatureState,
-    ForwarderKind, PlatformKind, SavedAttachTarget, capability_matrix,
+    ForwarderKind, ObservePosture, PlatformKind, SavedAttachTarget, TrustPosture,
+    capability_matrix,
 };
 use crate::engine::{EngineDetail, EngineSummary, compact_count, poll_engine_summary};
 use crate::extensions::ExtensionRegistry;
@@ -974,55 +975,39 @@ fn OperatorConnectBand(
         .as_ref()
         .map(|target| target.endpoint.clone())
         .unwrap_or_else(|| "open Settings to add or choose a target".into());
-    let attach_label = if last_probe_at_unix_s.is_some() {
-        "attached"
+    let attached = last_probe_at_unix_s.is_some();
+    let attach_dot_class = if attached {
+        "status-dot good"
     } else {
-        "detached"
+        "status-dot amber"
     };
-    let attach_tone = if last_probe_at_unix_s.is_some() {
-        "good"
+    let target_dot_class = if selected_available {
+        "status-dot good"
     } else {
-        "amber"
-    };
-    let link_class = if last_probe_at_unix_s.is_some() {
-        "ops-link live"
-    } else {
-        "ops-link idle"
+        "status-dot muted"
     };
     let launch_enabled = state.platform == PlatformKind::Desktop;
     rsx! {
         section { class: "operator-band", "aria-label": "Engine attach controls",
-            div { class: "operator-rail",
-                div { class: "ops-mini-map", "aria-label": "Dashboard attach path",
-                    div { class: "ops-node dashboard-node",
-                        span { "Dashboard" }
-                        strong { "{state.platform_label()}" }
-                    }
-                    div { class: "{link_class}" }
-                    div { class: "ops-node",
-                        span { "Forwarder" }
-                        strong { "{state.profile.display_name()}" }
-                    }
-                    div { class: if selected_available { "ops-link live" } else { "ops-link idle" } }
-                    div { class: "ops-node",
-                        span { "Target" }
-                        strong { "{selected_label}" }
-                    }
+            div { class: "operator-compact",
+                div { class: "operator-line", title: "{state.profile.endpoint}",
+                    span { class: "{attach_dot_class}", "aria-label": if attached { "attached" } else { "detached" } }
+                    span { class: "operator-kicker", "Forwarder" }
+                    strong { "{state.profile.display_name()}" }
                 }
-                div { class: "operator-summary",
-                    StatusChip { label: attach_label.to_string(), tone: attach_tone.to_string() }
-                    StatusChip {
-                        label: if selected_available { "target ready".to_string() } else { "target unavailable".to_string() },
-                        tone: if selected_available { "neutral".to_string() } else { "muted".to_string() }
-                    }
-                    details { class: "operator-popover",
-                        summary { "details" }
-                        div { class: "operator-popover-body",
-                            div { class: "kv", span { "Forwarder" } strong { "{state.profile.display_name()}" } }
-                            div { class: "kv", span { "Endpoint" } strong { class: "mono", "{state.profile.endpoint}" } }
-                            div { class: "kv", span { "Selected target" } strong { "{selected_label}" } }
-                            div { class: "kv", span { "Target endpoint" } strong { class: "mono", "{selected_endpoint}" } }
-                        }
+                div { class: "operator-line", title: "{selected_endpoint}",
+                    span { class: "{target_dot_class}", "aria-label": if selected_available { "target ready" } else { "target unavailable" } }
+                    span { class: "operator-kicker", "Target" }
+                    strong { "{selected_label}" }
+                }
+                details { class: "operator-popover",
+                    summary { "details" }
+                    div { class: "operator-popover-body",
+                        div { class: "kv", span { "Platform" } strong { "{state.platform_label()}" } }
+                        div { class: "kv", span { "Forwarder" } strong { "{state.profile.display_name()}" } }
+                        div { class: "kv", span { "Endpoint" } strong { class: "mono", "{state.profile.endpoint}" } }
+                        div { class: "kv", span { "Selected target" } strong { "{selected_label}" } }
+                        div { class: "kv", span { "Target endpoint" } strong { class: "mono", "{selected_endpoint}" } }
                     }
                 }
             }
@@ -1038,7 +1023,7 @@ fn OperatorConnectBand(
                     class: "tool-button",
                     "aria-label": "Attach to default engine target",
                     onclick: move |_| on_probe_default.call(()),
-                    "attach default"
+                    "default"
                 }
                 button {
                     class: "tool-button primary",
@@ -1046,14 +1031,14 @@ fn OperatorConnectBand(
                     title: if launch_enabled { "Open router startup workflow" } else { "Browsers cannot start local processes" },
                     "aria-label": "Open Start Router workflow",
                     onclick: move |_| on_open_start_router.call(()),
-                    "start router"
+                    "start"
                 }
                 button {
                     class: "tool-button",
                     disabled: !launch_enabled,
                     "aria-label": "Stop dashboard-started local ndn-fwd",
                     onclick: move |_| on_stop_forwarder.call(()),
-                    "stop local"
+                    "stop"
                 }
                 button {
                     class: "tool-button",
@@ -1491,11 +1476,6 @@ fn OperationsView(
         .iter()
         .filter(|action| action.enabled)
         .count();
-    let ownership_label = model
-        .attach_state
-        .binding()
-        .map(|binding| binding.ownership.label().to_string())
-        .unwrap_or_else(|| "none".into());
     let target_label = model
         .selected_target
         .as_ref()
@@ -1510,16 +1490,6 @@ fn OperationsView(
         .selected_target_status
         .map(|status| status.label().to_string())
         .unwrap_or_else(|| "not selected".into());
-    let target_tone = model
-        .selected_target_status
-        .map(|status| {
-            if status.is_available() {
-                "neutral"
-            } else {
-                "amber"
-            }
-        })
-        .unwrap_or("muted");
     let active_tool_count = if attached {
         active_tools
             .iter()
@@ -1528,55 +1498,62 @@ fn OperationsView(
     } else {
         0
     };
-    let face_count = if attached {
-        engine.faces.len().to_string()
-    } else {
-        "not attached".to_string()
-    };
-    let route_count = if attached {
-        engine.routes.len().to_string()
-    } else {
-        "not attached".to_string()
-    };
+    let face_count = if attached { engine.faces.len() } else { 0 };
+    let route_count = if attached { engine.routes.len() } else { 0 };
     let trace_count = if attached && model.capability_summary.observe_available {
-        observe.recent.len().to_string()
+        observe.recent.len()
     } else {
-        "unavailable".to_string()
+        0
     };
-    let attach_path_class = if attached {
-        "ops-link live"
+    let attach_dot_class = if attached {
+        "status-dot good"
     } else {
-        "ops-link idle"
+        "status-dot amber"
+    };
+    let target_dot_class = if selected_available {
+        "status-dot good"
+    } else {
+        "status-dot muted"
+    };
+    let trust_dot_class = if matches!(state.trust, TrustPosture::Valid) {
+        "status-dot good"
+    } else {
+        "status-dot amber"
+    };
+    let observe_dot_class = if matches!(state.observe, ObservePosture::Enabled) {
+        "status-dot good"
+    } else {
+        "status-dot amber"
     };
     rsx! {
         div { class: "view-grid operations-grid", "data-testid": "workspace-operations",
             Panel { title: "Operations".to_string(),
                 div { class: "operations-board",
-                    div { class: "ops-map", "aria-label": "Dashboard attach and trust path",
-                        div { class: "ops-node dashboard-node",
-                            span { "Dashboard" }
-                            strong { "{state.platform_label()}" }
+                    div { class: "ops-command-surface",
+                        div { class: "ops-current", title: "{target_endpoint}",
+                            div { class: "ops-current-title",
+                                span { class: "{attach_dot_class}", "aria-label": model.run_state.label() }
+                                strong { "{state.profile.display_name()}" }
+                            }
+                            div { class: "row-sub mono", "{state.profile.endpoint}" }
+                            div { class: "ops-current-title target",
+                                span { class: "{target_dot_class}", "aria-label": "{target_status}" }
+                                strong { "{target_label}" }
+                            }
                         }
-                        div { class: "{attach_path_class}" }
-                        div { class: "ops-node forwarder-node",
-                            span { "Forwarder" }
-                            strong { "{state.profile.display_name()}" }
-                        }
-                        div { class: if selected_available { "ops-link live" } else { "ops-link idle" } }
-                        div { class: "ops-node target-node",
-                            span { "Target" }
-                            strong { "{target_label}" }
-                        }
-                        div { class: "ops-map-status",
-                            StatusChip { label: model.run_state.label().to_string(), tone: if attached { "good".to_string() } else { "amber".to_string() } }
-                            StatusChip { label: ownership_label, tone: if attached { "info".to_string() } else { "muted".to_string() } }
-                        }
-                    }
-                    div { class: "ops-command-stack",
-                        div { class: "panel-toolbar",
-                            StatusChip { label: state.trust.label().to_string(), tone: tone_for_trust(state.trust).to_string() }
-                            StatusChip { label: state.observe.label().to_string(), tone: tone_for_observe(state.observe).to_string() }
-                            StatusChip { label: state.platform_label(), tone: "neutral".to_string() }
+                        div { class: "ops-status-strip", "aria-label": "Operator posture",
+                            div { class: "ops-status-item", title: "{state.trust.label()}",
+                                span { class: "{trust_dot_class}" }
+                                strong { "Trust" }
+                            }
+                            div { class: "ops-status-item", title: "{state.observe.label()}",
+                                span { class: "{observe_dot_class}" }
+                                strong { "Observe" }
+                            }
+                            div { class: "ops-status-item", title: "{state.platform_label()}",
+                                span { class: "status-dot info" }
+                                strong { "Shell" }
+                            }
                         }
                         div { class: "operator-actions inline-actions",
                             button {
@@ -1584,27 +1561,27 @@ fn OperationsView(
                                 disabled: !selected_available,
                                 "aria-label": "Attach selected target from Operations",
                                 onclick: move |_| on_probe_selected.call(()),
-                                "attach selected"
+                                "attach"
                             }
                             button {
                                 class: "tool-button",
                                 "aria-label": "Attach default target from Operations",
                                 onclick: move |_| on_probe_default.call(()),
-                                "attach default"
+                                "default"
                             }
                             button {
                                 class: "tool-button primary",
                                 disabled: !start_available,
                                 "aria-label": "Open Start Router from Operations",
                                 onclick: move |_| on_open_start_router.call(()),
-                                "start router"
+                                "start"
                             }
                         }
                     }
                     div { class: "summary-grid",
-                        Metric { label: "Faces".to_string(), value: face_count }
-                        Metric { label: "Routes".to_string(), value: route_count }
-                        Metric { label: "Recent traces".to_string(), value: trace_count }
+                        Metric { label: "Faces".to_string(), value: face_count.to_string() }
+                        Metric { label: "Routes".to_string(), value: route_count.to_string() }
+                        Metric { label: "Recent traces".to_string(), value: trace_count.to_string() }
                         Metric { label: "Tool runs".to_string(), value: active_tool_count.to_string() }
                     }
                     div { class: "ops-capability-meter", "aria-label": "Capability availability",
@@ -1640,10 +1617,10 @@ fn OperationsView(
                 }
             }
             div { class: "ops-disclosure-grid",
-                details { class: "ops-disclosure", open: true,
+                details { class: "ops-disclosure",
                     summary {
                         span { "Target" }
-                        StatusChip { label: target_status, tone: target_tone.to_string() }
+                        span { class: "{target_dot_class}", title: "{target_status}" }
                     }
                     div { class: "target-row selected",
                         div {
@@ -1657,24 +1634,18 @@ fn OperationsView(
                 details { class: "ops-disclosure",
                     summary {
                         span { "Lifecycle" }
-                        span { class: "metric", "{lifecycle_available_count} available" }
+                        span { class: "metric", "{lifecycle_available_count}/{model.lifecycle_actions.len()}" }
                     }
-                    div { class: "lifecycle-list",
+                    div { class: "lifecycle-list compact-lifecycle",
                         for action in model.lifecycle_actions.clone() {
+                            {
+                                let action_dot_class = if action.enabled { "status-dot good" } else { "status-dot muted" };
+                                let action_title = action.reason.clone().unwrap_or_else(|| action.action.label().to_string());
+                                rsx! {
                             div { class: if action.enabled { "lifecycle-row enabled" } else { "lifecycle-row disabled" },
+                                span { class: "{action_dot_class}", title: "{action_title}" }
                                 div {
                                     div { class: "row-title", "{action.action.label()}" }
-                                    if let Some(reason) = action.reason.clone() {
-                                        div { class: "row-sub", "{reason}" }
-                                    } else if action.action == RouterLifecycleAction::ShutdownSigned {
-                                        div { class: "row-sub", "Requires mutation preflight and custodian authorization." }
-                                    } else if action.action == RouterLifecycleAction::Detach {
-                                        div { class: "row-sub", "Closes this dashboard binding; the engine keeps running." }
-                                    }
-                                }
-                                StatusChip {
-                                    label: if action.enabled { "available".to_string() } else { "unavailable".to_string() },
-                                    tone: if action.enabled { "good".to_string() } else { "muted".to_string() }
                                 }
                                 if action.action == RouterLifecycleAction::StartRouter {
                                     button {
@@ -1685,6 +1656,8 @@ fn OperationsView(
                                         onclick: move |_| on_open_start_router.call(()),
                                         "+"
                                     }
+                                }
+                            }
                                 }
                             }
                         }
@@ -5160,49 +5133,53 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   border-color: #4589ff; background: #4589ff; color: #ffffff;
 }
 .operator-band {
-  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px;
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px;
   align-items: stretch; padding: 0 var(--pad); border-bottom: 1px solid var(--border);
   background: var(--border);
 }
-.operator-rail {
-  min-width: 0; display: grid; grid-template-columns: minmax(360px, 1fr) auto; gap: 1px;
-  background: var(--border);
+.operator-compact {
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 1px; align-items: stretch; background: var(--border);
 }
-.ops-mini-map, .ops-map {
-  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 52px minmax(0, 1fr) 52px minmax(0, 1fr);
-  gap: 0; align-items: center; background: var(--surface);
+.operator-line {
+  min-width: 0; min-height: 44px; display: grid; grid-template-columns: auto 70px minmax(0, 1fr);
+  gap: 8px; align-items: center; padding: 6px 10px; background: var(--surface);
 }
-.ops-mini-map { min-height: 56px; padding: 8px 12px; }
+.operator-kicker {
+  color: var(--faint); font-size: 10px; line-height: 1; text-transform: uppercase;
+}
+.operator-line strong {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; line-height: 1.2; font-weight: 700;
+}
+.status-dot {
+  width: 9px; height: 9px; display: inline-block; border-radius: 50%;
+  background: var(--border-strong); box-shadow: 0 0 0 1px rgba(255,255,255,.08);
+}
+.status-dot.good { background: var(--green); box-shadow: 0 0 0 2px rgba(66, 190, 101, .14); }
+.status-dot.amber {
+  background: var(--amber); box-shadow: 0 0 0 2px rgba(241, 194, 27, .14);
+  animation: status-pulse 1.8s ease-in-out infinite;
+}
+.status-dot.bad { background: var(--red); box-shadow: 0 0 0 2px rgba(250, 77, 86, .14); }
+.status-dot.info { background: var(--blue); box-shadow: 0 0 0 2px rgba(120, 169, 255, .14); }
+.status-dot.muted { background: var(--border-strong); }
+@keyframes status-pulse {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.amber { animation: none; }
+}
 .operator-status {
   min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center;
   min-height: 56px; border: 0; border-radius: 0; padding: 8px 12px; background: var(--surface);
 }
-.ops-node {
-  min-width: 0; min-height: 44px; display: grid; align-content: center; gap: 2px;
-  border: 1px solid var(--border); padding: 6px 8px; background: #1f1f1f;
-}
-.ops-node span { color: var(--faint); font-size: 10px; text-transform: uppercase; }
-.ops-node strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-sm); }
-.dashboard-node { border-left: 3px solid var(--accent); }
-.forwarder-node { border-left: 3px solid var(--blue); }
-.target-node { border-left: 3px solid var(--green); }
-.ops-link {
-  position: relative; height: 2px; min-width: 28px; background: var(--border-strong);
-}
-.ops-link::after {
-  content: ""; position: absolute; right: 0; top: 50%; transform: translateY(-50%) rotate(45deg);
-  width: 6px; height: 6px; border-top: 2px solid currentColor; border-right: 2px solid currentColor;
-}
-.ops-link.live { color: var(--green); background: var(--green); }
-.ops-link.idle { color: var(--faint); background: var(--border-strong); }
-.operator-summary {
-  min-width: 0; min-height: 56px; display: flex; align-items: center; gap: 6px;
-  padding: 8px 12px; background: var(--surface); position: relative;
-}
 .operator-popover { position: relative; }
 .operator-popover summary {
-  min-height: 26px; display: inline-flex; align-items: center; cursor: pointer;
-  color: var(--blue); font-size: var(--font-xs); list-style: none;
+  min-height: 44px; display: inline-flex; align-items: center; cursor: pointer;
+  color: var(--blue); font-size: var(--font-xs); list-style: none; padding: 0 10px;
+  background: var(--surface);
 }
 .operator-popover summary::-webkit-details-marker { display: none; }
 .operator-popover-body {
@@ -5213,7 +5190,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .operator-main { font-size: var(--font-sm); font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .operator-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .operator-actions { display: flex; gap: 1px; align-items: stretch; justify-content: flex-end; flex-wrap: wrap; background: var(--border); }
-.operator-actions .tool-button { min-width: 74px; }
+.operator-actions .tool-button { min-width: 72px; white-space: nowrap; }
 .operator-message {
   grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; min-height: 32px;
   border-radius: 0; border: 0; border-top: 1px solid var(--border); padding: 6px 12px; font-size: var(--font-xs);
@@ -5255,24 +5232,42 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .compact-copy { color: var(--muted); font-size: var(--font-sm); line-height: 1.45; }
 
 .operations-board {
-  min-width: 0; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, .8fr);
-  gap: 12px; align-items: stretch;
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .34fr);
+  gap: 10px; align-items: stretch;
 }
-.ops-map {
-  grid-column: 1 / -1; min-height: 96px; padding: 12px; border: 1px solid var(--border);
+.ops-command-surface {
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 1px; align-items: stretch; background: var(--border);
 }
-.ops-map .ops-node { min-height: 64px; }
-.ops-map-status {
-  grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 10px;
+.ops-current {
+  min-width: 0; display: grid; align-content: center; gap: 3px; padding: 8px 10px;
+  background: var(--surface-2);
 }
-.ops-command-stack { min-width: 0; display: grid; align-content: start; gap: 10px; }
+.ops-current-title {
+  min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px; align-items: center;
+}
+.ops-current-title.target strong { color: var(--muted); font-size: var(--font-xs); }
+.ops-current-title strong {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 14px; line-height: 1.2;
+}
+.ops-status-strip {
+  min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(70px, 1fr));
+  gap: 1px; background: var(--border);
+}
+.ops-status-item {
+  min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: center;
+  padding: 0 10px; background: var(--surface); font-size: var(--font-xs);
+}
+.ops-status-item strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.inline-actions { flex-wrap: nowrap; }
 .ops-capability-meter {
   min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px;
-  background: var(--border); min-height: 46px; align-self: start;
+  background: var(--border); min-height: 38px; align-self: stretch;
 }
 .meter-segment {
   min-width: 0; display: grid; place-items: center; background: #1f1f1f; color: var(--faint);
-  border-top: 3px solid var(--border-strong); font-size: var(--font-xs); text-transform: uppercase;
+  border-top: 2px solid var(--border-strong); font-size: 10px; text-transform: uppercase;
 }
 .meter-segment.enabled { color: var(--text); border-top-color: var(--green); }
 .meter-segment.disabled { color: var(--faint); border-top-color: var(--border-strong); }
@@ -5309,13 +5304,20 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .row-title { font-weight: 700; font-size: var(--font-sm); }
 .row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .metric { color: var(--muted); font-size: var(--font-xs); white-space: nowrap; }
-.summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; margin-bottom: 12px; background: var(--border); }
+.summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-bottom: 10px; background: var(--border); }
 .capability-list, .lifecycle-list { display: grid; gap: 6px; }
 .capability-line, .lifecycle-row {
   min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center;
   min-height: var(--row); border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; padding: 7px 0;
 }
-.lifecycle-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+.compact-lifecycle {
+  gap: 1px; background: var(--border);
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+}
+.lifecycle-row {
+  grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; min-height: 38px;
+  padding: 7px 8px; border-bottom: 0; background: var(--surface);
+}
 .lifecycle-row.disabled { opacity: .74; }
 .icon-button {
   width: 32px; height: 32px; display: grid; place-items: center; border-radius: 0;
@@ -5724,13 +5726,17 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .empty-state strong { color: var(--text); }
 .bottom-nav { display: none; }
 
+@media (max-width: 1240px) {
+  .operator-band, .operations-board { grid-template-columns: 1fr; }
+  .ops-command-surface { grid-template-columns: minmax(0, 1fr); }
+  .operator-actions, .inline-actions { justify-content: flex-start; }
+}
+
 @media (max-width: 980px) {
   .app-shell, .app-shell.nav-collapsed { grid-template-columns: 1fr; padding-bottom: 56px; }
   .sidebar { display: none; }
   .operations-grid > .panel:first-child, .operations-grid > .panel:nth-child(4) { grid-column: auto; }
-  .operator-band, .operator-rail { grid-template-columns: 1fr; }
-  .ops-disclosure-grid, .operations-board { grid-template-columns: 1fr; }
-  .operator-actions { justify-content: flex-start; }
+  .operator-compact, .ops-disclosure-grid, .operations-board { grid-template-columns: 1fr; }
   .view-grid, .operations-grid, .observe-grid, .engine-grid, .tools-grid, .tools-grid-collapsed { grid-template-columns: 1fr; }
   .trust-main-grid, .trust-main-grid.secondary { grid-template-columns: 1fr; }
   .trust-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -5753,10 +5759,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .attach-bar { align-items: stretch; flex-direction: column; gap: 7px; padding-top: 8px; padding-bottom: 8px; }
   .chip-row { justify-content: flex-start; }
   .operator-band { padding: 0; }
-  .ops-mini-map, .ops-map { grid-template-columns: 1fr; gap: 8px; }
-  .ops-link { width: 2px; min-width: 2px; height: 20px; justify-self: center; }
-  .ops-link::after { right: 50%; top: auto; bottom: 0; transform: translateX(50%) rotate(135deg); }
-  .operator-summary { flex-wrap: wrap; }
+  .operator-line { grid-template-columns: auto 58px minmax(0, 1fr); }
   .operator-popover-body { left: 0; right: auto; }
   .operator-status { grid-template-columns: 1fr; gap: 5px; }
   .operator-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -5768,7 +5771,9 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .panel-title { padding: 0 10px; }
   .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ops-capability-meter { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .capability-line, .lifecycle-row { grid-template-columns: 1fr; align-items: start; padding: 8px 0; }
+  .ops-status-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .capability-line { grid-template-columns: 1fr; align-items: start; padding: 8px 0; }
+  .lifecycle-row { grid-template-columns: auto minmax(0, 1fr) auto; }
   .trace-row { grid-template-columns: 1fr 1fr; }
   .bridge-status { align-items: flex-start; flex-direction: column; }
   .log-row { grid-template-columns: 1fr; }
