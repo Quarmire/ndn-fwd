@@ -69,7 +69,22 @@ fn main() {
     }
 
     #[cfg(feature = "desktop")]
-    dioxus::launch(app::App);
+    {
+        use dioxus::desktop::{Config, WindowBuilder};
+        // dioxus-desktop defaults `always_on_top` to true outside `dx serve`
+        // (Config::new -> dioxus_cli_config::always_on_top().unwrap_or(true)),
+        // which pinned the dashboard above every other window. Pin it off and
+        // set a real window title (was the default "Dioxus App").
+        dioxus::LaunchBuilder::desktop()
+            .with_cfg(
+                Config::new().with_window(
+                    WindowBuilder::new()
+                        .with_title("NDN Dashboard")
+                        .with_always_on_top(false),
+                ),
+            )
+            .launch(app::App);
+    }
 
     #[cfg(feature = "web")]
     dioxus::launch(app_web::AppWeb);
