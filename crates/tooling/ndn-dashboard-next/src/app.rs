@@ -984,26 +984,46 @@ fn OperatorConnectBand(
     } else {
         "amber"
     };
+    let link_class = if last_probe_at_unix_s.is_some() {
+        "ops-link live"
+    } else {
+        "ops-link idle"
+    };
     let launch_enabled = state.platform == PlatformKind::Desktop;
     rsx! {
         section { class: "operator-band", "aria-label": "Engine attach controls",
-            div { class: "operator-status",
-                StatusChip { label: attach_label.to_string(), tone: attach_tone.to_string() }
-                div {
-                    div { class: "operator-title", "Forwarder" }
-                    div { class: "operator-main", "{state.profile.display_name()}" }
-                    div { class: "operator-meta mono", "{state.profile.endpoint}" }
+            div { class: "operator-rail",
+                div { class: "ops-mini-map", "aria-label": "Dashboard attach path",
+                    div { class: "ops-node dashboard-node",
+                        span { "Dashboard" }
+                        strong { "{state.platform_label()}" }
+                    }
+                    div { class: "{link_class}" }
+                    div { class: "ops-node",
+                        span { "Forwarder" }
+                        strong { "{state.profile.display_name()}" }
+                    }
+                    div { class: if selected_available { "ops-link live" } else { "ops-link idle" } }
+                    div { class: "ops-node",
+                        span { "Target" }
+                        strong { "{selected_label}" }
+                    }
                 }
-            }
-            div { class: "operator-status target-status",
-                StatusChip {
-                    label: if selected_available { "target ready".to_string() } else { "target unavailable".to_string() },
-                    tone: if selected_available { "neutral".to_string() } else { "muted".to_string() }
-                }
-                div {
-                    div { class: "operator-title", "Selected target" }
-                    div { class: "operator-main", "{selected_label}" }
-                    div { class: "operator-meta mono", "{selected_endpoint}" }
+                div { class: "operator-summary",
+                    StatusChip { label: attach_label.to_string(), tone: attach_tone.to_string() }
+                    StatusChip {
+                        label: if selected_available { "target ready".to_string() } else { "target unavailable".to_string() },
+                        tone: if selected_available { "neutral".to_string() } else { "muted".to_string() }
+                    }
+                    details { class: "operator-popover",
+                        summary { "details" }
+                        div { class: "operator-popover-body",
+                            div { class: "kv", span { "Forwarder" } strong { "{state.profile.display_name()}" } }
+                            div { class: "kv", span { "Endpoint" } strong { class: "mono", "{state.profile.endpoint}" } }
+                            div { class: "kv", span { "Selected target" } strong { "{selected_label}" } }
+                            div { class: "kv", span { "Target endpoint" } strong { class: "mono", "{selected_endpoint}" } }
+                        }
+                    }
                 }
             }
             div { class: "operator-actions",
@@ -1466,6 +1486,11 @@ fn OperationsView(
     let start_available = model
         .action(RouterLifecycleAction::StartRouter)
         .is_some_and(|action| action.enabled);
+    let lifecycle_available_count = model
+        .lifecycle_actions
+        .iter()
+        .filter(|action| action.enabled)
+        .count();
     let ownership_label = model
         .attach_state
         .binding()
@@ -1518,120 +1543,165 @@ fn OperationsView(
     } else {
         "unavailable".to_string()
     };
+    let attach_path_class = if attached {
+        "ops-link live"
+    } else {
+        "ops-link idle"
+    };
     rsx! {
         div { class: "view-grid operations-grid", "data-testid": "workspace-operations",
-            Panel { title: "Operations Home".to_string(),
-                div { class: "panel-toolbar",
-                    StatusChip { label: model.run_state.label().to_string(), tone: if attached { "good".to_string() } else { "amber".to_string() } }
-                    StatusChip { label: state.trust.label().to_string(), tone: tone_for_trust(state.trust).to_string() }
-                    StatusChip { label: state.observe.label().to_string(), tone: tone_for_observe(state.observe).to_string() }
-                    StatusChip { label: state.platform_label(), tone: "neutral".to_string() }
-                    StatusChip { label: ownership_label, tone: if attached { "info".to_string() } else { "muted".to_string() } }
-                }
-                div { class: "operator-actions inline-actions",
-                    button {
-                        class: "tool-button primary",
-                        disabled: !selected_available,
-                        "aria-label": "Attach selected target from Operations",
-                        onclick: move |_| on_probe_selected.call(()),
-                        "attach selected"
+            Panel { title: "Operations".to_string(),
+                div { class: "operations-board",
+                    div { class: "ops-map", "aria-label": "Dashboard attach and trust path",
+                        div { class: "ops-node dashboard-node",
+                            span { "Dashboard" }
+                            strong { "{state.platform_label()}" }
+                        }
+                        div { class: "{attach_path_class}" }
+                        div { class: "ops-node forwarder-node",
+                            span { "Forwarder" }
+                            strong { "{state.profile.display_name()}" }
+                        }
+                        div { class: if selected_available { "ops-link live" } else { "ops-link idle" } }
+                        div { class: "ops-node target-node",
+                            span { "Target" }
+                            strong { "{target_label}" }
+                        }
+                        div { class: "ops-map-status",
+                            StatusChip { label: model.run_state.label().to_string(), tone: if attached { "good".to_string() } else { "amber".to_string() } }
+                            StatusChip { label: ownership_label, tone: if attached { "info".to_string() } else { "muted".to_string() } }
+                        }
                     }
-                    button {
-                        class: "tool-button",
-                        "aria-label": "Attach default target from Operations",
-                        onclick: move |_| on_probe_default.call(()),
-                        "attach default"
+                    div { class: "ops-command-stack",
+                        div { class: "panel-toolbar",
+                            StatusChip { label: state.trust.label().to_string(), tone: tone_for_trust(state.trust).to_string() }
+                            StatusChip { label: state.observe.label().to_string(), tone: tone_for_observe(state.observe).to_string() }
+                            StatusChip { label: state.platform_label(), tone: "neutral".to_string() }
+                        }
+                        div { class: "operator-actions inline-actions",
+                            button {
+                                class: "tool-button primary",
+                                disabled: !selected_available,
+                                "aria-label": "Attach selected target from Operations",
+                                onclick: move |_| on_probe_selected.call(()),
+                                "attach selected"
+                            }
+                            button {
+                                class: "tool-button",
+                                "aria-label": "Attach default target from Operations",
+                                onclick: move |_| on_probe_default.call(()),
+                                "attach default"
+                            }
+                            button {
+                                class: "tool-button primary",
+                                disabled: !start_available,
+                                "aria-label": "Open Start Router from Operations",
+                                onclick: move |_| on_open_start_router.call(()),
+                                "start router"
+                            }
+                        }
                     }
-                    button {
-                        class: "tool-button primary",
-                        disabled: !start_available,
-                        "aria-label": "Open Start Router from Operations",
-                        onclick: move |_| on_open_start_router.call(()),
-                        "start router"
+                    div { class: "summary-grid",
+                        Metric { label: "Faces".to_string(), value: face_count }
+                        Metric { label: "Routes".to_string(), value: route_count }
+                        Metric { label: "Recent traces".to_string(), value: trace_count }
+                        Metric { label: "Tool runs".to_string(), value: active_tool_count.to_string() }
                     }
-                }
-                div { class: "summary-grid",
-                    Metric { label: "Engine".to_string(), value: state.profile.display_name() }
-                    Metric { label: "Faces".to_string(), value: face_count }
-                    Metric { label: "Routes".to_string(), value: route_count }
-                    Metric { label: "Recent traces".to_string(), value: trace_count }
-                    Metric { label: "Active tool runs".to_string(), value: active_tool_count.to_string() }
-                }
-                if let Some(error) = last_attach_error {
-                    div { class: "operator-message bad", role: "alert",
-                        strong { "Attach failed" }
-                        span { "{error}" }
+                    div { class: "ops-capability-meter", "aria-label": "Capability availability",
+                        div { class: if model.capability_summary.live_engine { "meter-segment enabled" } else { "meter-segment disabled" }, title: "NFD baseline",
+                            span { "NFD" }
+                        }
+                        div { class: if model.capability_summary.trust_available { "meter-segment enabled" } else { "meter-segment disabled" }, title: "TrustContext",
+                            span { "Trust" }
+                        }
+                        div { class: if model.capability_summary.observe_available { "meter-segment enabled" } else { "meter-segment disabled" }, title: "Observability",
+                            span { "Observe" }
+                        }
+                        div { class: if model.capability_summary.tools_available { "meter-segment enabled" } else { "meter-segment disabled" }, title: "Tools",
+                            span { "Tools" }
+                        }
                     }
-                } else if let Some(notice) = start_notice {
-                    div { class: "operator-message {notice.tone}", role: "status",
-                        strong { "{notice.title}" }
-                        span { "{notice.detail}" }
-                    }
-                } else if !attached {
-                    EmptyState {
-                        title: "Detached".to_string(),
-                        detail: "Select an attach target, start a local router on desktop, or attach to a browser-safe engine before live Engine, Trust, Observe, and Tools surfaces become active.".to_string()
+                    if let Some(error) = last_attach_error {
+                        div { class: "operator-message bad", role: "alert",
+                            strong { "Attach failed" }
+                            span { "{error}" }
+                        }
+                    } else if let Some(notice) = start_notice {
+                        div { class: "operator-message {notice.tone}", role: "status",
+                            strong { "{notice.title}" }
+                            span { "{notice.detail}" }
+                        }
+                    } else if !attached {
+                        EmptyState {
+                            title: "Detached".to_string(),
+                            detail: "Attach a target or start a local router; details stay folded until needed.".to_string()
+                        }
                     }
                 }
             }
-            Panel { title: "Attach Target".to_string(),
-                div { class: "target-row selected",
-                    div {
-                        div { class: "target-name", "{target_label}" }
-                        div { class: "target-meta",
-                            span { class: "mono", "{target_endpoint}" }
-                        }
-                    }
-                    div { class: "target-badges",
+            div { class: "ops-disclosure-grid",
+                details { class: "ops-disclosure", open: true,
+                    summary {
+                        span { "Target" }
                         StatusChip { label: target_status, tone: target_tone.to_string() }
                     }
+                    div { class: "target-row selected",
+                        div {
+                            div { class: "target-name", "{target_label}" }
+                            div { class: "target-meta",
+                                span { class: "mono", "{target_endpoint}" }
+                            }
+                        }
+                    }
                 }
-                div { class: "capability-list",
-                    CapabilityLine { label: "NFD baseline".to_string(), enabled: model.capability_summary.live_engine }
-                    CapabilityLine { label: "TrustContext".to_string(), enabled: model.capability_summary.trust_available }
-                    CapabilityLine { label: "Observability".to_string(), enabled: model.capability_summary.observe_available }
-                    CapabilityLine { label: "Tools".to_string(), enabled: model.capability_summary.tools_available }
-                }
-            }
-            Panel { title: "Lifecycle".to_string(),
-                div { class: "lifecycle-list",
-                    for action in model.lifecycle_actions.clone() {
-                        div { class: if action.enabled { "lifecycle-row enabled" } else { "lifecycle-row disabled" },
-                            div {
-                                div { class: "row-title", "{action.action.label()}" }
-                                if let Some(reason) = action.reason.clone() {
-                                    div { class: "row-sub", "{reason}" }
-                                } else if action.action == RouterLifecycleAction::ShutdownSigned {
-                                    div { class: "row-sub", "Requires mutation preflight and custodian authorization." }
-                                } else if action.action == RouterLifecycleAction::Detach {
-                                    div { class: "row-sub", "Closes this dashboard binding; the engine keeps running." }
+                details { class: "ops-disclosure",
+                    summary {
+                        span { "Lifecycle" }
+                        span { class: "metric", "{lifecycle_available_count} available" }
+                    }
+                    div { class: "lifecycle-list",
+                        for action in model.lifecycle_actions.clone() {
+                            div { class: if action.enabled { "lifecycle-row enabled" } else { "lifecycle-row disabled" },
+                                div {
+                                    div { class: "row-title", "{action.action.label()}" }
+                                    if let Some(reason) = action.reason.clone() {
+                                        div { class: "row-sub", "{reason}" }
+                                    } else if action.action == RouterLifecycleAction::ShutdownSigned {
+                                        div { class: "row-sub", "Requires mutation preflight and custodian authorization." }
+                                    } else if action.action == RouterLifecycleAction::Detach {
+                                        div { class: "row-sub", "Closes this dashboard binding; the engine keeps running." }
+                                    }
                                 }
-                            }
-                            StatusChip {
-                                label: if action.enabled { "available".to_string() } else { "unavailable".to_string() },
-                                tone: if action.enabled { "good".to_string() } else { "muted".to_string() }
-                            }
-                            if action.action == RouterLifecycleAction::StartRouter {
-                                button {
-                                    class: "icon-button",
-                                    disabled: !action.enabled,
-                                    title: "Open Start Router",
-                                    "aria-label": "Open Start Router workflow",
-                                    onclick: move |_| on_open_start_router.call(()),
-                                    "+"
+                                StatusChip {
+                                    label: if action.enabled { "available".to_string() } else { "unavailable".to_string() },
+                                    tone: if action.enabled { "good".to_string() } else { "muted".to_string() }
+                                }
+                                if action.action == RouterLifecycleAction::StartRouter {
+                                    button {
+                                        class: "icon-button",
+                                        disabled: !action.enabled,
+                                        title: "Open Start Router",
+                                        "aria-label": "Open Start Router workflow",
+                                        onclick: move |_| on_open_start_router.call(()),
+                                        "+"
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            Panel { title: "Quick Evidence".to_string(),
-                div { class: "dense-table evidence-table",
-                    div { class: "table-head", span { "Area" } span { "Evidence" } span { "State" } }
-                    div { class: "table-row", span { "Engine" } span { "{state.profile.endpoint}" } span { "{state.profile.capabilities.nfd_basic.label()}" } }
-                    div { class: "table-row", span { "Trust" } span { "TrustContext and custodian posture" } span { "{state.trust.label()}" } }
-                    div { class: "table-row", span { "Observe" } span { "{observe.prefix}" } span { "{observe.source.label()}" } }
-                    div { class: "table-row", span { "Tools" } span { "current dashboard run" } span { "{active_tool_count} active" } }
+                details { class: "ops-disclosure",
+                    summary {
+                        span { "Evidence" }
+                        span { class: "metric", "4 rows" }
+                    }
+                    div { class: "dense-table evidence-table resizable-table",
+                        div { class: "table-head", span { "Area" } span { "Evidence" } span { "State" } }
+                        div { class: "table-row", span { "Engine" } span { "{state.profile.endpoint}" } span { "{state.profile.capabilities.nfd_basic.label()}" } }
+                        div { class: "table-row", span { "Trust" } span { "TrustContext and custodian posture" } span { "{state.trust.label()}" } }
+                        div { class: "table-row", span { "Observe" } span { "{observe.prefix}" } span { "{observe.source.label()}" } }
+                        div { class: "table-row", span { "Tools" } span { "current dashboard run" } span { "{active_tool_count} active" } }
+                    }
                 }
             }
         }
@@ -5090,13 +5160,54 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   border-color: #4589ff; background: #4589ff; color: #ffffff;
 }
 .operator-band {
-  display: grid; grid-template-columns: minmax(240px, .9fr) minmax(280px, 1.2fr) auto; gap: 1px;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px;
   align-items: stretch; padding: 0 var(--pad); border-bottom: 1px solid var(--border);
   background: var(--border);
 }
+.operator-rail {
+  min-width: 0; display: grid; grid-template-columns: minmax(360px, 1fr) auto; gap: 1px;
+  background: var(--border);
+}
+.ops-mini-map, .ops-map {
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 52px minmax(0, 1fr) 52px minmax(0, 1fr);
+  gap: 0; align-items: center; background: var(--surface);
+}
+.ops-mini-map { min-height: 56px; padding: 8px 12px; }
 .operator-status {
   min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center;
   min-height: 56px; border: 0; border-radius: 0; padding: 8px 12px; background: var(--surface);
+}
+.ops-node {
+  min-width: 0; min-height: 44px; display: grid; align-content: center; gap: 2px;
+  border: 1px solid var(--border); padding: 6px 8px; background: #1f1f1f;
+}
+.ops-node span { color: var(--faint); font-size: 10px; text-transform: uppercase; }
+.ops-node strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-sm); }
+.dashboard-node { border-left: 3px solid var(--accent); }
+.forwarder-node { border-left: 3px solid var(--blue); }
+.target-node { border-left: 3px solid var(--green); }
+.ops-link {
+  position: relative; height: 2px; min-width: 28px; background: var(--border-strong);
+}
+.ops-link::after {
+  content: ""; position: absolute; right: 0; top: 50%; transform: translateY(-50%) rotate(45deg);
+  width: 6px; height: 6px; border-top: 2px solid currentColor; border-right: 2px solid currentColor;
+}
+.ops-link.live { color: var(--green); background: var(--green); }
+.ops-link.idle { color: var(--faint); background: var(--border-strong); }
+.operator-summary {
+  min-width: 0; min-height: 56px; display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; background: var(--surface); position: relative;
+}
+.operator-popover { position: relative; }
+.operator-popover summary {
+  min-height: 26px; display: inline-flex; align-items: center; cursor: pointer;
+  color: var(--blue); font-size: var(--font-xs); list-style: none;
+}
+.operator-popover summary::-webkit-details-marker { display: none; }
+.operator-popover-body {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 5; width: min(520px, calc(100vw - 32px));
+  padding: 10px 12px; border: 1px solid var(--border-strong); background: var(--surface); box-shadow: 0 18px 40px var(--shadow);
 }
 .operator-title { color: var(--faint); font-size: 10px; text-transform: uppercase; }
 .operator-main { font-size: var(--font-sm); font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -5122,6 +5233,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .operations-grid { grid-template-columns: minmax(0, 1.15fr) minmax(340px, .85fr); }
 .operations-grid > .panel:first-child { grid-column: 1 / -1; }
 .operations-grid > .panel:nth-child(4) { grid-column: 1 / -1; }
+.ops-disclosure-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1fr) minmax(0, 1.1fr); gap: var(--gap); align-items: start; }
 .observe-grid, .engine-grid, .tools-grid { grid-template-columns: minmax(0, 1fr) minmax(360px, .8fr); }
 .tools-grid-collapsed { grid-template-columns: minmax(0, 1fr) 54px; }
 .settings-grid { grid-template-columns: minmax(380px, 1fr) minmax(420px, 1.05fr); }
@@ -5141,6 +5253,39 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .panel-toolbar, .hero-line, .tool-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .mono { font-family: "SF Mono", Consolas, ui-monospace, monospace; font-size: var(--font-xs); color: var(--muted); }
 .compact-copy { color: var(--muted); font-size: var(--font-sm); line-height: 1.45; }
+
+.operations-board {
+  min-width: 0; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, .8fr);
+  gap: 12px; align-items: stretch;
+}
+.ops-map {
+  grid-column: 1 / -1; min-height: 96px; padding: 12px; border: 1px solid var(--border);
+}
+.ops-map .ops-node { min-height: 64px; }
+.ops-map-status {
+  grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 10px;
+}
+.ops-command-stack { min-width: 0; display: grid; align-content: start; gap: 10px; }
+.ops-capability-meter {
+  min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px;
+  background: var(--border); min-height: 46px; align-self: start;
+}
+.meter-segment {
+  min-width: 0; display: grid; place-items: center; background: #1f1f1f; color: var(--faint);
+  border-top: 3px solid var(--border-strong); font-size: var(--font-xs); text-transform: uppercase;
+}
+.meter-segment.enabled { color: var(--text); border-top-color: var(--green); }
+.meter-segment.disabled { color: var(--faint); border-top-color: var(--border-strong); }
+.ops-disclosure {
+  min-width: 0; border: 1px solid var(--border); background: var(--surface);
+}
+.ops-disclosure summary {
+  min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 0 12px; border-bottom: 1px solid var(--border); cursor: pointer; color: var(--text);
+  background: #1f1f1f; font-size: var(--font-sm); font-weight: 650;
+}
+.ops-disclosure summary::marker { color: var(--blue); }
+.ops-disclosure > :not(summary) { margin: 10px 12px 12px; }
 
 .trace-list { display: grid; gap: 6px; }
 .trace-search { margin-bottom: 8px; }
@@ -5583,7 +5728,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .app-shell, .app-shell.nav-collapsed { grid-template-columns: 1fr; padding-bottom: 56px; }
   .sidebar { display: none; }
   .operations-grid > .panel:first-child, .operations-grid > .panel:nth-child(4) { grid-column: auto; }
-  .operator-band { grid-template-columns: 1fr; }
+  .operator-band, .operator-rail { grid-template-columns: 1fr; }
+  .ops-disclosure-grid, .operations-board { grid-template-columns: 1fr; }
   .operator-actions { justify-content: flex-start; }
   .view-grid, .operations-grid, .observe-grid, .engine-grid, .tools-grid, .tools-grid-collapsed { grid-template-columns: 1fr; }
   .trust-main-grid, .trust-main-grid.secondary { grid-template-columns: 1fr; }
@@ -5607,6 +5753,11 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .attach-bar { align-items: stretch; flex-direction: column; gap: 7px; padding-top: 8px; padding-bottom: 8px; }
   .chip-row { justify-content: flex-start; }
   .operator-band { padding: 0; }
+  .ops-mini-map, .ops-map { grid-template-columns: 1fr; gap: 8px; }
+  .ops-link { width: 2px; min-width: 2px; height: 20px; justify-self: center; }
+  .ops-link::after { right: 50%; top: auto; bottom: 0; transform: translateX(50%) rotate(135deg); }
+  .operator-summary { flex-wrap: wrap; }
+  .operator-popover-body { left: 0; right: auto; }
   .operator-status { grid-template-columns: 1fr; gap: 5px; }
   .operator-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .operator-actions .tool-button { min-width: 0; }
@@ -5616,6 +5767,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .panel > :not(.panel-title):not(.panel-title-row) { margin-left: 10px; margin-right: 10px; }
   .panel-title { padding: 0 10px; }
   .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ops-capability-meter { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .capability-line, .lifecycle-row { grid-template-columns: 1fr; align-items: start; padding: 8px 0; }
   .trace-row { grid-template-columns: 1fr 1fr; }
   .bridge-status { align-items: flex-start; flex-direction: column; }
