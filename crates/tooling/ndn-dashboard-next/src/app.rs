@@ -4,15 +4,15 @@ use dioxus::prelude::*;
 
 use crate::audit::{AuditViewModel, LogLevel};
 use crate::client::{
-    DashboardClient, MockDashboardClient, ProbeOutcome, ProbeResult, ProbeTranscript,
-    state_from_probe,
+    DashboardClient, DesktopLocalClient, MockDashboardClient, ProbeOutcome, ProbeResult,
+    ProbeTranscript, state_from_probe,
 };
 use crate::config::{
     ConfigPreset, DashboardSettingsDraft, RouterConfigDraft, StartupFaceDraft, StartupRouteDraft,
 };
 use crate::core::{
-    DashboardPreferences, DashboardState, Density, FeatureState, PlatformKind, SavedAttachTarget,
-    capability_matrix,
+    AttachMode, AttachTarget, DashboardPreferences, DashboardState, Density, FeatureState,
+    ForwarderKind, PlatformKind, SavedAttachTarget, capability_matrix,
 };
 use crate::engine::{EngineDetail, EngineSummary, compact_count, poll_engine_summary};
 use crate::extensions::ExtensionRegistry;
@@ -34,7 +34,8 @@ use crate::observe::{
     span_tree_rows,
 };
 use crate::operations::{
-    OperationsHomeModel, RouterLifecycleAction, StartRouterModalModel, StartRouterTab,
+    EngineOwnership, OperationsHomeModel, RouterLifecycleAction, StartRouterModalModel,
+    StartRouterTab,
 };
 use crate::platform::{self, PlatformServices, density_storage_label, preference_key};
 use crate::tools::{
@@ -319,6 +320,7 @@ pub fn App() -> Element {
                                         platform,
                                         probe,
                                         Some(target),
+                                                None,
                                         state,
                                         preferences,
                                         last_probe,
@@ -344,6 +346,7 @@ pub fn App() -> Element {
                                         platform,
                                         probe,
                                         None,
+                                                None,
                                         state,
                                         preferences,
                                         last_probe,
@@ -399,6 +402,60 @@ pub fn App() -> Element {
                                 active_tools: tools.clone(),
                                 last_attach_error: attach_error.clone(),
                                 start_notice: start_notice.clone(),
+                                on_probe_selected: move |_| {
+                                    let selected = preferences.read().selected_target().cloned();
+                                    if let Some(target) = selected {
+                                        let client = MockDashboardClient::new(platform);
+                                        match client.probe(&target.attach_target()) {
+                                            Ok(probe) => {
+                                                apply_probe_result(
+                                                    platform,
+                                                    probe,
+                                                    Some(target),
+                                                    None,
+                                                    state,
+                                                    preferences,
+                                                    last_probe,
+                                                    last_probe_at,
+                                                    last_attach_error,
+                                                );
+                                                forwarder_notice.set(None);
+                                            }
+                                            Err(err) => {
+                                                last_attach_error
+                                                    .set(Some(err.message().to_string()));
+                                            }
+                                        }
+                                    } else {
+                                        last_attach_error
+                                            .set(Some("Select an attach target first.".into()));
+                                    }
+                                },
+                                on_probe_default: move |_| {
+                                    let client = MockDashboardClient::new(platform);
+                                    if let Some(target) = client.attach_targets().first().cloned() {
+                                        match client.probe(&target) {
+                                            Ok(probe) => {
+                                                apply_probe_result(
+                                                    platform,
+                                                    probe,
+                                                    None,
+                                                    None,
+                                                    state,
+                                                    preferences,
+                                                    last_probe,
+                                                    last_probe_at,
+                                                    last_attach_error,
+                                                );
+                                                forwarder_notice.set(None);
+                                            }
+                                            Err(err) => {
+                                                last_attach_error
+                                                    .set(Some(err.message().to_string()));
+                                            }
+                                        }
+                                    }
+                                },
                                 on_open_start_router: move |_| {
                                     start_router_tab.set(StartRouterTab::QuickStart);
                                     start_router_open.set(true);
@@ -447,6 +504,7 @@ pub fn App() -> Element {
                                                     platform,
                                                     probe,
                                                     Some(target),
+                                                None,
                                                     state,
                                                     preferences,
                                                     last_probe,
@@ -484,6 +542,7 @@ pub fn App() -> Element {
                                                 platform,
                                                 probe,
                                                 Some(target),
+                                                None,
                                                 state,
                                                 preferences,
                                                 last_probe,
@@ -507,6 +566,7 @@ pub fn App() -> Element {
                                                 platform,
                                                 probe,
                                                 Some(target),
+                                                None,
                                                 state,
                                                 preferences,
                                                 last_probe,
@@ -530,6 +590,7 @@ pub fn App() -> Element {
                                                 platform,
                                                 probe,
                                                 Some(target),
+                                                None,
                                                 state,
                                                 preferences,
                                                 last_probe,
@@ -548,6 +609,7 @@ pub fn App() -> Element {
                                             platform,
                                             probe,
                                             None,
+                                                None,
                                             state,
                                             preferences,
                                             last_probe,
@@ -558,24 +620,16 @@ pub fn App() -> Element {
                                     }
                                 },
                                 on_start_forwarder: move |toml: String| {
-                                    match platform::start_local_forwarder_with_config(&toml) {
-                                        Ok(launch) => {
-                                            forwarder_notice.set(Some(ForwarderActionNotice::good(
-                                                "Local ndn-fwd started",
-                                                format!(
-                                                    "pid {} using {}. Probe the local target to attach.",
-                                                    launch.pid, launch.config_path
-                                                ),
-                                            )));
-                                            last_attach_error.set(None);
-                                        }
-                                        Err(err) => {
-                                            forwarder_notice.set(Some(ForwarderActionNotice::bad(
-                                                "Could not start ndn-fwd",
-                                                err,
-                                            )));
-                                        }
-                                    }
+                                    let notice = start_and_attach_local_forwarder(
+                                        platform,
+                                        &toml,
+                                        state,
+                                        preferences,
+                                        last_probe,
+                                        last_probe_at,
+                                        last_attach_error,
+                                    );
+                                    forwarder_notice.set(Some(notice));
                                 },
                                 on_stop_forwarder: move |_| {
                                     match platform::stop_local_forwarder() {
@@ -645,24 +699,19 @@ pub fn App() -> Element {
                         }
                     },
                     on_start: move |toml: String| {
-                        match platform::start_local_forwarder_with_config(&toml) {
-                            Ok(launch) => {
-                                forwarder_notice.set(Some(ForwarderActionNotice::good(
-                                    "Local ndn-fwd started",
-                                    format!(
-                                        "pid {} using {}. Probe the local target to attach.",
-                                        launch.pid, launch.config_path
-                                    ),
-                                )));
-                                last_attach_error.set(None);
-                                start_router_open.set(false);
-                            }
-                            Err(err) => {
-                                forwarder_notice.set(Some(ForwarderActionNotice::bad(
-                                    "Could not start ndn-fwd",
-                                    err,
-                                )));
-                            }
+                        let notice = start_and_attach_local_forwarder(
+                            platform,
+                            &toml,
+                            state,
+                            preferences,
+                            last_probe,
+                            last_probe_at,
+                            last_attach_error,
+                        );
+                        let should_close = notice.tone == "good";
+                        forwarder_notice.set(Some(notice));
+                        if should_close {
+                            start_router_open.set(false);
                         }
                     },
                     on_export: move |toml: String| {
@@ -755,6 +804,7 @@ fn apply_probe_result(
     platform: PlatformKind,
     probe: ProbeResult,
     connected_target: Option<SavedAttachTarget>,
+    ownership: Option<EngineOwnership>,
     mut state: Signal<DashboardState>,
     mut preferences: Signal<DashboardPreferences>,
     mut last_probe: Signal<Option<ProbeTranscript>>,
@@ -764,6 +814,14 @@ fn apply_probe_result(
     let density = state.read().density;
     let mut next = state_from_probe(platform, probe.clone());
     next.density = density;
+    if let Some(ownership) = ownership
+        && let crate::operations::AttachState::Attached { binding } = &mut next.attach_state
+    {
+        binding.ownership = ownership;
+        if let Some(target) = connected_target.as_ref() {
+            binding.target_label = Some(target.label.clone());
+        }
+    }
     let mut next_prefs = preferences.read().clone();
     next_prefs.density = density;
     if let Some(target) = connected_target {
@@ -775,6 +833,120 @@ fn apply_probe_result(
     last_probe_at.set(Some(1_717_300_000));
     last_attach_error.set(None);
     state.set(next);
+}
+
+fn dashboard_started_target(draft: &RouterConfigDraft) -> SavedAttachTarget {
+    SavedAttachTarget::from_target(
+        AttachTarget {
+            label: "dashboard-started ndn-fwd".into(),
+            endpoint: draft.management_socket.clone(),
+            mode: AttachMode::LocalDesktop,
+            profile_hint: Some(ForwarderKind::NdnRs),
+        },
+        false,
+        None,
+    )
+}
+
+fn probe_dashboard_started_forwarder(
+    platform: PlatformKind,
+    draft: &RouterConfigDraft,
+    state: Signal<DashboardState>,
+    preferences: Signal<DashboardPreferences>,
+    last_probe: Signal<Option<ProbeTranscript>>,
+    last_probe_at: Signal<Option<u64>>,
+    last_attach_error: Signal<Option<String>>,
+) -> Result<SavedAttachTarget, String> {
+    let target = dashboard_started_target(draft);
+    let client = DesktopLocalClient {
+        socket: draft.management_socket.clone(),
+    };
+    let probe = client
+        .probe(&target.attach_target())
+        .map_err(|err| err.message().to_string())?;
+    apply_probe_result(
+        platform,
+        probe,
+        Some(target.clone()),
+        Some(EngineOwnership::DashboardStarted),
+        state,
+        preferences,
+        last_probe,
+        last_probe_at,
+        last_attach_error,
+    );
+    Ok(target)
+}
+
+fn start_and_attach_local_forwarder(
+    platform: PlatformKind,
+    toml: &str,
+    state: Signal<DashboardState>,
+    preferences: Signal<DashboardPreferences>,
+    last_probe: Signal<Option<ProbeTranscript>>,
+    last_probe_at: Signal<Option<u64>>,
+    last_attach_error: Signal<Option<String>>,
+) -> ForwarderActionNotice {
+    let draft = match RouterConfigDraft::parse_toml(toml) {
+        Ok(draft) => draft,
+        Err(err) => {
+            return ForwarderActionNotice::bad(
+                "Could not start ndn-fwd",
+                format!("Router TOML is invalid: {err}"),
+            );
+        }
+    };
+
+    match platform::start_local_forwarder_with_config(toml) {
+        Ok(launch) => match probe_dashboard_started_forwarder(
+            platform,
+            &draft,
+            state,
+            preferences,
+            last_probe,
+            last_probe_at,
+            last_attach_error,
+        ) {
+            Ok(target) => ForwarderActionNotice::good(
+                "Local ndn-fwd started and attached",
+                format!(
+                    "pid {} using {}; attached through {}.",
+                    launch.pid, launch.config_path, target.endpoint
+                ),
+            ),
+            Err(err) => ForwarderActionNotice::bad(
+                "Local ndn-fwd started; attach failed",
+                format!(
+                    "pid {} using {}; probe {} failed: {err}. Check the management socket and attach the target from Operations or Settings.",
+                    launch.pid, launch.config_path, draft.management_socket
+                ),
+            ),
+        },
+        Err(err) if err.contains("already running from this dashboard") => {
+            match probe_dashboard_started_forwarder(
+                platform,
+                &draft,
+                state,
+                preferences,
+                last_probe,
+                last_probe_at,
+                last_attach_error,
+            ) {
+                Ok(target) => ForwarderActionNotice::good(
+                    "Attached to dashboard-started ndn-fwd",
+                    format!("{err}; attached through {}.", target.endpoint),
+                ),
+                Err(probe_err) => ForwarderActionNotice::bad(
+                    "Dashboard-started ndn-fwd is running; attach failed",
+                    format!(
+                        "{err}; probe {} failed: {probe_err}. Stop it or repair the selected management socket.",
+                        draft.management_socket
+                    ),
+                ),
+            }
+        }
+        Err(err) => ForwarderActionNotice::bad("Could not start ndn-fwd", err),
+    }
 }
 
 #[component]
@@ -1283,9 +1455,22 @@ fn OperationsView(
     active_tools: Vec<ToolRun>,
     last_attach_error: Option<String>,
     start_notice: Option<ForwarderActionNotice>,
+    on_probe_selected: EventHandler<()>,
+    on_probe_default: EventHandler<()>,
     on_open_start_router: EventHandler<()>,
 ) -> Element {
     let attached = model.attach_state.is_attached();
+    let selected_available = model
+        .selected_target_status
+        .is_some_and(|status| status.is_available());
+    let start_available = model
+        .action(RouterLifecycleAction::StartRouter)
+        .is_some_and(|action| action.enabled);
+    let ownership_label = model
+        .attach_state
+        .binding()
+        .map(|binding| binding.ownership.label().to_string())
+        .unwrap_or_else(|| "none".into());
     let target_label = model
         .selected_target
         .as_ref()
@@ -1341,6 +1526,29 @@ fn OperationsView(
                     StatusChip { label: state.trust.label().to_string(), tone: tone_for_trust(state.trust).to_string() }
                     StatusChip { label: state.observe.label().to_string(), tone: tone_for_observe(state.observe).to_string() }
                     StatusChip { label: state.platform_label(), tone: "neutral".to_string() }
+                    StatusChip { label: ownership_label, tone: if attached { "info".to_string() } else { "muted".to_string() } }
+                }
+                div { class: "operator-actions inline-actions",
+                    button {
+                        class: "tool-button primary",
+                        disabled: !selected_available,
+                        "aria-label": "Attach selected target from Operations",
+                        onclick: move |_| on_probe_selected.call(()),
+                        "attach selected"
+                    }
+                    button {
+                        class: "tool-button",
+                        "aria-label": "Attach default target from Operations",
+                        onclick: move |_| on_probe_default.call(()),
+                        "attach default"
+                    }
+                    button {
+                        class: "tool-button primary",
+                        disabled: !start_available,
+                        "aria-label": "Open Start Router from Operations",
+                        onclick: move |_| on_open_start_router.call(()),
+                        "start router"
+                    }
                 }
                 div { class: "summary-grid",
                     Metric { label: "Engine".to_string(), value: state.profile.display_name() }
