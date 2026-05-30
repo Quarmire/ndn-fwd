@@ -105,7 +105,12 @@ impl ActiveIdentity {
 }
 
 pub fn derive_posture(input: PostureInput<'_>) -> SecurityPosture {
-    if input.security_surface_supported == Some(false) {
+    // Stay quiet until a probe has actually landed and confirmed the
+    // forwarder speaks ndn-rs's `security/*` extensions. `None` = no probe
+    // yet (connecting / pre-probe); `Some(false)` = NFD / YaNFD. In neither
+    // case is there an ndn-rs identity to reason about, so the gate must not
+    // block the operator with a spurious "no persistent identity" modal.
+    if input.security_surface_supported != Some(true) {
         return SecurityPosture::Unsupported;
     }
     if input.identity_is_ephemeral || input.identity_name.is_empty() {
@@ -390,6 +395,22 @@ mod tests {
     #[test]
     fn hardened_when_persistent_no_expiry_data() {
         assert!(derive_posture(input("/lab/alice", false)).is_hardened());
+    }
+
+    #[test]
+    fn gate_quiet_until_security_probe_lands() {
+        // No probe has landed yet (disconnected / connecting): an empty
+        // identity must NOT escalate to `NoIdentity`, or the gate would
+        // block the operator before we have even reached a forwarder.
+        let posture = derive_posture(PostureInput {
+            identity_name: "",
+            identity_is_ephemeral: true,
+            cert_valid_until_unix_s: None,
+            now_unix_s: None,
+            security_surface_supported: None,
+        });
+        assert_eq!(posture, SecurityPosture::Unsupported);
+        assert!(!gate_should_fire(&posture, None, "ndn-fwd"));
     }
 
     #[test]

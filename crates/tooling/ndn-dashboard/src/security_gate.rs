@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::app::AppCtx;
+use crate::app::{AppCtx, ConnState};
 use crate::app_shared::push_toast;
 use crate::security_state::{
     GATE_ACCEPTED, PostureInput, PostureKind, SecurityPosture, accept, derive_posture,
@@ -17,6 +17,15 @@ use crate::views::View;
 #[allow(non_snake_case)]
 pub fn SecurityGate() -> Element {
     let ctx = use_context::<AppCtx>();
+
+    // The gate reasons about an attached forwarder's trust posture, so stay
+    // silent until we are actually connected. Firing while disconnected or
+    // reconnecting — when identity state is empty or stale — surfaced a "no
+    // persistent identity" modal for a forwarder the operator hadn't reached.
+    // (No hooks run below this point, so the early return is sound.)
+    if !matches!(&*ctx.conn.read(), ConnState::Connected) {
+        return rsx! {};
+    }
 
     let identity_name_handle = ctx.identity_name.read();
     let identity_is_ephemeral_handle = ctx.identity_is_ephemeral.read();
@@ -190,14 +199,20 @@ fn IdentityExpiredPanel(posture: SecurityPosture) -> Element {
             description: "Issues a fresh cert under the same key. Same identity, new \
                           validity window. Recommended.",
             action_label: "Go to CA → Renew",
-            on_action: move |_| jump_to_security_view(SecurityTab::Ca),
+            on_action: move |_| {
+                jump_to_security_view(SecurityTab::Ca);
+                accept(current_forwarder_id(), PostureKind::IdentityExpired);
+            },
         }
         GateChoice {
             icon: "🆕",
             title: "Generate a new key under this identity",
             description: "New key pair, new cert. Old key becomes inactive.",
             action_label: "Go to Identities → Rotate",
-            on_action: move |_| jump_to_security_view(SecurityTab::Identities),
+            on_action: move |_| {
+                jump_to_security_view(SecurityTab::Identities);
+                accept(current_forwarder_id(), PostureKind::IdentityExpired);
+            },
         }
 
         SkipRow {
@@ -257,7 +272,10 @@ fn TrustSchemaWeakenedPanel(posture: SecurityPosture) -> Element {
             title: "Investigate in the audit log",
             description: "See who removed what and when (signed chain entries).",
             action_label: "Go to Security → Audit log",
-            on_action: move |_| jump_to_security_view(SecurityTab::Audit),
+            on_action: move |_| {
+                jump_to_security_view(SecurityTab::Audit);
+                accept(current_forwarder_id(), PostureKind::TrustSchemaWeakened);
+            },
         }
 
         SkipRow {
