@@ -69,8 +69,9 @@ pub fn Overview() -> Element {
     // `n_faces` is always 0); the live count comes from the `faces/list`
     // dataset, the same source the ACTIVE FACES table below renders.
     let n_faces = faces.len() as u64;
-    // Operator-resizable column widths for the ACTIVE FACES table (px);
-    // held in a signal so they survive the 3s poll re-render.
+    // Operator-resizable widths for the ACTIVE FACES table (px); held in a
+    // signal so they survive the 3s poll re-render. The trailing actions
+    // column keeps a fixed width and gets no resize grip (buttons, not data).
     let face_cols = use_col_widths(&[70.0, 90.0, 280.0, 280.0, 120.0, 90.0]);
     let n_routes = status.as_ref().map(|s| s.n_fib).unwrap_or(0);
     let n_cs = status.as_ref().map(|s| s.n_cs).unwrap_or(0);
@@ -200,6 +201,7 @@ pub fn Overview() -> Element {
                     div { class: "empty", "No faces. Click + Add Face to create one." }
                 } else {
                     {face_cols.overlay()}
+                    div { class: "resizable-wrap",
                     table { class: "resizable",
                         {face_cols.colgroup()}
                         thead {
@@ -209,7 +211,9 @@ pub fn Overview() -> Element {
                                 th { "Remote URI" {face_cols.handle(2)} }
                                 th { "Local URI" {face_cols.handle(3)} }
                                 th { "Persistency" {face_cols.handle(4)} }
-                                th { "" {face_cols.handle(5)} }
+                                // Actions column: no resize grip — it holds
+                                // buttons, not data, and stays a fixed width.
+                                th { class: "col-actions", "" }
                             }
                         }
                         tbody {
@@ -235,6 +239,7 @@ pub fn Overview() -> Element {
                                 }
                             }
                         }
+                    }
                     }
                 }
             }

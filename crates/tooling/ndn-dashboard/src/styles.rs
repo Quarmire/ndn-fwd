@@ -159,11 +159,18 @@ td{padding:8px 12px;border-bottom:1px solid var(--border-subtle);color:var(--tex
 tr:last-child td{border-bottom:none}
 tr:hover td{background:var(--surface2)}
 /* ── Resizable table columns (resizable.rs) ──────────────────── */
+/* The table lives in a scroll container so a widened column scrolls
+   horizontally instead of pushing content off-screen. */
+.resizable-wrap{overflow-x:auto;max-width:100%}
 .resizable{table-layout:fixed;width:100%}
 .resizable th{position:relative}
 .resizable th,.resizable td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.col-resize{position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;user-select:none}
-.col-resize:hover{background:var(--accent-dim)}
+/* Drag grip on the right edge of a resizable column header. The always-on
+   faint divider advertises that the column can be resized; it brightens to
+   the accent colour on hover. */
+.col-resize{position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;user-select:none}
+.col-resize::after{content:'';position:absolute;right:2px;top:28%;bottom:28%;width:2px;background:var(--border)}
+.col-resize:hover::after{background:var(--accent);width:3px;right:2px}
 .col-resize-overlay{position:fixed;inset:0;z-index:9000;cursor:col-resize}
 .form-row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--border-subtle)}
 .form-group{display:flex;flex-direction:column;gap:4px}

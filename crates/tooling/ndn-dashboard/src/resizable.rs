@@ -38,10 +38,14 @@ pub struct ColWidths {
     widths: Signal<Vec<f64>>,
     drag: Signal<Option<Drag>>,
     min: f64,
+    max: f64,
 }
 
 /// Seed resizable-column state with one default px width per column.
-/// Call at the top of the table's component (it is a hook).
+/// Call at the top of the table's component (it is a hook). Drag is clamped
+/// to `[48, 960]` px so a column can't collapse to nothing or be dragged
+/// arbitrarily wide; the `.resizable-wrap` container scrolls if the whole
+/// table still overflows.
 pub fn use_col_widths(defaults: &[f64]) -> ColWidths {
     let widths = use_signal(|| defaults.to_vec());
     let drag = use_signal(|| None);
@@ -49,6 +53,7 @@ pub fn use_col_widths(defaults: &[f64]) -> ColWidths {
         widths,
         drag,
         min: 48.0,
+        max: 960.0,
     }
 }
 
@@ -95,6 +100,7 @@ impl ColWidths {
         let mut drag = self.drag;
         let mut widths = self.widths;
         let min = self.min;
+        let max = self.max;
         if drag.read().is_none() {
             return rsx! {};
         }
@@ -106,7 +112,7 @@ impl ColWidths {
                         let dx = e.client_coordinates().x - d.start_x;
                         let mut w = widths.write();
                         if let Some(cw) = w.get_mut(d.col) {
-                            *cw = (d.start_w + dx).max(min);
+                            *cw = (d.start_w + dx).clamp(min, max);
                         }
                     }
                 },
