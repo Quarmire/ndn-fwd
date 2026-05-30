@@ -51,7 +51,14 @@ impl ForwarderProfile {
     /// Override via `--socket=/custom/path`.
     pub fn default_socket(self) -> &'static Path {
         match self {
-            ForwarderProfile::NdnFwd => Path::new("/run/ndn-fwd/ndn-fwd.sock"),
+            // ndn-fwd binds the NFD-standard socket for drop-in compatibility,
+            // so its default is `/run/nfd/nfd.sock` — the same path
+            // `ndn_config::ManagementConfig::default().face_socket` produces.
+            // (It therefore shares YaNFD's path; `detection_order()` lists
+            // NdnFwd first so auto-detect prefers the native forwarder.
+            // TODO: derive this from ndn_config instead of a literal, and
+            // distinguish ndn-fwd from YaNFD by capability probe, not path.)
+            ForwarderProfile::NdnFwd => Path::new("/run/nfd/nfd.sock"),
             ForwarderProfile::Nfd => Path::new("/var/run/nfd.sock"),
             ForwarderProfile::YaNfd => Path::new("/run/nfd/nfd.sock"),
         }
