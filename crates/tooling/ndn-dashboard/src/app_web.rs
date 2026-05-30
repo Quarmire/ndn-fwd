@@ -570,7 +570,10 @@ pub fn AppWeb() -> Element {
 /// props of `Style {}` is not supported"). Mirrors `app::AppStyles`.
 #[component]
 fn AppStyles() -> Element {
-    rsx! { document::Style { "{CSS}" } }
+    rsx! {
+        document::Style { "{crate::fonts::FONT_FACES}" }
+        document::Style { "{CSS}" }
+    }
 }
 
 /// Toast overlay for the web build. Reads `app_shared::TOASTS` (the

@@ -52,8 +52,8 @@ html{height:100%}
   --cds-label-01:0.75rem;   --cds-body-01:0.875rem;   --cds-body-02:1rem;
   --cds-heading-01:0.875rem; --cds-heading-03:1.25rem; --cds-heading-04:1.75rem;
 
-  /* IBM Plex (Carbon's typeface). Falls back to the system stack until the
-     Plex web-fonts are bundled; see styles.rs follow-up. */
+  /* IBM Plex (Carbon's typeface), bundled as base64 `@font-face` in
+     `fonts.rs`; the system stack is the fallback if a face is missing. */
   --font-sans:'IBM Plex Sans','IBM Plex Sans Var',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
   --font-mono:'IBM Plex Mono','SF Mono',ui-monospace,SFMono-Regular,Consolas,monospace;
 }

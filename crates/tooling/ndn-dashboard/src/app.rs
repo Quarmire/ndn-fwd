@@ -1416,7 +1416,10 @@ pub fn App() -> Element {
 /// once and never diffed again.
 #[component]
 fn AppStyles() -> Element {
-    rsx! { document::Style { "{CSS}" } }
+    rsx! {
+        document::Style { "{crate::fonts::FONT_FACES}" }
+        document::Style { "{CSS}" }
+    }
 }
 
 #[component]
