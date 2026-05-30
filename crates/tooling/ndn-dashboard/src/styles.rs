@@ -6,71 +6,91 @@ pub const CSS: &str = "
 *{box-sizing:border-box;margin:0;padding:0}
 html{height:100%}
 
-/* ── Color tokens (dark mode defaults) ──────────────────────────── */
+/* ── Design tokens — IBM Carbon Design System ───────────────────────
+   Color tokens map onto the dashboard's existing variable names so every
+   rule inherits the Carbon palette. Dark = Carbon Gray-100 (`g100`);
+   `.light-mode` below = Carbon White. Spacing/type/font tokens follow the
+   Carbon scales for component migration. https://carbondesignsystem.com */
 :root{
-  --bg:#0d1117;
-  --surface:#161b22;
-  --surface2:#1c2128;
-  --border:#30363d;
-  --border-subtle:#21262d;
-  --text:#c9d1d9;
-  --text-muted:#8b949e;
-  --text-faint:#484f58;
-  --accent:#58a6ff;
-  --accent-solid:#1f6feb;
-  --accent-dim:#1f6feb22;
-  --accent-bg:#0c2d6b;
-  --green:#3fb950;
-  --green-bg:#1a4731;
-  --green-dark:#0f2a16;
-  --yellow:#d29922;
-  --yellow-bg:#3d3000;
-  --red:#f85149;
-  --red-bg:#4e1717;
-  --orange:#f0883e;
-  --orange-bg:#3d1f00;
-  --purple:#a371f7;
-  --purple-bg:#2a1a4e;
-  --btn-p:#238636;
-  --btn-p-h:#2ea043;
-  --btn-d:#da3633;
-  --btn-d-h:#f85149;
-  --shadow:rgba(0,0,0,.8);
+  /* Carbon g100 (dark) */
+  --bg:#161616;            /* $background */
+  --surface:#262626;       /* $layer-01 */
+  --surface2:#393939;      /* $layer-02 */
+  --border:#525252;        /* $border-strong-01 */
+  --border-subtle:#393939; /* $border-subtle-02 */
+  --text:#f4f4f4;          /* $text-primary */
+  --text-muted:#a8a8a8;    /* $text-secondary (gray-40) */
+  --text-faint:#6f6f6f;    /* $text-placeholder */
+  --accent:#78a9ff;        /* $link-primary (blue-40) */
+  --accent-solid:#4589ff;  /* $interactive (blue-50) */
+  --accent-dim:#4589ff29;  /* interactive @ ~16% — hover/selected fill */
+  --accent-bg:#001d6c;     /* blue-90 — selected/info chip fill */
+  --green:#42be65;         /* $support-success (green-40) */
+  --green-bg:#022d0d;
+  --green-dark:#071f0e;
+  --yellow:#f1c21b;        /* $support-warning (yellow-30) */
+  --yellow-bg:#302400;
+  --red:#fa4d56;           /* $support-error (red-40) */
+  --red-bg:#3a0b0d;
+  --orange:#ff832b;        /* orange-40 */
+  --orange-bg:#3a1c00;
+  --purple:#be95ff;        /* purple-40 */
+  --purple-bg:#1f1144;
+  --btn-p:#0f62fe;         /* $button-primary (blue-60) */
+  --btn-p-h:#0353e9;       /* $button-primary-hover */
+  --btn-d:#da1e28;         /* $button-danger-primary (red-60) */
+  --btn-d-h:#b81921;       /* $button-danger-hover */
+  --shadow:rgba(0,0,0,.6);
+
+  /* Carbon spacing scale */
+  --cds-spacing-01:0.125rem; --cds-spacing-02:0.25rem; --cds-spacing-03:0.5rem;
+  --cds-spacing-04:0.75rem;  --cds-spacing-05:1rem;    --cds-spacing-06:1.5rem;
+  --cds-spacing-07:2rem;     --cds-spacing-08:2.5rem;  --cds-spacing-09:3rem;
+  --cds-spacing-10:4rem;
+
+  /* Carbon type scale (font sizes) */
+  --cds-label-01:0.75rem;   --cds-body-01:0.875rem;   --cds-body-02:1rem;
+  --cds-heading-01:0.875rem; --cds-heading-03:1.25rem; --cds-heading-04:1.75rem;
+
+  /* IBM Plex (Carbon's typeface). Falls back to the system stack until the
+     Plex web-fonts are bundled; see styles.rs follow-up. */
+  --font-sans:'IBM Plex Sans','IBM Plex Sans Var',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --font-mono:'IBM Plex Mono','SF Mono',ui-monospace,SFMono-Regular,Consolas,monospace;
 }
 
-/* ── Light mode overrides ────────────────────────────────────────── */
+/* ── Light mode — Carbon White theme ─────────────────────────────── */
 .light-mode{
-  --bg:#ffffff;
-  --surface:#f6f8fa;
-  --surface2:#f0f3f6;
-  --border:#d0d7de;
-  --border-subtle:#e8ebef;
-  --text:#1f2328;
-  --text-muted:#656d76;
-  --text-faint:#9198a1;
-  --accent:#0969da;
-  --accent-solid:#0550ae;
-  --accent-dim:#0969da18;
-  --accent-bg:#ddf4ff;
-  --green:#1a7f37;
-  --green-bg:#dafbe1;
-  --green-dark:#ccffd8;
-  --yellow:#9a6700;
-  --yellow-bg:#fff8c5;
-  --red:#cf222e;
-  --red-bg:#ffebe9;
-  --orange:#bc4c00;
-  --orange-bg:#fff1e5;
-  --purple:#8250df;
-  --purple-bg:#fbefff;
-  --btn-p:#1a7f37;
-  --btn-p-h:#2da44e;
-  --btn-d:#cf222e;
-  --btn-d-h:#a40e26;
-  --shadow:rgba(0,0,0,.18);
+  --bg:#ffffff;            /* $background */
+  --surface:#f4f4f4;       /* $layer-01 */
+  --surface2:#e0e0e0;      /* $layer-02 */
+  --border:#c6c6c6;        /* $border-strong-01 */
+  --border-subtle:#e0e0e0; /* $border-subtle-02 */
+  --text:#161616;          /* $text-primary */
+  --text-muted:#525252;    /* $text-secondary */
+  --text-faint:#8d8d8d;    /* $text-placeholder */
+  --accent:#0f62fe;        /* $link-primary (blue-60) */
+  --accent-solid:#0f62fe;  /* $interactive */
+  --accent-dim:#0f62fe14;
+  --accent-bg:#d0e2ff;     /* blue-20 */
+  --green:#24a148;         /* $support-success (green-50) */
+  --green-bg:#defbe6;      /* green-10 */
+  --green-dark:#a7f0ba;
+  --yellow:#b28600;        /* darkened yellow-30 for light-bg contrast */
+  --yellow-bg:#fcf4d6;     /* yellow-10 */
+  --red:#da1e28;           /* $support-error (red-60) */
+  --red-bg:#fff1f1;        /* red-10 */
+  --orange:#ba4e00;
+  --orange-bg:#ffe8d6;
+  --purple:#8a3ffc;        /* purple-60 */
+  --purple-bg:#f6f2ff;     /* purple-10 */
+  --btn-p:#0f62fe;         /* $button-primary */
+  --btn-p-h:#0353e9;
+  --btn-d:#da1e28;         /* $button-danger-primary */
+  --btn-d-h:#b81921;
+  --shadow:rgba(0,0,0,.16);
 }
 
-body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);display:flex;height:100%;overflow:hidden}
+body{font-family:var(--font-sans);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;background:var(--bg);color:var(--text);display:flex;height:100%;overflow:hidden}
 /* Dioxus desktop mounts into a bare <div> inside body with no size — override it. */
 body>div{height:100%;width:100%;overflow:hidden}
 /* `.app-root` is the single ancestor of every overlay (modals,
@@ -96,7 +116,10 @@ body>div{height:100%;width:100%;overflow:hidden}
 /* The conn-bar is a flex column containing one status row + one
    optional config row. Desktop renders both inline on the status
    row via wider .conn-bar-status flex-flow; mobile stacks them. */
-.conn-bar{display:flex;flex-direction:column;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px;flex-shrink:0}
+/* Horizontal toolbar: the markup places every status control directly in
+   `.conn-bar`, so it lays them out as a single wrapping row (was
+   `flex-direction:column`, which stacked each control full-width). */
+.conn-bar{display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;gap:var(--cds-spacing-03);padding:var(--cds-spacing-03) var(--cds-spacing-05);background:var(--surface);border-bottom:1px solid var(--border-subtle);font-size:var(--cds-body-01);flex-shrink:0}
 .conn-bar-status{display:flex;align-items:center;gap:10px;padding:10px 20px}
 .conn-bar-config{display:flex;align-items:center;gap:10px;padding:0 20px 10px 20px}
 .conn-bar-config input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:4px;font-size:13px;font-family:monospace;min-width:0}
@@ -149,7 +172,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .btn-secondary:hover{background:var(--border)}
 .btn-sm{padding:4px 10px;font-size:12px}
 .error-banner{background:var(--red-bg);border:1px solid var(--red);border-radius:6px;padding:10px 16px;margin-bottom:16px;color:var(--red);font-size:13px;display:flex;justify-content:space-between;align-items:center}
-.mono{font-family:'SF Mono',Consolas,monospace;font-size:12px}
+.mono{font-family:var(--font-mono);font-size:12px}
 .empty{color:var(--text-muted);font-size:13px;padding:20px 0;text-align:center}
 [data-tooltip]{position:relative;cursor:help}
 [data-tooltip]::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:5px 10px;font-size:11px;color:var(--text);white-space:pre-wrap;max-width:280px;pointer-events:none;opacity:0;transition:opacity .15s;z-index:200;line-height:1.5;text-align:left}
@@ -464,3 +487,39 @@ input[type=range]:focus{outline:none;border-color:transparent}
   [data-tooltip]::after{max-width:88vw}
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::CSS;
+
+    /// Pins the Carbon Design System token foundation so a future edit can't
+    /// silently revert the palette/scale back to the ad-hoc theme.
+    #[test]
+    fn carbon_token_foundation_present() {
+        // Carbon g100 anchors + signature blue-60 button primary.
+        for needle in [
+            "#161616",  // $background (g100)
+            "#0f62fe",  // $button-primary (blue-60)
+            "#da1e28",  // $button-danger-primary (red-60)
+            "#42be65",  // $support-success (green-40)
+        ] {
+            assert!(CSS.contains(needle), "Carbon color token missing: {needle}");
+        }
+        // Scales + typeface wired as custom properties.
+        for needle in [
+            "--cds-spacing-05",
+            "--cds-body-01",
+            "--font-sans",
+            "--font-mono",
+            "IBM Plex Sans",
+            "IBM Plex Mono",
+        ] {
+            assert!(CSS.contains(needle), "Carbon scale/font token missing: {needle}");
+        }
+        // The conn-bar must lay its controls out as a row, not stack them.
+        assert!(
+            CSS.contains(".conn-bar{display:flex;flex-direction:row"),
+            "conn-bar should be a horizontal toolbar"
+        );
+    }
+}
