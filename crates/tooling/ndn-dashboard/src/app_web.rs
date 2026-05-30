@@ -157,9 +157,6 @@ pub fn AppWeb() -> Element {
 
         loop {
             conn_state.set(ConnState::Connecting);
-            // §6: new connection = new session; reset gate
-            // acceptance (mirrors the desktop coroutine).
-            crate::security_state::reset_acceptance();
 
             let mut client = {
                 #[cfg(feature = "browser-engine")]
@@ -196,6 +193,11 @@ pub fn AppWeb() -> Element {
 
             conn_state.set(ConnState::Connected);
             error_msg.set(None);
+            // §6: a *successful* new connection re-fires the security gate.
+            // Resetting here (not at the top of the loop) mirrors the
+            // desktop coroutine and stops a failed reconnect from wiping
+            // the operator's acknowledgement on every retry.
+            crate::security_state::reset_acceptance();
             *LAST_LOG_SEQ.write() = 0;
 
             // Initial poll
@@ -224,6 +226,12 @@ pub fn AppWeb() -> Element {
             {
                 conn_state.set(ConnState::Disconnected);
                 error_msg.set(Some(e));
+                // Back off before retrying: the connection opened but the
+                // forwarder's mgmt responses don't decode. Without this,
+                // connect-succeeds / poll-fails spins in a tight loop and
+                // floods the UI with reconnect churn (mirrors the desktop
+                // coroutine and the session poll loop below).
+                gloo_timers::future::TimeoutFuture::new(3_000).await;
                 continue;
             }
 
@@ -339,7 +347,7 @@ pub fn AppWeb() -> Element {
     };
 
     rsx! {
-        document::Style { "{CSS}" }
+        AppStyles {}
 
         // Single ancestor for every overlay — gate, modals, toast,
         // drawer backdrop — so they all inherit light-mode CSS
@@ -556,10 +564,20 @@ pub fn AppWeb() -> Element {
     }
 }
 
+/// Installs the global stylesheet exactly once. A propless child component is
+/// memoized, so the stylesheet is rendered a single time rather than re-emitted
+/// on every poll-driven re-render (which Dioxus rejects with "Changing the
+/// props of `Style {}` is not supported"). Mirrors `app::AppStyles`.
+#[component]
+fn AppStyles() -> Element {
+    rsx! { document::Style { "{CSS}" } }
+}
+
 /// Toast overlay for the web build. Reads `app_shared::TOASTS` (the
 /// shared queue that `app_shared::push_toast` writes to). Mirrors the
 /// desktop `ToastOverlay` in `app.rs` but separated so the desktop
 /// path stays untouched.
+
 #[component]
 fn WebToastOverlay() -> Element {
     let toasts = TOASTS.read();

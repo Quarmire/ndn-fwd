@@ -560,7 +560,6 @@ pub fn App() -> Element {
     let cmd = use_coroutine(move |mut rx: UnboundedReceiver<DashCmd>| async move {
         loop {
             conn_state.set(ConnState::Connecting);
-            crate::security_state::reset_acceptance();
             let path = socket_path.peek().clone();
 
             let client = match MgmtClient::connect(&path).await {
@@ -583,6 +582,13 @@ pub fn App() -> Element {
 
             conn_state.set(ConnState::Connected);
             error_msg.set(None);
+            // A *successful* new connection (or an explicit Reconnect that
+            // reaches this point) re-fires the security gate. Resetting
+            // acceptance here — rather than at the top of the loop — means a
+            // forwarder we can't reach no longer wipes the operator's
+            // acknowledgement on every 3s retry tick, which previously made
+            // the gate impossible to dismiss while disconnected.
+            crate::security_state::reset_acceptance();
             *LAST_LOG_SEQ.write() = 0;
 
             if let Err(e) = poll_all(
@@ -622,6 +628,23 @@ pub fn App() -> Element {
             {
                 conn_state.set(ConnState::Disconnected);
                 error_msg.set(Some(e));
+                // Back off before retrying. The socket accepted us but the
+                // forwarder's management responses don't decode (e.g. a
+                // non-ndn-rs forwarder listening on this socket, or a
+                // half-open socket). Without a delay this spins
+                // connect-succeeds / poll-fails in a tight loop, flooding the
+                // UI with reconnect churn. Interruptible by an explicit
+                // Reconnect, matching the connect-failure path above.
+                let sleep = tokio::time::sleep(Duration::from_secs(3));
+                tokio::pin!(sleep);
+                loop {
+                    tokio::select! {
+                        _ = &mut sleep => break,
+                        Some(cmd) = rx.next() => {
+                            if matches!(cmd, DashCmd::Reconnect) { break }
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -1171,7 +1194,7 @@ pub fn App() -> Element {
     use_context_provider(move || ctx);
 
     rsx! {
-        document::Style { "{CSS}" }
+        AppStyles {}
 
         crate::security_gate::SecurityGate {}
 
@@ -1381,6 +1404,19 @@ pub fn App() -> Element {
             }
         }
     }
+}
+
+/// Installs the global stylesheet exactly once.
+///
+/// Inlining `document::Style { "{CSS}" }` directly in `App` re-emitted it on
+/// every poll-driven re-render, which Dioxus rejects with "Changing the props
+/// of `Style {}` is not supported" (and which left the webview with a
+/// half-applied stylesheet during reconnect churn). A propless child component
+/// is memoized — it renders a single time — so the stylesheet is installed
+/// once and never diffed again.
+#[component]
+fn AppStyles() -> Element {
+    rsx! { document::Style { "{CSS}" } }
 }
 
 #[component]
