@@ -687,11 +687,13 @@ pub fn App() -> Element {
         }
     });
 
-    // Live face-event subscriber: long-polls the forwarder's faces
-    // notification stream on its own connection and sends `RefreshNow` so
-    // external face changes appear without waiting for the 3s poll.
+    // Live event subscriber: long-polls the forwarder's faces/rib/strategy
+    // notification streams (one connection each) and sends `RefreshNow` so
+    // external changes appear without waiting for the 3s poll.
     use_coroutine(move |_rx: UnboundedReceiver<()>| async move {
-        crate::notify_sub::run_faces_subscriber(socket_path, cmd).await;
+        let subs = crate::notify_sub::MODULES
+            .map(|m| crate::notify_sub::run_subscriber(m, socket_path, cmd));
+        futures::future::join_all(subs).await;
     });
 
     /// Reserved instance IDs for in-process servers.
