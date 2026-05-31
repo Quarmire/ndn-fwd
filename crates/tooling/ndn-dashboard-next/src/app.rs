@@ -801,6 +801,7 @@ impl ForwarderActionNotice {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_probe_result(
     platform: PlatformKind,
     probe: ProbeResult,
