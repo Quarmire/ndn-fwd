@@ -123,6 +123,9 @@ pub enum DashCmd {
     CsErase(String),
     Shutdown,
     Reconnect,
+    /// Poll immediately (out of the 3s cadence). Sent by the live event
+    /// subscriber (`run_ws_subscriber`) so external changes show up at once.
+    RefreshNow,
     RefreshConfig,
     RecordStart,
     RecordStop,

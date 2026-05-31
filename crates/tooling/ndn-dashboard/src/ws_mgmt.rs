@@ -122,6 +122,91 @@ impl WsMgmtClient {
         Self::parse_response(data_wire)
     }
 
+    /// Short-poll the latest event sequence on
+    /// `/localhost/nfd/<module>/notifications` (CanBePrefix). Returns
+    /// `Some(seq)` for the most recent event, or `None` if it timed out — e.g.
+    /// no events have been published yet, so the producer holds the Interest.
+    ///
+    /// The live-event subscriber polls this instead of issuing a *held*
+    /// long-poll for the next seq: over a WebSocket relay a held Interest may
+    /// not be supported, and timing one out would cancel a pending recv and
+    /// desync the connection. A "latest" fetch returns immediately whenever
+    /// any event exists, so the timeout (and the cancel) only fires before the
+    /// first event, where the caller simply reconnects.
+    pub async fn latest_notification(
+        &mut self,
+        module: &str,
+        timeout_ms: u32,
+    ) -> Result<Option<u64>> {
+        let name = Name::root()
+            .append(b"localhost")
+            .append(b"nfd")
+            .append(module.as_bytes())
+            .append(b"notifications");
+        let interest_wire = InterestBuilder::new(name)
+            .can_be_prefix()
+            .must_be_fresh()
+            .lifetime(Duration::from_millis(timeout_ms as u64))
+            .build();
+
+        let timeout = gloo_timers::future::TimeoutFuture::new(timeout_ms);
+        let data_wire = match &mut self.transport {
+            Transport::WebSocket(slot) => {
+                let ws = slot.as_mut().ok_or_else(|| anyhow!("not connected"))?;
+                ws.send(Message::Bytes(interest_wire.to_vec()))
+                    .await
+                    .map_err(|e| anyhow!("WebSocket send failed: {:?}", e))?;
+                let recv = ws.next();
+                futures::pin_mut!(recv);
+                match futures::future::select(recv, timeout).await {
+                    futures::future::Either::Left((Some(Ok(Message::Bytes(d))), _)) => Bytes::from(d),
+                    futures::future::Either::Left((Some(Ok(Message::Text(t))), _)) => {
+                        return Err(anyhow!("unexpected text response: {}", t));
+                    }
+                    futures::future::Either::Left((Some(Err(e)), _)) => {
+                        *slot = None;
+                        return Err(anyhow!("WebSocket recv error: {:?}", e));
+                    }
+                    futures::future::Either::Left((None, _)) => {
+                        *slot = None;
+                        return Err(anyhow!("WebSocket closed"));
+                    }
+                    futures::future::Either::Right(((), _)) => return Ok(None),
+                }
+            }
+            #[cfg(feature = "browser-engine")]
+            Transport::Local { tx, rx } => {
+                tx.send(interest_wire)
+                    .await
+                    .map_err(|_| anyhow!("local engine channel closed (send)"))?;
+                let recv = async { rx.lock().await.recv().await };
+                futures::pin_mut!(recv);
+                match futures::future::select(recv, timeout).await {
+                    futures::future::Either::Left((Some(d), _)) => d,
+                    futures::future::Either::Left((None, _)) => {
+                        return Err(anyhow!("local engine channel closed (recv)"));
+                    }
+                    futures::future::Either::Right(((), _)) => return Ok(None),
+                }
+            }
+        };
+
+        let data = Data::decode(strip_lp(data_wire)).map_err(|e| anyhow!("Data decode: {:?}", e))?;
+        let seq = data
+            .name
+            .components()
+            .last()
+            .filter(|c| c.typ == ndn_packet::tlv_type::SEQUENCE_NUM)
+            .map(|c| {
+                c.value
+                    .as_ref()
+                    .iter()
+                    .fold(0u64, |n, b| (n << 8) | u64::from(*b))
+            })
+            .ok_or_else(|| anyhow!("notification Data missing sequence number"))?;
+        Ok(Some(seq))
+    }
+
     async fn exchange(&mut self, interest_wire: Bytes) -> Result<Bytes> {
         match &mut self.transport {
             Transport::WebSocket(slot) => {

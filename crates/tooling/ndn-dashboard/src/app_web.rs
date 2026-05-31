@@ -9,7 +9,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use dioxus::prelude::*;
-use futures::StreamExt as _;
+use futures::{FutureExt as _, StreamExt as _};
 
 pub use crate::app_shared::*;
 
@@ -238,24 +238,47 @@ pub fn AppWeb() -> Element {
             // Poll loop
             let mut tick = 0u32;
             'session: loop {
-                // Use gloo timer for web-compatible sleep
-                gloo_timers::future::TimeoutFuture::new(3_000).await;
+                // Wake on the 3s tick OR as soon as a command arrives, so
+                // RefreshNow (live events) and user commands act promptly
+                // instead of waiting up to a full poll interval.
+                let woke_on: Option<DashCmd> = {
+                    let timer = gloo_timers::future::TimeoutFuture::new(3_000).fuse();
+                    let next = rx.next().fuse();
+                    futures::pin_mut!(timer, next);
+                    futures::select! {
+                        _ = timer => None,
+                        c = next => c,
+                    }
+                };
                 tick += 1;
 
-                // Check for commands (non-blocking drain)
-                while let Ok(Some(cmd_msg)) = rx.try_next() {
-                    if matches!(cmd_msg, DashCmd::Reconnect) {
-                        break 'session;
+                // Handle the waking command (if any) plus any others queued.
+                // RefreshNow just falls through to an immediate poll.
+                let mut pending = woke_on;
+                let mut do_reconnect = false;
+                while let Some(cmd_msg) = pending.take() {
+                    match cmd_msg {
+                        DashCmd::Reconnect => {
+                            do_reconnect = true;
+                            break;
+                        }
+                        DashCmd::RefreshNow => {}
+                        other => {
+                            run_cmd_web(
+                                other,
+                                &mut client,
+                                &error_msg,
+                                &trust_validation,
+                                &identity_name,
+                                &identity_is_ephemeral,
+                            )
+                            .await;
+                        }
                     }
-                    run_cmd_web(
-                        cmd_msg,
-                        &mut client,
-                        &error_msg,
-                        &trust_validation,
-                        &identity_name,
-                        &identity_is_ephemeral,
-                    )
-                    .await;
+                    pending = rx.try_next().ok().flatten();
+                }
+                if do_reconnect {
+                    break 'session;
                 }
 
                 // Poll
@@ -292,6 +315,15 @@ pub fn AppWeb() -> Element {
 
     // router_cmd / tool_cmd are desktop-only fields on AppCtx — no
     // subprocess substrate on web means no stub coroutines either.
+
+    // Live event subscriber: short-polls the faces/rib/strategy notification
+    // streams (one WS connection each) and sends RefreshNow so external
+    // changes refresh promptly. Fail-safe — if a stream/relay doesn't serve
+    // notifications it just reconnects and the 3s poll loop carries on.
+    use_coroutine(move |_rx: UnboundedReceiver<()>| async move {
+        let subs = ["faces", "rib", "strategy-choice"].map(|m| run_ws_subscriber(m, ws_url, cmd));
+        futures::future::join_all(subs).await;
+    });
 
     let ctx = AppCtx {
         conn: conn_state,
@@ -561,6 +593,41 @@ pub fn AppWeb() -> Element {
             } // close .main
         } // close .layout
         } // close .app-root wrapper
+    }
+}
+
+/// Live-event subscriber for the web build: short-polls one module's
+/// `/localhost/nfd/<module>/notifications` stream on a dedicated WebSocket and
+/// sends [`DashCmd::RefreshNow`] when the event sequence advances. Reconnects
+/// on error/timeout; the base poll loop runs regardless, so a relay that
+/// doesn't serve notifications is a harmless no-op. Mirrors the desktop
+/// `notify_sub::run_subscriber`, but short-polls "latest" rather than holding
+/// a long-poll (a WS relay may not keep an Interest open — see
+/// `WsMgmtClient::latest_notification`).
+async fn run_ws_subscriber(module: &str, ws_url: Signal<String>, cmd: Coroutine<DashCmd>) {
+    loop {
+        let mut client = WsMgmtClient::new(&ws_url.peek().clone());
+        if client.connect().await.is_err() {
+            gloo_timers::future::TimeoutFuture::new(3_000).await;
+            continue;
+        }
+        let mut last: u64 = 0;
+        loop {
+            gloo_timers::future::TimeoutFuture::new(2_000).await;
+            match client.latest_notification(module, 5_000).await {
+                Ok(Some(seq)) => {
+                    if last != 0 && seq > last {
+                        cmd.send(DashCmd::RefreshNow);
+                    }
+                    last = seq;
+                }
+                // Timed out (no events yet) — reconnect to avoid a stale
+                // pending recv on the cancelled long-poll.
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        gloo_timers::future::TimeoutFuture::new(2_000).await;
     }
 }
 
