@@ -949,6 +949,23 @@ pub struct SchemaRuleInfo {
 }
 
 impl SchemaRuleInfo {
+    /// Plain-English rendering of the rule for the "permissions as sentences"
+    /// view: data names matching the left pattern are trusted only when signed
+    /// by a key matching the right pattern. Empty patterns degrade to "any".
+    pub fn sentence(&self) -> String {
+        let data = if self.data_pattern.trim().is_empty() {
+            "any name"
+        } else {
+            self.data_pattern.trim()
+        };
+        let key = if self.key_pattern.trim().is_empty() {
+            "any key"
+        } else {
+            self.key_pattern.trim()
+        };
+        format!("Data matching {data} is trusted only when signed by a key matching {key}.")
+    }
+
     /// Parse from `security/schema-list` response text. Per-line format:
     /// `[<index>] <data_pattern> => <key_pattern>`.
     pub fn parse_list(text: &str) -> Vec<Self> {
@@ -1256,6 +1273,27 @@ impl From<ndn_config::RibEntry> for RibEntryInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_rule_sentence_reads_plainly() {
+        let r = SchemaRuleInfo {
+            index: 0,
+            data_pattern: "/lab/alice/<type>".into(),
+            key_pattern: "/lab/alice/KEY/<id>".into(),
+        };
+        let s = r.sentence();
+        assert!(s.contains("/lab/alice/<type>"));
+        assert!(s.contains("/lab/alice/KEY/<id>"));
+        assert!(s.contains("signed by"));
+        // Empty patterns degrade to readable defaults, not blanks.
+        let empty = SchemaRuleInfo {
+            index: 1,
+            data_pattern: String::new(),
+            key_pattern: "  ".into(),
+        };
+        assert!(empty.sentence().contains("any name"));
+        assert!(empty.sentence().contains("any key"));
+    }
 
     #[test]
     fn trust_validation_result_valid_minimal() {

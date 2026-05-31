@@ -830,44 +830,33 @@ fn TrustSchemaList(
                     " is accepted (security profile = disabled)."
                 }
             } else if !raw_mode {
-                table {
-                    thead {
-                        tr {
-                            th { "Index" }
-                            th { "Data Pattern" }
-                            th { "" }
-                            th { "Key Pattern" }
-                            th { "Actions" }
-                        }
-                    }
-                    tbody {
-                        for rule in rules.iter() {
-                            {
-                                let idx = rule.index as u64;
-                                rsx! {
-                                    tr {
-                                        td { span { class: "badge badge-gray", "{rule.index}" } }
-                                        td { class: "mono", style: "color:var(--accent);", "{rule.data_pattern}" }
-                                        td { style: "color:var(--text-muted);padding:0 6px;", "=>" }
-                                        td { class: "mono", style: "color:var(--green);", "{rule.key_pattern}" }
-                                        td {
-                                            button {
-                                                class: "btn btn-secondary btn-sm",
-                                                "data-tooltip": "Phase C: guided schema-rule editor",
-                                                onclick: move |_| push_toast(
-                                                    "Phase C: §11.6 — guided schema-rule editor",
-                                                    ToastLevel::Info,
-                                                ),
-                                                "Edit"
-                                            }
-                                            button {
-                                                class: "btn btn-danger btn-sm",
-                                                style: "margin-left:4px;",
-                                                onclick: move |_| on_remove_rule.call(idx),
-                                                "Remove"
-                                            }
-                                        }
-                                    }
+                // Permissions as sentences: each rule read as plain English.
+                for rule in rules.iter() {
+                    {
+                        let idx = rule.index as u64;
+                        rsx! {
+                            div { class: "schema-rule",
+                                span { class: "badge badge-gray", style: "flex-shrink:0;", "{rule.index}" }
+                                span { class: "schema-rule-text",
+                                    "Data matching "
+                                    span { class: "mono", style: "color:var(--accent);", "{rule.data_pattern}" }
+                                    " is trusted only when signed by a key matching "
+                                    span { class: "mono", style: "color:var(--green);", "{rule.key_pattern}" }
+                                    "."
+                                }
+                                button {
+                                    class: "btn btn-secondary btn-sm",
+                                    "data-tooltip": "Phase C: guided schema-rule editor",
+                                    onclick: move |_| push_toast(
+                                        "Phase C: §11.6 — guided schema-rule editor",
+                                        ToastLevel::Info,
+                                    ),
+                                    "Edit"
+                                }
+                                button {
+                                    class: "btn btn-danger btn-sm",
+                                    onclick: move |_| on_remove_rule.call(idx),
+                                    "Remove"
                                 }
                             }
                         }

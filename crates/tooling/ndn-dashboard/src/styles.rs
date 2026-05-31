@@ -107,6 +107,9 @@ body>div{height:100%;width:100%;overflow:hidden}
 .nav-section-caret{font-size:9px;width:10px;display:inline-block}
 /* Live tally per bucket (design note §2). */
 .nav-count{font-size:10px;font-weight:600;color:var(--text-faint);background:var(--surface2);border-radius:0;padding:1px 6px;min-width:18px;text-align:center}
+/* Trust-schema rule rendered as a plain-English sentence (permissions view). */
+.schema-rule{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border-subtle);border-left:3px solid var(--accent);margin-bottom:6px;background:var(--surface2)}
+.schema-rule-text{flex:1;font-size:13px;line-height:1.5;color:var(--text)}
 .nav-section .nav-item{padding-left:30px}
 .nav-item{padding:10px 16px;cursor:pointer;color:var(--text-muted);font-size:13px;border-left:3px solid transparent;transition:all .15s}
 .nav-item:hover{background:var(--border-subtle);color:var(--text)}
