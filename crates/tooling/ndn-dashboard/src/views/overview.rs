@@ -2,6 +2,7 @@ use crate::app::{AppCtx, DashCmd};
 use crate::resizable::use_col_widths;
 #[cfg(feature = "desktop")]
 use crate::tool_runner::fmt_bytes;
+use crate::views::inspector::{SELECTED_ENTITY, SelectedEntity};
 #[cfg(not(feature = "desktop"))]
 fn fmt_bytes(b: u64) -> String {
     if b > 1_000_000_000 {
@@ -221,10 +222,10 @@ pub fn Overview() -> Element {
                         tbody {
                             for face in faces.iter() {
                                 {
-                                    use crate::views::inspector::{SELECTED_ENTITY, SelectedEntity};
                                     let fid = face.face_id;
                                     let is_selected = SELECTED_ENTITY
                                         .read()
+                                        .as_ref()
                                         .and_then(|s| s.face_id())
                                         == Some(fid);
                                     rsx! {
@@ -301,13 +302,24 @@ pub fn Overview() -> Element {
                                         .find(|s| s.prefix == entry.prefix)
                                         .map(|s| s.strategy.clone());
                                     let current_strat2 = current_strat.clone();
+                                    let row_prefix = prefix.clone();
+                                    let is_selected = SELECTED_ENTITY
+                                        .read()
+                                        .as_ref()
+                                        .and_then(|s| s.route_prefix())
+                                        == Some(prefix.as_str());
                                     rsx! {
                                         tr {
+                                            class: if is_selected { "row-selectable selected" } else { "row-selectable" },
+                                            onclick: move |_| {
+                                                *SELECTED_ENTITY.write() = Some(SelectedEntity::Route(row_prefix.clone()));
+                                            },
                                             td { class: "mono", "{prefix}" }
                                             td { class: "mono", style: "font-size:11px;", "{nexthop_str}" }
                                             td {
                                                 select {
                                                     style: "background:var(--bg);border:1px solid var(--border-subtle);border-radius:4px;color:var(--text-muted);font-size:11px;padding:2px 6px;cursor:pointer;",
+                                                    onclick: move |e| e.stop_propagation(),
                                                     onchange: move |e| {
                                                         let val = e.value();
                                                         if val == "__unset__" || val.is_empty() {
@@ -333,10 +345,13 @@ pub fn Overview() -> Element {
                                             td {
                                                 button {
                                                     class: "btn btn-danger btn-sm",
-                                                    onclick: move |_| ctx.cmd.send(DashCmd::RouteRemove {
-                                                        prefix: pfx2.clone(),
-                                                        face_id: first_fid,
-                                                    }),
+                                                    onclick: move |e| {
+                                                        e.stop_propagation();
+                                                        ctx.cmd.send(DashCmd::RouteRemove {
+                                                            prefix: pfx2.clone(),
+                                                            face_id: first_fid,
+                                                        });
+                                                    },
                                                     "Remove"
                                                 }
                                             }

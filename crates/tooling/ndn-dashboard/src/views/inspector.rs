@@ -14,27 +14,39 @@ use dioxus::prelude::*;
 use crate::app::{AppCtx, DashCmd};
 use crate::views::View;
 
-/// The entity currently shown in the inspector. One variant today; extends to
-/// `Route`, `Identity`, `CsEntry`, … as each surface is migrated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The entity currently shown in the inspector. Extends to `Identity`,
+/// `CsEntry`, … as each surface is migrated.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SelectedEntity {
     Face(u64),
+    /// A FIB/RIB route, keyed by its name prefix.
+    Route(String),
 }
 
 impl SelectedEntity {
     /// The face id, when a face is selected.
-    pub fn face_id(self) -> Option<u64> {
+    pub fn face_id(&self) -> Option<u64> {
         match self {
-            SelectedEntity::Face(id) => Some(id),
+            SelectedEntity::Face(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The route prefix, when a route is selected.
+    pub fn route_prefix(&self) -> Option<&str> {
+        match self {
+            SelectedEntity::Route(p) => Some(p.as_str()),
+            _ => None,
         }
     }
 
     /// The nav view this selection is relevant to. The inspector only renders
     /// when the active view matches, so navigating away hides stale detail
     /// without having to clear the selection from every nav handler.
-    pub fn relevant_view(self) -> View {
+    pub fn relevant_view(&self) -> View {
         match self {
-            SelectedEntity::Face(_) => View::Overview,
+            // Both the Active Faces and FIB Routes tables live on Overview.
+            SelectedEntity::Face(_) | SelectedEntity::Route(_) => View::Overview,
         }
     }
 }
@@ -75,7 +87,7 @@ fn scope_label(v: u64) -> &'static str {
 
 #[component]
 pub fn Inspector() -> Element {
-    let selected = *SELECTED_ENTITY.read();
+    let selected = SELECTED_ENTITY.read().clone();
     let Some(sel) = selected else {
         return rsx! {};
     };
@@ -85,6 +97,7 @@ pub fn Inspector() -> Element {
     }
     match sel {
         SelectedEntity::Face(id) => rsx! { FaceInspector { face_id: id } },
+        SelectedEntity::Route(prefix) => rsx! { RouteInspector { prefix } },
     }
 }
 
@@ -176,6 +189,95 @@ fn FaceInspector(face_id: u64) -> Element {
     }
 }
 
+#[component]
+fn RouteInspector(prefix: String) -> Element {
+    let ctx = use_context::<AppCtx>();
+    let routes = ctx.routes.read();
+    let rib = ctx.rib_entries.read();
+    let strategies = ctx.strategies.read();
+
+    let fib = routes.iter().find(|e| e.prefix == prefix);
+    let rib_entry = rib.iter().find(|e| e.prefix == prefix);
+    let strat = strategies
+        .iter()
+        .find(|s| s.prefix == prefix)
+        .map(|s| s.short_name().to_string());
+    let present = fib.is_some() || rib_entry.is_some();
+    let prefix_close = prefix.clone();
+
+    rsx! {
+        aside { class: "inspector",
+            div { class: "inspector-header",
+                span { class: "inspector-title", "Route" }
+                button {
+                    class: "inspector-close",
+                    title: "Close",
+                    onclick: move |_| clear_selection(),
+                    "✕"
+                }
+            }
+            div { class: "inspector-body",
+                if !present {
+                    div { class: "inspector-empty", "Route {prefix_close} is no longer present." }
+                } else {
+                    div { class: "inspector-section",
+                        span { class: "inspector-section-title", "Prefix" }
+                        div { class: "mono", style: "word-break:break-all;", "{prefix}" }
+                    }
+                    div { class: "inspector-section",
+                        span { class: "inspector-section-title", "Strategy" }
+                        div { class: "mono", "{strat.clone().unwrap_or_else(|| \"— default —\".into())}" }
+                    }
+                    // FIB nexthops — the forwarding face(s) and their cost.
+                    if let Some(entry) = fib {
+                        div { class: "inspector-section",
+                            span { class: "inspector-section-title", "FIB nexthops" }
+                            if entry.nexthops.is_empty() {
+                                div { class: "inspector-empty", "none" }
+                            } else {
+                                dl { class: "inspector-kv",
+                                    for nh in entry.nexthops.iter() {
+                                        dt { class: "mono", "face {nh.face_id}" }
+                                        dd { class: "mono", "cost {nh.cost}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // RIB routes — origin, flags, and expiration the table hides.
+                    if let Some(entry) = rib_entry {
+                        div { class: "inspector-section",
+                            span { class: "inspector-section-title", "RIB routes" }
+                            table { class: "inspector-counters",
+                                thead {
+                                    tr { th { "Origin" } th { "Cost" } th { "Flags" } th { "Expires" } }
+                                }
+                                tbody {
+                                    for r in entry.routes.iter() {
+                                        {
+                                            let expires = r.expiration_period
+                                                .map(|ms| format!("{} s", ms / 1000))
+                                                .unwrap_or_else(|| "—".into());
+                                            rsx! {
+                                                tr {
+                                                    td { class: "mono", "{r.origin_label()}" }
+                                                    td { class: "mono", "{r.cost}" }
+                                                    td { class: "mono", "{r.flags_label()}" }
+                                                    td { class: "mono", "{expires}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +286,15 @@ mod tests {
     fn face_selection_carries_id_and_view() {
         let sel = SelectedEntity::Face(7);
         assert_eq!(sel.face_id(), Some(7));
+        assert_eq!(sel.route_prefix(), None);
+        assert_eq!(sel.relevant_view(), View::Overview);
+    }
+
+    #[test]
+    fn route_selection_carries_prefix_and_view() {
+        let sel = SelectedEntity::Route("/example/uav".into());
+        assert_eq!(sel.route_prefix(), Some("/example/uav"));
+        assert_eq!(sel.face_id(), None);
         assert_eq!(sel.relevant_view(), View::Overview);
     }
 
