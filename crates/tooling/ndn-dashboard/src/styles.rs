@@ -130,6 +130,12 @@ body>div{height:100%;width:100%;overflow:hidden}
 .conn-bar-config input{flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:0;font-size:13px;font-family:var(--font-mono);min-width:0}
 .conn-bar-config input:focus{outline:none;border-color:var(--accent)}
 .conn-bar-spacer{flex:1}
+/* Attach-bar axis framing (note section 8): the Engine axis and the
+   Acting-as identity axis are independent; a faint divider separates them. */
+.axis-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted);flex-shrink:0}
+.axis-divider{width:1px;align-self:stretch;min-height:18px;background:var(--border);flex-shrink:0;margin:0 var(--cds-spacing-02,4px)}
+.axis-select{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:0;font-size:13px;font-family:var(--font-mono)}
+.axis-select:focus{outline:none;border-color:var(--accent)}
 /* Conn-state badge becomes a clickable button on mobile (the
    toggle for the config row). Keep the inherited badge styling
    and just normalise the button defaults. */

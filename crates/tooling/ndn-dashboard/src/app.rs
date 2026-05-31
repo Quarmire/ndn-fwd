@@ -1351,12 +1351,14 @@ pub fn App() -> Element {
             }
 
             div { class: "main",
+                // Attach bar — two independent axes (note §8): the Engine you
+                // operate and the identity you're Acting as.
                 div { class: "conn-bar",
                     span {
                         class: "{conn_state.read().badge_class()}",
                         "{conn_state.read().label()}"
                     }
-                    crate::security_surfaces::IdentityChip {}
+                    span { class: "axis-label", "Engine" }
                     crate::views::engine_pill::EnginePill {}
                     input {
                         r#type: "text",
@@ -1369,6 +1371,8 @@ pub fn App() -> Element {
                         onclick: move |_| cmd.send(DashCmd::Reconnect),
                         "Connect"
                     }
+                    span { class: "axis-divider" }
+                    crate::security_surfaces::IdentityAxisControl {}
                     button {
                         class: "icon-btn",
                         title: "Refresh",

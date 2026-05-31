@@ -572,8 +572,10 @@ pub fn AppWeb() -> Element {
                                 " ▾"
                             }
                         }
-                        crate::security_surfaces::IdentityChip {}
+                        span { class: "axis-label", "Engine" }
                         crate::views::engine_pill::EnginePill {}
+                        span { class: "axis-divider" }
+                        crate::security_surfaces::IdentityAxisControl {}
                         div { class: "conn-bar-spacer" }
                         button {
                             class: "icon-btn",

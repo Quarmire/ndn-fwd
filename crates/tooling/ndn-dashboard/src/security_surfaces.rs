@@ -57,6 +57,47 @@ pub fn IdentityChip() -> Element {
     }
 }
 
+/// The "Acting as" axis of the Attach bar. Renders the active identity as a
+/// status chip in the single-context default (note §8 light-touch), and a
+/// switchable dropdown once more than one identity is selectable. Both branches
+/// read the same [`IdentityAxis`] view-model so display and selection can't
+/// drift, and so the Identity nav bucket / extension / mobile can reuse it.
+#[component]
+#[allow(non_snake_case)]
+pub fn IdentityAxisControl() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let mut identity_name = ctx.identity_name;
+    let axis = crate::identity_axis::IdentityAxis::from_active(
+        identity_name.read().as_str(),
+        *ctx.identity_is_ephemeral.read(),
+    );
+
+    rsx! {
+        span { class: "axis-label", "Acting as" }
+        if axis.is_single() {
+            // One (or zero) identity → the chip already shows it with status.
+            IdentityChip {}
+        } else {
+            // Multi-context: pick which identity signs on this surface.
+            // NOTE: this sets the dashboard's active-identity state; binding it
+            // to the mgmt-command signer lands with the TrustContext custodian
+            // work (Phase 3/4). The branch is unreachable on today's
+            // single-identity model and is exercised by identity_axis tests.
+            select {
+                class: "axis-select",
+                onchange: move |e| identity_name.set(e.value()),
+                for id in axis.available.iter() {
+                    option {
+                        value: "{id.name}",
+                        selected: axis.active.as_ref().map(|a| a.name == id.name).unwrap_or(false),
+                        "{id.name}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 #[allow(non_snake_case)]
 pub fn SecDot() -> Element {

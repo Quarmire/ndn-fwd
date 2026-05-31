@@ -22,6 +22,7 @@ mod fonts;
 #[cfg(feature = "desktop")]
 mod forwarder_proc;
 pub mod forwarder_profile;
+mod identity_axis;
 #[cfg(feature = "desktop")]
 mod notify_sub;
 mod resizable;
