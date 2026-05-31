@@ -302,10 +302,13 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .modal-close:hover{color:var(--text)}
 .modal-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--border-subtle)}
 /* ── Tab pills ─────────────────────────────────────────────── */
-.tab-pills{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap}
-.tab-pill{padding:5px 12px;border-radius:20px;border:1px solid var(--border);background:transparent;color:var(--text-muted);font-size:12px;cursor:pointer;transition:all .15s;font-family:inherit}
-.tab-pill:hover{border-color:var(--accent);color:var(--text)}
-.tab-pill.active{border-color:var(--accent);background:var(--accent-dim);color:var(--accent)}
+/* Carbon underline tabs: a rail with the active tab marked by a 2px accent
+   underline (was rounded pills). The container's bottom border is the rail;
+   each tab's transparent bottom border overlaps it via the -1px margin. */
+.tab-pills{display:flex;gap:0;margin-bottom:16px;flex-wrap:wrap;border-bottom:1px solid var(--border-subtle)}
+.tab-pill{padding:10px 16px;border:none;border-bottom:2px solid transparent;margin-bottom:-1px;background:transparent;color:var(--text-muted);font-size:13px;cursor:pointer;transition:color .15s,border-color .15s;font-family:inherit}
+.tab-pill:hover{color:var(--text);border-bottom-color:var(--border)}
+.tab-pill.active{color:var(--text);border-bottom-color:var(--accent);font-weight:600}
 /* ── Face type grid ────────────────────────────────────────── */
 .face-type-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
 .face-type-btn{padding:10px 8px;border:1px solid var(--border);border-radius:0;background:var(--bg);color:var(--text-muted);cursor:pointer;text-align:center;font-size:12px;transition:all .15s;font-family:inherit}
@@ -555,6 +558,8 @@ mod tests {
         }
         // Tables go horizontally scrollable on narrow viewports.
         assert!(CSS.contains("overflow-x:auto"), "responsive table scroll missing");
+        // Tabs are Carbon underline tabs, not rounded pills.
+        assert!(!CSS.contains("border-radius:20px"), "tab pill radius should be gone");
         // Monospace surfaces route through the token, not rule-level literals.
         // (`'SF Mono'` still appears inside the `--font-mono` fallback list,
         // which is correct — we only forbid it as a `font-family:` value.)
