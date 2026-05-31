@@ -2483,9 +2483,38 @@ async fn run_cmd(
             .await;
         }
         Err(e) => {
-            push_toast(format!("Command failed: {e}"), ToastLevel::Error);
+            push_toast(humanize_cmd_error(&e), ToastLevel::Error);
         }
     }
+}
+
+/// Turn a raw mgmt error into operator-actionable guidance. Privileged
+/// commands (add anchor, import key, route/schema edits) are always
+/// signed-and-validated by the forwarder; a fresh forwarder with no
+/// configured trust anchor refuses them by design — trust is bootstrapped
+/// out-of-band, not over the unauthenticated management channel.
+fn humanize_cmd_error(e: &str) -> String {
+    let lower = e.to_lowercase();
+    if lower.contains("no validator is configured") || lower.contains("authentication required") {
+        return format!(
+            "Forwarder refused a privileged command: it requires signed management commands but \
+             has no trust anchor configured, so it can't validate anyone. Bootstrap trust out-of-band: \
+             (1) `ndn-sec keygen --anchor /op/<you>`, (2) point [security.mgmt] trust_anchor_pib at that \
+             PIB and restart the forwarder, (3) `ndn-sec export /op/<you>` and import that SafeBag here \
+             so the dashboard signs as a trusted operator. ({e})"
+        );
+    }
+    if lower.contains("invalid command signature")
+        || lower.contains("signature required")
+        || lower.contains("unauthorized")
+    {
+        return format!(
+            "Forwarder rejected the command's signature: the dashboard's active signing identity isn't \
+             trusted for this operation. Import a SafeBag whose identity the forwarder's trust anchor \
+             covers, then retry. ({e})"
+        );
+    }
+    format!("Command failed: {e}")
 }
 
 /// Initiator name attached to audit entries. Returns the live identity name
