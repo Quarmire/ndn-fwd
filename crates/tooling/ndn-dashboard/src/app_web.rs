@@ -806,6 +806,7 @@ async fn poll_all_web(
                 n_out_bytes: fs.n_out_bytes,
                 n_in_nacks: fs.n_in_nacks,
                 n_out_nacks: fs.n_out_nacks,
+                flags: fs.flags,
             })
             .collect();
         let mut faces_sig = *faces;

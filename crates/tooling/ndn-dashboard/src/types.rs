@@ -183,6 +183,10 @@ pub struct FaceInfo {
     pub n_out_bytes: u64,
     pub n_in_nacks: u64,
     pub n_out_nacks: u64,
+    /// NFD FaceFlags bitmap (`Flags`=0x6c). Bit 0 = LocalFieldsEnabled,
+    /// 1 = LpReliabilityEnabled, 2 = CongestionMarkingEnabled. Read-only here;
+    /// runtime-mutable via `faces/update`.
+    pub flags: u64,
 }
 
 impl FaceInfo {
@@ -212,6 +216,7 @@ impl FaceInfo {
                 n_out_bytes: 0,
                 n_in_nacks: 0,
                 n_out_nacks: 0,
+                flags: 0,
             };
             for token in line.split_whitespace() {
                 if let Some((k, v)) = token.split_once('=') {
@@ -1143,6 +1148,7 @@ impl From<ndn_config::FaceStatus> for FaceInfo {
             n_out_bytes: fs.n_out_bytes,
             n_in_nacks: fs.n_in_nacks,
             n_out_nacks: fs.n_out_nacks,
+            flags: fs.flags,
         }
     }
 }

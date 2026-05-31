@@ -161,6 +161,8 @@ body>div{height:100%;width:100%;overflow:hidden}
 .inspector-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font-size:13px}
 .inspector-kv dt{color:var(--text-muted)}
 .inspector-kv dd{margin:0;color:var(--text);word-break:break-all}
+.inspector-kv dd.flag-on{color:var(--green);font-weight:600}
+.inspector-kv dd.flag-off{color:var(--text-faint)}
 .inspector-counters{width:100%;font-size:13px}
 .inspector-counters th{text-align:right;color:var(--text-muted);font-weight:500;padding:2px 6px}
 .inspector-counters th:first-child{text-align:left}

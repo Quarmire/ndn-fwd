@@ -162,6 +162,11 @@ fn FaceInspector(face_id: u64) -> Element {
                     let n_out_data = face.n_out_data;
                     let n_in_nacks = face.n_in_nacks;
                     let n_out_nacks = face.n_out_nacks;
+                    // NFD FaceFlags bits (read-only): runtime-mutable via
+                    // faces/update, surfaced here as on/off status.
+                    let local_fields = face.flags & 0b001 != 0;
+                    let lp_reliability = face.flags & 0b010 != 0;
+                    let cong_marking = face.flags & 0b100 != 0;
                     // Routes whose nexthop is this face — cross-nav targets.
                     let routes_via: Vec<String> = ctx
                         .routes
@@ -203,6 +208,23 @@ fn FaceInspector(face_id: u64) -> Element {
                                         tr { td { "Data" }      td { class: "mono", "{n_in_data}" } td { class: "mono", "{n_out_data}" } }
                                         tr { td { "Nacks" }     td { class: "mono", "{n_in_nacks}" } td { class: "mono", "{n_out_nacks}" } }
                                         tr { td { "Bytes" }     td { class: "mono", "{in_bytes}" } td { class: "mono", "{out_bytes}" } }
+                                    }
+                                }
+                            }
+                            div { class: "inspector-section",
+                                span { class: "inspector-section-title", "Link service" }
+                                dl { class: "inspector-kv",
+                                    dt { "Local fields" }
+                                    dd { class: if local_fields { "flag-on" } else { "flag-off" },
+                                        if local_fields { "on" } else { "off" }
+                                    }
+                                    dt { "LP reliability" }
+                                    dd { class: if lp_reliability { "flag-on" } else { "flag-off" },
+                                        if lp_reliability { "on" } else { "off" }
+                                    }
+                                    dt { "Congestion marking" }
+                                    dd { class: if cong_marking { "flag-on" } else { "flag-off" },
+                                        if cong_marking { "on" } else { "off" }
                                     }
                                 }
                             }
