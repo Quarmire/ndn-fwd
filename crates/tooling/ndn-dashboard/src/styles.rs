@@ -177,6 +177,11 @@ body>div{height:100%;width:100%;overflow:hidden}
      height, anchored to the bottom, with its own scroll. */
   .inspector{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;max-width:none;max-height:62vh;border-left:none;border-top:1px solid var(--border);box-shadow:0 -6px 20px rgba(0,0,0,.45);z-index:90}
   .inspector-header{position:sticky;top:0;background:var(--surface)}
+  /* The bottom sheet is fixed (out of flow), so without this the list can't
+     scroll past it and rows behind the sheet are unreachable — you'd have to
+     close the inspector to pick another row. Reserve the sheet's height as
+     bottom padding so every row scrolls into the visible strip above it. */
+  .inspector-open .content,.inspector-open .content-area{padding-bottom:64vh}
 }
 /* Sticky sub-nav inside a view's content area — keeps the tab
    bar + adjacent persistent controls pinned to the top of the

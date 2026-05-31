@@ -60,6 +60,17 @@ pub fn clear_selection() {
     *SELECTED_ENTITY.write() = None;
 }
 
+/// Whether the inspector pane is actually showing right now — a selection
+/// exists and the active view matches its `relevant_view`. The shell uses this
+/// to reserve bottom-sheet space on mobile so obscured rows stay scrollable.
+pub fn inspector_visible() -> bool {
+    SELECTED_ENTITY
+        .read()
+        .as_ref()
+        .map(|s| s.relevant_view() == *crate::app::ACTIVE_VIEW.read())
+        .unwrap_or(false)
+}
+
 fn fmt_bytes(n: u64) -> String {
     if n < 1024 {
         format!("{n} B")

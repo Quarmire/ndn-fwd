@@ -616,7 +616,7 @@ pub fn AppWeb() -> Element {
                 }
 
                 // View content + right-hand inspector (design note §3).
-                div { class: "content-host",
+                div { class: if crate::views::inspector::inspector_visible() { "content-host inspector-open" } else { "content-host" },
                     div { class: "content-area",
                         if let Some(err) = error_msg.read().as_ref() {
                             div { class: "alert alert-error",

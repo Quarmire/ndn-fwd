@@ -1449,7 +1449,7 @@ pub fn App() -> Element {
                     }
                 } else {
                     // Center content + right-hand inspector (design note §3).
-                    div { class: "content-host",
+                    div { class: if crate::views::inspector::inspector_visible() { "content-host inspector-open" } else { "content-host" },
                         div { class: "content",
                             if let Some(ref err) = *error_msg.read() {
                                 div { class: "error-banner",
