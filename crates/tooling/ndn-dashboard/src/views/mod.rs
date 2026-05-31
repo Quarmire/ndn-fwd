@@ -144,6 +144,31 @@ impl View {
     }
 }
 
+/// Live tally shown on a bucket's sidebar header (Eagle-style source-tree
+/// counts, design note §2). Engine = faces, Identity = distinct identities,
+/// Compose = locally-published prefixes (app/client route origin).
+pub fn bucket_count(
+    bucket: Bucket,
+    faces: &[crate::types::FaceInfo],
+    keys: &[crate::types::SecurityKeyInfo],
+    rib: &[crate::types::RibEntryInfo],
+) -> usize {
+    match bucket {
+        Bucket::Engine => faces.len(),
+        Bucket::Identity => {
+            let mut ids = std::collections::HashSet::new();
+            for k in keys {
+                ids.insert(k.identity_name());
+            }
+            ids.len()
+        }
+        Bucket::Compose => rib
+            .iter()
+            .filter(|e| e.routes.iter().any(|r| matches!(r.origin, 0 | 65)))
+            .count(),
+    }
+}
+
 #[cfg(test)]
 mod nav_tests {
     use super::*;
@@ -162,6 +187,50 @@ mod nav_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bucket_counts_reflect_state() {
+        use crate::types::{RibEntryInfo, RibRoute, SecurityKeyInfo};
+        let key = |name: &str| SecurityKeyInfo {
+            name: name.into(),
+            has_cert: false,
+            valid_until: String::new(),
+            public_key_b64: String::new(),
+        };
+        // Two keys under one identity + one under another = 2 distinct.
+        let keys = vec![
+            key("/home/bob/KEY/1"),
+            key("/home/bob/KEY/2"),
+            key("/work/acme/KEY/1"),
+        ];
+        assert_eq!(bucket_count(Bucket::Identity, &[], &keys, &[]), 2);
+
+        let route = |origin: u64| RibRoute {
+            face_id: 1,
+            origin,
+            cost: 0,
+            flags: 0,
+            expiration_period: None,
+        };
+        let rib = vec![
+            RibEntryInfo {
+                prefix: "/app".into(),
+                routes: vec![route(0)],
+            }, // app
+            RibEntryInfo {
+                prefix: "/cli".into(),
+                routes: vec![route(65)],
+            }, // client
+            RibEntryInfo {
+                prefix: "/nlsr".into(),
+                routes: vec![route(128)],
+            }, // learned
+        ];
+        // Only app(0) + client(65) origins count as "published".
+        assert_eq!(bucket_count(Bucket::Compose, &[], &[], &rib), 2);
+        // Engine counts faces (none here).
+        assert_eq!(bucket_count(Bucket::Engine, &[], &keys, &rib), 0);
     }
 
     /// The sidebar nav covers all three buckets and is non-empty in each.

@@ -105,6 +105,8 @@ body>div{height:100%;width:100%;overflow:hidden}
 .nav-section-header{display:flex;align-items:center;gap:6px;padding:12px 16px 6px;cursor:pointer;color:var(--text-muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;user-select:none}
 .nav-section-header:hover{color:var(--text)}
 .nav-section-caret{font-size:9px;width:10px;display:inline-block}
+/* Live tally per bucket (design note §2). */
+.nav-count{font-size:10px;font-weight:600;color:var(--text-faint);background:var(--surface2);border-radius:0;padding:1px 6px;min-width:18px;text-align:center}
 .nav-section .nav-item{padding-left:30px}
 .nav-item{padding:10px 16px;cursor:pointer;color:var(--text-muted);font-size:13px;border-left:3px solid transparent;transition:all .15s}
 .nav-item:hover{background:var(--border-subtle);color:var(--text)}
@@ -344,9 +346,10 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
 .ov-card:hover{background:var(--surface2);border-color:var(--accent)44}
 .ov-card-active{background:var(--accent-dim);border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
 .ov-card-static{background:var(--surface);border:1px solid var(--border);border-radius:0;padding:14px 16px;cursor:default}
-.ov-card-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px}
-.ov-card-value{font-size:26px;font-weight:600;color:var(--text);line-height:1}
-.ov-card-hint{font-size:10px;color:var(--text-faint);margin-top:5px}
+/* Carbon KPI tile (design note §2): label-01 caps label + heading-04 number. */
+.ov-card-label{font-size:var(--cds-label-01);color:var(--text-muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:var(--cds-spacing-03)}
+.ov-card-value{font-size:var(--cds-heading-04);font-weight:600;color:var(--text);line-height:1.2}
+.ov-card-hint{font-size:var(--cds-label-01);color:var(--text-faint);margin-top:var(--cds-spacing-02)}
 .section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
 .mini-stat{background:var(--bg);border:1px solid var(--border-subtle);border-radius:0;padding:10px 12px}
 .mini-stat-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}

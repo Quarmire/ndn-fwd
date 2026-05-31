@@ -1307,7 +1307,16 @@ pub fn App() -> Element {
                                     span { class: "nav-section-caret",
                                         if is_collapsed { "▸" } else { "▾" }
                                     }
-                                    span { "{bucket.label()}" }
+                                    span { style: "flex:1;", "{bucket.label()}" }
+                                    {
+                                        let count = crate::views::bucket_count(
+                                            bucket,
+                                            &faces.read(),
+                                            &security_keys.read(),
+                                            &rib_entries.read(),
+                                        );
+                                        rsx! { span { class: "nav-count", "{count}" } }
+                                    }
                                 }
                                 if !is_collapsed {
                                     for view in bucket.views() {
