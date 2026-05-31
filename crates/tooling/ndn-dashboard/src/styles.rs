@@ -171,9 +171,12 @@ body>div{height:100%;width:100%;overflow:hidden}
 .row-selectable{cursor:pointer}
 .row-selectable.selected{background:var(--accent-dim)}
 .row-selectable.selected td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
-@media (max-width:760px){
-  /* On narrow widths the inspector overlays the content instead of squeezing it. */
-  .inspector{position:fixed;top:0;right:0;bottom:0;width:88vw;max-width:360px;z-index:90;box-shadow:-4px 0 16px rgba(0,0,0,.4)}
+@media (max-width:768px){
+  /* On narrow widths the inspector is a bottom sheet: the entity list stays
+     visible above it instead of the pane taking the whole screen. Capped
+     height, anchored to the bottom, with its own scroll. */
+  .inspector{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;max-width:none;max-height:62vh;border-left:none;border-top:1px solid var(--border);box-shadow:0 -6px 20px rgba(0,0,0,.45);z-index:90}
+  .inspector-header{position:sticky;top:0;background:var(--surface)}
 }
 /* Sticky sub-nav inside a view's content area — keeps the tab
    bar + adjacent persistent controls pinned to the top of the
