@@ -1224,7 +1224,18 @@ pub fn App() -> Element {
     };
     use_context_provider(move || ctx);
 
+    // Light-mode lives on the outermost `.app-root` (not `.layout`) so the
+    // whole subtree — including `body`'s show-through behind transparent
+    // panes and the position:fixed modals/toasts/gate — inherits the theme
+    // variables. Mirrors the web build's wrapper.
+    let app_root_class = if *DARK_MODE.read() {
+        "app-root"
+    } else {
+        "app-root light-mode"
+    };
+
     rsx! {
+        div { class: "{app_root_class}",
         AppStyles {}
 
         crate::security_gate::SecurityGate {}
@@ -1257,7 +1268,7 @@ pub fn App() -> Element {
         }
 
         div {
-            class: if *DARK_MODE.read() { "layout" } else { "layout light-mode" },
+            class: "layout",
             ondragover: move |evt| { evt.prevent_default(); },
             ondrop: move |evt| {
                 evt.prevent_default();
@@ -1467,6 +1478,7 @@ pub fn App() -> Element {
                     }
                 }
             }
+        }
         }
     }
 }
