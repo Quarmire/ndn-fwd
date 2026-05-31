@@ -634,9 +634,11 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                             }
                         }
                         div { style: "font-size:10px;color:var(--text-muted);margin-top:4px;margin-left:18px;",
-                            "Loads the decrypted key into the dashboard keyring so management "
-                            "commands are signed as this identity. Uncheck to import the "
-                            "identity into the forwarder PIB without changing the active signer."
+                            "Loads the key into the dashboard so it signs management commands as "
+                            "this identity — this is how you bootstrap signing against a forwarder "
+                            "that enforces signed commands. Uncheck to instead push this identity "
+                            "into the forwarder's own keystore (requires you to already be a "
+                            "trusted operator)."
                         }
                     }
 
@@ -657,6 +659,7 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                             class: if trust_ok { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
                             disabled: !trust_ok || passphrase.read().is_empty(),
                             onclick: {
+                                let identity_name = p.identity_name.clone();
                                 let key_name = p.key_name.clone();
                                 // The forwarder's safebag-import checks the
                                 // requested name against the embedded cert's
@@ -675,20 +678,47 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                                     // the browser-sandbox limit when
                                     // detection returns Unknown.
                                     maybe_fire_fde_warning();
-                                    // Opt-in: load the operator key into the
-                                    // dashboard keyring so mgmt commands sign
-                                    // as this identity (the signing gate opens).
-                                    let provisioned = *set_active.read()
+
+                                    let activate = *set_active.read();
+                                    let already_signer =
+                                        crate::operator_keyring::is_provisioned();
+                                    // Load the operator key into the dashboard
+                                    // keyring so mgmt commands sign as this
+                                    // identity (the signing gate opens).
+                                    let provisioned = activate
                                         && load_operator_key(&wire, pw.as_bytes(), &key_name);
-                                    ctx.cmd.send(DashCmd::SecuritySafebagImport {
-                                        name: cert_name.clone(),
-                                        safebag_wire: wire.clone(),
-                                        passphrase: pw,
-                                    });
-                                    // Rebind the command client with the operator
-                                    // signer now that the gate has opened.
-                                    if provisioned {
+
+                                    if provisioned && !already_signer {
+                                        // Bootstrap: this import provisions the
+                                        // dashboard's *first* signing key. The
+                                        // command client can't sign until it
+                                        // reconnects with that key, so firing
+                                        // the (signed) safebag-import now would
+                                        // be rejected — and persisting the
+                                        // operator's own key into the forwarder
+                                        // PIB isn't needed (the forwarder
+                                        // already trusts it via its anchor).
+                                        // Just activate + reconnect.
                                         ctx.cmd.send(DashCmd::Reconnect);
+                                        push_toast(
+                                            format!(
+                                                "Now signing management commands as {identity_name}"
+                                            ),
+                                            ToastLevel::Success,
+                                        );
+                                    } else {
+                                        // Already a trusted signer (or not
+                                        // activating): persist the identity into
+                                        // the forwarder keystore over the signed
+                                        // management channel.
+                                        ctx.cmd.send(DashCmd::SecuritySafebagImport {
+                                            name: cert_name.clone(),
+                                            safebag_wire: wire.clone(),
+                                            passphrase: pw,
+                                        });
+                                        if provisioned {
+                                            ctx.cmd.send(DashCmd::Reconnect);
+                                        }
                                     }
                                     close();
                                 }
