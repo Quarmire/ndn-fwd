@@ -145,9 +145,112 @@ pub fn probe_fde() -> FdeDetection {
     FdeDetection::Unknown
 }
 
+/// What this machine holds of your signing key, and the trust caveat — the
+/// honest answer to "what can this machine do with my key, and what happens
+/// when I walk away." Surfaced read-only. The key *never touching* the machine
+/// (phone/fob remote custodian) is designed (synthesis §5) but not yet built;
+/// today the choices are on-disk persistence or an in-memory ephemeral key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineTrust {
+    /// Where the signing key lives on this surface.
+    pub residence: &'static str,
+    /// Whether the key persists past this session (on disk / in the browser).
+    pub persists: bool,
+    /// One-line caveat about trusting this machine with the key, if any.
+    pub caveat: Option<String>,
+}
+
+/// Pure over its inputs so each branch is testable.
+pub fn machine_trust_for(
+    runtime: DashboardRuntime,
+    ephemeral: bool,
+    has_identity: bool,
+    fde: FdeDetection,
+) -> MachineTrust {
+    if !has_identity {
+        return MachineTrust {
+            residence: "No signing key bound",
+            persists: false,
+            caveat: None,
+        };
+    }
+    if ephemeral {
+        return MachineTrust {
+            residence: "In-memory (ephemeral)",
+            persists: false,
+            caveat: Some(
+                "Nothing is written to disk — this binding ends when the session closes. Safe to use on a machine you don't fully control."
+                    .to_owned(),
+            ),
+        };
+    }
+    let residence = match runtime {
+        DashboardRuntime::Desktop => "On-disk keychain (PIB)",
+        DashboardRuntime::Browser => "Browser storage (IndexedDB)",
+        DashboardRuntime::BrowserEngineLocal => "In this browser tab",
+    };
+    MachineTrust {
+        residence,
+        persists: true,
+        // FDE warning text is already the right "untrusted machine" caveat:
+        // silent on desktop (operator knows their own FS), loud about IndexedDB
+        // / unencrypted disk where the key would be recoverable.
+        caveat: fde.warning_text(runtime),
+    }
+}
+
+/// Live machine-trust for the current runtime + FDE probe.
+pub fn live_machine_trust(ephemeral: bool, has_identity: bool) -> MachineTrust {
+    machine_trust_for(current_runtime(), ephemeral, has_identity, probe_fde())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_trust_ephemeral_does_not_persist() {
+        let t = machine_trust_for(DashboardRuntime::Desktop, true, true, FdeDetection::Unknown);
+        assert!(!t.persists);
+        assert!(t.caveat.unwrap().to_lowercase().contains("session"));
+    }
+
+    #[test]
+    fn machine_trust_desktop_persisted_is_silent_when_fde_unknown() {
+        let t = machine_trust_for(
+            DashboardRuntime::Desktop,
+            false,
+            true,
+            FdeDetection::Unknown,
+        );
+        assert!(t.persists);
+        assert_eq!(t.residence, "On-disk keychain (PIB)");
+        assert!(t.caveat.is_none());
+    }
+
+    #[test]
+    fn machine_trust_browser_warns_about_recoverability() {
+        let t = machine_trust_for(
+            DashboardRuntime::Browser,
+            false,
+            true,
+            FdeDetection::Unknown,
+        );
+        assert!(t.persists);
+        assert!(t.caveat.is_some());
+    }
+
+    #[test]
+    fn machine_trust_no_identity() {
+        let t = machine_trust_for(
+            DashboardRuntime::Desktop,
+            false,
+            false,
+            FdeDetection::Unknown,
+        );
+        assert!(!t.persists);
+        assert!(t.caveat.is_none());
+    }
 
     #[test]
     fn classify_native_is_desktop() {

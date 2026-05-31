@@ -31,6 +31,8 @@ pub fn TrustContext() -> Element {
     let ca = ctx.ca_info.read();
     let active = ctx.identity_name.read().clone();
     let ephemeral = *ctx.identity_is_ephemeral.read();
+    let machine =
+        crate::views::engine_pill::live_machine_trust(ephemeral, !active.trim().is_empty());
 
     // Group local keys by their owning identity.
     let mut identities: BTreeMap<&str, Vec<&SecurityKeyInfo>> = BTreeMap::new();
@@ -50,6 +52,31 @@ pub fn TrustContext() -> Element {
                     "Security"
                 }
                 " for full management."
+            }
+        }
+
+        // ── This machine (where your key lives) ────────────────────────
+        div { class: "section",
+            div { class: "section-title", "This machine" }
+            dl { class: "inspector-kv",
+                dt { "Signing key" }
+                dd {
+                    "{machine.residence}"
+                    if machine.persists {
+                        span { class: "badge badge-gray", style: "margin-left:8px;font-size:9px;", "persists" }
+                    } else {
+                        span { class: "badge badge-green", style: "margin-left:8px;font-size:9px;", "not stored" }
+                    }
+                }
+            }
+            if let Some(caveat) = machine.caveat.as_ref() {
+                div { class: "readonly-banner", style: "margin-top:10px;",
+                    span { class: "readonly-banner-icon", "⚠" }
+                    span { "{caveat}" }
+                }
+            }
+            p { class: "muted", style: "margin:8px 0 0;font-size:12px;",
+                "Signing with a key that never touches this machine (a phone or hardware fob holds it) is planned but not yet available — for an untrusted machine, use an ephemeral identity so nothing persists."
             }
         }
 
