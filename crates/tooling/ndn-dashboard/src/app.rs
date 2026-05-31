@@ -127,6 +127,10 @@ pub enum DashCmd {
     CsErase(String),
     Shutdown,
     Reconnect,
+    /// Poll the forwarder immediately (out of the 3s cadence). Sent by the
+    /// live face-event subscriber (`notify_sub`) so external changes show up
+    /// at once.
+    RefreshNow,
     RefreshConfig,
     RecordStart,
     RecordStop,
@@ -662,14 +666,32 @@ pub fn App() -> Element {
                         }
                     }
                     Some(cmd_msg) = rx.next() => {
-                        if matches!(cmd_msg, DashCmd::Reconnect) {
-                            break 'session;
+                        match cmd_msg {
+                            DashCmd::Reconnect => break 'session,
+                            // Event-driven immediate poll (notify_sub) — same
+                            // refresh as an interval tick, off-cadence.
+                            DashCmd::RefreshNow => {
+                                if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history).await {
+                                    conn_state.set(ConnState::Disconnected);
+                                    error_msg.set(Some(e));
+                                    break 'session;
+                                }
+                            }
+                            _ => {
+                                run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history, trust_validation).await;
+                            }
                         }
-                        run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history, trust_validation).await;
                     }
                 }
             }
         }
+    });
+
+    // Live face-event subscriber: long-polls the forwarder's faces
+    // notification stream on its own connection and sends `RefreshNow` so
+    // external face changes appear without waiting for the 3s poll.
+    use_coroutine(move |_rx: UnboundedReceiver<()>| async move {
+        crate::notify_sub::run_faces_subscriber(socket_path, cmd).await;
     });
 
     /// Reserved instance IDs for in-process servers.
@@ -1974,6 +1996,8 @@ async fn run_cmd(
             .map(|_| ())
             .map_err(|e| e.to_string()),
         DashCmd::Reconnect => return,
+        // Handled in the session loop (immediate poll); never a real command.
+        DashCmd::RefreshNow => return,
         DashCmd::RefreshConfig => {
             config_toml.set(String::new()); // clear so poll_all re-fetches
             return;

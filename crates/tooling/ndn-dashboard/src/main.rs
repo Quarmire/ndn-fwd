@@ -26,6 +26,8 @@ mod security_gate;
 mod security_state;
 mod security_surfaces;
 mod fonts;
+#[cfg(feature = "desktop")]
+mod notify_sub;
 mod resizable;
 pub mod settings;
 mod signed_data_chain;
