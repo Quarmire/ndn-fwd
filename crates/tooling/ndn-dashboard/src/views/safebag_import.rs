@@ -1,7 +1,9 @@
 //! §5.1 SafeBag import — drag-drop modal + preview + trust check.
 //!
-//! Drag a `.tpb` (or any SafeBag wire) file onto the dashboard's
-//! layout root. The dashboard parses + decrypts the wire in-browser
+//! Drag a SafeBag file — raw TLV or the base64 `ndnsec export` /
+//! `ndn-sec export` emits — onto the dashboard's layout root (common
+//! extensions: `.safebag`, `.tpb`, `.ndnsec`). The dashboard normalizes
+//! the encoding, then parses + decrypts the wire in-browser
 //! (no network round-trip until the operator confirms), runs a trust
 //! check against the dashboard's known anchors + schema, surfaces the
 //! result, and on submit fires `/localhost/nfd/security/safebag-import`
@@ -62,6 +64,10 @@ fn maybe_fire_fde_warning() {
 /// entry point. Pure side-effect — the modal reads its state from
 /// the global signal on next render.
 pub fn open_with_wire(filename: String, wire: Vec<u8>) {
+    // Accept whatever the operator drops: a raw SafeBag TLV, or the base64
+    // text `ndnsec export` emits. Normalize to raw wire up front so every
+    // downstream path (preview, decrypt, import) sees the same bytes.
+    let wire = normalize_safebag_bytes(&wire).unwrap_or(wire);
     let preview = parse_wire_preview(&wire);
     let mut st = crate::app_shared::SAFEBAG_IMPORT_STATE.write();
     st.open = true;
@@ -135,6 +141,119 @@ fn load_operator_key(wire: &[u8], passphrase: &[u8], key_name: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Accept a SafeBag as either a raw TLV (first byte `0x80`) or the base64
+/// text `ndnsec export` writes (whitespace tolerated). Returns the raw wire,
+/// or `None` when neither decodes to a SafeBag.
+pub fn normalize_safebag_bytes(input: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    if input.first() == Some(&0x80) {
+        return Some(input.to_vec());
+    }
+    let cleaned: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .ok()
+        .filter(|w| w.first() == Some(&0x80))
+}
+
+/// Normalize operator-supplied certificate bytes into a raw NDN Data TLV.
+/// Accepts the wire in three shapes so a pasted blob "just works":
+///   * raw Data TLV (first byte `0x06`),
+///   * base64 (what `ndnsec`/`.cert` files carry — whitespace tolerated),
+///   * lowercase/uppercase hex (`:`/`-`/whitespace tolerated).
+///
+/// Returns `None` when none of the three decode to something starting with
+/// the Data type byte.
+pub fn normalize_cert_bytes(input: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    if input.first() == Some(&0x06) {
+        return Some(input.to_vec());
+    }
+    let cleaned: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if let Ok(w) = base64::engine::general_purpose::STANDARD.decode(&cleaned)
+        && w.first() == Some(&0x06)
+    {
+        return Some(w);
+    }
+    // Hex fallback.
+    let hx: Vec<u8> = cleaned
+        .into_iter()
+        .filter(|b| *b != b':' && *b != b'-')
+        .collect();
+    if hx.len() >= 2 && hx.len().is_multiple_of(2) {
+        let mut out = Vec::with_capacity(hx.len() / 2);
+        let mut ok = true;
+        for pair in hx.chunks(2) {
+            let hi = (pair[0] as char).to_digit(16);
+            let lo = (pair[1] as char).to_digit(16);
+            match (hi, lo) {
+                (Some(h), Some(l)) => out.push(((h << 4) | l) as u8),
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok && out.first() == Some(&0x06) {
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// Parse a standalone certificate (from a file or pasted text) into its
+/// own key name + the raw Data wire — exactly the two inputs the
+/// `security/anchor-add` mgmt verb wants. Drives the §4.3 "Add trust
+/// anchor" form.
+pub fn parse_anchor_cert(input: &[u8]) -> Result<(String, Vec<u8>), String> {
+    let wire = normalize_cert_bytes(input)
+        .ok_or_else(|| "Not a certificate (expected raw Data TLV, base64, or hex)".to_owned())?;
+    let data = ndn_packet::Data::decode(bytes::Bytes::from(wire.clone()))
+        .map_err(|e| format!("Certificate Data decode failed: {e:?}"))?;
+    Ok((data.name.to_string(), wire))
+}
+
+/// Lowercase-hex encode bytes (cert wire for the mgmt verb body).
+pub fn hex_encode(b: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(b.len() * 2);
+    for byte in b {
+        let _ = write!(s, "{byte:02x}");
+    }
+    s
+}
+
+/// SHA-256 fingerprint (hex) of a cert wire — informational, used for the
+/// schema journal entry on anchor-add.
+pub fn cert_fingerprint_hex(wire: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex_encode(&Sha256::digest(wire))
+}
+
+/// Build the `security/anchor-add` command that trusts the SafeBag's own
+/// embedded certificate as an anchor (the inline TOFU gesture). The cert
+/// wire is cleartext inside the bag, so no passphrase is needed to trust it
+/// — only to import the private key. Returns the command plus the cert's
+/// name so the caller can toast it.
+fn tofu_anchor_cmd(wire: &[u8]) -> Result<(DashCmd, String), String> {
+    let bag = SafeBag::decode(wire).map_err(|e| format!("SafeBag decode: {e}"))?;
+    let (name, cert_wire) = parse_anchor_cert(&bag.certificate)?;
+    let cmd = DashCmd::SecurityAnchorAdd {
+        name: name.clone(),
+        fingerprint_hex: cert_fingerprint_hex(&cert_wire),
+        cert_wire_hex: hex_encode(&cert_wire),
+    };
+    Ok((cmd, name))
 }
 
 /// Verify the passphrase decrypts the SafeBag's PKCS#8 — pure
@@ -314,7 +433,7 @@ pub fn SafeBagImportPicker() -> Element {
                 "Import SafeBag…"
                 input {
                     r#type: "file",
-                    accept: ".tpb,application/octet-stream",
+                    accept: ".safebag,.tpb,.ndnsec,.b64,application/octet-stream,text/plain",
                     style: "display:none;",
                     onchange: move |evt| {
                         let files = evt.files();
@@ -330,7 +449,11 @@ pub fn SafeBagImportPicker() -> Element {
                 }
             }
             span { style: "color:var(--text-muted);font-size:10px;",
-                "or drag-drop a .tpb anywhere on the dashboard"
+                "raw or base64 (from "
+                span { class: "mono", "ndn-sec export" }
+                " / "
+                span { class: "mono", "ndnsec export" }
+                ") — or drag-drop the file anywhere"
             }
         }
     }
@@ -341,7 +464,10 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
     let ctx = use_context::<AppCtx>();
     let mut state = state;
     let mut passphrase: Signal<String> = use_signal(String::new);
-    let mut set_active: Signal<bool> = use_signal(|| false);
+    // Default ON: importing your operator key and signing with it is the
+    // common case. Operators can uncheck to import the identity without
+    // making it the dashboard's active signer.
+    let mut set_active: Signal<bool> = use_signal(|| true);
     let mut submit_error: Signal<Option<String>> = use_signal(|| None);
 
     let snapshot = state.read().clone();
@@ -360,7 +486,7 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
     let mut close = move || {
         state.write().open = false;
         passphrase.set(String::new());
-        set_active.set(false);
+        set_active.set(true);
         submit_error.set(None);
     };
 
@@ -438,6 +564,43 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                         TrustRow { label: "Issuer's anchor present", row: trust.anchor_found.clone() }
                         TrustRow { label: "Schema rule covers key",  row: trust.schema_match.clone() }
                         TrustRow { label: "Validity window",         row: trust.validity_window.clone() }
+
+                        // Inline TOFU: a self-signed root has no separate
+                        // issuer anchor to install, so offer to trust the
+                        // bag's own cert as an anchor (first-use). Fires
+                        // `security/anchor-add` with the embedded cert, then
+                        // the next poll flips the check to ✓.
+                        if !trust.anchor_found.ok {
+                            div { style: "margin-top:8px;padding:8px 10px;background:var(--surface2);border:1px dashed var(--border);border-radius:6px;",
+                                div { style: "font-size:10px;color:var(--text-muted);margin-bottom:6px;",
+                                    "No installed anchor covers this identity. If this is a "
+                                    "self-signed root you trust, add its certificate as a trust "
+                                    "anchor (trust-on-first-use)."
+                                }
+                                button {
+                                    class: "btn btn-secondary btn-sm",
+                                    style: "font-size:10px;",
+                                    onclick: {
+                                        let wire = wire.clone();
+                                        move |_| {
+                                            match tofu_anchor_cmd(&wire) {
+                                                Ok((cmd, name)) => {
+                                                    ctx.cmd.send(cmd);
+                                                    ctx.cmd.send(DashCmd::RefreshNow);
+                                                    push_toast(
+                                                        format!("Trusting {name} as an anchor…"),
+                                                        ToastLevel::Info,
+                                                    );
+                                                    submit_error.set(None);
+                                                }
+                                                Err(e) => submit_error.set(Some(e)),
+                                            }
+                                        }
+                                    },
+                                    "⚓ Trust this certificate as an anchor (TOFU)"
+                                }
+                            }
+                        }
                     }
 
                     // Passphrase
@@ -471,7 +634,9 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                             }
                         }
                         div { style: "font-size:10px;color:var(--text-muted);margin-top:4px;margin-left:18px;",
-                            "Tracked for a follow-up — v1 imports the identity into the PIB; flipping the active signer is a separate ceremony surfaced in §5.3."
+                            "Loads the decrypted key into the dashboard keyring so management "
+                            "commands are signed as this identity. Uncheck to import the "
+                            "identity into the forwarder PIB without changing the active signer."
                         }
                     }
 
@@ -492,8 +657,12 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                             class: if trust_ok { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
                             disabled: !trust_ok || passphrase.read().is_empty(),
                             onclick: {
-                                let identity_name = p.identity_name.clone();
                                 let key_name = p.key_name.clone();
+                                // The forwarder's safebag-import checks the
+                                // requested name against the embedded cert's
+                                // full name — so send the cert name, not the
+                                // bare identity.
+                                let cert_name = p.cert_name.clone();
                                 let wire = wire.clone();
                                 move |_| {
                                     let pw = passphrase.read().clone();
@@ -506,13 +675,13 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                                     // the browser-sandbox limit when
                                     // detection returns Unknown.
                                     maybe_fire_fde_warning();
-                                    // Load the operator key into the dashboard's
-                                    // keyring so mgmt commands sign as this
-                                    // identity, then persist to the forwarder PIB.
-                                    let provisioned =
-                                        load_operator_key(&wire, pw.as_bytes(), &key_name);
+                                    // Opt-in: load the operator key into the
+                                    // dashboard keyring so mgmt commands sign
+                                    // as this identity (the signing gate opens).
+                                    let provisioned = *set_active.read()
+                                        && load_operator_key(&wire, pw.as_bytes(), &key_name);
                                     ctx.cmd.send(DashCmd::SecuritySafebagImport {
-                                        name: identity_name.clone(),
+                                        name: cert_name.clone(),
                                         safebag_wire: wire.clone(),
                                         passphrase: pw,
                                     });
@@ -571,6 +740,49 @@ mod tests {
     fn parse_wire_preview_rejects_garbage() {
         assert!(parse_wire_preview(b"").is_err());
         assert!(parse_wire_preview(b"not-a-safebag").is_err());
+    }
+
+    #[test]
+    fn normalize_safebag_accepts_raw_and_base64() {
+        use base64::Engine as _;
+        // A "SafeBag" for the purposes of normalization is anything starting
+        // with the 0x80 type byte.
+        let raw = vec![0x80u8, 0x01, 0x00];
+        assert_eq!(normalize_safebag_bytes(&raw), Some(raw.clone()));
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        assert_eq!(normalize_safebag_bytes(b64.as_bytes()), Some(raw.clone()));
+
+        // ndnsec wraps base64 across lines — whitespace must be tolerated.
+        let wrapped = format!("{b64}\n");
+        assert_eq!(normalize_safebag_bytes(wrapped.as_bytes()), Some(raw));
+
+        assert_eq!(normalize_safebag_bytes(b"not-a-bag"), None);
+        // base64 that decodes but isn't a SafeBag is rejected.
+        let other = base64::engine::general_purpose::STANDARD.encode([0x06u8, 0x00]);
+        assert_eq!(normalize_safebag_bytes(other.as_bytes()), None);
+    }
+
+    #[test]
+    fn normalize_cert_accepts_raw_base64_hex() {
+        use base64::Engine as _;
+        let raw = vec![0x06u8, 0x01, 0x00];
+        assert_eq!(normalize_cert_bytes(&raw), Some(raw.clone()));
+
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+        assert_eq!(normalize_cert_bytes(b64.as_bytes()), Some(raw.clone()));
+
+        assert_eq!(normalize_cert_bytes(b"060100"), Some(raw.clone()));
+        assert_eq!(normalize_cert_bytes(b"06:01:00"), Some(raw));
+
+        assert_eq!(normalize_cert_bytes(b"zzz!!!"), None);
+    }
+
+    #[test]
+    fn parse_anchor_cert_rejects_non_cert() {
+        assert!(parse_anchor_cert(b"").is_err());
+        // 0x80 is a SafeBag, not a bare cert Data (0x06).
+        assert!(parse_anchor_cert(&[0x80, 0x01, 0x00]).is_err());
     }
 
     #[test]

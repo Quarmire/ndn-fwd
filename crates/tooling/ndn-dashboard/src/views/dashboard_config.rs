@@ -2,14 +2,21 @@
 
 use dioxus::prelude::*;
 
-use crate::app::{ROUTER_RUNNING, ToastLevel, push_toast};
+use crate::app::{AppCtx, ROUTER_RUNNING, ToastLevel, push_toast};
 use crate::settings::{DASH_SETTINGS, save_settings};
 
 #[component]
 pub fn DashboardConfig() -> Element {
+    let ctx = use_context::<AppCtx>();
     // Local draft — edits don't apply until saved.
     let mut draft = use_signal(|| DASH_SETTINGS.peek().clone());
     let mut dirty = use_signal(|| false);
+
+    // Read-only identity/PIB facts reported by the connected forwarder.
+    let pib_path = ctx.identity_pib_path.read().clone();
+    let active_identity = ctx.identity_name.read().clone();
+    let identity_ephemeral = *ctx.identity_is_ephemeral.read();
+    let anchor_count = ctx.security_anchors.read().len();
 
     rsx! {
         div { class: "section",
@@ -30,6 +37,57 @@ pub fn DashboardConfig() -> Element {
                 }
                 div { style: "font-size:11px;color:var(--text-faint);margin-top:4px;",
                     "Used as base for server names (e.g. \u{3008}node-prefix\u{3009}/iperf). Leave empty to use raw prefixes."
+                }
+            }
+
+            // Identity & keystore (PIB) — read-only facts about the connected
+            // forwarder's keystore. The dashboard manages keys/anchors over the
+            // NDN management protocol; it never writes the PIB directly. The
+            // path is set forwarder-side (config or $NDN_PIB) and matches what
+            // `ndn-sec --pib` / `$NDN_PIB` target on the same host.
+            div { style: "margin-bottom:28px;",
+                div { style: "font-size:12px;font-weight:600;color:var(--text);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px;border-bottom:1px solid var(--border-subtle);padding-bottom:8px;",
+                    "Identity & Keystore (PIB)"
+                }
+                table { style: "font-size:12px;border-collapse:collapse;",
+                    tr {
+                        td { style: "color:var(--text-muted);padding:3px 16px 3px 0;vertical-align:top;", "Keystore (PIB) path" }
+                        td { class: "mono", style: "color:var(--text);word-break:break-all;",
+                            if let Some(p) = pib_path.as_ref() {
+                                "{p}"
+                            } else {
+                                span { style: "color:var(--text-faint);", "not reported by forwarder" }
+                            }
+                        }
+                    }
+                    tr {
+                        td { style: "color:var(--text-muted);padding:3px 16px 3px 0;vertical-align:top;", "Active identity" }
+                        td { class: "mono", style: "color:var(--text);word-break:break-all;",
+                            if active_identity.is_empty() {
+                                span { style: "color:var(--text-faint);", "none" }
+                            } else {
+                                "{active_identity}"
+                            }
+                            if identity_ephemeral {
+                                span { class: "badge badge-yellow", style: "font-size:10px;margin-left:8px;", "ephemeral" }
+                            }
+                        }
+                    }
+                    tr {
+                        td { style: "color:var(--text-muted);padding:3px 16px 3px 0;vertical-align:top;", "Trust anchors" }
+                        td { style: "color:var(--text);", "{anchor_count} installed" }
+                    }
+                }
+                div { style: "font-size:11px;color:var(--text-faint);margin-top:8px;max-width:560px;",
+                    "Set forwarder-side via "
+                    span { class: "mono", "$NDN_PIB" }
+                    " or the forwarder config; the "
+                    span { class: "mono", "ndn-sec" }
+                    " CLI targets the same store with "
+                    span { class: "mono", "--pib" }
+                    " / "
+                    span { class: "mono", "$NDN_PIB" }
+                    ". Manage keys, anchors, and SafeBag import from the Security view — those go through the management protocol, not direct file edits."
                 }
             }
 

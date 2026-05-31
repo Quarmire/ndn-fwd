@@ -163,6 +163,11 @@ pub enum DashCmd {
         fingerprint_hex: String,
         cert_wire_hex: String,
     },
+    /// Fires `/localhost/nfd/security/anchor-remove`; `name` is the anchor's
+    /// cert key name.
+    SecurityAnchorRemove {
+        name: String,
+    },
     /// Fires `/localhost/nfd/security/safebag-import`; `safebag_wire` is raw TLV bytes
     /// (the client method hex-encodes both halves of the wire envelope).
     SecuritySafebagImport {
@@ -1992,6 +1997,7 @@ async fn run_cmd(
         DashCmd::SecurityPolicySet(_) => Some("Mgmt access policy updated"),
         DashCmd::SecurityValidateTrace(_) => None, // surfaces via the sidesheet, not a toast
         DashCmd::SecurityAnchorAdd { .. } => Some("Anchor promoted (TOFU)"),
+        DashCmd::SecurityAnchorRemove { .. } => Some("Anchor removed"),
         DashCmd::SecuritySafebagImport { .. } => Some("SafeBag imported"),
         DashCmd::CaListApprovals => None, // refresh is silent; state-signal drives UI
         DashCmd::CaApprove { .. } => Some("Approval published"),
@@ -2352,6 +2358,18 @@ async fn run_cmd(
                     }
                     Err(e) => Err(e.to_string()),
                 }
+            }
+        }
+        DashCmd::SecurityAnchorRemove { name } => {
+            let parsed_name = match name.parse::<ndn_packet::Name>() {
+                Ok(n) => n,
+                Err(e) => {
+                    return push_toast(format!("invalid anchor name: {e}"), ToastLevel::Error);
+                }
+            };
+            match client.security_anchor_remove(&parsed_name).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.to_string()),
             }
         }
         DashCmd::SecuritySafebagImport {

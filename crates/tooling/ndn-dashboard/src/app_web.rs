@@ -1424,6 +1424,22 @@ async fn run_cmd_web(
             }
             resp
         }
+        DashCmd::SecurityAnchorRemove { name } => {
+            let parsed = match name.parse::<Name>() {
+                Ok(n) => n,
+                Err(e) => {
+                    error_msg
+                        .to_owned()
+                        .set(Some(format!("invalid anchor name '{name}': {e:?}")));
+                    return;
+                }
+            };
+            let cp = ControlParameters {
+                name: Some(parsed),
+                ..Default::default()
+            };
+            client.send_cmd("security", "anchor-remove", Some(&cp)).await
+        }
         DashCmd::SecurityTokenAdd(description) => {
             let params = ControlParameters {
                 uri: Some(description),

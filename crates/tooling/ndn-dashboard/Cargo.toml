@@ -102,6 +102,7 @@ tracing    = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow     = { workspace = true }
 dioxus     = "0.7"
+base64     = { workspace = true }
 getrandom  = "0.2"
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

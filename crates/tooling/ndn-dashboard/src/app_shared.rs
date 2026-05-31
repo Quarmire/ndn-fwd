@@ -153,6 +153,9 @@ pub enum DashCmd {
         fingerprint_hex: String,
         cert_wire_hex: String,
     },
+    SecurityAnchorRemove {
+        name: String,
+    },
     SecuritySafebagImport {
         name: String,
         safebag_wire: Vec<u8>,

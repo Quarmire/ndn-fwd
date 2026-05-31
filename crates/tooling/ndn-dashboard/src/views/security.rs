@@ -731,8 +731,29 @@ fn TrustTab(anchors: Vec<AnchorInfo>, rules: Vec<SchemaRuleInfo>) -> Element {
     }
 }
 
+/// Parse cert bytes (raw/base64/hex) and fire `security/anchor-add` for the
+/// cert's own key name. Returns the installed name on success so the caller
+/// can toast it. `ctx` is `Copy`, so this is safe to call from async file
+/// handlers as well as sync onclick handlers.
+fn install_anchor_cert(ctx: AppCtx, bytes: &[u8]) -> Result<String, String> {
+    let (name, wire) = crate::views::safebag_import::parse_anchor_cert(bytes)?;
+    ctx.cmd.send(DashCmd::SecurityAnchorAdd {
+        name: name.clone(),
+        fingerprint_hex: crate::views::safebag_import::cert_fingerprint_hex(&wire),
+        cert_wire_hex: crate::views::safebag_import::hex_encode(&wire),
+    });
+    Ok(name)
+}
+
 #[component]
 fn TrustAnchorList(anchors: Vec<AnchorInfo>) -> Element {
+    let ctx = use_context::<AppCtx>();
+    // Add-anchor form state. `paste` holds pasted base64/hex/raw cert text;
+    // a file pick routes its bytes through the same parse path.
+    let mut show_add: Signal<bool> = use_signal(|| false);
+    let mut paste: Signal<String> = use_signal(String::new);
+    let mut add_error: Signal<Option<String>> = use_signal(|| None);
+
     rsx! {
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
             div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;",
@@ -760,28 +781,108 @@ fn TrustAnchorList(anchors: Vec<AnchorInfo>) -> Element {
                                 " is extended to carry it (Phase C wire-format follow-up)."
                             }
                         }
+                        button {
+                            class: "btn btn-secondary btn-sm",
+                            style: "font-size:10px;",
+                            onclick: {
+                                let key_name = a.name.clone();
+                                move |_| ctx.cmd.send(DashCmd::SecurityAnchorRemove { name: key_name.clone() })
+                            },
+                            "Remove"
+                        }
                     }
                 }
             }
-            // Action row — Phase C stubs per kickoff. Anchor add/remove
-            // mgmt verbs aren't wired yet; the affordances exist so
-            // the design intent is visible.
+
+            // Add-anchor: file upload OR paste, parsed in-browser into the
+            // cert's own key name + wire, then fired at `security/anchor-add`.
             div { style: "display:flex;gap:8px;margin-top:12px;",
-                button {
+                label {
                     class: "btn btn-secondary btn-sm",
-                    onclick: move |_| push_toast(
-                        "Phase C: §4.3 — anchor-add from file (mgmt verb pending)",
-                        ToastLevel::Info,
-                    ),
+                    style: "cursor:pointer;",
                     "+ Add from file"
+                    input {
+                        r#type: "file",
+                        accept: ".cert,.ndnc,.der,.b64,.pem,application/octet-stream,text/plain",
+                        style: "display:none;",
+                        onchange: move |evt| {
+                            let files = evt.files();
+                            if let Some(file) = files.first().cloned() {
+                                spawn(async move {
+                                    match file.read_bytes().await {
+                                        Ok(bytes) => match install_anchor_cert(ctx, &bytes) {
+                                            Ok(name) => push_toast(
+                                                format!("Installing trust anchor {name}…"),
+                                                ToastLevel::Info,
+                                            ),
+                                            Err(e) => push_toast(
+                                                format!("Add anchor failed: {e}"),
+                                                ToastLevel::Error,
+                                            ),
+                                        },
+                                        Err(_) => push_toast(
+                                            "Couldn't read the selected file".to_owned(),
+                                            ToastLevel::Error,
+                                        ),
+                                    }
+                                });
+                            }
+                        },
+                    }
                 }
                 button {
-                    class: "btn btn-secondary btn-sm",
-                    onclick: move |_| push_toast(
-                        "Phase C: §4.3 — anchor-add from name (mgmt verb pending)",
-                        ToastLevel::Info,
-                    ),
-                    "+ Add by name"
+                    class: if *show_add.read() { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
+                    onclick: move |_| {
+                        let prev = *show_add.read();
+                        show_add.set(!prev);
+                        add_error.set(None);
+                    },
+                    "+ Paste cert"
+                }
+            }
+
+            if *show_add.read() {
+                div { style: "margin-top:10px;padding:10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;",
+                    div { style: "font-size:10px;color:var(--text-muted);margin-bottom:6px;",
+                        "Paste a certificate as base64 (from "
+                        span { class: "mono", "ndn-sec certdump" }
+                        " / "
+                        span { class: "mono", "ndnsec cert-dump" }
+                        "), hex, or raw wire. The key name is read from the cert itself."
+                    }
+                    textarea {
+                        style: "width:100%;min-height:80px;font-family:var(--font-mono);font-size:11px;padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);",
+                        value: "{paste}",
+                        oninput: move |e| {
+                            paste.set(e.value());
+                            add_error.set(None);
+                        },
+                    }
+                    if let Some(err) = add_error.read().clone() {
+                        div { style: "font-size:11px;color:var(--red,#f85149);margin-top:6px;", "{err}" }
+                    }
+                    div { style: "display:flex;justify-content:flex-end;margin-top:8px;",
+                        button {
+                            class: "btn btn-primary btn-sm",
+                            disabled: paste.read().trim().is_empty(),
+                            onclick: move |_| {
+                                let text = paste.peek().clone();
+                                match install_anchor_cert(ctx, text.as_bytes()) {
+                                    Ok(name) => {
+                                        push_toast(
+                                            format!("Installing trust anchor {name}…"),
+                                            ToastLevel::Info,
+                                        );
+                                        paste.set(String::new());
+                                        show_add.set(false);
+                                        add_error.set(None);
+                                    }
+                                    Err(e) => add_error.set(Some(e)),
+                                }
+                            },
+                            "Add trust anchor"
+                        }
+                    }
                 }
             }
         }
