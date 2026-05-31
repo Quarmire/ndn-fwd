@@ -745,6 +745,7 @@ fn render_view_web(view: View) -> Element {
         },
         View::Radio => rsx! { Radio {} },
         View::Compose => rsx! { crate::views::compose::Compose {} },
+        View::TrustContext => rsx! { crate::views::trust_context::TrustContext {} },
         // Desktop-only views render a placeholder on web.
         // Coding/RateLimit will move to web once their fetch path is
         // ported off `ndn-ipc::MgmtClient` (§1d).

@@ -1555,6 +1555,7 @@ fn render_view(view: View) -> Element {
         View::Radio => rsx! { Radio {} },
         View::Tools => rsx! { Tools {} },
         View::Compose => rsx! { crate::views::compose::Compose {} },
+        View::TrustContext => rsx! { crate::views::trust_context::TrustContext {} },
         View::DashboardConfig => rsx! { DashboardConfig {} },
         View::RouterConfig => rsx! { Config {} },
     }

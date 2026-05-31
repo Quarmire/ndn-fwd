@@ -36,6 +36,7 @@ pub mod strategy;
 #[cfg(feature = "desktop")]
 pub mod tools;
 pub mod traffic;
+pub mod trust_context;
 
 /// Which panel is currently visible in the content area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub enum View {
     Radio,
     Tools,
     Compose,
+    TrustContext,
     DashboardConfig,
     RouterConfig,
 }
@@ -97,7 +99,7 @@ impl Bucket {
                 View::Fleet,
                 View::Tools,
             ],
-            Bucket::Identity => &[View::Security, View::Session],
+            Bucket::Identity => &[View::TrustContext, View::Security, View::Session],
             Bucket::Compose => &[View::Compose],
         }
     }
@@ -118,6 +120,7 @@ impl View {
             View::Radio => "Radio",
             View::Tools => "Tools",
             View::Compose => "Published",
+            View::TrustContext => "Trust Context",
             View::DashboardConfig => "Dashboard Config",
             View::RouterConfig => "Router Config",
         }
@@ -138,7 +141,7 @@ impl View {
             | View::Tools
             | View::DashboardConfig
             | View::RouterConfig => Bucket::Engine,
-            View::Security | View::Session => Bucket::Identity,
+            View::Security | View::Session | View::TrustContext => Bucket::Identity,
             View::Compose => Bucket::Compose,
         }
     }
