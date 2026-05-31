@@ -193,9 +193,13 @@ fn append_component(prefix: &Name, comp: &[u8]) -> Name {
 fn span_data_name(prefix: &Name, trace_id: &[u8; 16], span_id: &[u8; 8]) -> Name {
     let mut name = prefix.clone();
     name = name.append_component(NameComponent::generic(bytes::Bytes::from_static(b"traces")));
-    name = name.append_component(NameComponent::generic(bytes::Bytes::from(hex_lower(trace_id))));
+    name = name.append_component(NameComponent::generic(bytes::Bytes::from(hex_lower(
+        trace_id,
+    ))));
     name = name.append_component(NameComponent::generic(bytes::Bytes::from_static(b"spans")));
-    name = name.append_component(NameComponent::generic(bytes::Bytes::from(hex_lower(span_id))));
+    name = name.append_component(NameComponent::generic(bytes::Bytes::from(hex_lower(
+        span_id,
+    ))));
     name
 }
 
@@ -283,11 +287,8 @@ mod tests {
 
     #[test]
     fn decode_pair_roundtrip() {
-        let (t, s) = decode_pair(
-            "0102030405060708090a0b0c0d0e0f10",
-            "a1a2a3a4a5a6a7a8",
-        )
-        .expect("decode");
+        let (t, s) =
+            decode_pair("0102030405060708090a0b0c0d0e0f10", "a1a2a3a4a5a6a7a8").expect("decode");
         assert_eq!(t[0], 0x01);
         assert_eq!(t[15], 0x10);
         assert_eq!(s[0], 0xA1);

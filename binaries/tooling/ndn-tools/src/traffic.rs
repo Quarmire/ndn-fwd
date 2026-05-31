@@ -15,7 +15,6 @@ use ndn_packet::lp::is_lp_packet;
 use ndn_packet::{Interest, Name};
 use ndn_transport::FaceId;
 
-
 #[derive(Parser)]
 #[command(name = "ndn-traffic", about = "NDN traffic generator")]
 struct Cli {
@@ -43,7 +42,6 @@ struct Cli {
     #[arg(long, default_value_t = 1)]
     concurrency: u64,
 }
-
 
 fn build_name(prefix: &Name, flow: u64, seq: u64) -> Name {
     prefix
@@ -99,7 +97,6 @@ fn print_stats(results: &[FlowResult], elapsed: Duration, size: usize) {
     println!("  elapsed: {:.2}s", elapsed.as_secs_f64());
 }
 
-
 async fn run_producer(handle: InProcHandle, payload: Arc<Vec<u8>>) {
     loop {
         let raw = match handle.recv().await {
@@ -116,7 +113,6 @@ async fn run_producer(handle: InProcHandle, payload: Arc<Vec<u8>>) {
         }
     }
 }
-
 
 async fn run_consumer(
     handle: InProcHandle,
@@ -159,7 +155,6 @@ async fn run_consumer(
 
     result
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {

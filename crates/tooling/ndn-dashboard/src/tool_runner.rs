@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use dioxus::prelude::*;
 
-
 /// Which tab is active in the Tools view — persists across navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolTab {
@@ -22,7 +21,6 @@ pub static PING_IDS: GlobalSignal<Vec<u32>> = Signal::global(|| vec![next_tool_i
 pub static IPERF_IDS: GlobalSignal<Vec<u32>> = Signal::global(|| vec![next_tool_instance_id()]);
 pub static PEEK_IDS: GlobalSignal<Vec<u32>> = Signal::global(|| vec![next_tool_instance_id()]);
 pub static PUT_IDS: GlobalSignal<Vec<u32>> = Signal::global(|| vec![next_tool_instance_id()]);
-
 
 /// A summary record stored in the shared results table after a tool run completes.
 #[derive(Clone, Debug)]
@@ -59,7 +57,6 @@ pub fn next_tool_instance_id() -> u32 {
     TOOL_INST_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-
 #[derive(Clone, Debug)]
 pub struct ToolInstanceState {
     #[allow(dead_code)]
@@ -90,7 +87,6 @@ pub struct ToolInstanceState {
 
 pub static TOOL_INSTANCES: GlobalSignal<std::collections::HashMap<u32, ToolInstanceState>> =
     Signal::global(std::collections::HashMap::new);
-
 
 #[derive(Debug)]
 pub enum ToolCmd {
@@ -139,7 +135,6 @@ pub enum ToolParams {
         freshness_ms: u64,
     },
 }
-
 
 /// Return current local time as HH:MM:SS string.
 pub fn chrono_now() -> String {
@@ -279,7 +274,6 @@ fn smooth_rtts(data: &[u64], target_len: usize) -> Vec<u64> {
         })
         .collect()
 }
-
 
 /// Format bits-per-second as a human-readable string.
 pub fn fmt_bps(bps: f64) -> String {

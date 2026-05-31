@@ -1,8 +1,8 @@
 # ndn-tools
 
-Operator CLIs for working with an NDN forwarder. One crate, seven
+Operator CLIs for working with an NDN forwarder. One crate, eight
 binaries: `ndn-peek`, `ndn-put`, `ndn-ping`, `ndn-sec`, `ndn-ctl`,
-`ndn-traffic`, `ndn-iperf`.
+`ndn-traffic`, `ndn-iperf`, `ndn-psync-consumer`.
 
 ## Get started
 
@@ -30,7 +30,7 @@ detail.
 
 ```bash
 cargo build --release -p ndn-tools
-# Produces: ndn-peek, ndn-put, ndn-ping, ndn-sec, ndn-ctl, ndn-traffic, ndn-iperf
+# Produces: ndn-peek, ndn-put, ndn-ping, ndn-sec, ndn-ctl, ndn-traffic, ndn-iperf, ndn-psync-consumer
 ```
 
 ### Nix

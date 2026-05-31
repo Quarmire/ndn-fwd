@@ -18,7 +18,6 @@ use crate::types::ThroughputSample;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-
 /// Sum selected face throughput histories into one aggregated VecDeque.
 /// `filter = None` means include all faces.
 pub fn sum_face_histories(
@@ -238,7 +237,6 @@ pub fn render_pps_bars(hist: &VecDeque<ThroughputSample>, height_px: u32) -> Ele
         }
     }
 }
-
 
 #[derive(Clone, PartialEq)]
 enum MonitorMode {

@@ -28,7 +28,6 @@ const KNOWN_STRATEGIES: &[(&str, &str)] = &[
     ("/ndn/strategy/self-learning", "Self-Learning"),
 ];
 
-
 #[component]
 pub fn Overview() -> Element {
     let ctx = use_context::<AppCtx>();

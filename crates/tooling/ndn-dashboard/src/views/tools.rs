@@ -60,7 +60,6 @@ pub fn Tools() -> Element {
     }
 }
 
-
 #[component]
 fn PingTab() -> Element {
     rsx! {
@@ -193,7 +192,6 @@ fn PingCard(panel_id: u32) -> Element {
         }
     }
 }
-
 
 #[component]
 fn IperfTab() -> Element {
@@ -462,7 +460,6 @@ fn IperfCard(panel_id: u32) -> Element {
     }
 }
 
-
 #[component]
 fn PeekTab() -> Element {
     rsx! {
@@ -579,7 +576,6 @@ fn PeekCard(panel_id: u32) -> Element {
         }
     }
 }
-
 
 #[component]
 fn PutTab() -> Element {
@@ -754,7 +750,6 @@ fn PutCard(panel_id: u32) -> Element {
     }
 }
 
-
 #[component]
 fn ResultsTable() -> Element {
     let mut filter = use_signal(|| "all".to_string());
@@ -876,7 +871,6 @@ fn ResultsTable() -> Element {
         }
     }
 }
-
 
 #[component]
 #[allow(clippy::too_many_arguments)]
@@ -1098,7 +1092,6 @@ fn ResultRow(
         }
     }
 }
-
 
 fn result_to_json(r: &crate::tool_runner::ToolResultEntry) -> serde_json::Value {
     serde_json::json!({

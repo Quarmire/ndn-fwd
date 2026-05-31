@@ -14,7 +14,6 @@ use ndn_security::{
     spki,
 };
 
-
 #[derive(Parser)]
 #[command(
     name = "ndn-sec",
@@ -92,7 +91,6 @@ enum AnchorCmd {
     List,
 }
 
-
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let pib_path = resolve_pib_path(cli.pib.as_deref());
@@ -124,7 +122,6 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 fn cmd_keygen(
     pib_path: &PathBuf,
@@ -284,7 +281,6 @@ fn cmd_anchor_list(pib_path: &PathBuf) -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 /// Resolve the PIB path: CLI flag → $NDN_PIB → ~/.ndn/pib.
 fn resolve_pib_path(arg: Option<&str>) -> PathBuf {

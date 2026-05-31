@@ -84,6 +84,9 @@ pub fn SecurityGate() -> Element {
                     PostureKind::TrustSchemaWeakened => rsx! {
                         TrustSchemaWeakenedPanel { posture: posture.clone() }
                     },
+                    PostureKind::SchemaTightened => rsx! {
+                        SchemaTightenedPanel { posture: posture.clone() }
+                    },
                     PostureKind::Hardened | PostureKind::Unsupported => rsx! {},
                 }
             }
@@ -230,7 +233,6 @@ fn IdentityExpiredPanel(posture: SecurityPosture) -> Element {
     }
 }
 
-
 #[component]
 #[allow(non_snake_case)]
 fn TrustSchemaWeakenedPanel(posture: SecurityPosture) -> Element {
@@ -286,6 +288,61 @@ fn TrustSchemaWeakenedPanel(posture: SecurityPosture) -> Element {
                 skip_acknowledged.set(false);
                 push_toast(
                     "Schema change accepted. The new anchor set is now baseline.",
+                    crate::app_shared::ToastLevel::Info,
+                );
+            },
+        }
+    }
+}
+
+#[component]
+#[allow(non_snake_case)]
+fn SchemaTightenedPanel(posture: SecurityPosture) -> Element {
+    let mut skip_acknowledged: Signal<bool> = use_signal(|| false);
+    let orphaned = match &posture {
+        SecurityPosture::SchemaTightened { orphaned } => orphaned.clone(),
+        _ => return rsx! {},
+    };
+
+    rsx! {
+        h2 { style: "margin:0 0 12px 0;font-size:18px;",
+            "⚠  Pending schema tightening would orphan live certificates."
+        }
+        p { style: "margin:0 0 8px 0;color:var(--text-muted);line-height:1.5;",
+            "A dry-run of the proposed schema against the current cert set found "
+            "identities that would stop validating. Apply with a grace window so "
+            "both schemas validate during the transition, or re-issue these first."
+        }
+        if orphaned.is_empty() {
+            p { style: "margin:0 0 18px 0;color:#6c6;", "No live certificates would be orphaned." }
+        } else {
+            p { style: "margin:0 0 8px 0;color:var(--text-muted);", "Would stop validating:" }
+            ul { style: "margin:0 0 18px 18px;color:#ddd;",
+                for o in orphaned.iter() {
+                    li { key: "{o}", code { "{o}" } }
+                }
+            }
+        }
+
+        GateChoice {
+            icon: "📜",
+            title: "Review the affected identities",
+            description: "Inspect each orphaned cert chain before applying the tighter schema.",
+            action_label: "Go to Security → Trust & schema",
+            on_action: move |_| {
+                jump_to_security_view(SecurityTab::Schema);
+                accept(current_forwarder_id(), PostureKind::SchemaTightened);
+            },
+        }
+
+        SkipRow {
+            label: "Apply anyway — these identities are expected to be retired.".to_string(),
+            checked: skip_acknowledged,
+            on_skip: move |_| {
+                accept(current_forwarder_id(), PostureKind::SchemaTightened);
+                skip_acknowledged.set(false);
+                push_toast(
+                    "Schema tightening accepted. Orphaned identities will no longer validate.",
                     crate::app_shared::ToastLevel::Info,
                 );
             },

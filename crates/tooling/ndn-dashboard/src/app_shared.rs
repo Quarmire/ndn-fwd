@@ -161,9 +161,14 @@ pub enum DashCmd {
     /// §5.5 list pending CA device-approval requests.
     CaListApprovals,
     /// §5.5 approve a pending request.
-    CaApprove { request_id: String },
+    CaApprove {
+        request_id: String,
+    },
     /// §5.5 deny a pending request with a reason.
-    CaDeny { request_id: String, reason: String },
+    CaDeny {
+        request_id: String,
+        reason: String,
+    },
 }
 
 #[cfg(feature = "desktop")]

@@ -13,7 +13,6 @@
 use crate::app::AppCtx;
 use dioxus::prelude::*;
 
-
 /// Persistence-layer mismatch fix: the original implementation used
 /// `~/.ndn/dashboard-onboarded` via `std::fs`, which silently no-ops
 /// in the wasm sandbox. The browser dashboard therefore re-showed
@@ -61,7 +60,6 @@ fn mark_onboarded() {
         let _ = ls.set_item(ONBOARDED_LS_KEY, "1");
     }
 }
-
 
 #[component]
 pub fn Onboarding(mut on_complete: EventHandler<()>) -> Element {
@@ -135,7 +133,6 @@ fn render_step(
     }
 }
 
-
 fn render_welcome(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     rsx! {
         div { style: "text-align:center;",
@@ -173,7 +170,6 @@ fn render_welcome(advance: impl FnMut(MouseEvent) + 'static) -> Element {
         }
     }
 }
-
 
 fn render_identity(
     has_identity: bool,
@@ -232,7 +228,6 @@ fn render_identity(
         }
     }
 }
-
 
 fn render_trust(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     rsx! {
@@ -295,7 +290,6 @@ fn render_trust(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     }
 }
 
-
 fn render_done(advance: impl FnMut(MouseEvent) + 'static) -> Element {
     rsx! {
         div { style: "text-align:center;",
@@ -349,7 +343,6 @@ fn QuickCard(icon: &'static str, title: &'static str, desc: &'static str) -> Ele
         }
     }
 }
-
 
 /// Encode an NDN name as a `did:ndn` DID suffix (percent-encode slashes → %2F).
 pub fn encode_did_ndn(name: &str) -> String {

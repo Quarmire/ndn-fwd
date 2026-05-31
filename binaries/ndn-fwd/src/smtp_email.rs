@@ -65,7 +65,9 @@ impl EmailSender for SmtpEmailSender {
             let transport = self.transport()?;
             let email = Message::builder()
                 .from(from.parse().map_err(|e| format!("bad from address: {e}"))?)
-                .to(address.parse().map_err(|e| format!("bad to address: {e}"))?)
+                .to(address
+                    .parse()
+                    .map_err(|e| format!("bad to address: {e}"))?)
                 .subject("Your NDNCERT verification code")
                 .body(format!("Your NDNCERT verification code is: {code}\n"))
                 .map_err(|e| format!("build message: {e}"))?;

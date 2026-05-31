@@ -264,7 +264,6 @@ enum SecurityAction {
     },
 }
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -276,7 +275,6 @@ async fn main() -> anyhow::Result<()> {
 
     run_nfd(&cli).await
 }
-
 
 async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
     use anyhow::Context as _;
@@ -508,23 +506,9 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
         },
         Command::Status => {
             let s = mgmt.status().await.map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("{}", s.nfd_version);
-            println!(
-                "tables: fib={} pit={} cs={} name-tree={} measurements={}",
-                s.n_fib_entries,
-                s.n_pit_entries,
-                s.n_cs_entries,
-                s.n_name_tree_entries,
-                s.n_measurements_entries,
-            );
-            println!(
-                "in:  interests={} data={} nacks={}",
-                s.n_in_interests, s.n_in_data, s.n_in_nacks,
-            );
-            println!(
-                "out: interests={} data={} nacks={}",
-                s.n_out_interests, s.n_out_data, s.n_out_nacks,
-            );
+            let mut out = String::new();
+            render_status_into(&mut out, &s);
+            print!("{out}");
         }
         Command::Shutdown => {
             let resp = mgmt.shutdown().await.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -536,7 +520,6 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 fn run_security(action: &SecurityAction) -> anyhow::Result<()> {
     use ndn_security::{FilePib, SecurityManager};
@@ -739,11 +722,49 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
-
 fn print_face_list(faces: &[ndn_config::FaceStatus]) {
     let mut out = String::new();
     render_face_list_into(&mut out, faces);
     print!("{out}");
+}
+
+fn render_status_into(out: &mut String, s: &ndn_mgmt_wire::GeneralStatus) {
+    use std::fmt::Write;
+
+    let uptime_ms = s.current_timestamp_ms.saturating_sub(s.start_timestamp_ms);
+    writeln!(out, "status: 200 OK").unwrap();
+    writeln!(out, "version: {}", s.nfd_version).unwrap();
+    writeln!(out, "startTime: {}", s.start_timestamp_ms).unwrap();
+    writeln!(out, "currentTime: {}", s.current_timestamp_ms).unwrap();
+    writeln!(out, "uptime: {}ms", uptime_ms).unwrap();
+    writeln!(
+        out,
+        "tables: fib={} pit={} cs={} name-tree={} measurements={}",
+        s.n_fib_entries,
+        s.n_pit_entries,
+        s.n_cs_entries,
+        s.n_name_tree_entries,
+        s.n_measurements_entries,
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "in:  interests={} data={} nacks={}",
+        s.n_in_interests, s.n_in_data, s.n_in_nacks,
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "out: interests={} data={} nacks={}",
+        s.n_out_interests, s.n_out_data, s.n_out_nacks,
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "satisfied: {} unsatisfied: {}",
+        s.n_satisfied_interests, s.n_unsatisfied_interests,
+    )
+    .unwrap();
 }
 
 /// Face-system Tier 4 §C — operator-facing renderer for the
@@ -953,6 +974,30 @@ fn flag_bit_labels(flags: u64) -> Vec<&'static str> {
 #[cfg(test)]
 mod ctl_tests {
     use super::*;
+
+    #[test]
+    fn status_renderer_includes_nfd_compatible_fields() {
+        let status = ndn_mgmt_wire::GeneralStatus {
+            nfd_version: "ndn-rs 0.1.0".to_owned(),
+            start_timestamp_ms: 1_000,
+            current_timestamp_ms: 2_500,
+            n_fib_entries: 5,
+            n_pit_entries: 1,
+            n_cs_entries: 4,
+            n_in_interests: 7,
+            n_out_data: 3,
+            ..Default::default()
+        };
+
+        let mut out = String::new();
+        render_status_into(&mut out, &status);
+
+        assert!(out.contains("status: 200 OK"), "{out}");
+        assert!(out.contains("version: ndn-rs 0.1.0"), "{out}");
+        assert!(out.contains("startTime: 1000"), "{out}");
+        assert!(out.contains("uptime: 1500ms"), "{out}");
+        assert!(out.contains("tables: fib=5 pit=1 cs=4"), "{out}");
+    }
 
     /// Tier 4 §C — the renderer prints every ndn-rs extension field
     /// with the labels operators read in the design doc's example

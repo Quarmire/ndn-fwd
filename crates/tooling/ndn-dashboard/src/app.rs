@@ -176,10 +176,15 @@ pub enum DashCmd {
     CaListApprovals,
     /// §5.5 — fire `/localhost/nfd/ca/approve` for a single pending
     /// request. The handler refreshes the approvals list on success.
-    CaApprove { request_id: String },
+    CaApprove {
+        request_id: String,
+    },
     /// §5.5 — fire `/localhost/nfd/ca/deny` for a pending request.
     /// `reason` defaults to "denied" when empty.
-    CaDeny { request_id: String, reason: String },
+    CaDeny {
+        request_id: String,
+        reason: String,
+    },
 }
 
 /// Commands sent to the router-management coroutine.
@@ -2113,7 +2118,9 @@ async fn run_cmd(
                     }
                     Err(e) => {
                         *crate::app_shared::ENROLLMENT_RESULT.write() =
-                            Some(EnrollmentResult::Failed { reason: e.to_string() });
+                            Some(EnrollmentResult::Failed {
+                                reason: e.to_string(),
+                            });
                         Err(e.to_string())
                     }
                 },

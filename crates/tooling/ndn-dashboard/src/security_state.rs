@@ -23,6 +23,13 @@ pub enum SecurityPosture {
         anchors_removed: Vec<String>,
         rules_removed: Vec<String>,
     },
+    /// A pending schema *tightening* would orphan live certificates — the
+    /// dry-run preview of identities that would stop validating if applied.
+    /// Fires before the change lands so the operator can apply with a grace
+    /// window instead of silently breaking working nodes.
+    SchemaTightened {
+        orphaned: Vec<String>,
+    },
 }
 
 impl SecurityPosture {
@@ -35,6 +42,7 @@ impl SecurityPosture {
             Self::NoIdentity => PostureKind::NoIdentity,
             Self::IdentityExpired { .. } => PostureKind::IdentityExpired,
             Self::TrustSchemaWeakened { .. } => PostureKind::TrustSchemaWeakened,
+            Self::SchemaTightened { .. } => PostureKind::SchemaTightened,
         }
     }
 
@@ -55,6 +63,7 @@ pub enum PostureKind {
     NoIdentity,
     IdentityExpired,
     TrustSchemaWeakened,
+    SchemaTightened,
 }
 
 impl PostureKind {
@@ -67,6 +76,7 @@ impl PostureKind {
             Self::NoIdentity => "N",
             Self::IdentityExpired => "E",
             Self::TrustSchemaWeakened => "W",
+            Self::SchemaTightened => "T",
         }
     }
 
@@ -77,6 +87,7 @@ impl PostureKind {
             "N" => Self::NoIdentity,
             "E" => Self::IdentityExpired,
             "W" => Self::TrustSchemaWeakened,
+            "T" => Self::SchemaTightened,
             _ => return None,
         })
     }
@@ -144,14 +155,19 @@ pub struct PostureInput<'a> {
 /// ExpiringSoon → Hardened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChipState {
-    Hardened { identity_name: String },
+    Hardened {
+        identity_name: String,
+    },
     /// Forwarder doesn't speak ndn-rs's `security/*` extensions.
     Unsupported,
     Ephemeral,
     /// `require_signed_commands == false`; overrides Ephemeral.
     UnsignedMgmt,
     /// `days` in 0..=7.
-    ExpiringSoon { identity_name: String, days: u32 },
+    ExpiringSoon {
+        identity_name: String,
+        days: u32,
+    },
     Expired {
         identity_name: String,
         days_ago: i64,

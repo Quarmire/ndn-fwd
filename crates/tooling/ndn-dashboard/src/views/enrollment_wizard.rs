@@ -813,8 +813,12 @@ mod tests {
             EnrollmentResult::Submitting,
         );
         assert_eq!(
-            EnrollmentResult::Failed { reason: "nope".into() },
-            EnrollmentResult::Failed { reason: "nope".into() },
+            EnrollmentResult::Failed {
+                reason: "nope".into()
+            },
+            EnrollmentResult::Failed {
+                reason: "nope".into()
+            },
         );
         assert_ne!(
             EnrollmentResult::Failed { reason: "a".into() },

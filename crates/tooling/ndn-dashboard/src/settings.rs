@@ -81,7 +81,6 @@ impl Default for DashSettings {
     }
 }
 
-
 #[cfg(feature = "desktop")]
 fn settings_path() -> std::path::PathBuf {
     dirs_next::config_dir()
@@ -111,7 +110,6 @@ pub fn save_settings(settings: &DashSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 #[cfg(feature = "web")]
 pub fn load_settings() -> DashSettings {
     use gloo_storage::{LocalStorage, Storage};
@@ -124,7 +122,6 @@ pub fn save_settings(settings: &DashSettings) -> anyhow::Result<()> {
     LocalStorage::set("ndn-dashboard-settings", settings)
         .map_err(|e| anyhow::anyhow!("localStorage write failed: {:?}", e))
 }
-
 
 #[cfg(not(any(feature = "desktop", feature = "web")))]
 pub fn load_settings() -> DashSettings {

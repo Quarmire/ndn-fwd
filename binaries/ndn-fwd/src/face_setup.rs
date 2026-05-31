@@ -181,7 +181,9 @@ async fn run_face_setup_inner(
                 let eng = engine.clone();
                 let c = cancel.child_token();
                 tokio::spawn(async move {
-                    match ndn_face_native::net::MulticastUdpFace::new(iface, port, group_addr, id).await {
+                    match ndn_face_native::net::MulticastUdpFace::new(iface, port, group_addr, id)
+                        .await
+                    {
                         Ok(face) => {
                             eng.add_face_with_persistency(
                                 face,
@@ -240,7 +242,8 @@ async fn run_face_setup_inner(
                     let eng = engine.clone();
                     let c = cancel.child_token();
                     tokio::spawn(async move {
-                        match ndn_face_webtransport::WebTransportFace::connect(id, &url, tls).await {
+                        match ndn_face_webtransport::WebTransportFace::connect(id, &url, tls).await
+                        {
                             Ok(face) => {
                                 eng.add_face(face, c);
                                 tracing::info!(target: "face.wt", face=%id, remote=%url, "WebTransport dial face connected");
@@ -284,14 +287,20 @@ async fn run_face_setup_inner(
                         // The connector (endpoint) is dropped after connect; the
                         // face's streams keep the connection + driver alive.
                         match ndn_face_quic::QuicConnector::new(tls) {
-                            Ok(connector) => match connector.connect_authority(id, &authority).await {
-                                Ok(face) => {
-                                    eng.add_face(face, c);
-                                    tracing::info!(target: "face.quic", face=%id, remote=%authority, "QUIC dial face connected");
+                            Ok(connector) => {
+                                match connector.connect_authority(id, &authority).await {
+                                    Ok(face) => {
+                                        eng.add_face(face, c);
+                                        tracing::info!(target: "face.quic", face=%id, remote=%authority, "QUIC dial face connected");
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(target: "face.quic", remote=%authority, error=%e, "QUIC dial failed")
+                                    }
                                 }
-                                Err(e) => tracing::error!(target: "face.quic", remote=%authority, error=%e, "QUIC dial failed"),
-                            },
-                            Err(e) => tracing::error!(target: "face.quic", error=%e, "QUIC connector setup failed"),
+                            }
+                            Err(e) => {
+                                tracing::error!(target: "face.quic", error=%e, "QUIC connector setup failed")
+                            }
                         }
                     });
                 }
@@ -377,9 +386,13 @@ async fn run_face_setup_inner(
                         // A `bpf-object` path overrides the embedded default
                         // redirect program (`bpf/redirect.bpf.o`).
                         let opened = match bpf_object.clone() {
-                            Some(obj) => {
-                                ndn_face_native::l2::AfXdpFace::new(id, interface, 0, mac, obj.into())
-                            }
+                            Some(obj) => ndn_face_native::l2::AfXdpFace::new(
+                                id,
+                                interface,
+                                0,
+                                mac,
+                                obj.into(),
+                            ),
                             None => ndn_face_native::l2::AfXdpFace::new_with_embedded_redirect(
                                 id, interface, 0, mac,
                             ),
@@ -449,7 +462,9 @@ async fn run_face_setup_inner(
     {
         let eng = engine.clone();
         let c = cancel.clone();
-        tokio::spawn(async move { crate::transport_listeners::run_quic_listener(quic_cfg, eng, c).await });
+        tokio::spawn(async move {
+            crate::transport_listeners::run_quic_listener(quic_cfg, eng, c).await
+        });
     }
 
     // Polls the signaling relay, accepts SDP offers as `WebRtcFace`s, and

@@ -10,11 +10,9 @@ use std::sync::OnceLock;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-
 thread_local! {
     static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
 }
-
 
 struct MenuIds {
     open: tray_icon::menu::MenuId,
@@ -26,7 +24,6 @@ struct MenuIds {
 }
 
 static MENU_IDS: OnceLock<MenuIds> = OnceLock::new();
-
 
 /// Create the system-tray icon and menu.
 ///
@@ -140,7 +137,6 @@ pub fn update_state(connected: bool, router_running: bool) {
         }
     });
 }
-
 
 /// Generate a solid-colour circle as a 22×22 RGBA icon.
 fn make_circle(r: u8, g: u8, b: u8) -> Icon {

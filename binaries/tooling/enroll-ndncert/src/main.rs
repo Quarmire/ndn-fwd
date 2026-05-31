@@ -197,16 +197,13 @@ async fn finish(
 
     eprintln!("enrollment complete — issued cert name: {cert_name}");
 
-    // Step 3 (best-effort): fetch the issued cert. `ndncert-ca-server`
-    // registers only `<ca-prefix>/CA`; the issued cert at
-    // `<requester>/KEY/...` is normally served by a paired NDN repo.
+    // Step 3: fetch and decode the issued certificate. The fetched Data packet
+    // is itself the Certificate v2 object; its Content is the SPKI public key,
+    // not another nested Data packet.
     let ca_prefix_str = ca_prefix.to_string();
     let (issuer_str, fetched) = match consumer.fetch(cert_name.clone()).await {
         Ok(cert_data) => {
-            let cert_bytes = cert_data
-                .content()
-                .context("cert fetch response has no content")?;
-            let cert = ndn_cert::ca::deserialize_cert(cert_bytes)
+            let cert = ndn_security::Certificate::decode(&cert_data)
                 .context("issued cert does not decode as NDN Certificate v2")?;
             let issuer_str = cert
                 .issuer

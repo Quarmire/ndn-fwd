@@ -24,6 +24,9 @@
 # ── Stage 1: chef base ────────────────────────────────────────────────────────
 FROM rust:slim AS chef
 
+ARG BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${BUILD_JOBS}
+
 RUN cargo install cargo-chef --locked
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,7 +57,7 @@ RUN cargo chef cook --release --bin ndn-fwd --recipe-path recipe.json
 FROM chef AS builder
 COPY . .
 COPY --from=cacher /build/target target
-RUN cargo build --release --bin ndn-fwd
+RUN cargo build --release --bin ndn-fwd -j "${CARGO_BUILD_JOBS}"
 
 # ── Stage 5: runtime image ────────────────────────────────────────────────────
 FROM debian:trixie-slim

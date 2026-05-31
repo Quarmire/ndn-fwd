@@ -1394,7 +1394,9 @@ async fn run_cmd_web(
                         uri: Some(format!("{challenge_type}:{challenge_param}")),
                         ..Default::default()
                     };
-                    let resp = client.send_cmd("security", "ca-enroll", Some(&params)).await;
+                    let resp = client
+                        .send_cmd("security", "ca-enroll", Some(&params))
+                        .await;
                     match &resp {
                         Ok(r) if r.is_ok() => {
                             *crate::app_shared::ENROLLMENT_RESULT.write() =
@@ -1428,7 +1430,7 @@ async fn run_cmd_web(
                     return;
                 }
             }
-        },
+        }
         DashCmd::DiscoveryConfigSet(params_str) => {
             let cp = ControlParameters {
                 uri: Some(params_str),

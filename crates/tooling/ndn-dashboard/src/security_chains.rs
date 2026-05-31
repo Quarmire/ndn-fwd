@@ -385,10 +385,10 @@ mod audit_globals {
 }
 
 #[cfg(feature = "desktop")]
-pub use audit_globals::{append as append_audit_entry, init as init_audit_chain};
-#[cfg(feature = "desktop")]
 #[allow(unused_imports)]
 pub use audit_globals::snapshot as audit_chain_snapshot;
+#[cfg(feature = "desktop")]
+pub use audit_globals::{append as append_audit_entry, init as init_audit_chain};
 
 /// Wasm32 audit chain — `IdbDatabase` is `!Send`, so we use `thread_local!` +
 /// `RefCell`. `init_audit_chain` stays sync but spawns the async IDB open;

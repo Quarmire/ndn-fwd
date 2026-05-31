@@ -13,7 +13,6 @@ use tokio::process::{Child, Command};
 
 use crate::types::LogEntry;
 
-
 pub struct RouterProc {
     child: Child,
     log_buf: Arc<Mutex<VecDeque<LogEntry>>>,
@@ -88,7 +87,6 @@ impl RouterProc {
     }
 }
 
-
 /// Write `toml` to a temporary file and return its path.
 /// Used by StartRouterModal "Start with Config" to pass the current config
 /// to the router without requiring the user to save it manually.
@@ -97,7 +95,6 @@ pub fn write_temp_config(toml: &str) -> std::io::Result<std::path::PathBuf> {
     std::fs::write(&path, toml)?;
     Ok(path)
 }
-
 
 use crate::forwarder_profile::ForwarderProfile;
 

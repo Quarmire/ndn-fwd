@@ -1,12 +1,10 @@
 use crate::app::{AppCtx, DashCmd};
 use dioxus::prelude::*;
 
-
 const CHALLENGE_TOKEN: &str = "token";
 const CHALLENGE_PIN: &str = "pin";
 const CHALLENGE_POSSESSION: &str = "possession";
 const CHALLENGE_YUBIKEY: &str = "yubikey-hotp";
-
 
 #[component]
 pub fn Fleet() -> Element {
@@ -500,7 +498,6 @@ pub fn Fleet() -> Element {
         }
     }
 }
-
 
 #[component]
 fn EnrollProgress(step: u8, result_did: Option<String>, on_reset: EventHandler<()>) -> Element {

@@ -11,9 +11,8 @@ use tokio_util::sync::CancellationToken;
 /// listener start. Process-global because listeners are process-global and the
 /// `webtransport` mgmt module reads it without per-listener plumbing.
 #[cfg(feature = "webtransport")]
-pub static WT_CERT_STATUS: std::sync::LazyLock<
-    std::sync::RwLock<Vec<ndn_mgmt::WtCertStatusInfo>>,
-> = std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
+pub static WT_CERT_STATUS: std::sync::LazyLock<std::sync::RwLock<Vec<ndn_mgmt::WtCertStatusInfo>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(Vec::new()));
 
 /// `WtCertStatusBackend` for the `/localhost/nfd/webtransport/cert-status`
 /// dataset; reads the process-global [`WT_CERT_STATUS`].
@@ -23,10 +22,7 @@ pub struct WtCertStatusReader;
 #[cfg(feature = "webtransport")]
 impl ndn_mgmt::WtCertStatusBackend for WtCertStatusReader {
     fn cert_status(&self) -> Vec<ndn_mgmt::WtCertStatusInfo> {
-        WT_CERT_STATUS
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        WT_CERT_STATUS.read().map(|g| g.clone()).unwrap_or_default()
     }
 }
 
@@ -149,16 +145,18 @@ pub async fn run_wt_listener(
 
     // Browser-pinnable: self-signed certs stay under Chrome's 14-day
     // `serverCertificateHashes` limit.
-    let material =
-        match resolve_cert_source(&cfg.cert_source, ndn_acme::SelfSignedProfile::BrowserPinnable)
-            .await
-        {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(target: "face.wt", error=%e, "wt-listener: cert resolve failed");
-                return;
-            }
-        };
+    let material = match resolve_cert_source(
+        &cfg.cert_source,
+        ndn_acme::SelfSignedProfile::BrowserPinnable,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(target: "face.wt", error=%e, "wt-listener: cert resolve failed");
+            return;
+        }
+    };
 
     // Read-only cert-status surface: notAfter / days-remaining / renewal state.
     // Logged and published to the `webtransport/cert-status` mgmt dataset.
@@ -264,14 +262,18 @@ pub async fn run_quic_listener(
 
     // Backbone: a pinned dialer trusts the leaf hash, not the expiry, so a
     // self-signed source gets a long-lived cert (no restart-time pin churn).
-    let material =
-        match resolve_cert_source(&cfg.cert_source, ndn_acme::SelfSignedProfile::Backbone).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(target: "face.quic", error=%e, "quic-listener: cert resolve failed");
-                return;
-            }
-        };
+    let material = match resolve_cert_source(
+        &cfg.cert_source,
+        ndn_acme::SelfSignedProfile::Backbone,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(target: "face.quic", error=%e, "quic-listener: cert resolve failed");
+            return;
+        }
+    };
     if let Some(hex) = material.leaf_sha256().as_ref().map(hex32) {
         tracing::info!(target: "face.quic", addr=%bind_addr, cert_sha256=%hex, "QUIC listener ready (pin this hash on dialers)");
     }

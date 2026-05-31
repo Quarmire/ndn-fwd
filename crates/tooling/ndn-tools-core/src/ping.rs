@@ -170,9 +170,12 @@ pub async fn run_client(params: PingClientParams, tx: mpsc::Sender<ToolEvent>) -
             Err(AppError::Nacked { reason }) => {
                 let rtt_us = t0.elapsed().as_micros() as u64;
                 nacks += 1;
+                let reason = reason
+                    .map(|reason| format!("{reason:?}"))
+                    .unwrap_or_else(|| "Unspecified".to_string());
                 let _ = tx
                     .send(ToolEvent::warn(format!(
-                        "  seq={seq}: nack ({reason:?}), rtt={}",
+                        "  seq={seq}: nack ({reason}), rtt={}",
                         format_rtt(rtt_us)
                     )))
                     .await;

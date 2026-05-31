@@ -252,7 +252,6 @@ pub fn Config() -> Element {
     }
 }
 
-
 fn section_header(
     title: &str,
     section: ConfigSection,
@@ -295,7 +294,6 @@ fn kv_row(key: &str, val: impl std::fmt::Display, badge: Element) -> Element {
         }
     }
 }
-
 
 fn render_engine_section(engine: EngineConfig, editing: Signal<Option<ConfigSection>>) -> Element {
     let is_open = *editing.read() == Some(ConfigSection::Engine);
@@ -342,7 +340,6 @@ fn render_engine_section(engine: EngineConfig, editing: Signal<Option<ConfigSect
         }
     }
 }
-
 
 fn render_cs_section(cs: CsConfig, editing: Signal<Option<ConfigSection>>) -> Element {
     let is_open = *editing.read() == Some(ConfigSection::ContentStore);
@@ -405,7 +402,6 @@ fn render_cs_section(cs: CsConfig, editing: Signal<Option<ConfigSection>>) -> El
     }
 }
 
-
 fn render_management_section(
     mgmt: ManagementConfig,
     editing: Signal<Option<ConfigSection>>,
@@ -433,7 +429,6 @@ fn render_management_section(
         }
     }
 }
-
 
 fn render_security_section(sec: SecurityConfig, editing: Signal<Option<ConfigSection>>) -> Element {
     let is_open = *editing.read() == Some(ConfigSection::Security);
@@ -496,7 +491,6 @@ fn render_security_section(sec: SecurityConfig, editing: Signal<Option<ConfigSec
         }
     }
 }
-
 
 fn render_discovery_section(
     disc: DiscoveryTomlConfig,
@@ -594,7 +588,6 @@ fn render_discovery_section(
     }
 }
 
-
 fn render_logging_section(
     log: LoggingConfig,
     _ctx: AppCtx,
@@ -652,7 +645,6 @@ fn render_logging_section(
         }
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq)]
 enum AddFaceKind {
@@ -982,7 +974,6 @@ fn FacesSection(faces: Signal<Vec<FaceConfig>>) -> Element {
         }
     }
 }
-
 
 #[component]
 fn RoutesSection(routes: Signal<Vec<RouteConfig>>, n_faces: usize) -> Element {

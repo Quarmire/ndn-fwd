@@ -36,13 +36,31 @@ path = "src/traffic.rs"
 name = "ndn-iperf"
 path = "src/iperf.rs"
 
+[[bin]]
+name = "ndn-psync-consumer"
+path = "src/psync_consumer.rs"
+
+[[bin]]
+name = "ndn-mgmt-response-verify"
+path = "src/mgmt_response_verify.rs"
+
+[[bin]]
+name = "ndn-mgmt-notification-fetch"
+path = "src/mgmt_notification_fetch.rs"
+
+[[bin]]
+name = "ndn-safebag-witness"
+path = "src/safebag_witness.rs"
+
 [dependencies]
 ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"] }
 ndn-engine     = { workspace = true }
 ndn-app        = { workspace = true }
 ndn-ipc        = { workspace = true }
+ndn-mgmt-wire  = { workspace = true }
 ndn-packet     = { workspace = true, features = ["std"] }
 ndn-security   = { workspace = true }
+ndn-sync       = { workspace = true }
 ndn-config     = { workspace = true }
 ndn-transport  = { workspace = true }
 ndn-face-native     = { workspace = true }

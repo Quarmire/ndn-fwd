@@ -3,8 +3,9 @@
 //! discovery, routing protocols, and NFD-compatible management on
 //! `/localhost/nfd/`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -42,12 +43,13 @@ fn build_obs_retention(
 }
 
 mod demo_ca;
-#[cfg(feature = "smtp")]
-mod smtp_email;
-mod installs;
 mod face_setup;
 mod host_helpers;
+mod installs;
+mod onboard;
 mod security_init;
+#[cfg(feature = "smtp")]
+mod smtp_email;
 mod tracing_init;
 mod transport_listeners;
 
@@ -58,6 +60,10 @@ pub(crate) use host_helpers::{
 };
 pub(crate) use security_init::load_security;
 use tracing_init::{build_log_inspector, init_tracing};
+
+fn default_command_replay_cache() -> mgmt_ndn::CommandReplayCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
 
 struct CliArgs {
     config_path: Option<PathBuf>,
@@ -101,6 +107,12 @@ fn parse_args() -> CliArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Onboarding subcommands (`init` / `adopt`) run and exit before the daemon
+    // starts; everything else falls through to the forwarder.
+    if let Some(result) = onboard::maybe_run() {
+        return result;
+    }
+
     let cli = parse_args();
 
     if cli.list_modules {
@@ -129,9 +141,9 @@ async fn main() -> Result<()> {
         if fwd_config.observability.publish_to_ndn {
             use std::str::FromStr;
             let obs_cfg = &fwd_config.observability;
-            let prefix = ndn_packet::Name::from_str(&obs_cfg.ndn_prefix)
-                .unwrap_or_else(|_| ndn_packet::Name::from_str("/localhost/nfd/observability")
-                    .expect("static"));
+            let prefix = ndn_packet::Name::from_str(&obs_cfg.ndn_prefix).unwrap_or_else(|_| {
+                ndn_packet::Name::from_str("/localhost/nfd/observability").expect("static")
+            });
             let retention = build_obs_retention(obs_cfg);
             Some(ndn_observability::SpanPublisher::new(prefix, retention))
         } else {
@@ -712,7 +724,7 @@ async fn main() -> Result<()> {
             // to NFD's `m_isLocalhopEnabled = false`).
             localhop_command_validator: localhop_validator,
             require_signed_commands: fwd_config.security.mgmt.require_signed_commands,
-            command_replay_cache: None,
+            command_replay_cache: Some(default_command_replay_cache()),
             // Sign mgmt responses with the daemon identity when one exists,
             // else fall back to DigestSha256 (ephemeral boots still answer).
             command_response_signer: engine.security().and_then(|m| m.any_signer()),
@@ -854,4 +866,18 @@ async fn main() -> Result<()> {
 
     shutdown.shutdown().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn n10_forwarder_default_replay_cache_is_wired() {
+        let cache = default_command_replay_cache();
+        assert!(
+            cache.lock().expect("cache lock").is_empty(),
+            "ndn-fwd must mount management with a live command replay cache"
+        );
+    }
 }

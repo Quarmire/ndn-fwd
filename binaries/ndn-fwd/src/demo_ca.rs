@@ -141,10 +141,12 @@ pub(crate) fn spawn(
     }
 
     if let Some(ra) = &cfg.require_attestation {
-        let prefix: Name = ra
-            .prefix
-            .parse()
-            .with_context(|| format!("[demo_ca] invalid require_attestation prefix '{}'", ra.prefix))?;
+        let prefix: Name = ra.prefix.parse().with_context(|| {
+            format!(
+                "[demo_ca] invalid require_attestation prefix '{}'",
+                ra.prefix
+            )
+        })?;
         let policy =
             RequireAttestationKind::new(prefix, ra.kind.clone()).require_signed(ra.require_signed);
         builder = builder.issuance(Box::new(policy));
@@ -238,7 +240,9 @@ fn make_email_sender(smtp: Option<&ndn_config::SmtpConfig>) -> Arc<dyn EmailSend
     }
     #[cfg(feature = "smtp")]
     {
-        Arc::new(crate::smtp_email::SmtpEmailSender::new(smtp.expect("checked")))
+        Arc::new(crate::smtp_email::SmtpEmailSender::new(
+            smtp.expect("checked"),
+        ))
     }
     #[cfg(not(feature = "smtp"))]
     {

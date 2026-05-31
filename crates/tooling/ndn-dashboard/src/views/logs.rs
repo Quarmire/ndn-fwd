@@ -9,7 +9,6 @@ use crate::app::{
 };
 use crate::types::{LogEntry, LogLevel};
 
-
 #[derive(Clone, PartialEq)]
 struct ModuleGroup {
     prefix: String,
@@ -33,7 +32,6 @@ fn build_module_tree(targets: &BTreeSet<String>) -> Vec<ModuleGroup> {
         })
         .collect()
 }
-
 
 #[derive(Clone, Copy, PartialEq)]
 enum ExportFormat {
@@ -113,7 +111,6 @@ fn json_str(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-
 const LEVEL_OPTIONS: &[(&str, &str)] = &[
     ("", "inherit"),
     ("trace", "TRACE"),
@@ -123,7 +120,6 @@ const LEVEL_OPTIONS: &[(&str, &str)] = &[
     ("error", "ERROR"),
     ("off", "off"),
 ];
-
 
 #[derive(Clone, Copy, PartialEq)]
 enum SplitMode {
@@ -148,7 +144,6 @@ impl SplitMode {
         }
     }
 }
-
 
 const LOG_WINDOW_CSS: &str = "
 *{box-sizing:border-box;margin:0;padding:0}
@@ -733,7 +728,6 @@ pub fn LogPane(pane_id: usize) -> Element {
     }
 }
 
-
 #[component]
 fn LogWindowApp(pane_id: usize) -> Element {
     rsx! {
@@ -741,7 +735,6 @@ fn LogWindowApp(pane_id: usize) -> Element {
         LogPane { pane_id }
     }
 }
-
 
 #[component]
 pub fn Logs() -> Element {
@@ -866,7 +859,6 @@ pub fn Logs() -> Element {
         }
     }
 }
-
 
 fn save_log_to_file(content: &str, ext: &str) {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
