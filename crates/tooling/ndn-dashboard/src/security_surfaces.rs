@@ -98,6 +98,76 @@ pub fn IdentityAxisControl() -> Element {
     }
 }
 
+/// Predict what the acting-as identity can do against the attached engine,
+/// from the live mgmt-auth policy + active identity (see
+/// [`crate::identity_axis::write_capability`]).
+fn live_write_capability(ctx: &AppCtx) -> crate::identity_axis::WriteCapability {
+    let policy = ctx.mgmt_access_policy.read();
+    // Prefer the full policy snapshot; fall back to the standalone flag.
+    let require_signed = policy
+        .as_ref()
+        .map(|p| Some(p.require_signed_commands))
+        .unwrap_or_else(|| *ctx.mgmt_signed_commands_required.read());
+    let ephemeral_allowed = policy
+        .as_ref()
+        .map(|p| p.ephemeral_allowed)
+        .unwrap_or(false);
+    let has_identity = !ctx.identity_name.read().trim().is_empty();
+    let identity_ephemeral = *ctx.identity_is_ephemeral.read();
+    let cert_expired = match (*ctx.cert_valid_until_unix_s.read(), now_unix_s()) {
+        (Some(valid_until), Some(now)) => now > valid_until,
+        _ => false,
+    };
+    crate::identity_axis::write_capability(
+        require_signed,
+        ephemeral_allowed,
+        has_identity,
+        identity_ephemeral,
+        cert_expired,
+    )
+}
+
+/// Attach-bar badge: what the operator can do here (read-only vs read-write),
+/// derived from the engine's auth policy and the acting-as identity.
+#[component]
+#[allow(non_snake_case)]
+pub fn CapabilityBadge() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let cap = live_write_capability(&ctx);
+    rsx! {
+        span {
+            class: "{cap.badge_class()}",
+            style: "flex-shrink:0;",
+            title: "{cap.tooltip()}",
+            "{cap.label()}"
+        }
+    }
+}
+
+/// Content-area notice shown only when the operator is read-only against this
+/// engine — so a refused mutation is understood up front, not discovered by a
+/// failed click. A notice (not per-button disabling) because the prediction
+/// can't fully verify the cert chain client-side; the engine is the authority.
+#[component]
+#[allow(non_snake_case)]
+pub fn ReadOnlyBanner() -> Element {
+    let ctx = use_context::<AppCtx>();
+    let cap = live_write_capability(&ctx);
+    if !cap.is_read_only() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "readonly-banner",
+            span { class: "readonly-banner-icon", "🔒" }
+            span {
+                "Read-only — this engine requires signed commands and the identity you're "
+                "acting as won't be accepted for changes. Adopt or enroll a trusted identity "
+                "to make changes."
+            }
+        }
+    }
+}
+
 #[component]
 #[allow(non_snake_case)]
 pub fn SecDot() -> Element {

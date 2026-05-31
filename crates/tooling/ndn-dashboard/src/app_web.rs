@@ -585,6 +585,7 @@ pub fn AppWeb() -> Element {
                         crate::views::engine_pill::EnginePill {}
                         span { class: "axis-divider" }
                         crate::security_surfaces::IdentityAxisControl {}
+                        crate::security_surfaces::CapabilityBadge {}
                         div { class: "conn-bar-spacer" }
                         button {
                             class: "icon-btn",
@@ -633,6 +634,7 @@ pub fn AppWeb() -> Element {
                                 "{err}"
                             }
                         }
+                        crate::security_surfaces::ReadOnlyBanner {}
                         { render_view_web(*ACTIVE_VIEW.read()) }
                     }
                     crate::views::inspector::Inspector {}

@@ -1393,6 +1393,7 @@ pub fn App() -> Element {
                     }
                     span { class: "axis-divider" }
                     crate::security_surfaces::IdentityAxisControl {}
+                    crate::security_surfaces::CapabilityBadge {}
                     button {
                         class: "icon-btn",
                         title: "Refresh",
@@ -1481,6 +1482,7 @@ pub fn App() -> Element {
                                     }
                                 }
                             }
+                            crate::security_surfaces::ReadOnlyBanner {}
                             {render_view(*ACTIVE_VIEW.read())}
                         }
                         crate::views::inspector::Inspector {}
