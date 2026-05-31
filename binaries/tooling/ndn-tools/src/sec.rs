@@ -441,6 +441,18 @@ fn key_type_label(t: KeyType) -> &'static str {
     }
 }
 
+/// Human label for a certificate's `SignatureType` (the stored algorithm).
+fn sig_type_label(t: ndn_packet::SignatureType) -> &'static str {
+    use ndn_packet::SignatureType as S;
+    match t {
+        S::SignatureEd25519 => "Ed25519",
+        S::SignatureSha256WithEcdsa => "ECDSA P-256",
+        S::SignatureSha256WithRsa => "RSA (SHA-256)",
+        S::DigestSha256 => "SHA-256 digest (no key)",
+        _ => "other",
+    }
+}
+
 fn format_label(f: WireFormat) -> &'static str {
     match f {
         WireFormat::Base64 => "base64",
@@ -461,6 +473,7 @@ fn cmd_certdump(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let expired = cert.valid_until != u64::MAX && cert.valid_until < now_ns();
     println!("Certificate for {name_str}");
     println!("  Cert name  : {cert_name}");
+    println!("  Algorithm  : {}", sig_type_label(cert.sig_type));
     println!("  Public key : {}", hex_encode(&cert.public_key));
     println!("  Valid from : {}", format_ns(cert.valid_from));
     println!(
