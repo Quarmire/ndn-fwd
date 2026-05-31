@@ -144,6 +144,37 @@ body>div{height:100%;width:100%;overflow:hidden}
 .conn-bar input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:0;font-size:13px;font-family:var(--font-mono);flex:1;max-width:280px;min-width:120px}
 .conn-bar input:focus{outline:none;border-color:var(--accent)}
 .content,.content-area{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:24px;min-height:0}
+/* Master-detail shell (design note section 3): center content + right-hand
+   inspector laid out as a row; the inspector is absent (zero width) until a
+   row is selected. */
+.content-host{display:flex;flex-direction:row;flex:1;min-height:0;min-width:0}
+.content-host .content,.content-host .content-area{flex:1;min-width:0}
+.inspector{width:320px;flex-shrink:0;border-left:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;overflow:hidden}
+.inspector-header{display:flex;align-items:center;justify-content:space-between;padding:var(--cds-spacing-04) var(--cds-spacing-05);border-bottom:1px solid var(--border-subtle)}
+.inspector-title{font-size:14px;font-weight:600;color:var(--text)}
+.inspector-close{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:14px;padding:2px 6px}
+.inspector-close:hover{color:var(--text)}
+.inspector-body{flex:1;overflow-y:auto;padding:var(--cds-spacing-05);display:flex;flex-direction:column;gap:var(--cds-spacing-06)}
+.inspector-empty{color:var(--text-muted);font-size:13px}
+.inspector-section{display:flex;flex-direction:column;gap:var(--cds-spacing-03)}
+.inspector-section-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted)}
+.inspector-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0;font-size:13px}
+.inspector-kv dt{color:var(--text-muted)}
+.inspector-kv dd{margin:0;color:var(--text);word-break:break-all}
+.inspector-counters{width:100%;font-size:13px}
+.inspector-counters th{text-align:right;color:var(--text-muted);font-weight:500;padding:2px 6px}
+.inspector-counters th:first-child{text-align:left}
+.inspector-counters td{padding:2px 6px}
+.inspector-counters td:not(:first-child){text-align:right}
+.inspector-footer{padding:var(--cds-spacing-04) var(--cds-spacing-05);border-top:1px solid var(--border-subtle)}
+/* Selectable rows feed the inspector. */
+.row-selectable{cursor:pointer}
+.row-selectable.selected{background:var(--accent-dim)}
+.row-selectable.selected td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+@media (max-width:760px){
+  /* On narrow widths the inspector overlays the content instead of squeezing it. */
+  .inspector{position:fixed;top:0;right:0;bottom:0;width:88vw;max-width:360px;z-index:90;box-shadow:-4px 0 16px rgba(0,0,0,.4)}
+}
 /* Sticky sub-nav inside a view's content area — keeps the tab
    bar + adjacent persistent controls pinned to the top of the
    scroll viewport. The container caps its height to a fraction

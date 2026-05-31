@@ -1448,18 +1448,22 @@ pub fn App() -> Element {
                         Logs {}
                     }
                 } else {
-                    div { class: "content",
-                        if let Some(ref err) = *error_msg.read() {
-                            div { class: "error-banner",
-                                span { "{err}" }
-                                button {
-                                    class: "btn btn-secondary btn-sm",
-                                    onclick: move |_| error_msg.set(None),
-                                    "✕"
+                    // Center content + right-hand inspector (design note §3).
+                    div { class: "content-host",
+                        div { class: "content",
+                            if let Some(ref err) = *error_msg.read() {
+                                div { class: "error-banner",
+                                    span { "{err}" }
+                                    button {
+                                        class: "btn btn-secondary btn-sm",
+                                        onclick: move |_| error_msg.set(None),
+                                        "✕"
+                                    }
                                 }
                             }
+                            {render_view(*ACTIVE_VIEW.read())}
                         }
-                        {render_view(*ACTIVE_VIEW.read())}
+                        crate::views::inspector::Inspector {}
                     }
                 }
             }

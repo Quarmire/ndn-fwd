@@ -615,15 +615,18 @@ pub fn AppWeb() -> Element {
                     }
                 }
 
-                // View content
-                div { class: "content-area",
-                    if let Some(err) = error_msg.read().as_ref() {
-                        div { class: "alert alert-error",
-                            strong { "Connection error: " }
-                            "{err}"
+                // View content + right-hand inspector (design note §3).
+                div { class: "content-host",
+                    div { class: "content-area",
+                        if let Some(err) = error_msg.read().as_ref() {
+                            div { class: "alert alert-error",
+                                strong { "Connection error: " }
+                                "{err}"
+                            }
                         }
+                        { render_view_web(*ACTIVE_VIEW.read()) }
                     }
-                    { render_view_web(*ACTIVE_VIEW.read()) }
+                    crate::views::inspector::Inspector {}
                 }
             } // close .main
         } // close .layout

@@ -221,9 +221,18 @@ pub fn Overview() -> Element {
                         tbody {
                             for face in faces.iter() {
                                 {
+                                    use crate::views::inspector::{SELECTED_ENTITY, SelectedEntity};
                                     let fid = face.face_id;
+                                    let is_selected = SELECTED_ENTITY
+                                        .read()
+                                        .and_then(|s| s.face_id())
+                                        == Some(fid);
                                     rsx! {
                                         tr {
+                                            class: if is_selected { "row-selectable selected" } else { "row-selectable" },
+                                            onclick: move |_| {
+                                                *SELECTED_ENTITY.write() = Some(SelectedEntity::Face(fid));
+                                            },
                                             td { class: "mono", "{face.face_id}" }
                                             td { span { class: "{face.kind_badge_class()}", "{face.kind_label()}" } }
                                             td { class: "mono", "{face.remote_uri.as_deref().unwrap_or(\"—\")}" }
@@ -232,7 +241,10 @@ pub fn Overview() -> Element {
                                             td {
                                                 button {
                                                     class: "btn btn-danger btn-sm",
-                                                    onclick: move |_| ctx.cmd.send(DashCmd::FaceDestroy(fid)),
+                                                    onclick: move |e| {
+                                                        e.stop_propagation();
+                                                        ctx.cmd.send(DashCmd::FaceDestroy(fid));
+                                                    },
                                                     "Destroy"
                                                 }
                                             }

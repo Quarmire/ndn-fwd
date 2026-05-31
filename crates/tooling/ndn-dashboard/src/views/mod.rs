@@ -14,6 +14,7 @@ pub mod engine_pill;
 pub mod enrollment_wizard;
 pub mod faces;
 pub mod fleet;
+pub mod inspector;
 pub mod key_rotation;
 pub mod logs;
 #[cfg(feature = "desktop")]
