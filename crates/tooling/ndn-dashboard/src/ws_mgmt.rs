@@ -159,7 +159,9 @@ impl WsMgmtClient {
                 let recv = ws.next();
                 futures::pin_mut!(recv);
                 match futures::future::select(recv, timeout).await {
-                    futures::future::Either::Left((Some(Ok(Message::Bytes(d))), _)) => Bytes::from(d),
+                    futures::future::Either::Left((Some(Ok(Message::Bytes(d))), _)) => {
+                        Bytes::from(d)
+                    }
                     futures::future::Either::Left((Some(Ok(Message::Text(t))), _)) => {
                         return Err(anyhow!("unexpected text response: {}", t));
                     }
@@ -191,7 +193,8 @@ impl WsMgmtClient {
             }
         };
 
-        let data = Data::decode(strip_lp(data_wire)).map_err(|e| anyhow!("Data decode: {:?}", e))?;
+        let data =
+            Data::decode(strip_lp(data_wire)).map_err(|e| anyhow!("Data decode: {:?}", e))?;
         let seq = data
             .name
             .components()

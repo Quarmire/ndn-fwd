@@ -39,7 +39,10 @@ pub async fn run_subscriber(module: &str, socket_path: Signal<String>, cmd: Coro
         // Learn the current sequence, then long-poll the next one. The
         // producer holds each "next seq" Interest open until the event fires
         // (or its budget elapses, surfacing here as `Ok(None)` → re-issue).
-        let mut next = match client.notification(module, None, Duration::from_secs(5)).await {
+        let mut next = match client
+            .notification(module, None, Duration::from_secs(5))
+            .await
+        {
             Ok(Some((seq, _))) => seq + 1,
             Ok(None) => 1,
             Err(_) => {
@@ -56,7 +59,7 @@ pub async fn run_subscriber(module: &str, socket_path: Signal<String>, cmd: Coro
                     cmd.send(DashCmd::RefreshNow);
                     next = seq + 1;
                 }
-                Ok(None) => {} // no event in the window — re-issue the same seq
+                Ok(None) => {}   // no event in the window — re-issue the same seq
                 Err(_) => break, // transport/decode error → reconnect
             }
         }

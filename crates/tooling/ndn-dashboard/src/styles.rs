@@ -522,10 +522,10 @@ mod tests {
     fn carbon_token_foundation_present() {
         // Carbon g100 anchors + signature blue-60 button primary.
         for needle in [
-            "#161616",  // $background (g100)
-            "#0f62fe",  // $button-primary (blue-60)
-            "#da1e28",  // $button-danger-primary (red-60)
-            "#42be65",  // $support-success (green-40)
+            "#161616", // $background (g100)
+            "#0f62fe", // $button-primary (blue-60)
+            "#da1e28", // $button-danger-primary (red-60)
+            "#42be65", // $support-success (green-40)
         ] {
             assert!(CSS.contains(needle), "Carbon color token missing: {needle}");
         }
@@ -538,7 +538,10 @@ mod tests {
             "IBM Plex Sans",
             "IBM Plex Mono",
         ] {
-            assert!(CSS.contains(needle), "Carbon scale/font token missing: {needle}");
+            assert!(
+                CSS.contains(needle),
+                "Carbon scale/font token missing: {needle}"
+            );
         }
         // The conn-bar must lay its controls out as a row, not stack them.
         assert!(
@@ -553,17 +556,30 @@ mod tests {
     fn carbon_component_pass_present() {
         // Containers/controls are squared (Carbon). The rounded 8/6/4px radii
         // are gone; tag/pill radii (10/12/20px) are intentionally kept.
-        for gone in ["border-radius:8px", "border-radius:6px", "border-radius:4px"] {
+        for gone in [
+            "border-radius:8px",
+            "border-radius:6px",
+            "border-radius:4px",
+        ] {
             assert!(!CSS.contains(gone), "container radius not squared: {gone}");
         }
         // Tables go horizontally scrollable on narrow viewports.
-        assert!(CSS.contains("overflow-x:auto"), "responsive table scroll missing");
+        assert!(
+            CSS.contains("overflow-x:auto"),
+            "responsive table scroll missing"
+        );
         // Tabs are Carbon underline tabs, not rounded pills.
-        assert!(!CSS.contains("border-radius:20px"), "tab pill radius should be gone");
+        assert!(
+            !CSS.contains("border-radius:20px"),
+            "tab pill radius should be gone"
+        );
         // Monospace surfaces route through the token, not rule-level literals.
         // (`'SF Mono'` still appears inside the `--font-mono` fallback list,
         // which is correct — we only forbid it as a `font-family:` value.)
-        assert!(CSS.contains("font-family:var(--font-mono)"), "mono token unused");
+        assert!(
+            CSS.contains("font-family:var(--font-mono)"),
+            "mono token unused"
+        );
         assert!(
             !CSS.contains("font-family:'SF Mono'"),
             "stray 'SF Mono' font-family literal remains"

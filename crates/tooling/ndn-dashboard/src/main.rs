@@ -18,17 +18,17 @@ pub mod app {
 mod app_web;
 #[cfg(target_arch = "wasm32")]
 mod browser_engine;
+mod fonts;
 #[cfg(feature = "desktop")]
 mod forwarder_proc;
 pub mod forwarder_profile;
+#[cfg(feature = "desktop")]
+mod notify_sub;
+mod resizable;
 mod security_chains;
 mod security_gate;
 mod security_state;
 mod security_surfaces;
-mod fonts;
-#[cfg(feature = "desktop")]
-mod notify_sub;
-mod resizable;
 pub mod settings;
 mod signed_data_chain;
 mod styles;
