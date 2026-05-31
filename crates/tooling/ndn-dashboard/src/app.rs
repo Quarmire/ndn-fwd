@@ -446,6 +446,8 @@ pub fn App() -> Element {
     let mut show_onboarding: Signal<bool> = use_signal(|| !is_onboarded());
     let mut show_start_modal: Signal<bool> = use_signal(|| false);
     let mut show_gear_menu: Signal<bool> = use_signal(|| false);
+    // Buckets the user has collapsed in the sidebar; all expanded by default.
+    let collapsed_buckets: Signal<HashSet<crate::views::Bucket>> = use_signal(HashSet::new);
 
     let (srv_cmd_tx, srv_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<ToolCmd>();
     let srv_cmd_tx_arc = std::sync::Arc::new(srv_cmd_tx);
@@ -1276,15 +1278,41 @@ pub fn App() -> Element {
                     span { "NDN Dashboard" }
                     crate::security_surfaces::SecDot {}
                 }
-                for view in View::NAV {
+                for bucket in crate::views::Bucket::ALL {
                     {
-                        let view = *view;
-                        let is_active = *ACTIVE_VIEW.read() == view;
+                        let bucket = *bucket;
+                        let mut collapsed_buckets = collapsed_buckets;
+                        let is_collapsed = collapsed_buckets.read().contains(&bucket);
                         rsx! {
-                            div {
-                                class: if is_active { "nav-item active" } else { "nav-item" },
-                                onclick: move |_| { *ACTIVE_VIEW.write() = view; },
-                                "{view.label()}"
+                            div { class: "nav-section",
+                                div {
+                                    class: "nav-section-header",
+                                    onclick: move |_| {
+                                        let mut set = collapsed_buckets.write();
+                                        if !set.remove(&bucket) {
+                                            set.insert(bucket);
+                                        }
+                                    },
+                                    span { class: "nav-section-caret",
+                                        if is_collapsed { "▸" } else { "▾" }
+                                    }
+                                    span { "{bucket.label()}" }
+                                }
+                                if !is_collapsed {
+                                    for view in bucket.views() {
+                                        {
+                                            let view = *view;
+                                            let is_active = *ACTIVE_VIEW.read() == view;
+                                            rsx! {
+                                                div {
+                                                    class: if is_active { "nav-item active" } else { "nav-item" },
+                                                    onclick: move |_| { *ACTIVE_VIEW.write() = view; },
+                                                    "{view.label()}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1497,6 +1525,7 @@ fn render_view(view: View) -> Element {
         View::Routing => rsx! { Routing {} },
         View::Radio => rsx! { Radio {} },
         View::Tools => rsx! { Tools {} },
+        View::Compose => rsx! { crate::views::compose::Compose {} },
         View::DashboardConfig => rsx! { DashboardConfig {} },
         View::RouterConfig => rsx! { Config {} },
     }

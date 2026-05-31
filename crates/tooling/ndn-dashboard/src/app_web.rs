@@ -126,6 +126,8 @@ pub fn AppWeb() -> Element {
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
     let mut show_onboarding: Signal<bool> = use_signal(|| !is_onboarded());
     let mut show_gear_menu: Signal<bool> = use_signal(|| false);
+    let collapsed_buckets: Signal<std::collections::HashSet<crate::views::Bucket>> =
+        use_signal(std::collections::HashSet::new);
 
     // Theme class is bound reactively on the layout root below — no JS.
 
@@ -444,23 +446,54 @@ pub fn AppWeb() -> Element {
                     span { class: "badge badge-sm", style: "font-size:0.6rem;", "WEB" }
                     crate::security_surfaces::SecDot {}
                 }
-                for view in View::NAV {
+                for bucket in crate::views::Bucket::ALL {
                     {
-                        let view = *view;
-                        // Skip desktop-only views
-                        if web_hidden_views.contains(&view) {
+                        let bucket = *bucket;
+                        // Views in this bucket that the web build actually shows.
+                        let visible: Vec<View> = bucket
+                            .views()
+                            .iter()
+                            .copied()
+                            .filter(|v| !web_hidden_views.contains(v))
+                            .collect();
+                        if visible.is_empty() {
                             return rsx! {};
                         }
-                        let is_active = *ACTIVE_VIEW.read() == view;
+                        let mut collapsed_buckets = collapsed_buckets;
+                        let is_collapsed = collapsed_buckets.read().contains(&bucket);
                         rsx! {
-                            div {
-                                class: if is_active { "nav-item active" } else { "nav-item" },
-                                onclick: move |_| {
-                                    *ACTIVE_VIEW.write() = view;
-                                    // Auto-close drawer on mobile after pick.
-                                    *SIDEBAR_OPEN.write() = false;
-                                },
-                                "{view.label()}"
+                            div { class: "nav-section",
+                                div {
+                                    class: "nav-section-header",
+                                    onclick: move |_| {
+                                        let mut set = collapsed_buckets.write();
+                                        if !set.remove(&bucket) {
+                                            set.insert(bucket);
+                                        }
+                                    },
+                                    span { class: "nav-section-caret",
+                                        if is_collapsed { "▸" } else { "▾" }
+                                    }
+                                    span { "{bucket.label()}" }
+                                }
+                                if !is_collapsed {
+                                    for view in visible {
+                                        {
+                                            let is_active = *ACTIVE_VIEW.read() == view;
+                                            rsx! {
+                                                div {
+                                                    class: if is_active { "nav-item active" } else { "nav-item" },
+                                                    onclick: move |_| {
+                                                        *ACTIVE_VIEW.write() = view;
+                                                        // Auto-close drawer on mobile after pick.
+                                                        *SIDEBAR_OPEN.write() = false;
+                                                    },
+                                                    "{view.label()}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -697,6 +730,7 @@ fn render_view_web(view: View) -> Element {
             }
         },
         View::Radio => rsx! { Radio {} },
+        View::Compose => rsx! { crate::views::compose::Compose {} },
         // Desktop-only views render a placeholder on web.
         // Coding/RateLimit will move to web once their fetch path is
         // ported off `ndn-ipc::MgmtClient` (§1d).

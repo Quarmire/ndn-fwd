@@ -101,6 +101,11 @@ body>div{height:100%;width:100%;overflow:hidden}
 .layout{display:flex;width:100%;height:100%}
 .sidebar{width:200px;min-width:200px;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column}
 .sidebar-logo{padding:16px;font-size:15px;font-weight:600;color:var(--accent);border-bottom:1px solid var(--border);letter-spacing:.5px}
+.nav-section{display:flex;flex-direction:column}
+.nav-section-header{display:flex;align-items:center;gap:6px;padding:12px 16px 6px;cursor:pointer;color:var(--text-muted);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;user-select:none}
+.nav-section-header:hover{color:var(--text)}
+.nav-section-caret{font-size:9px;width:10px;display:inline-block}
+.nav-section .nav-item{padding-left:30px}
 .nav-item{padding:10px 16px;cursor:pointer;color:var(--text-muted);font-size:13px;border-left:3px solid transparent;transition:all .15s}
 .nav-item:hover{background:var(--border-subtle);color:var(--text)}
 .nav-item.active{background:var(--accent-dim);color:var(--accent);border-left-color:var(--accent)}
