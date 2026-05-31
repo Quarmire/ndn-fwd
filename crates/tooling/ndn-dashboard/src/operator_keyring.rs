@@ -52,6 +52,24 @@ pub fn provision_ed25519(key_name: Name, seed: &[u8; 32]) {
     *kr.active.write().expect("operator keyring lock") = Some((key_id, pk));
 }
 
+/// Provision from a decrypted PKCS#8 Ed25519 private key — the real source: a
+/// SafeBag the operator imported (the dashboard decrypts it in-browser). Errors
+/// if the key isn't a parseable Ed25519 PKCS#8.
+///
+/// OS-keyring / fob / remote custodians are *not* fed this way — their key
+/// never enters the dashboard; they would `insert_signer` a delegating
+/// custodian into the registry instead, once those impls are functional.
+pub fn provision_ed25519_pkcs8(key_name: Name, pkcs8_der: &[u8]) -> Result<(), String> {
+    let kr = keyring();
+    let signer = Ed25519Signer::from_pkcs8_der(pkcs8_der, key_name.clone())
+        .map_err(|e| format!("operator key load: {e}"))?;
+    let pk = Bytes::copy_from_slice(&signer.public_key_bytes());
+    let key_id = KeyId(key_name);
+    kr.custodian.insert(key_id.clone(), signer);
+    *kr.active.write().expect("operator keyring lock") = Some((key_id, pk));
+    Ok(())
+}
+
 /// Whether an operator key is provisioned (the gate is open).
 pub fn is_provisioned() -> bool {
     keyring()

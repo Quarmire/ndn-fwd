@@ -16,7 +16,7 @@ use crate::edu_gloss::EduGloss;
 use crate::types::{AnchorInfo, SchemaRuleInfo};
 use crate::views::engine_pill::{FdeDetection, probe_fde};
 use dioxus::prelude::*;
-use ndn_safebag::SafeBag;
+use ndn_safebag::{SafeBag, SafeBagAlgorithm};
 
 /// State of the §5.1 SafeBag import modal — held in a global signal
 /// so the layout-root drag-drop handler can push the dropped wire
@@ -109,6 +109,27 @@ fn derive_identity_and_key(cert_name: &str) -> (String, String) {
     let key_id = after_key.split('/').next().unwrap_or("");
     let key_name = format!("{identity}/KEY/{key_id}");
     (identity, key_name)
+}
+
+/// Best-effort: load an imported **Ed25519** SafeBag key into the dashboard's
+/// operator keyring so mgmt commands can be signed as this identity (the
+/// signing gate opens). Returns `true` if a key was provisioned. Non-Ed25519
+/// keys still import to the forwarder's PIB; they just don't yet back
+/// dashboard-side signing (InPageCustodian is Ed25519-only today).
+fn load_operator_key(wire: &[u8], passphrase: &[u8], key_name: &str) -> bool {
+    let Ok(bag) = SafeBag::decode(wire) else {
+        return false;
+    };
+    if !matches!(bag.algorithm(passphrase), Ok(SafeBagAlgorithm::Ed25519)) {
+        return false;
+    }
+    let Ok(pkcs8) = bag.decrypt_pkcs8(passphrase) else {
+        return false;
+    };
+    let Ok(kn) = key_name.parse::<ndn_packet::Name>() else {
+        return false;
+    };
+    crate::operator_keyring::provision_ed25519_pkcs8(kn, &pkcs8).is_ok()
 }
 
 /// Verify the passphrase decrypts the SafeBag's PKCS#8 — pure
@@ -467,6 +488,7 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                             disabled: !trust_ok || passphrase.read().is_empty(),
                             onclick: {
                                 let identity_name = p.identity_name.clone();
+                                let key_name = p.key_name.clone();
                                 let wire = wire.clone();
                                 move |_| {
                                     let pw = passphrase.read().clone();
@@ -479,11 +501,21 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                                     // the browser-sandbox limit when
                                     // detection returns Unknown.
                                     maybe_fire_fde_warning();
+                                    // Load the operator key into the dashboard's
+                                    // keyring so mgmt commands sign as this
+                                    // identity, then persist to the forwarder PIB.
+                                    let provisioned =
+                                        load_operator_key(&wire, pw.as_bytes(), &key_name);
                                     ctx.cmd.send(DashCmd::SecuritySafebagImport {
                                         name: identity_name.clone(),
                                         safebag_wire: wire.clone(),
                                         passphrase: pw,
                                     });
+                                    // Rebind the command client with the operator
+                                    // signer now that the gate has opened.
+                                    if provisioned {
+                                        ctx.cmd.send(DashCmd::Reconnect);
+                                    }
                                     close();
                                 }
                             },
@@ -539,6 +571,16 @@ mod tests {
     #[test]
     fn verify_passphrase_rejects_garbage_wire() {
         assert!(verify_passphrase(b"", b"pw").is_err());
+    }
+
+    #[test]
+    fn load_operator_key_rejects_garbage_wire() {
+        // A non-SafeBag wire never provisions a key (and never panics).
+        assert!(!load_operator_key(
+            b"not-a-safebag",
+            b"pw",
+            "/op/alice/KEY/k1"
+        ));
     }
 
     #[test]
