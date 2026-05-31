@@ -111,25 +111,30 @@ fn derive_identity_and_key(cert_name: &str) -> (String, String) {
     (identity, key_name)
 }
 
-/// Best-effort: load an imported **Ed25519** SafeBag key into the dashboard's
-/// operator keyring so mgmt commands can be signed as this identity (the
-/// signing gate opens). Returns `true` if a key was provisioned. Non-Ed25519
-/// keys still import to the forwarder's PIB; they just don't yet back
-/// dashboard-side signing (InPageCustodian is Ed25519-only today).
+/// Best-effort: load an imported SafeBag key into the dashboard's operator
+/// keyring so mgmt commands can be signed as this identity (the signing gate
+/// opens). Handles both algorithms a SafeBag can carry — Ed25519 and ECDSA
+/// P-256. Returns `true` if a key was provisioned. (RSA is not a SafeBag
+/// algorithm here and has no signer, so it can't back signing.)
 fn load_operator_key(wire: &[u8], passphrase: &[u8], key_name: &str) -> bool {
     let Ok(bag) = SafeBag::decode(wire) else {
         return false;
     };
-    if !matches!(bag.algorithm(passphrase), Ok(SafeBagAlgorithm::Ed25519)) {
-        return false;
-    }
     let Ok(pkcs8) = bag.decrypt_pkcs8(passphrase) else {
         return false;
     };
     let Ok(kn) = key_name.parse::<ndn_packet::Name>() else {
         return false;
     };
-    crate::operator_keyring::provision_ed25519_pkcs8(kn, &pkcs8).is_ok()
+    match bag.algorithm(passphrase) {
+        Ok(SafeBagAlgorithm::Ed25519) => {
+            crate::operator_keyring::provision_ed25519_pkcs8(kn, &pkcs8).is_ok()
+        }
+        Ok(SafeBagAlgorithm::EcdsaP256) => {
+            crate::operator_keyring::provision_ecdsa_p256_pkcs8(kn, &pkcs8).is_ok()
+        }
+        _ => false,
+    }
 }
 
 /// Verify the passphrase decrypts the SafeBag's PKCS#8 — pure

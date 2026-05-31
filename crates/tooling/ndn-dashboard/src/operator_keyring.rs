@@ -24,12 +24,18 @@ use std::sync::{Arc, OnceLock, RwLock};
 use bytes::Bytes;
 use ndn_custodian::{CustodianSigner, InPageCustodian, KeyId};
 use ndn_packet::{Name, SignatureType};
-use ndn_security::{Ed25519Signer, Signer};
+use ndn_security::{EcdsaP256Signer, Ed25519Signer, Signer};
+
+/// The provisioned key's id + signature metadata (gate open), or `None`.
+struct Active {
+    key_id: KeyId,
+    sig_type: SignatureType,
+    public_key: Option<Bytes>,
+}
 
 struct OperatorKeyring {
     custodian: Arc<InPageCustodian>,
-    /// The provisioned key's id + public key, or `None` (gate closed).
-    active: RwLock<Option<(KeyId, Bytes)>>,
+    active: RwLock<Option<Active>>,
 }
 
 fn keyring() -> &'static OperatorKeyring {
@@ -40,33 +46,48 @@ fn keyring() -> &'static OperatorKeyring {
     })
 }
 
-/// Provision the operator's Ed25519 signing key into the dashboard-held
-/// custodian. After this the gate opens: [`command_signer`] returns a signer
-/// and mgmt commands carry the operator's signature instead of `DigestSha256`.
-pub fn provision_ed25519(key_name: Name, seed: &[u8; 32]) {
+/// Core: hold `signer` as the operator key and open the gate. The signature
+/// metadata is read off the signer, so any algorithm works (Ed25519, ECDSA).
+fn provision_signer(key_name: Name, signer: Arc<dyn Signer>) {
     let kr = keyring();
-    let signer = Ed25519Signer::from_seed(seed, key_name.clone());
-    let pk = Bytes::copy_from_slice(&signer.public_key_bytes());
+    let sig_type = signer.sig_type();
+    let public_key = signer.public_key();
     let key_id = KeyId(key_name);
-    kr.custodian.insert(key_id.clone(), signer);
-    *kr.active.write().expect("operator keyring lock") = Some((key_id, pk));
+    kr.custodian.insert_signer(key_id.clone(), signer);
+    *kr.active.write().expect("operator keyring lock") = Some(Active {
+        key_id,
+        sig_type,
+        public_key,
+    });
 }
 
-/// Provision from a decrypted PKCS#8 Ed25519 private key — the real source: a
-/// SafeBag the operator imported (the dashboard decrypts it in-browser). Errors
-/// if the key isn't a parseable Ed25519 PKCS#8.
+/// Provision a freshly-seeded Ed25519 operator key (used by tests / generate).
+pub fn provision_ed25519(key_name: Name, seed: &[u8; 32]) {
+    provision_signer(
+        key_name.clone(),
+        Arc::new(Ed25519Signer::from_seed(seed, key_name)),
+    );
+}
+
+/// Provision from a decrypted **Ed25519** PKCS#8 key — a SafeBag the operator
+/// imported (the dashboard decrypts it in-browser).
 ///
 /// OS-keyring / fob / remote custodians are *not* fed this way — their key
 /// never enters the dashboard; they would `insert_signer` a delegating
 /// custodian into the registry instead, once those impls are functional.
 pub fn provision_ed25519_pkcs8(key_name: Name, pkcs8_der: &[u8]) -> Result<(), String> {
-    let kr = keyring();
     let signer = Ed25519Signer::from_pkcs8_der(pkcs8_der, key_name.clone())
-        .map_err(|e| format!("operator key load: {e}"))?;
-    let pk = Bytes::copy_from_slice(&signer.public_key_bytes());
-    let key_id = KeyId(key_name);
-    kr.custodian.insert(key_id.clone(), signer);
-    *kr.active.write().expect("operator keyring lock") = Some((key_id, pk));
+        .map_err(|e| format!("operator key load (ed25519): {e}"))?;
+    provision_signer(key_name, Arc::new(signer));
+    Ok(())
+}
+
+/// Provision from a decrypted **ECDSA P-256** PKCS#8 key (the other algorithm a
+/// SafeBag can carry).
+pub fn provision_ecdsa_p256_pkcs8(key_name: Name, pkcs8_der: &[u8]) -> Result<(), String> {
+    let signer = EcdsaP256Signer::from_pkcs8_der(pkcs8_der, key_name.clone())
+        .map_err(|e| format!("operator key load (ecdsa-p256): {e}"))?;
+    provision_signer(key_name, Arc::new(signer));
     Ok(())
 }
 
@@ -84,12 +105,12 @@ pub fn is_provisioned() -> bool {
 pub fn command_signer() -> Option<Arc<dyn Signer>> {
     let kr = keyring();
     let guard = kr.active.read().expect("operator keyring lock");
-    let (key_id, pk) = guard.as_ref()?;
+    let active = guard.as_ref()?;
     Some(Arc::new(CustodianSigner::new(
         kr.custodian.clone(),
-        key_id.clone(),
-        SignatureType::SignatureEd25519,
-        Some(pk.clone()),
+        active.key_id.clone(),
+        active.sig_type,
+        active.public_key.clone(),
     )))
 }
 
@@ -97,19 +118,26 @@ pub fn command_signer() -> Option<Arc<dyn Signer>> {
 mod tests {
     use super::*;
 
+    // One test (not several) because keyring() is process-global — separate
+    // #[test]s would race on it. Steps run sequentially here.
     #[test]
     fn gate_opens_after_provisioning() {
-        // Note: keyring() is process-global; this test owns provisioning in
-        // this binary's test run.
-        assert!(
-            command_signer().is_none(),
-            "gate closed before provisioning"
-        );
+        // Ed25519 opens the gate with the Ed25519 sig type.
         let name: Name = "/op/dash/KEY/k1".parse().unwrap();
         provision_ed25519(name.clone(), &[5u8; 32]);
         assert!(is_provisioned());
-        let signer = command_signer().expect("gate open after provisioning");
+        let signer = command_signer().expect("gate open after ed25519");
         assert_eq!(signer.sig_type(), SignatureType::SignatureEd25519);
         assert_eq!(signer.key_name().to_string(), "/op/dash/KEY/k1");
+
+        // An ECDSA P-256 key (via PKCS#8) opens it with the ECDSA sig type —
+        // proving the keyring is algorithm-agnostic, not Ed25519-only.
+        let ec_name: Name = "/op/dash/KEY/ec".parse().unwrap();
+        let ec = ndn_security::EcdsaP256Signer::from_seed(&[6u8; 32], ec_name.clone())
+            .expect("ecdsa key");
+        let pkcs8 = ec.to_pkcs8_der().expect("ecdsa pkcs8");
+        provision_ecdsa_p256_pkcs8(ec_name, &pkcs8).expect("provision ecdsa");
+        let signer = command_signer().expect("gate open after ecdsa");
+        assert_eq!(signer.sig_type(), SignatureType::SignatureSha256WithEcdsa);
     }
 }

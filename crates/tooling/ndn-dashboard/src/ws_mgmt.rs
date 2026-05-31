@@ -17,6 +17,7 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use ndn_config::{ControlParameters, ControlResponse};
 use ndn_packet::lp::{LpPacket, is_lp_packet};
 use ndn_packet::{Data, Name, encode::InterestBuilder};
+use ndn_security::Signer;
 
 #[cfg(feature = "browser-engine")]
 use crate::browser_engine::LocalMgmtChannels;
@@ -116,7 +117,31 @@ impl WsMgmtClient {
         if let Some(cp) = params {
             builder = builder.app_parameters(cp.encode().to_vec());
         }
-        let wire = builder.build();
+        // Sign through the operator keyring when a key is provisioned (the gate,
+        // mirroring the desktop MgmtClient path); otherwise leave the command
+        // unsigned, as before.
+        let wire = match crate::operator_keyring::command_signer() {
+            Some(signer) => {
+                let sig_type = signer.sig_type();
+                let key_loc = signer
+                    .cert_name()
+                    .or_else(|| Some(signer.key_name()))
+                    .cloned();
+                builder
+                    .sign_fallible(sig_type, key_loc.as_ref(), |region| {
+                        let region = Bytes::copy_from_slice(region);
+                        let signer = signer.clone();
+                        async move {
+                            signer
+                                .sign(&region)
+                                .await
+                                .map_err(|e| anyhow!("operator sign: {e}"))
+                        }
+                    })
+                    .await?
+            }
+            None => builder.build(),
+        };
 
         let data_wire = self.exchange(wire).await?;
         Self::parse_response(data_wire)
