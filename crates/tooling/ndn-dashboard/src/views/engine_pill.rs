@@ -1,6 +1,7 @@
 //! Runtime-classification pill rendered next to the conn-bar identity chip.
 
 use dioxus::prelude::*;
+use ndn_custodian::CustodianRef;
 
 /// Computed at startup from compile-time features + the `?engine=` query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,50 +153,95 @@ pub fn probe_fde() -> FdeDetection {
 /// today the choices are on-disk persistence or an in-memory ephemeral key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineTrust {
-    /// Where the signing key lives on this surface.
+    /// The custodian kind backing the signing key on this surface, if any.
+    /// `None` when no identity is bound.
+    pub custodian: Option<CustodianRef>,
+    /// Where the signing key lives on this surface (precise, runtime-aware).
     pub residence: &'static str,
     /// Whether the key persists past this session (on disk / in the browser).
     pub persists: bool,
+    /// Whether each signature requires an explicit user action (fob/extension).
+    pub prompts: bool,
     /// One-line caveat about trusting this machine with the key, if any.
     pub caveat: Option<String>,
 }
 
-/// Pure over its inputs so each branch is testable.
+/// Which [`CustodianRef`] backs signing on this surface today. Until the mgmt
+/// signing path routes through a real `CustodianRegistry`, this is inferred
+/// from the runtime + ephemeral flag — but it speaks the canonical custodian
+/// vocabulary, so swapping in a live registry later is a one-place change and
+/// a future Fob/Extension custodian surfaces correctly.
+pub fn active_custodian_ref(
+    runtime: DashboardRuntime,
+    ephemeral: bool,
+    has_identity: bool,
+) -> Option<CustodianRef> {
+    if !has_identity {
+        return None;
+    }
+    if ephemeral {
+        // Ephemeral keys live in process memory regardless of platform.
+        return Some(CustodianRef::InPage);
+    }
+    Some(match runtime {
+        DashboardRuntime::Desktop => CustodianRef::OsKeyring,
+        DashboardRuntime::Browser | DashboardRuntime::BrowserEngineLocal => CustodianRef::InPage,
+    })
+}
+
+/// Pure over its inputs so each branch is testable. Derives the machine-trust
+/// display from the canonical [`CustodianRef`] (its `key_on_this_machine` /
+/// `prompts_per_action` semantics) plus the runtime/ephemeral/FDE context.
 pub fn machine_trust_for(
     runtime: DashboardRuntime,
     ephemeral: bool,
     has_identity: bool,
     fde: FdeDetection,
 ) -> MachineTrust {
-    if !has_identity {
+    let Some(custodian) = active_custodian_ref(runtime, ephemeral, has_identity) else {
         return MachineTrust {
+            custodian: None,
             residence: "No signing key bound",
             persists: false,
+            prompts: false,
             caveat: None,
         };
-    }
-    if ephemeral {
-        return MachineTrust {
-            residence: "In-memory (ephemeral)",
-            persists: false,
-            caveat: Some(
-                "Nothing is written to disk — this binding ends when the session closes. Safe to use on a machine you don't fully control."
-                    .to_owned(),
-            ),
-        };
-    }
-    let residence = match runtime {
-        DashboardRuntime::Desktop => "On-disk keychain (PIB)",
-        DashboardRuntime::Browser => "Browser storage (IndexedDB)",
-        DashboardRuntime::BrowserEngineLocal => "In this browser tab",
     };
+
+    let on_machine = custodian.key_on_this_machine();
+    let prompts = custodian.prompts_per_action();
+    // Precise residence: runtime/ephemeral nuance for on-machine kinds, the
+    // custodian label for off-machine ones (fob/remote).
+    let residence: &'static str = if ephemeral {
+        "In-memory (ephemeral)"
+    } else {
+        match &custodian {
+            CustodianRef::OsKeyring => "On-disk keyring (PIB)",
+            CustodianRef::InPage => "Browser storage (IndexedDB)",
+            other => other.label(),
+        }
+    };
+    let persists = on_machine && !ephemeral;
+    let caveat = if ephemeral {
+        Some(
+            "Nothing is written to disk — this binding ends when the session closes. Safe to use on a machine you don't fully control."
+                .to_owned(),
+        )
+    } else if on_machine {
+        // FDE warning is the right "untrusted machine" caveat: silent on desktop
+        // (operator knows their own FS), loud about IndexedDB / unencrypted disk.
+        fde.warning_text(runtime)
+    } else {
+        // Fob/remote: the key never touches this machine — the safe option.
+        Some("The key stays on the fob/phone and never touches this machine.".to_owned())
+    };
+
     MachineTrust {
+        custodian: Some(custodian),
         residence,
-        persists: true,
-        // FDE warning text is already the right "untrusted machine" caveat:
-        // silent on desktop (operator knows their own FS), loud about IndexedDB
-        // / unencrypted disk where the key would be recoverable.
-        caveat: fde.warning_text(runtime),
+        persists,
+        prompts,
+        caveat,
     }
 }
 
@@ -211,7 +257,9 @@ mod tests {
     #[test]
     fn machine_trust_ephemeral_does_not_persist() {
         let t = machine_trust_for(DashboardRuntime::Desktop, true, true, FdeDetection::Unknown);
+        assert_eq!(t.custodian, Some(CustodianRef::InPage));
         assert!(!t.persists);
+        assert!(!t.prompts);
         assert!(t.caveat.unwrap().to_lowercase().contains("session"));
     }
 
@@ -223,9 +271,30 @@ mod tests {
             true,
             FdeDetection::Unknown,
         );
+        assert_eq!(t.custodian, Some(CustodianRef::OsKeyring));
         assert!(t.persists);
-        assert_eq!(t.residence, "On-disk keychain (PIB)");
+        assert_eq!(t.residence, "On-disk keyring (PIB)");
         assert!(t.caveat.is_none());
+    }
+
+    #[test]
+    fn active_custodian_ref_maps_runtime_and_ephemeral() {
+        assert_eq!(
+            active_custodian_ref(DashboardRuntime::Desktop, false, true),
+            Some(CustodianRef::OsKeyring)
+        );
+        assert_eq!(
+            active_custodian_ref(DashboardRuntime::Browser, false, true),
+            Some(CustodianRef::InPage)
+        );
+        assert_eq!(
+            active_custodian_ref(DashboardRuntime::Desktop, true, true),
+            Some(CustodianRef::InPage)
+        );
+        assert_eq!(
+            active_custodian_ref(DashboardRuntime::Desktop, false, false),
+            None
+        );
     }
 
     #[test]

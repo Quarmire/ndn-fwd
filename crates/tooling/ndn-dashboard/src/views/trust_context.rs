@@ -68,6 +68,10 @@ pub fn TrustContext() -> Element {
                         span { class: "badge badge-green", style: "margin-left:8px;font-size:9px;", "not stored" }
                     }
                 }
+                if machine.prompts {
+                    dt { "Per-action" }
+                    dd { "Each signature needs an explicit confirmation (fob touch / popup)." }
+                }
             }
             if let Some(caveat) = machine.caveat.as_ref() {
                 div { class: "readonly-banner", style: "margin-top:10px;",
