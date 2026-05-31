@@ -12,17 +12,9 @@
 use dioxus::prelude::*;
 
 use crate::app::{AppCtx, DashCmd};
+use crate::views::KNOWN_STRATEGIES;
 use crate::views::View;
 use crate::views::traffic::render_throughput_bars;
-
-/// Well-known strategy names for the route inspector's strategy selector.
-const KNOWN_STRATEGIES: &[(&str, &str)] = &[
-    ("/ndn/strategy/best-route/v5", "Best Route"),
-    ("/ndn/strategy/multicast/v5", "Multicast"),
-    ("/ndn/strategy/ncc/v1", "NCC"),
-    ("/ndn/strategy/access/v1", "Access"),
-    ("/ndn/strategy/self-learning", "Self-Learning"),
-];
 
 /// The entity currently shown in the inspector. Extends to `Identity`,
 /// `CsEntry`, … as each surface is migrated.

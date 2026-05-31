@@ -21,13 +21,7 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 
-const KNOWN_STRATEGIES: &[(&str, &str)] = &[
-    ("/ndn/strategy/best-route/v5", "Best Route"),
-    ("/ndn/strategy/multicast/v5", "Multicast"),
-    ("/ndn/strategy/ncc/v1", "NCC"),
-    ("/ndn/strategy/access/v1", "Access"),
-    ("/ndn/strategy/self-learning", "Self-Learning"),
-];
+use crate::views::KNOWN_STRATEGIES;
 
 #[component]
 pub fn Overview() -> Element {

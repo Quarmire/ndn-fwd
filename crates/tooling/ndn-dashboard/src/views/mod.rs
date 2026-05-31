@@ -147,6 +147,21 @@ impl View {
     }
 }
 
+/// Forwarding strategies ndn-fwd registers, in the canonical
+/// `/localhost/nfd/strategy/<name>/v=<version>` form — the exact names
+/// `ndn-strategy`'s `strategy_name()` builds (best-route/multicast at v=5,
+/// self-learning at v=1). The old `/ndn/strategy/...` literals were rejected
+/// with `404 unknown strategy`. NFD/YaNFD strategies (ncc/access/asf, different
+/// versions) are reached via the Strategy tab's "Custom…" field.
+///
+/// One source so the three strategy dropdowns (Overview routes, Strategy tab,
+/// route inspector) can't drift apart again.
+pub const KNOWN_STRATEGIES: &[(&str, &str)] = &[
+    ("/localhost/nfd/strategy/best-route/v=5", "Best Route"),
+    ("/localhost/nfd/strategy/multicast/v=5", "Multicast"),
+    ("/localhost/nfd/strategy/self-learning/v=1", "Self-Learning"),
+];
+
 /// Live tally shown on a bucket's sidebar header (Eagle-style source-tree
 /// counts, design note §2). Engine = faces, Identity = distinct identities,
 /// Compose = locally-published prefixes (app/client route origin).
@@ -189,6 +204,20 @@ mod nav_tests {
                     view.bucket()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn known_strategies_are_canonical_versioned_names() {
+        for (uri, _) in KNOWN_STRATEGIES {
+            assert!(
+                uri.starts_with("/localhost/nfd/strategy/"),
+                "{uri} is not a canonical NFD strategy name"
+            );
+            let n: ndn_packet::Name = uri.parse().expect("strategy name parses");
+            // The version component must survive a parse→Display round-trip
+            // (the old `/ndn/strategy/.../v5` form did not encode a version).
+            assert_eq!(&n.to_string(), uri, "{uri} does not round-trip");
         }
     }
 

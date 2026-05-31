@@ -3,14 +3,8 @@ use dioxus::prelude::*;
 use crate::app::{AppCtx, DashCmd};
 use crate::resizable::use_col_widths;
 
-/// Well-known strategy names for the dropdown.
-const STRATEGIES: &[(&str, &str)] = &[
-    ("/ndn/strategy/best-route/v5", "Best Route"),
-    ("/ndn/strategy/multicast/v5", "Multicast"),
-    ("/ndn/strategy/ncc/v1", "NCC"),
-    ("/ndn/strategy/access/v1", "Access"),
-    ("/ndn/strategy/self-learning", "Self-Learning"),
-];
+/// Well-known strategy names for the dropdown (shared, canonical names).
+use crate::views::KNOWN_STRATEGIES as STRATEGIES;
 
 #[component]
 pub fn Strategy() -> Element {
@@ -99,7 +93,7 @@ pub fn Strategy() -> Element {
                         input {
                             id: "st-custom",
                             r#type: "text",
-                            placeholder: "/ndn/strategy/my-strategy/v1",
+                            placeholder: "/localhost/nfd/strategy/my-strategy/v=1",
                             value: "{custom_strat}",
                             oninput: move |e| custom_strat.set(e.value()),
                         }

@@ -821,13 +821,22 @@ impl StrategyEntry {
         entries
     }
 
-    /// Strips NDN name prefix and version (`/ndn/strategy/best-route/v5` → `best-route`).
+    /// Strips the NDN name prefix and trailing version component for display
+    /// (`/localhost/nfd/strategy/best-route/v=5` → `best-route`). Handles both
+    /// the canonical `v=<n>` version component and the legacy `v<n>` form.
     pub fn short_name(&self) -> &str {
         self.strategy
             .rsplit('/')
-            .find(|s| !s.starts_with('v') || !s[1..].chars().all(|c| c.is_ascii_digit()))
+            .find(|s| !is_version_component(s))
             .unwrap_or(&self.strategy)
     }
+}
+
+/// A trailing NDN version component as it renders in a name URI: `v=5`
+/// (canonical, TLV 0x36) or the legacy bare `v5`.
+fn is_version_component(s: &str) -> bool {
+    let digits = s.strip_prefix("v=").or_else(|| s.strip_prefix('v'));
+    matches!(digits, Some(d) if !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Parsed from `discovery/status` response.
@@ -1273,6 +1282,25 @@ impl From<ndn_config::RibEntry> for RibEntryInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strategy_short_name_strips_canonical_and_legacy_versions() {
+        let sn = |s: &str| {
+            StrategyEntry {
+                prefix: "/x".into(),
+                strategy: s.into(),
+            }
+            .short_name()
+            .to_string()
+        };
+        assert_eq!(sn("/localhost/nfd/strategy/multicast/v=5"), "multicast");
+        assert_eq!(sn("/localhost/nfd/strategy/best-route/v=5"), "best-route");
+        assert_eq!(sn("/ndn/strategy/best-route/v5"), "best-route"); // legacy
+        assert_eq!(
+            sn("/localhost/nfd/strategy/self-learning/v=1"),
+            "self-learning"
+        );
+    }
 
     #[test]
     fn schema_rule_sentence_reads_plainly() {
