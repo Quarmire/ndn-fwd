@@ -13,6 +13,16 @@ use dioxus::prelude::*;
 
 use crate::app::{AppCtx, DashCmd};
 use crate::views::View;
+use crate::views::traffic::render_throughput_bars;
+
+/// Well-known strategy names for the route inspector's strategy selector.
+const KNOWN_STRATEGIES: &[(&str, &str)] = &[
+    ("/ndn/strategy/best-route/v5", "Best Route"),
+    ("/ndn/strategy/multicast/v5", "Multicast"),
+    ("/ndn/strategy/ncc/v1", "NCC"),
+    ("/ndn/strategy/access/v1", "Access"),
+    ("/ndn/strategy/self-learning", "Self-Learning"),
+];
 
 /// The entity currently shown in the inspector. Extends to `Identity`,
 /// `CsEntry`, … as each surface is migrated.
@@ -152,6 +162,20 @@ fn FaceInspector(face_id: u64) -> Element {
                     let n_out_data = face.n_out_data;
                     let n_in_nacks = face.n_in_nacks;
                     let n_out_nacks = face.n_out_nacks;
+                    // Routes whose nexthop is this face — cross-nav targets.
+                    let routes_via: Vec<String> = ctx
+                        .routes
+                        .read()
+                        .iter()
+                        .filter(|e| e.nexthops.iter().any(|nh| nh.face_id == face_id))
+                        .map(|e| e.prefix.clone())
+                        .collect();
+                    // Recent per-face throughput (same data as the traffic view).
+                    let tp_read = ctx.face_throughput.read();
+                    let sparkline = tp_read
+                        .get(&face_id)
+                        .filter(|h| !h.is_empty())
+                        .map(|h| render_throughput_bars(h, 44));
                     rsx! {
                         div { class: "inspector-body",
                             div { class: "inspector-section",
@@ -182,6 +206,36 @@ fn FaceInspector(face_id: u64) -> Element {
                                     }
                                 }
                             }
+                            if let Some(spark) = sparkline {
+                                div { class: "inspector-section",
+                                    span { class: "inspector-section-title", "Throughput" }
+                                    {spark}
+                                }
+                            }
+                            div { class: "inspector-section",
+                                span { class: "inspector-section-title", "Routes via this face" }
+                                if routes_via.is_empty() {
+                                    div { class: "inspector-empty", "No routes forward through this face." }
+                                } else {
+                                    div { class: "inspector-links",
+                                        for prefix in routes_via.iter() {
+                                            {
+                                                let p = prefix.clone();
+                                                rsx! {
+                                                    button {
+                                                        class: "inspector-link mono",
+                                                        title: "Inspect this route",
+                                                        onclick: move |_| {
+                                                            *SELECTED_ENTITY.write() = Some(SelectedEntity::Route(p.clone()));
+                                                        },
+                                                        "{prefix}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         div { class: "inspector-footer",
                             button {
@@ -209,12 +263,18 @@ fn RouteInspector(prefix: String) -> Element {
 
     let fib = routes.iter().find(|e| e.prefix == prefix);
     let rib_entry = rib.iter().find(|e| e.prefix == prefix);
-    let strat = strategies
+    let current_strat_uri = strategies
         .iter()
         .find(|s| s.prefix == prefix)
-        .map(|s| s.short_name().to_string());
+        .map(|s| s.strategy.clone());
     let present = fib.is_some() || rib_entry.is_some();
     let prefix_close = prefix.clone();
+    let strat_prefix = prefix.clone();
+    let add_prefix = prefix.clone();
+
+    // Add-nexthop form state.
+    let mut nh_face: Signal<String> = use_signal(String::new);
+    let mut nh_cost: Signal<String> = use_signal(|| "10".to_string());
 
     rsx! {
         aside { class: "inspector",
@@ -237,20 +297,99 @@ fn RouteInspector(prefix: String) -> Element {
                     }
                     div { class: "inspector-section",
                         span { class: "inspector-section-title", "Strategy" }
-                        div { class: "mono", "{strat.clone().unwrap_or_else(|| \"— default —\".into())}" }
+                        select {
+                            class: "axis-select",
+                            onchange: move |e| {
+                                let val = e.value();
+                                if val == "__unset__" || val.is_empty() {
+                                    ctx.cmd.send(DashCmd::StrategyUnset(strat_prefix.clone()));
+                                } else {
+                                    ctx.cmd.send(DashCmd::StrategySet { prefix: strat_prefix.clone(), strategy: val });
+                                }
+                            },
+                            option {
+                                value: "__unset__",
+                                selected: current_strat_uri.is_none(),
+                                "— default —"
+                            }
+                            for (uri, label) in KNOWN_STRATEGIES {
+                                option {
+                                    value: "{uri}",
+                                    selected: current_strat_uri.as_deref() == Some(*uri),
+                                    "{label}"
+                                }
+                            }
+                        }
                     }
-                    // FIB nexthops — the forwarding face(s) and their cost.
+                    // FIB nexthops — click a face to inspect it; Remove drops
+                    // that specific nexthop (the table's Remove only hit the
+                    // first one).
                     if let Some(entry) = fib {
                         div { class: "inspector-section",
                             span { class: "inspector-section-title", "FIB nexthops" }
                             if entry.nexthops.is_empty() {
                                 div { class: "inspector-empty", "none" }
                             } else {
-                                dl { class: "inspector-kv",
-                                    for nh in entry.nexthops.iter() {
-                                        dt { class: "mono", "face {nh.face_id}" }
-                                        dd { class: "mono", "cost {nh.cost}" }
+                                for nh in entry.nexthops.iter() {
+                                    {
+                                        let fid = nh.face_id;
+                                        let cost = nh.cost;
+                                        let rm_prefix = prefix.clone();
+                                        rsx! {
+                                            div { class: "inspector-nh",
+                                                button {
+                                                    class: "inspector-link mono",
+                                                    title: "Inspect face {fid}",
+                                                    onclick: move |_| {
+                                                        *SELECTED_ENTITY.write() = Some(SelectedEntity::Face(fid));
+                                                    },
+                                                    "face {fid}"
+                                                }
+                                                span { class: "mono", style: "color:var(--text-muted);", "cost {cost}" }
+                                                button {
+                                                    class: "btn btn-danger btn-sm",
+                                                    onclick: move |_| ctx.cmd.send(DashCmd::RouteRemove {
+                                                        prefix: rm_prefix.clone(),
+                                                        face_id: fid,
+                                                    }),
+                                                    "Remove"
+                                                }
+                                            }
+                                        }
                                     }
+                                }
+                            }
+                        }
+                        div { class: "inspector-section",
+                            span { class: "inspector-section-title", "Add nexthop" }
+                            div { class: "inspector-addnh",
+                                input {
+                                    r#type: "text",
+                                    placeholder: "face id",
+                                    value: "{nh_face}",
+                                    oninput: move |e| nh_face.set(e.value()),
+                                }
+                                input {
+                                    r#type: "text",
+                                    placeholder: "cost",
+                                    value: "{nh_cost}",
+                                    oninput: move |e| nh_cost.set(e.value()),
+                                }
+                                button {
+                                    class: "btn btn-primary btn-sm",
+                                    onclick: move |_| {
+                                        let parsed = nh_face.read().trim().parse::<u64>();
+                                        let cost = nh_cost.read().trim().parse::<u64>().unwrap_or(10);
+                                        if let Ok(fid) = parsed {
+                                            ctx.cmd.send(DashCmd::RouteAdd {
+                                                prefix: add_prefix.clone(),
+                                                face_id: fid,
+                                                cost,
+                                            });
+                                            nh_face.set(String::new());
+                                        }
+                                    },
+                                    "Add"
                                 }
                             }
                         }

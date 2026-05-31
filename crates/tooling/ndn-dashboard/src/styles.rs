@@ -167,6 +167,15 @@ body>div{height:100%;width:100%;overflow:hidden}
 .inspector-counters td{padding:2px 6px}
 .inspector-counters td:not(:first-child){text-align:right}
 .inspector-footer{padding:var(--cds-spacing-04) var(--cds-spacing-05);border-top:1px solid var(--border-subtle)}
+/* Cross-navigation links (route prefixes, nexthop faces) — clickable, accent. */
+.inspector-links{display:flex;flex-direction:column;gap:2px}
+.inspector-link{background:none;border:none;text-align:left;padding:2px 0;color:var(--accent);cursor:pointer;font-size:13px;word-break:break-all}
+.inspector-link:hover{text-decoration:underline}
+.inspector-nh{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px}
+.inspector-nh .inspector-link{flex:1}
+.inspector-addnh{display:flex;gap:6px;align-items:center}
+.inspector-addnh input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:0;font-size:13px;font-family:var(--font-mono)}
+.inspector-addnh input:focus{outline:none;border-color:var(--accent)}
 /* Selectable rows feed the inspector. */
 .row-selectable{cursor:pointer}
 .row-selectable.selected{background:var(--accent-dim)}
