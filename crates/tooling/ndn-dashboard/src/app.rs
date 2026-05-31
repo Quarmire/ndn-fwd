@@ -574,7 +574,13 @@ pub fn App() -> Element {
             let path = socket_path.peek().clone();
 
             let client = match MgmtClient::connect(&path).await {
-                Ok(c) => c,
+                // Gate: when the operator has provisioned a signing key into the
+                // dashboard, sign mgmt commands through its custodian; otherwise
+                // keep the DigestSha256 default. Datasets stay unsigned either way.
+                Ok(c) => match crate::operator_keyring::command_signer() {
+                    Some(signer) => c.with_signer(signer),
+                    None => c,
+                },
                 Err(e) => {
                     conn_state.set(ConnState::Error(e.to_string()));
                     let sleep = tokio::time::sleep(Duration::from_secs(3));

@@ -25,6 +25,7 @@ pub mod forwarder_profile;
 mod identity_axis;
 #[cfg(feature = "desktop")]
 mod notify_sub;
+mod operator_keyring;
 mod resizable;
 mod security_chains;
 mod security_gate;
