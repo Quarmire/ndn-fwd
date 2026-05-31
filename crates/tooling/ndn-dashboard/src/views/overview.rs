@@ -73,6 +73,9 @@ pub fn Overview() -> Element {
     // signal so they survive the 3s poll re-render. The trailing actions
     // column keeps a fixed width and gets no resize grip (buttons, not data).
     let face_cols = use_col_widths(&[70.0, 90.0, 280.0, 280.0, 120.0, 90.0]);
+    // FIB routes: Prefix + Nexthops are variable; the Strategy selector and
+    // the actions column are controls and get no grip.
+    let route_cols = use_col_widths(&[220.0, 300.0, 160.0, 80.0]);
     let n_routes = status.as_ref().map(|s| s.n_fib).unwrap_or(0);
     let n_cs = status.as_ref().map(|s| s.n_cs).unwrap_or(0);
     let n_pit = status.as_ref().map(|s| s.n_pit).unwrap_or(0);
@@ -258,13 +261,16 @@ pub fn Overview() -> Element {
                 if routes.is_empty() {
                     div { class: "empty", "No routes. Click + Add Route to register one." }
                 } else {
-                    table {
+                    {route_cols.overlay()}
+                    div { class: "resizable-wrap",
+                    table { class: "resizable",
+                        {route_cols.colgroup()}
                         thead {
                             tr {
-                                th { "Prefix" }
-                                th { "Nexthops" }
-                                th { "Strategy" }
-                                th { "" }
+                                th { "Prefix" {route_cols.handle(0)} }
+                                th { "Nexthops" {route_cols.handle(1)} }
+                                th { class: "col-actions", "Strategy" }
+                                th { class: "col-actions", "" }
                             }
                         }
                         tbody {
@@ -328,6 +334,7 @@ pub fn Overview() -> Element {
                                 }
                             }
                         }
+                    }
                     }
                 }
             }

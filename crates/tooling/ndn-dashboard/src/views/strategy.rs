@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::app::{AppCtx, DashCmd};
+use crate::resizable::use_col_widths;
 
 /// Well-known strategy names for the dropdown.
 const STRATEGIES: &[(&str, &str)] = &[
@@ -19,6 +20,8 @@ pub fn Strategy() -> Element {
     let mut set_prefix: Signal<String> = use_signal(String::new);
     let mut set_strategy: Signal<String> = use_signal(|| STRATEGIES[0].0.to_string());
     let mut custom_strat: Signal<String> = use_signal(String::new);
+    // Prefix + Strategy are variable-length names; the actions column is fixed.
+    let strat_cols = use_col_widths(&[260.0, 240.0, 80.0]);
 
     rsx! {
         div { class: "section",
@@ -26,12 +29,15 @@ pub fn Strategy() -> Element {
             if strategies.is_empty() {
                 div { class: "empty", "No strategy assignments." }
             } else {
-                table {
+                {strat_cols.overlay()}
+                div { class: "resizable-wrap",
+                table { class: "resizable",
+                    {strat_cols.colgroup()}
                     thead {
                         tr {
-                            th { "Prefix" }
-                            th { "Strategy" }
-                            th { "" }
+                            th { "Prefix" {strat_cols.handle(0)} }
+                            th { "Strategy" {strat_cols.handle(1)} }
+                            th { class: "col-actions", "" }
                         }
                     }
                     tbody {
@@ -56,6 +62,7 @@ pub fn Strategy() -> Element {
                             }
                         }
                     }
+                }
                 }
             }
 

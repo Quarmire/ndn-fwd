@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::app::{AppCtx, DashCmd};
+use crate::resizable::use_col_widths;
 use crate::types::RibRoute;
 
 fn origin_label(origin: u64) -> String {
@@ -33,6 +34,10 @@ pub fn Routes() -> Element {
     let mut new_prefix: Signal<String> = use_signal(String::new);
     let mut new_face_id: Signal<String> = use_signal(String::new);
     let mut new_cost: Signal<String> = use_signal(|| "10".to_string());
+    // Resizable: Prefix + Remote URI are variable-length; numeric/action
+    // columns keep fixed widths and no grip.
+    let fib_cols = use_col_widths(&[240.0, 80.0, 280.0, 70.0, 80.0]);
+    let rib_cols = use_col_widths(&[240.0, 80.0, 100.0, 70.0, 110.0, 110.0]);
 
     rsx! {
         div { class: "section",
@@ -40,14 +45,17 @@ pub fn Routes() -> Element {
             if routes.is_empty() {
                 div { class: "empty", "No entries in FIB." }
             } else {
-                table {
+                {fib_cols.overlay()}
+                div { class: "resizable-wrap",
+                table { class: "resizable",
+                    {fib_cols.colgroup()}
                     thead {
                         tr {
-                            th { "Prefix" }
-                            th { "Face ID" }
-                            th { "Remote URI" }
-                            th { "Cost" }
-                            th { "" }
+                            th { "Prefix" {fib_cols.handle(0)} }
+                            th { class: "col-actions", "Face ID" }
+                            th { "Remote URI" {fib_cols.handle(2)} }
+                            th { class: "col-actions", "Cost" }
+                            th { class: "col-actions", "" }
                         }
                     }
                     tbody {
@@ -94,6 +102,7 @@ pub fn Routes() -> Element {
                             }
                         }
                     }
+                }
                 }
             }
 
@@ -151,15 +160,18 @@ pub fn Routes() -> Element {
             if rib_entries.is_empty() {
                 div { class: "empty", "No entries in RIB (or router does not expose rib/list)." }
             } else {
-                table {
+                {rib_cols.overlay()}
+                div { class: "resizable-wrap",
+                table { class: "resizable",
+                    {rib_cols.colgroup()}
                     thead {
                         tr {
-                            th { "Prefix" }
-                            th { "Face ID" }
-                            th { "Origin" }
-                            th { "Cost" }
-                            th { "Flags" }
-                            th { "Expiry" }
+                            th { "Prefix" {rib_cols.handle(0)} }
+                            th { class: "col-actions", "Face ID" }
+                            th { class: "col-actions", "Origin" }
+                            th { class: "col-actions", "Cost" }
+                            th { "Flags" {rib_cols.handle(4)} }
+                            th { class: "col-actions", "Expiry" }
                         }
                     }
                     tbody {
@@ -186,6 +198,7 @@ pub fn Routes() -> Element {
                             }
                         }
                     }
+                }
                 }
             }
         }
