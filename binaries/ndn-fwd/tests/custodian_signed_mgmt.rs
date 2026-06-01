@@ -217,6 +217,15 @@ async fn custodian_command_keylocator_must_name_the_cert() {
             .await
     };
 
+    // The mgmt trust anchor (trust_anchor_pib) must be visible via
+    // security/anchor-list, tagged source=mgmt — otherwise the dashboard
+    // shows "no trust anchors" even though commands are authorized.
+    let anchor_list = MgmtClient::connect(sock.to_str().unwrap())
+        .await
+        .expect("connect")
+        .security_anchor_list()
+        .await;
+
     let _ = child.kill();
     let _ = child.wait();
 
@@ -227,5 +236,10 @@ async fn custodian_command_keylocator_must_name_the_cert() {
     assert!(
         with_cert.is_ok(),
         "KeyLocator naming the cert must be authorized, got {with_cert:?}"
+    );
+    let listing = anchor_list.expect("anchor-list").status_text;
+    assert!(
+        listing.contains(&format!("name={cert_name} source=mgmt")),
+        "anchor-list must surface the mgmt anchor, got:\n{listing}"
     );
 }
