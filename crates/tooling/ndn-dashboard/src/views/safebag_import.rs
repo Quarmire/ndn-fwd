@@ -132,12 +132,19 @@ fn load_operator_key(wire: &[u8], passphrase: &[u8], key_name: &str) -> bool {
     let Ok(kn) = key_name.parse::<ndn_packet::Name>() else {
         return false;
     };
+    // The certificate name is what the forwarder's trust anchor is keyed by;
+    // advertise it in the command KeyLocator so signed commands resolve to the
+    // anchor (otherwise the validator returns "signing certificate not yet
+    // resolved").
+    let cert_name = ndn_packet::Data::decode(bag.certificate.clone())
+        .ok()
+        .map(|d| (*d.name).clone());
     match bag.algorithm(passphrase) {
         Ok(SafeBagAlgorithm::Ed25519) => {
-            crate::operator_keyring::provision_ed25519_pkcs8(kn, &pkcs8).is_ok()
+            crate::operator_keyring::provision_ed25519_pkcs8(kn, cert_name, &pkcs8).is_ok()
         }
         Ok(SafeBagAlgorithm::EcdsaP256) => {
-            crate::operator_keyring::provision_ecdsa_p256_pkcs8(kn, &pkcs8).is_ok()
+            crate::operator_keyring::provision_ecdsa_p256_pkcs8(kn, cert_name, &pkcs8).is_ok()
         }
         _ => false,
     }

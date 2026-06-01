@@ -29,6 +29,9 @@ use ndn_security::{EcdsaP256Signer, Ed25519Signer, Signer};
 /// The provisioned key's id + signature metadata (gate open), or `None`.
 struct Active {
     key_id: KeyId,
+    /// Operator certificate name, advertised in the command KeyLocator so the
+    /// forwarder can resolve the signing cert to its trust anchor.
+    cert_name: Option<Name>,
     sig_type: SignatureType,
     public_key: Option<Bytes>,
 }
@@ -48,7 +51,7 @@ fn keyring() -> &'static OperatorKeyring {
 
 /// Core: hold `signer` as the operator key and open the gate. The signature
 /// metadata is read off the signer, so any algorithm works (Ed25519, ECDSA).
-fn provision_signer(key_name: Name, signer: Arc<dyn Signer>) {
+fn provision_signer(key_name: Name, cert_name: Option<Name>, signer: Arc<dyn Signer>) {
     let kr = keyring();
     let sig_type = signer.sig_type();
     let public_key = signer.public_key();
@@ -56,6 +59,7 @@ fn provision_signer(key_name: Name, signer: Arc<dyn Signer>) {
     kr.custodian.insert_signer(key_id.clone(), signer);
     *kr.active.write().expect("operator keyring lock") = Some(Active {
         key_id,
+        cert_name,
         sig_type,
         public_key,
     });
@@ -65,6 +69,7 @@ fn provision_signer(key_name: Name, signer: Arc<dyn Signer>) {
 pub fn provision_ed25519(key_name: Name, seed: &[u8; 32]) {
     provision_signer(
         key_name.clone(),
+        None,
         Arc::new(Ed25519Signer::from_seed(seed, key_name)),
     );
 }
@@ -75,19 +80,27 @@ pub fn provision_ed25519(key_name: Name, seed: &[u8; 32]) {
 /// OS-keyring / fob / remote custodians are *not* fed this way — their key
 /// never enters the dashboard; they would `insert_signer` a delegating
 /// custodian into the registry instead, once those impls are functional.
-pub fn provision_ed25519_pkcs8(key_name: Name, pkcs8_der: &[u8]) -> Result<(), String> {
+pub fn provision_ed25519_pkcs8(
+    key_name: Name,
+    cert_name: Option<Name>,
+    pkcs8_der: &[u8],
+) -> Result<(), String> {
     let signer = Ed25519Signer::from_pkcs8_der(pkcs8_der, key_name.clone())
         .map_err(|e| format!("operator key load (ed25519): {e}"))?;
-    provision_signer(key_name, Arc::new(signer));
+    provision_signer(key_name, cert_name, Arc::new(signer));
     Ok(())
 }
 
 /// Provision from a decrypted **ECDSA P-256** PKCS#8 key (the other algorithm a
 /// SafeBag can carry).
-pub fn provision_ecdsa_p256_pkcs8(key_name: Name, pkcs8_der: &[u8]) -> Result<(), String> {
+pub fn provision_ecdsa_p256_pkcs8(
+    key_name: Name,
+    cert_name: Option<Name>,
+    pkcs8_der: &[u8],
+) -> Result<(), String> {
     let signer = EcdsaP256Signer::from_pkcs8_der(pkcs8_der, key_name.clone())
         .map_err(|e| format!("operator key load (ecdsa-p256): {e}"))?;
-    provision_signer(key_name, Arc::new(signer));
+    provision_signer(key_name, cert_name, Arc::new(signer));
     Ok(())
 }
 
@@ -106,12 +119,16 @@ pub fn command_signer() -> Option<Arc<dyn Signer>> {
     let kr = keyring();
     let guard = kr.active.read().expect("operator keyring lock");
     let active = guard.as_ref()?;
-    Some(Arc::new(CustodianSigner::new(
+    let mut signer = CustodianSigner::new(
         kr.custodian.clone(),
         active.key_id.clone(),
         active.sig_type,
         active.public_key.clone(),
-    )))
+    );
+    if let Some(cert_name) = active.cert_name.clone() {
+        signer = signer.with_cert_name(cert_name);
+    }
+    Some(Arc::new(signer))
 }
 
 #[cfg(test)]
@@ -136,8 +153,13 @@ mod tests {
         let ec = ndn_security::EcdsaP256Signer::from_seed(&[6u8; 32], ec_name.clone())
             .expect("ecdsa key");
         let pkcs8 = ec.to_pkcs8_der().expect("ecdsa pkcs8");
-        provision_ecdsa_p256_pkcs8(ec_name, &pkcs8).expect("provision ecdsa");
+        // Provision with a cert name and confirm it surfaces as the signer's
+        // cert_name (which the mgmt client uses for the command KeyLocator).
+        let cert_name: Name = "/op/dash/KEY/ec/self/v=0".parse().unwrap();
+        provision_ecdsa_p256_pkcs8(ec_name, Some(cert_name.clone()), &pkcs8)
+            .expect("provision ecdsa");
         let signer = command_signer().expect("gate open after ecdsa");
         assert_eq!(signer.sig_type(), SignatureType::SignatureSha256WithEcdsa);
+        assert_eq!(signer.cert_name(), Some(&cert_name));
     }
 }
