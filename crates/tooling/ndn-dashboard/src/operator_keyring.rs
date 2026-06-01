@@ -229,6 +229,36 @@ pub fn provision_remote_signer(
     );
 }
 
+/// Provision a remote-signer identity from the operator certificate learned at
+/// pairing. The paired device sends its **self-signed** operator certificate
+/// (the reply to a [`ndn_custodian::PairingOffer`]); the public key, names, and
+/// algorithm all live inside it, so this is the single entry point from a
+/// completed pairing to an active off-host identity.
+///
+/// `transport` is the channel to the device; `kind` says what it is
+/// (`CustodianRef::Fob` for a phone). Returns the active identity name.
+///
+/// The algorithm is read from the certificate's own `SignatureInfo` — correct
+/// because a pairing cert is self-signed (it carries the operator key's own
+/// signature). A CA-issued certificate would report the issuer's algorithm, so
+/// this path assumes the TOFU self-signed pairing cert.
+pub fn provision_remote_signer_from_cert(
+    cert_wire: Bytes,
+    transport: Arc<dyn RemoteSignerTransport>,
+    kind: CustodianRef,
+) -> Result<String, String> {
+    let cert = ndn_packet::Data::decode(cert_wire).map_err(|e| format!("certificate decode: {e:?}"))?;
+    let cert_name = (*cert.name).clone();
+    let key_name = key_name_from_cert(&cert_name);
+    let sig_type = cert
+        .sig_info()
+        .map(|si| si.sig_type)
+        .ok_or("certificate has no SignatureInfo")?;
+    let public_key = cert.content().cloned();
+    provision_remote_signer(key_name, Some(cert_name), sig_type, public_key, transport, kind);
+    active_identity_name().ok_or_else(|| "provisioned but no active identity".into())
+}
+
 /// Provision a generated identity (in-page key + self-signed cert) as the
 /// active signer, retaining the material to export / persist it.
 pub fn provision_generated(
@@ -467,7 +497,7 @@ mod tests {
     use super::*;
     use ndn_custodian::{CustodianError, RemoteSignRequest};
     use ndn_security::verifier::EcdsaSha256Verifier;
-    use ndn_security::{VerifyOutcome, Verifier};
+    use ndn_security::{VerifyOutcome, Verifier, encode_cert_data};
 
     /// A loopback "phone": a local signer standing in for a paired remote
     /// device, so the keyring's remote-signer wiring is testable without one.
@@ -570,5 +600,42 @@ mod tests {
             EcdsaSha256Verifier.verify(region, &sig, &pk).await,
             Ok(VerifyOutcome::Valid)
         ));
+
+        // ── Pairing glue: provision straight from the paired self-signed cert.
+        let paired_key: Name = "/op/paired/KEY/pk1".parse().unwrap();
+        let paired = EcdsaP256Signer::from_seed(&[11u8; 32], paired_key.clone()).unwrap();
+        let paired_pk = paired.public_key().unwrap();
+        let paired_cert_name: Name = "/op/paired/KEY/pk1/self/v=0".parse().unwrap();
+        let cert_wire = encode_cert_data(&paired_cert_name, &paired_pk, &paired, 0, u64::MAX)
+            .await
+            .expect("self-sign pairing cert");
+
+        // The phone keeps the key; a loopback stands in for it here.
+        let phone = Arc::new(LoopbackPhone {
+            signer: EcdsaP256Signer::from_seed(&[11u8; 32], paired_key).unwrap(),
+        });
+        let id = provision_remote_signer_from_cert(
+            Bytes::from(cert_wire.to_vec()),
+            phone,
+            CustodianRef::Fob {
+                fob_id: "paired-phone".into(),
+            },
+        )
+        .expect("provision from cert");
+        assert_eq!(id, "/op/paired");
+
+        let summary = list_identities()
+            .into_iter()
+            .find(|i| i.key_name == "/op/paired/KEY/pk1")
+            .expect("paired identity held");
+        assert!(summary.active);
+        assert!(!summary.key_on_this_machine);
+        assert_eq!(summary.algorithm, "ECDSA P-256");
+        assert_eq!(summary.custodian_label, "Hardware fob");
+        // The cert name (derived from the cert) flows into the command signer.
+        assert_eq!(
+            command_signer().unwrap().cert_name(),
+            Some(&paired_cert_name)
+        );
     }
 }
