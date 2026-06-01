@@ -482,6 +482,13 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
         .map(|p| run_trust_check(p, &anchors, &schema))
         .unwrap_or_default();
     let trust_ok = snapshot.preview_pre_pw.is_some() && trust.all_ok();
+    // Activating a *local* signing identity doesn't depend on the forwarder's
+    // Data-validation anchor list (the trust check) — whether the forwarder
+    // accepts the resulting signed commands is decided by its mgmt validator
+    // (`trust_anchor_pib`). So the trust check only gates the forwarder-side
+    // PIB import (the unchecked case).
+    let activate = *set_active.read();
+    let can_submit = !passphrase.read().is_empty() && (activate || trust_ok);
 
     let mut close = move || {
         state.write().open = false;
@@ -601,6 +608,18 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                                 }
                             }
                         }
+
+                        // The trust check gates *forwarder-side* import. When
+                        // you're only loading this key as the dashboard's
+                        // signing identity, it doesn't apply — the forwarder
+                        // validates your commands against its own operator
+                        // anchor (trust_anchor_pib).
+                        if activate && !trust_ok {
+                            div { style: "font-size:10px;color:var(--text-muted);margin-top:8px;font-style:italic;",
+                                "Activating a signing identity doesn't require the checks above — "
+                                "they gate importing an identity into the forwarder's keystore."
+                            }
+                        }
                     }
 
                     // Passphrase
@@ -656,8 +675,8 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                             "Cancel"
                         }
                         button {
-                            class: if trust_ok { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
-                            disabled: !trust_ok || passphrase.read().is_empty(),
+                            class: if can_submit { "btn btn-primary btn-sm" } else { "btn btn-secondary btn-sm" },
+                            disabled: !can_submit,
                             onclick: {
                                 let identity_name = p.identity_name.clone();
                                 let key_name = p.key_name.clone();
