@@ -24,9 +24,13 @@ pub struct SavedIdentity {
     pub cert_name: String,
     pub algorithm: String,
     pub fingerprint: String,
-    /// Encrypted SafeBag wire, base64. Decrypts only with the passphrase the
-    /// operator chose when saving.
+    /// Encrypted SafeBag wire, base64. The passphrase that decrypts it comes
+    /// from the `guard` (typed passphrase, or an OS-keychain-held secret).
     pub safebag_b64: String,
+    /// Which second factor protects this identity. Defaults to `Passphrase`
+    /// so identities saved before guardians keep loading.
+    #[serde(default)]
+    pub guard: crate::keyguard::GuardKind,
 }
 
 /// All saved identities, or empty when nothing has been persisted.
@@ -107,4 +111,27 @@ fn load_blob() -> Option<Vec<SavedIdentity>> {
 #[cfg(not(any(feature = "desktop", feature = "web")))]
 fn save_blob(_all: &[SavedIdentity]) -> Result<(), String> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_identity_without_guard_defaults_to_passphrase() {
+        // Identities persisted before guardians have no `guard` field; they
+        // must keep loading as passphrase-guarded.
+        let json = r#"{"identity":"/op/a","key_name":"/op/a/KEY/k","cert_name":"",
+            "algorithm":"Ed25519","fingerprint":"abcd","safebag_b64":"xx"}"#;
+        let s: SavedIdentity = serde_json::from_str(json).unwrap();
+        assert_eq!(s.guard, crate::keyguard::GuardKind::Passphrase);
+
+        // And an explicit os-keychain guard round-trips.
+        let os = SavedIdentity {
+            guard: crate::keyguard::GuardKind::OsKeychain,
+            ..s.clone()
+        };
+        let back: SavedIdentity = serde_json::from_str(&serde_json::to_string(&os).unwrap()).unwrap();
+        assert_eq!(back.guard, crate::keyguard::GuardKind::OsKeychain);
+    }
 }

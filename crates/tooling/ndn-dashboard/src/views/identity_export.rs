@@ -132,24 +132,30 @@ struct IdRow {
     active: bool,
     exportable: bool,
     saved: bool,
+    guard: crate::keyguard::GuardKind,
     safebag_b64: Option<String>,
 }
 
 fn merged_rows() -> Vec<IdRow> {
+    use crate::keyguard::GuardKind;
     let loaded = crate::operator_keyring::list_identities();
     let saved = crate::operator_keyring_store::load_saved();
     let mut rows: Vec<IdRow> = loaded
         .iter()
-        .map(|l| IdRow {
-            identity: l.identity.clone(),
-            key_name: l.key_name.clone(),
-            algorithm: l.algorithm.clone(),
-            fingerprint: l.fingerprint.clone(),
-            loaded: true,
-            active: l.active,
-            exportable: l.exportable,
-            saved: saved.iter().any(|s| s.fingerprint == l.fingerprint),
-            safebag_b64: None,
+        .map(|l| {
+            let saved_entry = saved.iter().find(|s| s.fingerprint == l.fingerprint);
+            IdRow {
+                identity: l.identity.clone(),
+                key_name: l.key_name.clone(),
+                algorithm: l.algorithm.clone(),
+                fingerprint: l.fingerprint.clone(),
+                loaded: true,
+                active: l.active,
+                exportable: l.exportable,
+                saved: saved_entry.is_some(),
+                guard: saved_entry.map(|s| s.guard).unwrap_or(GuardKind::Passphrase),
+                safebag_b64: None,
+            }
         })
         .collect();
     for s in &saved {
@@ -163,11 +169,34 @@ fn merged_rows() -> Vec<IdRow> {
                 active: false,
                 exportable: false,
                 saved: true,
+                guard: s.guard,
                 safebag_b64: Some(s.safebag_b64.clone()),
             });
         }
     }
     rows
+}
+
+/// Save a held identity to this device sealed by the OS keychain — no typed
+/// passphrase (the OS gates release with login/biometric).
+fn save_identity_os_keychain(row: &IdRow) -> Result<(), String> {
+    use base64::Engine as _;
+    let pass = crate::keyguard::os_keychain_seal(&row.fingerprint)?;
+    let wire = match crate::operator_keyring::export_safebag_for(&row.key_name, pass.as_bytes()) {
+        Some(Ok(w)) => w,
+        Some(Err(e)) => return Err(e),
+        None => return Err("identity is not exportable".into()),
+    };
+    let item = crate::operator_keyring_store::SavedIdentity {
+        identity: row.identity.clone(),
+        key_name: row.key_name.clone(),
+        cert_name: String::new(),
+        algorithm: row.algorithm.clone(),
+        fingerprint: row.fingerprint.clone(),
+        safebag_b64: base64::engine::general_purpose::STANDARD.encode(&wire),
+        guard: crate::keyguard::GuardKind::OsKeychain,
+    };
+    crate::operator_keyring_store::upsert(item).map_err(|e| format!("save failed: {e}"))
 }
 
 /// A passphrase-requiring action awaiting confirmation, so the password input
@@ -268,7 +297,9 @@ pub fn OperatorIdentityPanel() -> Element {
                                         span { class: "badge badge-gray", style: "font-size:9px;", "locked" }
                                     }
                                     if id.saved {
-                                        span { class: "badge badge-blue", style: "font-size:9px;", "saved" }
+                                        span { class: "badge badge-blue", style: "font-size:9px;",
+                                            if id.guard == crate::keyguard::GuardKind::OsKeychain { "saved · 🔐 device" } else { "saved · passphrase" }
+                                        }
                                     }
                                     if id.loaded && !id.exportable {
                                         span { class: "badge badge-gray", style: "font-size:9px;", "signing only" }
@@ -278,7 +309,9 @@ pub fn OperatorIdentityPanel() -> Element {
                                     "{id.algorithm} · fp {id.fingerprint}"
                                 }
                             }
-                            // Unlock a locked (persisted) identity.
+                            // Unlock a locked (persisted) identity — OS-keychain
+                            // releases via the OS (biometric/login, no prompt);
+                            // passphrase guards raise the contextual prompt.
                             if !id.loaded {
                                 button {
                                     class: "btn btn-primary btn-sm",
@@ -286,12 +319,37 @@ pub fn OperatorIdentityPanel() -> Element {
                                     onclick: {
                                         let row = id.clone();
                                         move |_| {
-                                            prompt_pw.set(String::new());
                                             error.set(None);
-                                            pending.set(Some(PendingOp::from_row(PendingKind::Unlock, &row)));
+                                            match row.guard {
+                                                crate::keyguard::GuardKind::OsKeychain => {
+                                                    use base64::Engine as _;
+                                                    match crate::keyguard::os_keychain_release(&row.fingerprint) {
+                                                        Ok(pass) => {
+                                                            let wire = row.safebag_b64.as_deref()
+                                                                .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s.trim()).ok());
+                                                            match wire {
+                                                                Some(wire) => match crate::operator_keyring::provision_from_safebag(&wire, pass.as_bytes()) {
+                                                                    Ok(name) => {
+                                                                        crate::app_shared::bump_keyring_gen();
+                                                                        ctx.cmd.send(DashCmd::Reconnect);
+                                                                        push_toast(format!("Unlocked {name} (this device)"), ToastLevel::Success);
+                                                                    }
+                                                                    Err(e) => error.set(Some(e)),
+                                                                },
+                                                                None => error.set(Some("corrupt saved identity".into())),
+                                                            }
+                                                        }
+                                                        Err(e) => error.set(Some(e)),
+                                                    }
+                                                }
+                                                crate::keyguard::GuardKind::Passphrase => {
+                                                    prompt_pw.set(String::new());
+                                                    pending.set(Some(PendingOp::from_row(PendingKind::Unlock, &row)));
+                                                }
+                                            }
                                         }
                                     },
-                                    "Unlock"
+                                    if id.guard == crate::keyguard::GuardKind::OsKeychain { "Unlock (device)" } else { "Unlock" }
                                 }
                             }
                             // Switch the active signer.
@@ -312,7 +370,30 @@ pub fn OperatorIdentityPanel() -> Element {
                                 }
                             }
                             // Save a loaded, exportable identity to this device.
+                            // Primary: OS keychain (no password). Secondary:
+                            // passphrase (portable).
                             if id.loaded && id.exportable && !id.saved {
+                                if crate::keyguard::os_keychain_available() {
+                                    button {
+                                        class: "btn btn-primary btn-sm",
+                                        style: "font-size:10px;",
+                                        title: "Seal on this device with the OS keychain (Touch ID / Hello) — no password",
+                                        onclick: {
+                                            let row = id.clone();
+                                            move |_| {
+                                                error.set(None);
+                                                match save_identity_os_keychain(&row) {
+                                                    Ok(()) => {
+                                                        crate::app_shared::bump_keyring_gen();
+                                                        push_toast(format!("Saved {} on this device (no password)", row.identity), ToastLevel::Success);
+                                                    }
+                                                    Err(e) => error.set(Some(format!("{e} — try Save (passphrase)"))),
+                                                }
+                                            }
+                                        },
+                                        "🔐 Save to device"
+                                    }
+                                }
                                 button {
                                     class: "btn btn-secondary btn-sm",
                                     style: "font-size:10px;",
@@ -324,7 +405,7 @@ pub fn OperatorIdentityPanel() -> Element {
                                             pending.set(Some(PendingOp::from_row(PendingKind::Save, &row)));
                                         }
                                     },
-                                    "Save"
+                                    "Save (passphrase)"
                                 }
                             }
                             // Lock: sign out (unload the key) but keep it saved
@@ -345,16 +426,21 @@ pub fn OperatorIdentityPanel() -> Element {
                                     "Lock"
                                 }
                             }
-                            // Forget: drop from the keyring AND the device store.
+                            // Forget: drop from the keyring AND the device store
+                            // (and any OS-keychain secret).
                             button {
                                 class: "btn btn-secondary btn-sm",
                                 style: "font-size:10px;color:var(--red,#f85149);",
                                 onclick: {
                                     let kn = id.key_name.clone();
                                     let fp = id.fingerprint.clone();
+                                    let guard = id.guard;
                                     move |_| {
                                         crate::operator_keyring::remove_identity(&kn);
                                         let _ = crate::operator_keyring_store::remove(&fp);
+                                        if guard == crate::keyguard::GuardKind::OsKeychain {
+                                            crate::keyguard::os_keychain_forget(&fp);
+                                        }
                                         crate::app_shared::bump_keyring_gen();
                                     }
                                 },
@@ -414,6 +500,7 @@ pub fn OperatorIdentityPanel() -> Element {
                                                         algorithm: op.algorithm.clone(),
                                                         fingerprint: op.fingerprint.clone(),
                                                         safebag_b64: b64.encode(&wire),
+                                                        guard: crate::keyguard::GuardKind::Passphrase,
                                                     };
                                                     crate::operator_keyring_store::upsert(item)
                                                         .map(|()| {

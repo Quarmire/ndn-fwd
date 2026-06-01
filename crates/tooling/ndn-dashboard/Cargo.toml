@@ -28,6 +28,7 @@ desktop = [
   "dep:dirs-next",
   "dep:which",
   "dep:arboard",
+  "dep:keyring",
   "dep:ndn-ipc",
   "dep:ndn-tools-core",
   "dep:ndn-config",
@@ -115,6 +116,10 @@ tray-icon      = { version = "0.21", optional = true }
 dirs-next      = { version = "2", optional = true }
 which          = { version = "6", optional = true }
 arboard        = { version = "3", optional = true }
+# OS keychain (Touch ID / Windows Hello / Secret Service) for the
+# device-bound second factor — seals the operator key without a typed
+# password. Native backends only (no extra system daemons on macOS).
+keyring        = { version = "3", optional = true, features = ["apple-native", "windows-native", "sync-secret-service"] }
 ndn-ipc        = { workspace = true, optional = true }
 ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"], optional = true }
 
