@@ -13,7 +13,7 @@ use ndn_packet::{Name, NameComponent};
 use ndn_security::{EcdsaP256Signer, Ed25519Signer, Signer, encode_cert_data};
 use std::sync::Arc;
 
-use crate::app::{ToastLevel, push_toast};
+use crate::app::{AppCtx, DashCmd, ToastLevel, push_toast};
 
 #[cfg(not(target_arch = "wasm32"))]
 fn now_unix_ns() -> u64 {
@@ -122,6 +122,7 @@ pub async fn generate_operator_identity(
 /// optional.
 #[component]
 pub fn OperatorIdentityPanel() -> Element {
+    let ctx = use_context::<AppCtx>();
     let mut gen_name: Signal<String> = use_signal(String::new);
     let mut gen_algo: Signal<String> = use_signal(|| "ed25519".to_string());
     let mut gen_busy: Signal<bool> = use_signal(|| false);
@@ -129,20 +130,88 @@ pub fn OperatorIdentityPanel() -> Element {
     let mut export_b64: Signal<Option<String>> = use_signal(|| None);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
+    // Subscribe to keyring changes so the held-identity list reacts to
+    // generate / import / switch / forget.
+    let _ = crate::app_shared::KEYRING_GEN.read();
+    let identities = crate::operator_keyring::list_identities();
     let exportable = crate::operator_keyring::active_is_exportable();
     let active_id = crate::operator_keyring::active_identity_name();
 
     rsx! {
         div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
             div { style: "font-size:12px;font-weight:600;color:var(--text);margin-bottom:4px;",
-                "Operator identity (in dashboard)"
+                "Your identities"
             }
             div { style: "font-size:10px;color:var(--text-muted);margin-bottom:12px;",
-                "Generate a signing identity here and export it as a SafeBag — no "
+                "Signing identities the dashboard holds — portable, independent of any "
+                "forwarder. Generate or import them here and export as a SafeBag; no "
                 span { class: "mono", "ndn-sec" }
-                " needed. To let a forwarder accept its commands, add the exported "
-                "SafeBag's certificate to the forwarder's trust anchor (still a "
-                "one-time out-of-band step)."
+                " needed. A forwarder accepts an identity's commands once its certificate "
+                "is a trust anchor there."
+            }
+
+            // ── Held identities ────────────────────────────────────────
+            if identities.is_empty() {
+                div { class: "empty", style: "margin-bottom:12px;",
+                    "No identities yet. Generate one below, or import a SafeBag."
+                }
+            } else {
+                div { style: "margin-bottom:12px;",
+                    for id in identities.iter() {
+                        div {
+                            key: "{id.key_name}",
+                            style: "display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--border-subtle);font-size:12px;",
+                            span { style: "font-size:14px;", if id.active { "🔑" } else { "•" } }
+                            div { style: "flex:1;min-width:0;",
+                                div { style: "display:flex;gap:8px;align-items:center;",
+                                    span { class: "mono", style: "color:var(--text);word-break:break-all;", "{id.identity}" }
+                                    if id.active {
+                                        span { class: "badge badge-green", style: "font-size:9px;", "active signer" }
+                                    }
+                                    if !id.exportable {
+                                        span { class: "badge badge-gray", style: "font-size:9px;", "signing only" }
+                                    }
+                                }
+                                div { style: "font-size:10px;color:var(--text-muted);margin-top:2px;",
+                                    "{id.algorithm} · fp {id.fingerprint}"
+                                }
+                            }
+                            if !id.active {
+                                button {
+                                    class: "btn btn-secondary btn-sm",
+                                    style: "font-size:10px;",
+                                    onclick: {
+                                        let kn = id.key_name.clone();
+                                        move |_| {
+                                            if crate::operator_keyring::set_active(&kn) {
+                                                crate::app_shared::bump_keyring_gen();
+                                                ctx.cmd.send(DashCmd::Reconnect);
+                                            }
+                                        }
+                                    },
+                                    "Use"
+                                }
+                            }
+                            button {
+                                class: "btn btn-secondary btn-sm",
+                                style: "font-size:10px;",
+                                onclick: {
+                                    let kn = id.key_name.clone();
+                                    move |_| {
+                                        if crate::operator_keyring::remove_identity(&kn) {
+                                            crate::app_shared::bump_keyring_gen();
+                                        }
+                                    }
+                                },
+                                "Forget"
+                            }
+                        }
+                    }
+                }
+            }
+
+            div { style: "font-size:11px;font-weight:600;color:var(--text);margin-bottom:8px;padding-top:6px;border-top:1px solid var(--border-subtle);",
+                "Generate a new identity"
             }
 
             // ── Generate ────────────────────────────────────────────────

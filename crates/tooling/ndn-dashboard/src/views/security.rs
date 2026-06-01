@@ -197,9 +197,32 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
             }
         }
 
+        // ── Your identities (the operator keyring — portable) ──────────
+        crate::views::identity_export::OperatorIdentityPanel {}
+        div {
+            style: "display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 24px;",
+            crate::views::safebag_import::SafeBagImportPicker {}
+            button {
+                class: "btn btn-secondary",
+                onclick: move |_| {
+                    crate::app_shared::ENROLLMENT_WIZARD_STATE.write().open = true;
+                },
+                "+ Join via NDNCERT"
+            }
+        }
+
+        // ── This appliance's keys (the forwarder's own keystore) ───────
+        div { class: "section-title", style: "font-size:13px;margin-top:8px;",
+            "This appliance's keys"
+        }
+        div { style: "font-size:11px;color:var(--text-muted);margin-bottom:10px;",
+            "Keys held by the forwarder you're attached to — its own signing identity, "
+            "separate from yours above."
+        }
+
         if keys.is_empty() {
             div { class: "empty",
-                "No identity keys found. Security may not be configured, or the PIB is empty."
+                "This forwarder holds no keys of its own (it may sign with an ephemeral key, or have no security configured)."
             }
         } else {
             div { style: "display:grid;grid-template-columns:minmax(260px,320px) 1fr;gap:16px;align-items:start;",
@@ -230,26 +253,6 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
                 }
             }
         }
-
-        div {
-            style: "display:flex;flex-wrap:wrap;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--border-subtle);",
-            // Mirror the conn-bar's "Import SafeBag…" file picker
-            // here. We render it as a styled <label>+hidden <input>
-            // pair so the browser natively triggers its file chooser
-            // — same affordance as the header picker.
-            crate::views::safebag_import::SafeBagImportPicker {}
-            button {
-                class: "btn btn-secondary",
-                onclick: move |_| {
-                    crate::app_shared::ENROLLMENT_WIZARD_STATE.write().open = true;
-                },
-                "+ Join via NDNCERT"
-            }
-        }
-
-        // Dashboard-native operator identity: generate + SafeBag export
-        // in-page (replaces `ndn-sec keygen` / `ndn-sec export`).
-        crate::views::identity_export::OperatorIdentityPanel {}
 
         div { class: "form-row", style: "margin-top:14px;",
             div { class: "form-group",
