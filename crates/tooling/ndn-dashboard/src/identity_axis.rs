@@ -62,9 +62,6 @@ impl WriteCapability {
         }
     }
 
-    pub fn is_read_only(self) -> bool {
-        matches!(self, WriteCapability::ReadOnly)
-    }
 }
 
 /// Predict the write capability from polled state. `cert_expired` is the

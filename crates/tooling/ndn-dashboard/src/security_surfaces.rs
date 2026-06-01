@@ -176,27 +176,117 @@ pub fn CapabilityBadge() -> Element {
     }
 }
 
-/// Content-area notice shown only when the operator is read-only against this
-/// engine — so a refused mutation is understood up front, not discovered by a
-/// failed click. A notice (not per-button disabling) because the prediction
-/// can't fully verify the cert chain client-side; the engine is the authority.
+/// Posture of the active operator identity against the attached forwarder —
+/// the single "can I manage this forwarder, and if not, what's the next step?"
+/// surface that supersedes the bare read-only banner. Every bootstrap route
+/// (pre-provision / NDNCERT / claim) plugs into the `NotTrusted` action.
+enum TrustPosture {
+    /// Auth policy not yet read.
+    Unknown,
+    /// Forwarder accepts unsigned commands — anyone connected can change it.
+    Open,
+    /// Signed commands required, but no active operator identity.
+    NoIdentity,
+    /// Signed commands required; identity active and an anchor covers it.
+    Trusted(String),
+    /// Signed commands required; identity active but no anchor covers it.
+    NotTrusted(String),
+}
+
+fn anchor_covers(anchor_name: &str, identity: &str) -> bool {
+    let root = match anchor_name.find("/KEY/") {
+        Some(i) => &anchor_name[..i],
+        None => anchor_name,
+    };
+    identity == root || identity.starts_with(&format!("{root}/"))
+}
+
+fn forwarder_trust_posture(ctx: &AppCtx) -> TrustPosture {
+    let _ = crate::app_shared::KEYRING_GEN.read();
+    let policy = ctx.mgmt_access_policy.read();
+    let require_signed = policy
+        .as_ref()
+        .map(|p| Some(p.require_signed_commands))
+        .unwrap_or_else(|| *ctx.mgmt_signed_commands_required.read());
+    match require_signed {
+        None => TrustPosture::Unknown,
+        Some(false) => TrustPosture::Open,
+        Some(true) => match crate::operator_keyring::active_identity_name() {
+            None => TrustPosture::NoIdentity,
+            Some(id) => {
+                let anchors = ctx.security_anchors.read();
+                if anchors.iter().any(|a| anchor_covers(&a.name, &id)) {
+                    TrustPosture::Trusted(id)
+                } else {
+                    TrustPosture::NotTrusted(id)
+                }
+            }
+        },
+    }
+}
+
+/// Navigate to the Identities tab of the Security view.
+fn goto_identities() {
+    *crate::app_shared::ACTIVE_VIEW.write() = crate::views::View::Security;
+    *crate::app_shared::ACTIVE_SECURITY_TAB.write() = Some(0);
+}
+
+/// Posture-adaptive trust panel: for (active identity × this forwarder), state
+/// whether you can manage it and offer the one right next action.
 #[component]
 #[allow(non_snake_case)]
-pub fn ReadOnlyBanner() -> Element {
+pub fn TrustStatusPanel() -> Element {
     let ctx = use_context::<AppCtx>();
-    let cap = live_write_capability(&ctx);
-    if !cap.is_read_only() {
-        return rsx! {};
-    }
-    rsx! {
-        div { class: "readonly-banner",
-            span { class: "readonly-banner-icon", "🔒" }
-            span {
-                "Read-only — this engine requires signed commands and the identity you're "
-                "acting as won't be accepted for changes. Adopt or enroll a trusted identity "
-                "to make changes."
+    match forwarder_trust_posture(&ctx) {
+        // Healthy/quiet states render nothing — no banner noise when all is well.
+        TrustPosture::Unknown | TrustPosture::Trusted(_) => rsx! {},
+        TrustPosture::Open => rsx! {
+            div { class: "readonly-banner", style: "border-color:var(--yellow,#d29922);",
+                span { class: "readonly-banner-icon", "⚠" }
+                span {
+                    "This forwarder accepts "
+                    b { "unsigned" }
+                    " management commands — anyone who can reach it can make changes. "
+                    "Enable signed commands in Mgmt Access to lock it down."
+                }
             }
-        }
+        },
+        TrustPosture::NoIdentity => rsx! {
+            div { class: "readonly-banner",
+                span { class: "readonly-banner-icon", "🔒" }
+                span {
+                    "Read-only — this forwarder requires signed commands and you have no "
+                    "active signing identity. "
+                }
+                button {
+                    class: "btn btn-primary btn-sm",
+                    style: "margin-left:10px;",
+                    onclick: move |_| goto_identities(),
+                    "Your identities →"
+                }
+            }
+        },
+        TrustPosture::NotTrusted(id) => rsx! {
+            div { class: "readonly-banner",
+                span { class: "readonly-banner-icon", "🔒" }
+                span {
+                    "Read-only — this forwarder requires signed commands but doesn't yet "
+                    "trust "
+                    span { class: "mono", "{id}" }
+                    ". Add this identity's certificate to the forwarder's trust anchor "
+                    "(export its SafeBag → "
+                    span { class: "mono", "trust_anchor_pib" }
+                    "), or — if you're already a trusted operator — add it as an anchor "
+                    "under Trust & Schema."
+                }
+                button {
+                    class: "btn btn-primary btn-sm",
+                    style: "margin-left:10px;",
+                    onclick: move |_| goto_identities(),
+                    "Your identities →"
+                }
+            }
+        },
     }
 }
 

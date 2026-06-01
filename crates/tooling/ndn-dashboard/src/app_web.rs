@@ -634,7 +634,7 @@ pub fn AppWeb() -> Element {
                                 "{err}"
                             }
                         }
-                        crate::security_surfaces::ReadOnlyBanner {}
+                        crate::security_surfaces::TrustStatusPanel {}
                         { render_view_web(*ACTIVE_VIEW.read()) }
                     }
                     crate::views::inspector::Inspector {}
