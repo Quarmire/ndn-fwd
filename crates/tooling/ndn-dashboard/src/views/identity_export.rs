@@ -346,8 +346,8 @@ pub fn OperatorIdentityPanel() -> Element {
                                                     prompt_pw.set(String::new());
                                                     pending.set(Some(PendingOp::from_row(PendingKind::Unlock, &row)));
                                                 }
-                                                crate::keyguard::GuardKind::RemoteFob => {
-                                                    error.set(Some("Paired-phone unlock isn't wired yet — pairing and the phone app are the next step.".into()));
+                                                crate::keyguard::GuardKind::RemoteSigner => {
+                                                    error.set(Some("Remote-signer unlock isn't wired yet — pairing and the signer app are the next step.".into()));
                                                 }
                                             }
                                         }

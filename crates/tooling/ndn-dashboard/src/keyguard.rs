@@ -8,7 +8,7 @@
 //!   (Touch ID / Windows Hello / Secret Service) — passwordless, device-bound.
 //!   Releasing it is gated by the OS (login / biometric), the "second factor".
 //!
-//! Future variants (`WebAuthnPrf`, `RemoteFob`) plug into this same seam.
+//! Future variants (`WebAuthnPrf`, `RemoteSigner`) plug into this same seam.
 //!
 //! This module owns only the OS-keychain secret; the SafeBag crypto stays in
 //! `operator_keyring`. Everything degrades gracefully: if the keychain is
@@ -28,12 +28,13 @@ pub enum GuardKind {
     /// A random secret held in the OS keychain; release is OS-gated.
     #[serde(rename = "os-keychain")]
     OsKeychain,
-    /// The key lives on a paired phone (fob); each signature is biometric-
-    /// gated there and the key never touches this host. Wired via
-    /// `ndn_custodian::FobCustodian`; pairing + transport land with the phone
-    /// app (see .claude/notes/remote-fob-design-2026-06-01.md).
-    #[serde(rename = "remote-fob")]
-    RemoteFob,
+    /// The key lives on a remote signer — a phone, another machine, a
+    /// hardware token — that gates each signature there; the key never touches
+    /// this host. Wired via `ndn_custodian::RemoteCustodian`; pairing +
+    /// transport land with the signer app (see
+    /// .claude/notes/remote-fob-design-2026-06-01.md).
+    #[serde(rename = "remote-signer")]
+    RemoteSigner,
 }
 
 impl GuardKind {
@@ -41,7 +42,7 @@ impl GuardKind {
         match self {
             GuardKind::Passphrase => "passphrase",
             GuardKind::OsKeychain => "this device",
-            GuardKind::RemoteFob => "paired phone",
+            GuardKind::RemoteSigner => "remote signer",
         }
     }
 }
