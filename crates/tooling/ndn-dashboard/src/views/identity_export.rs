@@ -567,6 +567,108 @@ pub fn OperatorIdentityPanel() -> Element {
     }
 }
 
+/// "Set up forwarder trust" — turn the active operator identity into the
+/// artifacts a forwarder needs to trust it (anchor PIB + config snippet), so
+/// the only manual step is "set the config and restart" — no CLI. Opens from
+/// the trust banner's "Set up forwarder trust →" CTA.
+#[component]
+pub fn PreprovisionPanel() -> Element {
+    let _ = crate::app_shared::KEYRING_GEN.read();
+    let mut open: Signal<bool> = use_signal(|| false);
+    // Consume the one-shot open flag (mirrors ACTIVE_SECURITY_TAB).
+    if *crate::app_shared::PREPROVISION_OPEN.read() {
+        open.set(true);
+        *crate::app_shared::PREPROVISION_OPEN.write() = false;
+    }
+    // (path, config_snippet, cert_b64)
+    let mut result: Signal<Option<(Option<String>, String, String)>> = use_signal(|| None);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let active = crate::operator_keyring::active_identity_name();
+
+    rsx! {
+        div { style: "background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px;",
+            div {
+                style: "display:flex;justify-content:space-between;align-items:center;cursor:pointer;",
+                onclick: move |_| { let v = *open.read(); open.set(!v); },
+                div { style: "font-size:12px;font-weight:600;color:var(--text);",
+                    "Set up forwarder trust"
+                }
+                span { style: "color:var(--text-muted);", if *open.read() { "▾" } else { "▸" } }
+            }
+
+            if *open.read() {
+                div { style: "font-size:10px;color:var(--text-muted);margin:8px 0 12px;",
+                    "Make the attached forwarder accept commands signed by your active "
+                    "identity. The dashboard writes a trust-anchor store and the exact "
+                    "config — you set it and restart the forwarder. (Establishing trust is "
+                    "out-of-band by design; this just removes the CLI from it.)"
+                }
+                if let Some(id) = active.as_ref() {
+                    button {
+                        class: "btn btn-primary btn-sm",
+                        onclick: {
+                            let id = id.clone();
+                            move |_| {
+                                error.set(None);
+                                match crate::operator_keyring::active_cert_wire() {
+                                    Some(wire) => match crate::preprovision::build(&id, &wire) {
+                                        Ok(a) => result.set(Some((a.anchor_pib_path, a.config_snippet, a.cert_b64))),
+                                        Err(e) => error.set(Some(e)),
+                                    },
+                                    None => error.set(Some(
+                                        "The active identity has no certificate to anchor — generate or import a full identity first.".into())),
+                                }
+                            }
+                        },
+                        "Generate trust files for {id}"
+                    }
+                } else {
+                    div { class: "empty", "Activate a signing identity first (under Your identities)." }
+                }
+
+                if let Some((path, config, cert)) = result.read().clone() {
+                    div { style: "margin-top:12px;",
+                        if let Some(p) = path.as_ref() {
+                            div { style: "font-size:11px;color:var(--green,#3fb950);margin-bottom:6px;",
+                                "✓ Wrote trust-anchor store to "
+                                span { class: "mono", style: "word-break:break-all;", "{p}" }
+                            }
+                        } else {
+                            div { style: "font-size:11px;color:var(--text-muted);margin-bottom:6px;",
+                                "On this platform the dashboard can't write files. Create the "
+                                "anchor store with "
+                                span { class: "mono", "ndn-sec import --anchor <file>" }
+                                " from the certificate below, then use the config:"
+                            }
+                        }
+                        div { style: "font-size:10px;color:var(--text-muted);margin-bottom:4px;", "Forwarder config — add and restart:" }
+                        textarea {
+                            readonly: true,
+                            style: "width:100%;min-height:64px;font-family:var(--font-mono);font-size:10px;padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);",
+                            "{config}"
+                        }
+                        if path.is_none() {
+                            div { style: "font-size:10px;color:var(--text-muted);margin:6px 0 4px;", "Certificate (base64):" }
+                            textarea {
+                                readonly: true,
+                                style: "width:100%;min-height:64px;font-family:var(--font-mono);font-size:10px;padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text);word-break:break-all;",
+                                "{cert}"
+                            }
+                        }
+                        div { style: "font-size:10px;color:var(--text-muted);margin-top:6px;",
+                            "Read-only datasets work immediately; signed commands work after the forwarder restarts with this config."
+                        }
+                    }
+                }
+
+                if let Some(err) = error.read().clone() {
+                    div { style: "font-size:11px;color:var(--red,#f85149);margin-top:8px;", "{err}" }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

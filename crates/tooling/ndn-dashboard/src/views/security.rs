@@ -199,6 +199,7 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
 
         // ── Your identities (the operator keyring — portable) ──────────
         crate::views::identity_export::OperatorIdentityPanel {}
+        crate::views::identity_export::PreprovisionPanel {}
         div {
             style: "display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 24px;",
             crate::views::safebag_import::SafeBagImportPicker {}

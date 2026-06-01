@@ -27,6 +27,7 @@ mod identity_axis;
 mod notify_sub;
 mod operator_keyring;
 mod operator_keyring_store;
+mod preprovision;
 mod resizable;
 mod security_chains;
 mod security_gate;

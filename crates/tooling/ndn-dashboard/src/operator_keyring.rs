@@ -351,6 +351,13 @@ pub fn active_identity_name() -> Option<String> {
     with_active(|h| identity_of(&h.key_id.as_name().to_string()))
 }
 
+/// The active identity's certificate Data wire — what a forwarder needs as a
+/// trust anchor to accept this identity's commands. `None` unless the active
+/// identity is fully held (its cert is available).
+pub fn active_cert_wire() -> Option<Vec<u8>> {
+    with_active(|h| h.exportable.as_ref().map(|e| e.cert_wire.to_vec())).flatten()
+}
+
 /// The mgmt-command signer for the active identity, else `None`.
 pub fn command_signer() -> Option<Arc<dyn Signer>> {
     let kr = keyring();
