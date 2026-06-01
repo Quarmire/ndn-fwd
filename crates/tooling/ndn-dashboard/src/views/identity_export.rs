@@ -120,20 +120,71 @@ pub async fn generate_operator_identity(
 /// export it (or any dashboard-generated identity) as a SafeBag. The
 /// dashboard-native path that makes `ndn-sec keygen` / `ndn-sec export`
 /// optional.
+/// A merged "Your identities" row: a loaded (signing) identity and/or a
+/// locked one persisted on this device.
+#[derive(Clone)]
+struct IdRow {
+    identity: String,
+    key_name: String,
+    algorithm: String,
+    fingerprint: String,
+    loaded: bool,
+    active: bool,
+    exportable: bool,
+    saved: bool,
+    safebag_b64: Option<String>,
+}
+
+fn merged_rows() -> Vec<IdRow> {
+    let loaded = crate::operator_keyring::list_identities();
+    let saved = crate::operator_keyring_store::load_saved();
+    let mut rows: Vec<IdRow> = loaded
+        .iter()
+        .map(|l| IdRow {
+            identity: l.identity.clone(),
+            key_name: l.key_name.clone(),
+            algorithm: l.algorithm.clone(),
+            fingerprint: l.fingerprint.clone(),
+            loaded: true,
+            active: l.active,
+            exportable: l.exportable,
+            saved: saved.iter().any(|s| s.fingerprint == l.fingerprint),
+            safebag_b64: None,
+        })
+        .collect();
+    for s in &saved {
+        if !loaded.iter().any(|l| l.fingerprint == s.fingerprint) {
+            rows.push(IdRow {
+                identity: s.identity.clone(),
+                key_name: s.key_name.clone(),
+                algorithm: s.algorithm.clone(),
+                fingerprint: s.fingerprint.clone(),
+                loaded: false,
+                active: false,
+                exportable: false,
+                saved: true,
+                safebag_b64: Some(s.safebag_b64.clone()),
+            });
+        }
+    }
+    rows
+}
+
 #[component]
 pub fn OperatorIdentityPanel() -> Element {
     let ctx = use_context::<AppCtx>();
     let mut gen_name: Signal<String> = use_signal(String::new);
     let mut gen_algo: Signal<String> = use_signal(|| "ed25519".to_string());
     let mut gen_busy: Signal<bool> = use_signal(|| false);
-    let mut export_pw: Signal<String> = use_signal(String::new);
+    // Shared passphrase for save / unlock / export.
+    let mut pw: Signal<String> = use_signal(String::new);
     let mut export_b64: Signal<Option<String>> = use_signal(|| None);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
-    // Subscribe to keyring changes so the held-identity list reacts to
-    // generate / import / switch / forget.
+    // Subscribe to keyring changes so the list reacts to
+    // generate / import / switch / forget / save / unlock.
     let _ = crate::app_shared::KEYRING_GEN.read();
-    let identities = crate::operator_keyring::list_identities();
+    let rows = merged_rows();
     let exportable = crate::operator_keyring::active_is_exportable();
     let active_id = crate::operator_keyring::active_identity_name();
 
@@ -144,31 +195,53 @@ pub fn OperatorIdentityPanel() -> Element {
             }
             div { style: "font-size:10px;color:var(--text-muted);margin-bottom:12px;",
                 "Signing identities the dashboard holds — portable, independent of any "
-                "forwarder. Generate or import them here and export as a SafeBag; no "
+                "forwarder. Generate or import them, save them to this device (encrypted), "
+                "and export as a SafeBag; no "
                 span { class: "mono", "ndn-sec" }
                 " needed. A forwarder accepts an identity's commands once its certificate "
                 "is a trust anchor there."
             }
 
-            // ── Held identities ────────────────────────────────────────
-            if identities.is_empty() {
+            // Shared passphrase for save / unlock / export.
+            div { style: "display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;",
+                div { class: "form-group",
+                    label { style: "font-size:11px;color:var(--text-muted);", "Passphrase (for save / unlock / export)" }
+                    input {
+                        r#type: "password",
+                        value: "{pw}",
+                        style: "width:280px;",
+                        oninput: move |e| { pw.set(e.value()); error.set(None); },
+                    }
+                }
+            }
+
+            // ── Held + saved identities ────────────────────────────────
+            if rows.is_empty() {
                 div { class: "empty", style: "margin-bottom:12px;",
                     "No identities yet. Generate one below, or import a SafeBag."
                 }
             } else {
                 div { style: "margin-bottom:12px;",
-                    for id in identities.iter() {
+                    for id in rows.iter() {
                         div {
-                            key: "{id.key_name}",
+                            key: "{id.fingerprint}",
                             style: "display:flex;gap:10px;align-items:center;padding:8px 0;border-top:1px solid var(--border-subtle);font-size:12px;",
-                            span { style: "font-size:14px;", if id.active { "🔑" } else { "•" } }
+                            span { style: "font-size:14px;",
+                                if id.active { "🔑" } else if !id.loaded { "🔒" } else { "•" }
+                            }
                             div { style: "flex:1;min-width:0;",
-                                div { style: "display:flex;gap:8px;align-items:center;",
+                                div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
                                     span { class: "mono", style: "color:var(--text);word-break:break-all;", "{id.identity}" }
                                     if id.active {
                                         span { class: "badge badge-green", style: "font-size:9px;", "active signer" }
                                     }
-                                    if !id.exportable {
+                                    if !id.loaded {
+                                        span { class: "badge badge-gray", style: "font-size:9px;", "locked" }
+                                    }
+                                    if id.saved {
+                                        span { class: "badge badge-blue", style: "font-size:9px;", "saved" }
+                                    }
+                                    if id.loaded && !id.exportable {
                                         span { class: "badge badge-gray", style: "font-size:9px;", "signing only" }
                                     }
                                 }
@@ -176,7 +249,37 @@ pub fn OperatorIdentityPanel() -> Element {
                                     "{id.algorithm} · fp {id.fingerprint}"
                                 }
                             }
-                            if !id.active {
+                            // Unlock a locked (persisted) identity.
+                            if !id.loaded {
+                                button {
+                                    class: "btn btn-primary btn-sm",
+                                    style: "font-size:10px;",
+                                    disabled: pw.read().is_empty(),
+                                    onclick: {
+                                        let b64 = id.safebag_b64.clone().unwrap_or_default();
+                                        move |_| {
+                                            use base64::Engine as _;
+                                            let pass = pw.peek().clone();
+                                            let Ok(wire) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+                                                error.set(Some("corrupt saved identity".into()));
+                                                return;
+                                            };
+                                            match crate::operator_keyring::provision_from_safebag(&wire, pass.as_bytes()) {
+                                                Ok(name) => {
+                                                    crate::app_shared::bump_keyring_gen();
+                                                    ctx.cmd.send(DashCmd::Reconnect);
+                                                    push_toast(format!("Unlocked and now signing as {name}"), ToastLevel::Success);
+                                                    error.set(None);
+                                                }
+                                                Err(e) => error.set(Some(e)),
+                                            }
+                                        }
+                                    },
+                                    "Unlock"
+                                }
+                            }
+                            // Switch the active signer.
+                            if id.loaded && !id.active {
                                 button {
                                     class: "btn btn-secondary btn-sm",
                                     style: "font-size:10px;",
@@ -192,15 +295,55 @@ pub fn OperatorIdentityPanel() -> Element {
                                     "Use"
                                 }
                             }
+                            // Save a loaded, exportable identity to this device.
+                            if id.loaded && id.exportable && !id.saved {
+                                button {
+                                    class: "btn btn-secondary btn-sm",
+                                    style: "font-size:10px;",
+                                    disabled: pw.read().is_empty(),
+                                    onclick: {
+                                        let row = id.clone();
+                                        move |_| {
+                                            let pass = pw.peek().clone();
+                                            match crate::operator_keyring::export_safebag_for(&row.key_name, pass.as_bytes()) {
+                                                Some(Ok(wire)) => {
+                                                    use base64::Engine as _;
+                                                    let item = crate::operator_keyring_store::SavedIdentity {
+                                                        identity: row.identity.clone(),
+                                                        key_name: row.key_name.clone(),
+                                                        cert_name: String::new(),
+                                                        algorithm: row.algorithm.clone(),
+                                                        fingerprint: row.fingerprint.clone(),
+                                                        safebag_b64: base64::engine::general_purpose::STANDARD.encode(&wire),
+                                                    };
+                                                    match crate::operator_keyring_store::upsert(item) {
+                                                        Ok(()) => {
+                                                            crate::app_shared::bump_keyring_gen();
+                                                            push_toast(format!("Saved {} to this device", row.identity), ToastLevel::Success);
+                                                            error.set(None);
+                                                        }
+                                                        Err(e) => error.set(Some(format!("save failed: {e}"))),
+                                                    }
+                                                }
+                                                Some(Err(e)) => error.set(Some(e)),
+                                                None => error.set(Some("identity is not exportable".into())),
+                                            }
+                                        }
+                                    },
+                                    "Save"
+                                }
+                            }
+                            // Forget: drop from the keyring and the device store.
                             button {
                                 class: "btn btn-secondary btn-sm",
                                 style: "font-size:10px;",
                                 onclick: {
                                     let kn = id.key_name.clone();
+                                    let fp = id.fingerprint.clone();
                                     move |_| {
-                                        if crate::operator_keyring::remove_identity(&kn) {
-                                            crate::app_shared::bump_keyring_gen();
-                                        }
+                                        crate::operator_keyring::remove_identity(&kn);
+                                        let _ = crate::operator_keyring_store::remove(&fp);
+                                        crate::app_shared::bump_keyring_gen();
                                     }
                                 },
                                 "Forget"
@@ -277,24 +420,15 @@ pub fn OperatorIdentityPanel() -> Element {
             if exportable {
                 div { style: "margin-top:12px;padding-top:12px;border-top:1px solid var(--border-subtle);",
                     div { style: "font-size:11px;font-weight:600;color:var(--text);margin-bottom:6px;",
-                        "Export the active identity as a SafeBag"
+                        "Export the active identity as a SafeBag (uses the passphrase above)"
                     }
                     div { style: "display:flex;gap:8px;align-items:flex-end;",
-                        div { class: "form-group",
-                            label { style: "font-size:11px;color:var(--text-muted);", "Passphrase" }
-                            input {
-                                r#type: "password",
-                                value: "{export_pw}",
-                                style: "width:240px;",
-                                oninput: move |e| { export_pw.set(e.value()); error.set(None); },
-                            }
-                        }
                         button {
                             class: "btn btn-secondary btn-sm",
-                            disabled: export_pw.read().is_empty(),
+                            disabled: pw.read().is_empty(),
                             onclick: move |_| {
-                                let pw = export_pw.peek().clone();
-                                match crate::operator_keyring::export_active_safebag(pw.as_bytes()) {
+                                let pass = pw.peek().clone();
+                                match crate::operator_keyring::export_active_safebag(pass.as_bytes()) {
                                     Some(Ok(wire)) => {
                                         use base64::Engine as _;
                                         let b64 = base64::engine::general_purpose::STANDARD.encode(&wire);

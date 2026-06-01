@@ -204,6 +204,40 @@ pub fn provision_imported(
     Ok(())
 }
 
+/// Decode + decrypt a SafeBag wire and provision it as a fully-held active
+/// identity. Derives the key and certificate names from the embedded cert, so
+/// it's the single entry point for both SafeBag import and unlocking a
+/// persisted identity. Returns the identity name on success.
+pub fn provision_from_safebag(wire: &[u8], passphrase: &[u8]) -> Result<String, String> {
+    let bag = ndn_safebag::SafeBag::decode(wire).map_err(|e| format!("SafeBag decode: {e}"))?;
+    let pkcs8 = bag
+        .decrypt_pkcs8(passphrase)
+        .map_err(|e| format!("decrypt failed (wrong passphrase?): {e}"))?;
+    let cert_data = ndn_packet::Data::decode(bag.certificate.clone())
+        .map_err(|e| format!("certificate decode: {e:?}"))?;
+    let cert_name = (*cert_data.name).clone();
+    let key_name = key_name_from_cert(&cert_name);
+    provision_imported(key_name, cert_name, &pkcs8, bag.certificate)?;
+    active_identity_name().ok_or_else(|| "provision succeeded but no active identity".into())
+}
+
+/// Reduce a certificate name to its key name: keep components up to and
+/// including the key id (`…/KEY/<keyid>`), dropping issuer + version.
+fn key_name_from_cert(cert_name: &Name) -> Name {
+    use ndn_packet::tlv_type::NAME_COMPONENT;
+    let comps = cert_name.components();
+    let key_idx = comps
+        .iter()
+        .position(|c| c.typ == NAME_COMPONENT && c.value.as_ref() == b"KEY");
+    match key_idx {
+        // identity.../KEY/<keyid> → keep through keyid.
+        Some(i) if i + 1 < comps.len() => {
+            Name::from_components(comps[..=i + 1].iter().cloned())
+        }
+        _ => cert_name.clone(),
+    }
+}
+
 /// Every identity the dashboard holds, with the active one flagged.
 pub fn list_identities() -> Vec<IdentitySummary> {
     let kr = keyring();
