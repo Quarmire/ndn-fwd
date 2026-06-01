@@ -873,6 +873,7 @@ mod tests {
     fn anchor(name: &str) -> AnchorInfo {
         AnchorInfo {
             name: name.to_owned(),
+            source: None,
         }
     }
 

@@ -776,9 +776,13 @@ fn TrustAnchorList(anchors: Vec<AnchorInfo>) -> Element {
                         div { style: "flex:1;",
                             div { class: "mono", style: "color:var(--text);word-break:break-all;", "{a.name}" }
                             div { style: "font-size:10px;color:var(--text-muted);margin-top:2px;",
-                                "Source attribution will surface here once "
-                                span { class: "mono", "security/anchor-list" }
-                                " is extended to carry it (Phase C wire-format follow-up)."
+                                match a.source.as_deref() {
+                                    Some("mgmt") => "Authorizes signed management commands (trust_anchor_pib).",
+                                    Some("localhop") => "Authorizes /localhop registration (localhop_trust_anchor_pib).",
+                                    Some("engine") => "Validates incoming Data and certificates (engine keystore).",
+                                    Some(other) => other,
+                                    None => "Trust anchor.",
+                                }
                             }
                         }
                         button {

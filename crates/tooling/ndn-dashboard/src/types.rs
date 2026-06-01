@@ -770,6 +770,10 @@ impl SecurityKeyInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnchorInfo {
     pub name: String,
+    /// Which forwarder trust store this anchor lives in: `engine` (Data
+    /// validation), `mgmt` (command authorization), `localhop`. `None` for
+    /// older forwarders whose `anchor-list` didn't carry a source.
+    pub source: Option<String>,
 }
 
 impl AnchorInfo {
@@ -777,10 +781,19 @@ impl AnchorInfo {
         let mut out = Vec::new();
         for line in text.lines() {
             let line = line.trim();
-            if let Some(name) = line.strip_prefix("name=") {
-                out.push(AnchorInfo {
-                    name: name.to_string(),
-                });
+            // Tokens are `key=value` separated by whitespace; an NDN name has
+            // no spaces, so `name=<name>` is a single token.
+            let mut name: Option<String> = None;
+            let mut source: Option<String> = None;
+            for tok in line.split_whitespace() {
+                if let Some(v) = tok.strip_prefix("name=") {
+                    name = Some(v.to_string());
+                } else if let Some(v) = tok.strip_prefix("source=") {
+                    source = Some(v.to_string());
+                }
+            }
+            if let Some(name) = name {
+                out.push(AnchorInfo { name, source });
             }
         }
         out
