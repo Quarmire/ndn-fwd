@@ -28,6 +28,12 @@ pub enum GuardKind {
     /// A random secret held in the OS keychain; release is OS-gated.
     #[serde(rename = "os-keychain")]
     OsKeychain,
+    /// The key lives on a paired phone (fob); each signature is biometric-
+    /// gated there and the key never touches this host. Wired via
+    /// `ndn_custodian::FobCustodian`; pairing + transport land with the phone
+    /// app (see .claude/notes/remote-fob-design-2026-06-01.md).
+    #[serde(rename = "remote-fob")]
+    RemoteFob,
 }
 
 impl GuardKind {
@@ -35,6 +41,7 @@ impl GuardKind {
         match self {
             GuardKind::Passphrase => "passphrase",
             GuardKind::OsKeychain => "this device",
+            GuardKind::RemoteFob => "paired phone",
         }
     }
 }
