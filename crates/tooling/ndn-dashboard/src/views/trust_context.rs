@@ -31,6 +31,7 @@ pub fn TrustContext() -> Element {
     let ca = ctx.ca_info.read();
     // Prefer the dashboard's own provisioned operator identity (what it signs
     // as) over the forwarder's reported identity, which is often ephemeral.
+    let _ = crate::app_shared::KEYRING_GEN.read();
     let op_identity = crate::operator_keyring::active_identity_name();
     let active = op_identity
         .clone()

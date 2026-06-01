@@ -19,6 +19,17 @@ pub static CONFIG_PRESETS: GlobalSignal<Vec<(String, String)>> = Signal::global(
 pub static ACTIVE_VIEW: GlobalSignal<View> = Signal::global(|| View::Overview);
 /// Deep-link target the Security view consumes one-shot when set.
 pub static ACTIVE_SECURITY_TAB: GlobalSignal<Option<u8>> = Signal::global(|| None);
+/// Reactive generation counter for the (Dioxus-free) operator keyring. Views
+/// that render keyring state read it to subscribe; UI mutation handlers call
+/// [`bump_keyring_gen`] so those views re-render after generate/import/switch.
+pub static KEYRING_GEN: GlobalSignal<u32> = Signal::global(|| 0);
+
+/// Bump [`KEYRING_GEN`] so keyring-displaying views re-render. Call from a
+/// component/event context after mutating `operator_keyring`.
+pub fn bump_keyring_gen() {
+    let next = KEYRING_GEN.peek().wrapping_add(1);
+    *KEYRING_GEN.write() = next;
+}
 pub static SAFEBAG_IMPORT_STATE: GlobalSignal<crate::views::safebag_import::SafeBagImportState> =
     Signal::global(crate::views::safebag_import::SafeBagImportState::default);
 pub static ENROLLMENT_WIZARD_STATE: GlobalSignal<

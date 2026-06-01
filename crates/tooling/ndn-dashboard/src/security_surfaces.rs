@@ -24,6 +24,9 @@ fn now_unix_s() -> Option<u64> {
 }
 
 fn live_chip_state(ctx: &AppCtx) -> ChipState {
+    // Subscribe to keyring changes so switching the active operator identity
+    // re-renders the chip.
+    let _ = crate::app_shared::KEYRING_GEN.read();
     let signed_required = *ctx.mgmt_signed_commands_required.read();
     let surface_supported = *ctx.security_surface_supported.read();
     // When the dashboard holds its own provisioned operator key, "acting as"
@@ -71,38 +74,44 @@ pub fn IdentityChip() -> Element {
 
 /// The "Acting as" axis of the Attach bar. Renders the active identity as a
 /// status chip in the single-context default (note §8 light-touch), and a
-/// switchable dropdown once more than one identity is selectable. Both branches
-/// read the same [`IdentityAxis`] view-model so display and selection can't
-/// drift, and so the Identity nav bucket / extension / mobile can reuse it.
+/// switchable dropdown once the operator holds more than one identity. Both
+/// branches read the operator keyring ([`crate::operator_keyring`]) so display
+/// and selection can't drift, and so the Identity nav bucket / extension /
+/// mobile can reuse it.
 #[component]
 #[allow(non_snake_case)]
 pub fn IdentityAxisControl() -> Element {
     let ctx = use_context::<AppCtx>();
-    let mut identity_name = ctx.identity_name;
-    let axis = crate::identity_axis::IdentityAxis::from_active(
-        identity_name.read().as_str(),
-        *ctx.identity_is_ephemeral.read(),
-    );
+    // Subscribe to keyring changes so add/import/switch re-renders the axis.
+    let _ = crate::app_shared::KEYRING_GEN.read();
+
+    // Prefer the dashboard's own operator identities (portable, what we sign
+    // as); fall back to the forwarder-reported identity when the keyring is
+    // empty. Each option's value is the key name (stable id); its label is the
+    // identity name.
+    let held = crate::operator_keyring::list_identities();
 
     rsx! {
         span { class: "axis-label", "Acting as" }
-        if axis.is_single() {
-            // One (or zero) identity → the chip already shows it with status.
+        if held.len() <= 1 {
+            // Zero/one identity → the chip already shows it with status.
             IdentityChip {}
         } else {
-            // Multi-context: pick which identity signs on this surface.
-            // NOTE: this sets the dashboard's active-identity state; binding it
-            // to the mgmt-command signer lands with the TrustContext custodian
-            // work (Phase 3/4). The branch is unreachable on today's
-            // single-identity model and is exercised by identity_axis tests.
+            // Switch which operator identity signs on this surface.
             select {
                 class: "axis-select",
-                onchange: move |e| identity_name.set(e.value()),
-                for id in axis.available.iter() {
+                onchange: move |e| {
+                    if crate::operator_keyring::set_active(&e.value()) {
+                        crate::app_shared::bump_keyring_gen();
+                        // Re-bind the command client to the newly active signer.
+                        ctx.cmd.send(crate::app::DashCmd::Reconnect);
+                    }
+                },
+                for id in held.iter() {
                     option {
-                        value: "{id.name}",
-                        selected: axis.active.as_ref().map(|a| a.name == id.name).unwrap_or(false),
-                        "{id.name}"
+                        value: "{id.key_name}",
+                        selected: id.active,
+                        "{id.identity}  ({id.fingerprint})"
                     }
                 }
             }
@@ -114,6 +123,7 @@ pub fn IdentityAxisControl() -> Element {
 /// from the live mgmt-auth policy + active identity (see
 /// [`crate::identity_axis::write_capability`]).
 fn live_write_capability(ctx: &AppCtx) -> crate::identity_axis::WriteCapability {
+    let _ = crate::app_shared::KEYRING_GEN.read();
     let policy = ctx.mgmt_access_policy.read();
     // Prefer the full policy snapshot; fall back to the standalone flag.
     let require_signed = policy

@@ -178,6 +178,7 @@ pub fn OperatorIdentityPanel() -> Element {
                         spawn(async move {
                             match generate_operator_identity(&name, algo, 365).await {
                                 Ok(cert) => {
+                                    crate::app_shared::bump_keyring_gen();
                                     push_toast(
                                         format!("Generated and now signing as {name} (cert {cert})"),
                                         ToastLevel::Success,

@@ -135,19 +135,20 @@ fn load_operator_key(wire: &[u8], passphrase: &[u8], key_name: &str) -> bool {
     // The certificate name is what the forwarder's trust anchor is keyed by;
     // advertise it in the command KeyLocator so signed commands resolve to the
     // anchor (otherwise the validator returns "signing certificate not yet
-    // resolved").
-    let cert_name = ndn_packet::Data::decode(bag.certificate.clone())
-        .ok()
-        .map(|d| (*d.name).clone());
-    match bag.algorithm(passphrase) {
-        Ok(SafeBagAlgorithm::Ed25519) => {
-            crate::operator_keyring::provision_ed25519_pkcs8(kn, cert_name, &pkcs8).is_ok()
-        }
-        Ok(SafeBagAlgorithm::EcdsaP256) => {
-            crate::operator_keyring::provision_ecdsa_p256_pkcs8(kn, cert_name, &pkcs8).is_ok()
-        }
-        _ => false,
+    // resolved"). The cert wire is retained so the imported identity is a
+    // fully-held, re-exportable, persistable member of the keyring.
+    let Ok(cert_data) = ndn_packet::Data::decode(bag.certificate.clone()) else {
+        return false;
+    };
+    let cert_name = (*cert_data.name).clone();
+    // Only the two SafeBag-carriable algorithms back signing.
+    if !matches!(
+        bag.algorithm(passphrase),
+        Ok(SafeBagAlgorithm::Ed25519 | SafeBagAlgorithm::EcdsaP256)
+    ) {
+        return false;
     }
+    crate::operator_keyring::provision_imported(kn, cert_name, &pkcs8, bag.certificate).is_ok()
 }
 
 /// Accept a SafeBag as either a raw TLV (first byte `0x80`) or the base64
@@ -713,6 +714,9 @@ pub fn SafeBagImportModal(state: Signal<SafeBagImportState>) -> Element {
                                     // identity (the signing gate opens).
                                     let provisioned = activate
                                         && load_operator_key(&wire, pw.as_bytes(), &key_name);
+                                    if provisioned {
+                                        crate::app_shared::bump_keyring_gen();
+                                    }
 
                                     if provisioned && !already_signer {
                                         // Bootstrap: this import provisions the
