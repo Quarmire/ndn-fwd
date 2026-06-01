@@ -80,9 +80,20 @@ fn keychain_set(fingerprint: &str, secret: &str) -> Result<(), String> {
     use security_framework::passwords_options::{AccessControlOptions, PasswordOptions};
     // Replace any prior item so the access control is applied cleanly.
     keychain_delete(fingerprint);
-    let mut opts = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, fingerprint);
-    opts.set_access_control_options(AccessControlOptions::USER_PRESENCE);
-    set_generic_password_options(secret.as_bytes(), opts)
+
+    // Prefer a biometric (USER_PRESENCE) item — reading it raises Touch ID /
+    // passcode. This only succeeds in a *code-signed, entitled* app build;
+    // unsigned/dev binaries get errSecMissingEntitlement.
+    let mut bio = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, fingerprint);
+    bio.set_access_control_options(AccessControlOptions::USER_PRESENCE);
+    if set_generic_password_options(secret.as_bytes(), bio).is_ok() {
+        return Ok(());
+    }
+
+    // Fallback: a plain login-keychain item — passwordless and device-bound,
+    // but login-gated rather than per-use biometric (the cost of no signing).
+    let plain = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, fingerprint);
+    set_generic_password_options(secret.as_bytes(), plain)
         .map_err(|e| format!("keychain write: {e}"))
 }
 
