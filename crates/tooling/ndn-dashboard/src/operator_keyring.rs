@@ -34,6 +34,18 @@ struct Active {
     cert_name: Option<Name>,
     sig_type: SignatureType,
     public_key: Option<Bytes>,
+    /// Present for identities generated in-dashboard (key + self-signed cert
+    /// held here): the private key and certificate Data needed to re-emit a
+    /// SafeBag. `None` for imported identities — the operator already has
+    /// their SafeBag file.
+    exportable: Option<Exportable>,
+}
+
+/// Material needed to export a dashboard-held identity as a SafeBag.
+#[derive(Clone)]
+struct Exportable {
+    pkcs8: Vec<u8>,
+    cert_wire: Bytes,
 }
 
 struct OperatorKeyring {
@@ -52,6 +64,15 @@ fn keyring() -> &'static OperatorKeyring {
 /// Core: hold `signer` as the operator key and open the gate. The signature
 /// metadata is read off the signer, so any algorithm works (Ed25519, ECDSA).
 fn provision_signer(key_name: Name, cert_name: Option<Name>, signer: Arc<dyn Signer>) {
+    provision_inner(key_name, cert_name, signer, None);
+}
+
+fn provision_inner(
+    key_name: Name,
+    cert_name: Option<Name>,
+    signer: Arc<dyn Signer>,
+    exportable: Option<Exportable>,
+) {
     let kr = keyring();
     let sig_type = signer.sig_type();
     let public_key = signer.public_key();
@@ -62,7 +83,49 @@ fn provision_signer(key_name: Name, cert_name: Option<Name>, signer: Arc<dyn Sig
         cert_name,
         sig_type,
         public_key,
+        exportable,
     });
+}
+
+/// Provision a generated identity (in-page key + self-signed cert) as the
+/// active signer, retaining the material to export it as a SafeBag.
+pub fn provision_generated(
+    key_name: Name,
+    cert_name: Name,
+    signer: Arc<dyn Signer>,
+    pkcs8: Vec<u8>,
+    cert_wire: Bytes,
+) {
+    provision_inner(
+        key_name,
+        Some(cert_name),
+        signer,
+        Some(Exportable { pkcs8, cert_wire }),
+    );
+}
+
+/// Encrypt the active identity into a SafeBag wire under `passphrase`, when
+/// the active key is exportable (generated in-dashboard). `None` otherwise.
+pub fn export_active_safebag(passphrase: &[u8]) -> Option<Result<Vec<u8>, String>> {
+    let kr = keyring();
+    let guard = kr.active.read().expect("operator keyring lock");
+    let exp = guard.as_ref()?.exportable.clone()?;
+    Some(
+        ndn_safebag::SafeBag::encrypt(exp.cert_wire, &exp.pkcs8, passphrase)
+            .map(|bag| bag.encode().to_vec())
+            .map_err(|e| format!("SafeBag encrypt: {e}")),
+    )
+}
+
+/// Whether the active identity can be exported as a SafeBag (was generated
+/// in-dashboard, so its private key + cert are held here).
+pub fn active_is_exportable() -> bool {
+    keyring()
+        .active
+        .read()
+        .expect("operator keyring lock")
+        .as_ref()
+        .is_some_and(|a| a.exportable.is_some())
 }
 
 /// Provision a freshly-seeded Ed25519 operator key (used by tests / generate).

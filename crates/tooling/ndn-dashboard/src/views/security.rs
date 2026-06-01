@@ -247,9 +247,13 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
             }
         }
 
+        // Dashboard-native operator identity: generate + SafeBag export
+        // in-page (replaces `ndn-sec keygen` / `ndn-sec export`).
+        crate::views::identity_export::OperatorIdentityPanel {}
+
         div { class: "form-row", style: "margin-top:14px;",
             div { class: "form-group",
-                label { "Generate a new Ed25519 identity key" }
+                label { "Generate a key in the forwarder's keystore" }
                 input {
                     r#type: "text",
                     placeholder: "/ndn/myrouter/key",
@@ -259,7 +263,7 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
                 }
             }
             button {
-                class: "btn btn-primary",
+                class: "btn btn-secondary",
                 onclick: move |_| {
                     let name = new_key_name.read().trim().to_string();
                     if !name.is_empty() {
@@ -267,7 +271,7 @@ fn IdentitiesTab(keys: Vec<SecurityKeyInfo>, mut new_key_name: Signal<String>) -
                         new_key_name.set(String::new());
                     }
                 },
-                "Generate"
+                "Generate (forwarder)"
             }
         }
     }
@@ -476,7 +480,9 @@ fn CertCard(info: SecurityKeyInfo, on_delete: EventHandler<String>) -> Element {
                 button {
                     class: "btn btn-secondary btn-sm",
                     onclick: move |_| push_toast(
-                        "Phase C: §5 sub-flow — SafeBag export",
+                        "Forwarder-held keys can't be exported over the wire. \
+                         To export an identity, generate it under \"Operator identity \
+                         (in dashboard)\" and use its Export SafeBag.",
                         ToastLevel::Info,
                     ),
                     "Export SafeBag"
