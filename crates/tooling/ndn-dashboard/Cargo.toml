@@ -186,3 +186,4 @@ security-framework = "3"
 
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
+async-trait = { workspace = true }

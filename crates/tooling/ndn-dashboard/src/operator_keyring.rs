@@ -12,15 +12,22 @@
 //! the call sites via [`crate::app_shared::bump_keyring_gen`] after a mutation;
 //! views that render keyring state subscribe by reading `KEYRING_GEN`.
 //!
-//! OS-keyring / fob / remote custodians plug into the same seam (insert a
-//! delegating `Custodian` instead of an in-page signer); local persistence of
-//! the in-page identities is layered on top (see `operator_keyring_store`).
+//! Each held identity carries its *own* backing [`Custodian`]: on-host
+//! identities share the keyring's [`InPageCustodian`], while a remote-signer
+//! identity ([`provision_remote_signer`]) carries a `RemoteCustodian` whose key
+//! lives off-host on a paired device — `command_signer` delegates signing to
+//! whichever custodian backs the active identity. OS-keyring / extension
+//! custodians plug into the same seam; local persistence of the in-page
+//! identities is layered on top (see `operator_keyring_store`).
 #![allow(dead_code)]
 
 use std::sync::{Arc, OnceLock, RwLock};
 
 use bytes::Bytes;
-use ndn_custodian::{CustodianSigner, InPageCustodian, KeyId};
+use ndn_custodian::{
+    Custodian, CustodianRef, CustodianSigner, InPageCustodian, KeyId, RemoteCustodian,
+    RemoteSignerTransport,
+};
 use ndn_packet::{Name, SignatureType};
 use ndn_security::{EcdsaP256Signer, Ed25519Signer, Signer};
 
@@ -37,6 +44,13 @@ struct Held {
     /// imported with the key): the private key + certificate Data needed to
     /// re-emit a SafeBag and to persist the identity locally.
     exportable: Option<Exportable>,
+    /// The custodian that signs for this identity. In-page identities share the
+    /// keyring's `InPageCustodian`; a remote-signer identity carries its own
+    /// `RemoteCustodian` (the key lives off-host, on a paired device).
+    custodian: Arc<dyn Custodian>,
+    /// Where this identity's key lives — drives the security-tier badge and the
+    /// "key never touches this host" property for remote signers.
+    custodian_ref: CustodianRef,
 }
 
 /// Material needed to export / persist a dashboard-held identity as a SafeBag.
@@ -80,6 +94,16 @@ pub struct IdentitySummary {
     pub exportable: bool,
     /// Whether this is the active signing identity.
     pub active: bool,
+    /// Human label for where the signing key lives (`In-page (memory)`,
+    /// `Remote signer`, `Hardware fob`, …) — the security tier, taken from the
+    /// backing custodian.
+    pub custodian_label: String,
+    /// Whether the private key physically resides on this machine. `false` for
+    /// a remote signer (phone / hardware token): the key never touches the host.
+    pub key_on_this_machine: bool,
+    /// Whether every signature requires an explicit user action on the
+    /// custodian (a remote tap / biometric). `false` for a silent in-page key.
+    pub prompts_per_action: bool,
 }
 
 fn identity_of(key_name: &str) -> String {
@@ -111,9 +135,44 @@ fn fingerprint_of(pk: Option<&Bytes>) -> String {
     }
 }
 
-/// Core: add (or replace) `held` in the keyring and make it active. The
-/// custodian gains the signer. Callers from the UI should follow with
+/// Core: add (or replace) a held identity in the keyring and make it active.
+/// `custodian` is the backend that signs for it (the shared `InPageCustodian`
+/// for on-host keys, a `RemoteCustodian` for off-host ones); `custodian_ref`
+/// records where the key lives. Callers from the UI should follow with
 /// [`crate::app_shared::bump_keyring_gen`].
+#[allow(clippy::too_many_arguments)]
+fn insert_held(
+    key_id: KeyId,
+    cert_name: Option<Name>,
+    sig_type: SignatureType,
+    public_key: Option<Bytes>,
+    custodian: Arc<dyn Custodian>,
+    custodian_ref: CustodianRef,
+    exportable: Option<Exportable>,
+) {
+    let kr = keyring();
+    let held = Held {
+        key_id: key_id.clone(),
+        cert_name,
+        sig_type,
+        public_key,
+        exportable,
+        custodian,
+        custodian_ref,
+    };
+    {
+        let mut ids = kr.identities.write().expect("operator keyring lock");
+        if let Some(slot) = ids.iter_mut().find(|h| h.key_id == key_id) {
+            *slot = held;
+        } else {
+            ids.push(held);
+        }
+    }
+    *kr.active.write().expect("operator keyring lock") = Some(key_id);
+}
+
+/// Provision an in-page identity: the keyring's `InPageCustodian` gains the
+/// signer and signs for it (the key is held on this host).
 fn provision_inner(
     key_name: Name,
     cert_name: Option<Name>,
@@ -125,23 +184,49 @@ fn provision_inner(
     let public_key = signer.public_key();
     let key_id = KeyId(key_name);
     kr.custodian.insert_signer(key_id.clone(), signer);
-
-    let held = Held {
-        key_id: key_id.clone(),
+    insert_held(
+        key_id,
         cert_name,
         sig_type,
         public_key,
+        kr.custodian.clone(),
+        CustodianRef::InPage,
         exportable,
-    };
-    {
-        let mut ids = kr.identities.write().expect("operator keyring lock");
-        if let Some(slot) = ids.iter_mut().find(|h| h.key_id == key_id) {
-            *slot = held;
-        } else {
-            ids.push(held);
-        }
-    }
-    *kr.active.write().expect("operator keyring lock") = Some(key_id);
+    );
+}
+
+/// Provision an identity whose key lives on a **remote signer** — a paired
+/// phone, another machine, or a hardware token that gates each signature there.
+/// The private key never touches this host; [`command_signer`] delegates
+/// signing to the remote device over `transport`. `sig_type` / `public_key` /
+/// `cert_name` come from pairing (the dashboard learns the operator's public
+/// key + certificate, never the key). Not exportable — there's nothing on-host
+/// to export.
+///
+/// `kind` says what the signer is ([`CustodianRef::Fob`] for a phone,
+/// [`CustodianRef::Remote`] for a networked signer); it drives the
+/// security-tier badge. Per the 2026-06-01 design decision the operator key
+/// should be ECDSA P-256, so a PWA software key can later upgrade to a native
+/// secure-enclave key without re-keying (see
+/// `.claude/notes/remote-fob-design-2026-06-01.md`).
+pub fn provision_remote_signer(
+    key_name: Name,
+    cert_name: Option<Name>,
+    sig_type: SignatureType,
+    public_key: Option<Bytes>,
+    transport: Arc<dyn RemoteSignerTransport>,
+    kind: CustodianRef,
+) {
+    let custodian: Arc<dyn Custodian> = Arc::new(RemoteCustodian::new(transport, kind.clone()));
+    insert_held(
+        KeyId(key_name),
+        cert_name,
+        sig_type,
+        public_key,
+        custodian,
+        kind,
+        None,
+    );
 }
 
 /// Provision a generated identity (in-page key + self-signed cert) as the
@@ -255,6 +340,9 @@ pub fn list_identities() -> Vec<IdentitySummary> {
                 fingerprint: fingerprint_of(h.public_key.as_ref()),
                 exportable: h.exportable.is_some(),
                 active: active.as_ref() == Some(&h.key_id),
+                custodian_label: h.custodian_ref.label().to_string(),
+                key_on_this_machine: h.custodian_ref.key_on_this_machine(),
+                prompts_per_action: h.custodian_ref.prompts_per_action(),
                 key_name,
             }
         })
@@ -360,10 +448,9 @@ pub fn active_cert_wire() -> Option<Vec<u8>> {
 
 /// The mgmt-command signer for the active identity, else `None`.
 pub fn command_signer() -> Option<Arc<dyn Signer>> {
-    let kr = keyring();
     with_active(|h| {
         let mut signer = CustodianSigner::new(
-            kr.custodian.clone(),
+            h.custodian.clone(),
             h.key_id.clone(),
             h.sig_type,
             h.public_key.clone(),
@@ -378,10 +465,34 @@ pub fn command_signer() -> Option<Arc<dyn Signer>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndn_custodian::{CustodianError, RemoteSignRequest};
+    use ndn_security::verifier::EcdsaSha256Verifier;
+    use ndn_security::{VerifyOutcome, Verifier};
+
+    /// A loopback "phone": a local signer standing in for a paired remote
+    /// device, so the keyring's remote-signer wiring is testable without one.
+    struct LoopbackPhone {
+        signer: EcdsaP256Signer,
+    }
+
+    #[async_trait::async_trait]
+    impl RemoteSignerTransport for LoopbackPhone {
+        async fn request_signature(
+            &self,
+            req: &RemoteSignRequest,
+        ) -> Result<Bytes, CustodianError> {
+            self.signer
+                .sign_sync(&req.region)
+                .map_err(|e| CustodianError::SignFailed(e.to_string()))
+        }
+        async fn is_reachable(&self) -> bool {
+            true
+        }
+    }
 
     // keyring() is process-global, so all steps run in one sequential test.
-    #[test]
-    fn keyring_holds_multiple_and_switches_active() {
+    #[tokio::test]
+    async fn keyring_holds_inpage_and_remote_signer_identities() {
         // Provision an Ed25519 identity → active.
         let ed: Name = "/op/dash/KEY/k1".parse().unwrap();
         provision_ed25519(ed.clone(), &[5u8; 32]);
@@ -413,5 +524,51 @@ mod tests {
         // Forget it → active clears.
         assert!(remove_identity("/op/dash/KEY/k1"));
         assert!(!is_provisioned());
+
+        // ── Remote-signer identity: the key lives off-host on a paired device.
+        // A loopback "phone" (a local ECDSA P-256 signer, per the v1 P-256
+        // decision) stands in for the real device.
+        let phone_key: Name = "/op/phone/KEY/p1".parse().unwrap();
+        let phone = EcdsaP256Signer::from_seed(&[8u8; 32], phone_key.clone()).unwrap();
+        let phone_pk = phone.public_key();
+        let cert_name: Name = "/op/phone/KEY/p1/self/v=0".parse().unwrap();
+        provision_remote_signer(
+            phone_key,
+            Some(cert_name.clone()),
+            SignatureType::SignatureSha256WithEcdsa,
+            phone_pk.clone(),
+            Arc::new(LoopbackPhone { signer: phone }),
+            CustodianRef::Fob {
+                fob_id: "phone-1".into(),
+            },
+        );
+
+        // It's active, and the summary reflects an off-host, per-use signer
+        // that the dashboard cannot export (no key material on this host).
+        assert!(is_provisioned());
+        let phone_summary = list_identities()
+            .into_iter()
+            .find(|i| i.key_name == "/op/phone/KEY/p1")
+            .expect("remote identity held");
+        assert!(phone_summary.active);
+        assert!(!phone_summary.key_on_this_machine, "key is off-host");
+        assert!(phone_summary.prompts_per_action);
+        assert!(!phone_summary.exportable, "nothing on-host to export");
+        assert_eq!(phone_summary.custodian_label, "Hardware fob");
+        assert_eq!(phone_summary.algorithm, "ECDSA P-256");
+
+        // command_signer delegates to the remote signer; the returned signature
+        // verifies against the operator public key learned at pairing, and the
+        // cert name surfaces in the command KeyLocator.
+        let signer = command_signer().expect("remote signer active");
+        assert_eq!(signer.sig_type(), SignatureType::SignatureSha256WithEcdsa);
+        assert_eq!(signer.cert_name(), Some(&cert_name));
+        let region = b"signed mgmt command region";
+        let sig = signer.sign(region).await.expect("remote signs");
+        let pk = phone_pk.expect("public key");
+        assert!(matches!(
+            EcdsaSha256Verifier.verify(region, &sig, &pk).await,
+            Ok(VerifyOutcome::Valid)
+        ));
     }
 }
