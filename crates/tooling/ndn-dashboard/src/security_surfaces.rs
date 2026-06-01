@@ -231,12 +231,27 @@ fn goto_identities() {
     *crate::app_shared::ACTIVE_SECURITY_TAB.write() = Some(0);
 }
 
+/// Open the "trust this identity on the forwarder" (pre-provision) flow.
+fn goto_preprovision() {
+    *crate::app_shared::ACTIVE_VIEW.write() = crate::views::View::Security;
+    *crate::app_shared::ACTIVE_SECURITY_TAB.write() = Some(0);
+    *crate::app_shared::PREPROVISION_OPEN.write() = true;
+}
+
+fn dismiss_banner() {
+    *crate::app_shared::TRUST_BANNER_DISMISSED.write() = true;
+}
+
 /// Posture-adaptive trust panel: for (active identity × this forwarder), state
-/// whether you can manage it and offer the one right next action.
+/// whether you can manage it and offer the one right next action. Dismissable;
+/// re-shows after any identity action (see `bump_keyring_gen`).
 #[component]
 #[allow(non_snake_case)]
 pub fn TrustStatusPanel() -> Element {
     let ctx = use_context::<AppCtx>();
+    if *crate::app_shared::TRUST_BANNER_DISMISSED.read() {
+        return rsx! {};
+    }
     match forwarder_trust_posture(&ctx) {
         // Healthy/quiet states render nothing — no banner noise when all is well.
         TrustPosture::Unknown | TrustPosture::Trusted(_) => rsx! {},
@@ -249,6 +264,7 @@ pub fn TrustStatusPanel() -> Element {
                     " management commands — anyone who can reach it can make changes. "
                     "Enable signed commands in Mgmt Access to lock it down."
                 }
+                button { class: "btn btn-secondary btn-sm", style: "margin-left:auto;", onclick: move |_| dismiss_banner(), "✕" }
             }
         },
         TrustPosture::NoIdentity => rsx! {
@@ -256,7 +272,7 @@ pub fn TrustStatusPanel() -> Element {
                 span { class: "readonly-banner-icon", "🔒" }
                 span {
                     "Read-only — this forwarder requires signed commands and you have no "
-                    "active signing identity. "
+                    "active signing identity."
                 }
                 button {
                     class: "btn btn-primary btn-sm",
@@ -264,27 +280,24 @@ pub fn TrustStatusPanel() -> Element {
                     onclick: move |_| goto_identities(),
                     "Your identities →"
                 }
+                button { class: "btn btn-secondary btn-sm", style: "margin-left:auto;", onclick: move |_| dismiss_banner(), "✕" }
             }
         },
         TrustPosture::NotTrusted(id) => rsx! {
             div { class: "readonly-banner",
                 span { class: "readonly-banner-icon", "🔒" }
                 span {
-                    "Read-only — this forwarder requires signed commands but doesn't yet "
-                    "trust "
+                    "Read-only — this forwarder doesn't yet trust "
                     span { class: "mono", "{id}" }
-                    ". Add this identity's certificate to the forwarder's trust anchor "
-                    "(export its SafeBag → "
-                    span { class: "mono", "trust_anchor_pib" }
-                    "), or — if you're already a trusted operator — add it as an anchor "
-                    "under Trust & Schema."
+                    " for signed commands."
                 }
                 button {
                     class: "btn btn-primary btn-sm",
                     style: "margin-left:10px;",
-                    onclick: move |_| goto_identities(),
-                    "Your identities →"
+                    onclick: move |_| goto_preprovision(),
+                    "Set up forwarder trust →"
                 }
+                button { class: "btn btn-secondary btn-sm", style: "margin-left:auto;", onclick: move |_| dismiss_banner(), "✕" }
             }
         },
     }

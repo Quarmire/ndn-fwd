@@ -24,11 +24,22 @@ pub static ACTIVE_SECURITY_TAB: GlobalSignal<Option<u8>> = Signal::global(|| Non
 /// [`bump_keyring_gen`] so those views re-render after generate/import/switch.
 pub static KEYRING_GEN: GlobalSignal<u32> = Signal::global(|| 0);
 
+/// Whether the operator dismissed the trust-status banner. Reset whenever the
+/// keyring changes (see [`bump_keyring_gen`]) so the banner re-evaluates after
+/// any identity action instead of staying hidden forever.
+pub static TRUST_BANNER_DISMISSED: GlobalSignal<bool> = Signal::global(|| false);
+
+/// Set true to open the "trust this identity on the forwarder" (pre-provision)
+/// flow; the Identities tab consumes it.
+pub static PREPROVISION_OPEN: GlobalSignal<bool> = Signal::global(|| false);
+
 /// Bump [`KEYRING_GEN`] so keyring-displaying views re-render. Call from a
 /// component/event context after mutating `operator_keyring`.
 pub fn bump_keyring_gen() {
     let next = KEYRING_GEN.peek().wrapping_add(1);
     *KEYRING_GEN.write() = next;
+    // A keyring change is a meaningful posture change — re-show the banner.
+    *TRUST_BANNER_DISMISSED.write() = false;
 }
 pub static SAFEBAG_IMPORT_STATE: GlobalSignal<crate::views::safebag_import::SafeBagImportState> =
     Signal::global(crate::views::safebag_import::SafeBagImportState::default);

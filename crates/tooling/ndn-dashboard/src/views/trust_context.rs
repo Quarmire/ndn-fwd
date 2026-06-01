@@ -133,7 +133,7 @@ pub fn TrustContext() -> Element {
             }
         }
 
-        // ── Your identities ────────────────────────────────────────────
+        // ── Your identities (the operator keyring — portable) ──────────
         div { class: "section",
             div { class: "section-hdr",
                 span { class: "section-title", "Your identities" }
@@ -143,8 +143,43 @@ pub fn TrustContext() -> Element {
                     "Manage identities →"
                 }
             }
+            {
+                let op = crate::operator_keyring::list_identities();
+                if op.is_empty() {
+                    rsx! {
+                        div { class: "empty",
+                            "No signing identities yet — generate or import one in Security → Identities."
+                        }
+                    }
+                } else {
+                    rsx! {
+                        table {
+                            thead { tr { th { "Identity" } th { "Algorithm" } th { "Fingerprint" } } }
+                            tbody {
+                                for id in op.iter() {
+                                    tr {
+                                        td { class: "mono",
+                                            "{id.identity}"
+                                            if id.active {
+                                                span { class: "badge badge-green", style: "margin-left:8px;font-size:9px;", "active signer" }
+                                            }
+                                        }
+                                        td { "{id.algorithm}" }
+                                        td { class: "mono", style: "font-size:11px;", "{id.fingerprint}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── This appliance's keys (the forwarder's own keystore) ───────
+        div { class: "section",
+            div { class: "section-title", "This appliance's keys" }
             if identities.is_empty() {
-                div { class: "empty", "No identities in this node's keychain yet." }
+                div { class: "empty", "This forwarder holds no keys of its own (it may sign with an ephemeral key)." }
             } else {
                 table {
                     thead {
