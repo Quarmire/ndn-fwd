@@ -377,7 +377,7 @@ pub fn OperatorIdentityPanel() -> Element {
                                     button {
                                         class: "btn btn-primary btn-sm",
                                         style: "font-size:10px;",
-                                        title: "Seal on this device with the OS keychain (Touch ID / Hello) — no password",
+                                        title: "Sealed by this device — no password. Unlocking it later prompts Touch ID / device passcode (macOS) or your OS keychain.",
                                         onclick: {
                                             let row = id.clone();
                                             move |_| {

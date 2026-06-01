@@ -178,5 +178,11 @@ features = [
   "Event",
 ]
 
+# macOS gets the real biometric path: a keychain item gated by Touch ID /
+# device passcode (USER_PRESENCE), via Security.framework directly — the
+# `keyring` crate stores login-keychain items without per-use biometric.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
 [dev-dependencies]
 ed25519-dalek = { workspace = true }

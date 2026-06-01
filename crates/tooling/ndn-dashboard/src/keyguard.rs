@@ -69,27 +69,58 @@ pub fn os_keychain_forget(fingerprint: &str) {
     keychain_delete(fingerprint);
 }
 
-#[cfg(feature = "desktop")]
+// ── macOS: Security.framework with a per-use Touch ID / passcode gate ──────
+//
+// The item is stored with `USER_PRESENCE` access control, so *reading* it
+// (release on Unlock) triggers the system Touch ID / device-passcode prompt.
+// Writing (Save) does not prompt — that's expected; the gate is on use.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn keychain_set(fingerprint: &str, secret: &str) -> Result<(), String> {
+    use security_framework::passwords::set_generic_password_options;
+    use security_framework::passwords_options::{AccessControlOptions, PasswordOptions};
+    // Replace any prior item so the access control is applied cleanly.
+    keychain_delete(fingerprint);
+    let mut opts = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, fingerprint);
+    opts.set_access_control_options(AccessControlOptions::USER_PRESENCE);
+    set_generic_password_options(secret.as_bytes(), opts)
+        .map_err(|e| format!("keychain write: {e}"))
+}
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn keychain_get(fingerprint: &str) -> Result<String, String> {
+    // Reading a USER_PRESENCE item raises the Touch ID / passcode prompt.
+    let bytes = security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, fingerprint)
+        .map_err(|e| format!("keychain read: {e}"))?;
+    String::from_utf8(bytes).map_err(|_| "keychain secret is not UTF-8".to_string())
+}
+
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn keychain_delete(fingerprint: &str) {
+    let _ = security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, fingerprint);
+}
+
+// ── Other desktop (Windows Hello / Secret Service) via the keyring crate ───
+#[cfg(all(feature = "desktop", not(target_os = "macos")))]
 fn keychain_entry(fingerprint: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(KEYCHAIN_SERVICE, fingerprint)
         .map_err(|e| format!("OS keychain unavailable: {e}"))
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(target_os = "macos")))]
 fn keychain_set(fingerprint: &str, secret: &str) -> Result<(), String> {
     keychain_entry(fingerprint)?
         .set_password(secret)
         .map_err(|e| format!("OS keychain write failed: {e}"))
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(target_os = "macos")))]
 fn keychain_get(fingerprint: &str) -> Result<String, String> {
     keychain_entry(fingerprint)?
         .get_password()
         .map_err(|e| format!("OS keychain read failed: {e}"))
 }
 
-#[cfg(feature = "desktop")]
+#[cfg(all(feature = "desktop", not(target_os = "macos")))]
 fn keychain_delete(fingerprint: &str) {
     if let Ok(entry) = keychain_entry(fingerprint) {
         let _ = entry.delete_credential();
