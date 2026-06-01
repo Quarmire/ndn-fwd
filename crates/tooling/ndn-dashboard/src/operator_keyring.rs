@@ -113,6 +113,24 @@ pub fn is_provisioned() -> bool {
         .is_some()
 }
 
+/// The provisioned operator's identity name (the key name with the
+/// `/KEY/<id>…` suffix stripped), or `None` when no key is provisioned.
+/// Drives the "acting as" display so it reflects the dashboard's own
+/// signing identity, not the forwarder's.
+pub fn active_identity_name() -> Option<String> {
+    let kr = keyring();
+    let guard = kr.active.read().ok()?;
+    let active = guard.as_ref()?;
+    let key_name = active.key_id.as_name().to_string();
+    Some(
+        key_name
+            .split_once("/KEY/")
+            .map(|(id, _)| id.to_string())
+            .filter(|id| !id.is_empty())
+            .unwrap_or(key_name),
+    )
+}
+
 /// The mgmt-command signer when an operator key is provisioned, else `None`
 /// (the client then signs `DigestSha256`, as today).
 pub fn command_signer() -> Option<Arc<dyn Signer>> {

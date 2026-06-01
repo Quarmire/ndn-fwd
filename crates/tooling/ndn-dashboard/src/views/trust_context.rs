@@ -29,8 +29,13 @@ pub fn TrustContext() -> Element {
     let anchors = ctx.security_anchors.read();
     let keys = ctx.security_keys.read();
     let ca = ctx.ca_info.read();
-    let active = ctx.identity_name.read().clone();
-    let ephemeral = *ctx.identity_is_ephemeral.read();
+    // Prefer the dashboard's own provisioned operator identity (what it signs
+    // as) over the forwarder's reported identity, which is often ephemeral.
+    let op_identity = crate::operator_keyring::active_identity_name();
+    let active = op_identity
+        .clone()
+        .unwrap_or_else(|| ctx.identity_name.read().clone());
+    let ephemeral = op_identity.is_none() && *ctx.identity_is_ephemeral.read();
     let machine =
         crate::views::engine_pill::live_machine_trust(ephemeral, !active.trim().is_empty());
 

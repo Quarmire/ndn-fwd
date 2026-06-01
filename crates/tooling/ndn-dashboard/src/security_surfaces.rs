@@ -24,11 +24,23 @@ fn now_unix_s() -> Option<u64> {
 }
 
 fn live_chip_state(ctx: &AppCtx) -> ChipState {
+    let signed_required = *ctx.mgmt_signed_commands_required.read();
+    let surface_supported = *ctx.security_surface_supported.read();
+    // When the dashboard holds its own provisioned operator key, "acting as"
+    // is that identity — not the forwarder's (often ephemeral) one.
+    if let Some(op_identity) = crate::operator_keyring::active_identity_name() {
+        return derive_chip_state(ChipInput {
+            identity_name: &op_identity,
+            identity_is_ephemeral: false,
+            cert_valid_until_unix_s: None,
+            now_unix_s: now_unix_s(),
+            mgmt_signed_commands_required: signed_required,
+            security_surface_supported: surface_supported,
+        });
+    }
     let identity_name = ctx.identity_name.read();
     let is_ephemeral = *ctx.identity_is_ephemeral.read();
     let cert_expiry = *ctx.cert_valid_until_unix_s.read();
-    let signed_required = *ctx.mgmt_signed_commands_required.read();
-    let surface_supported = *ctx.security_surface_supported.read();
     derive_chip_state(ChipInput {
         identity_name: identity_name.as_str(),
         identity_is_ephemeral: is_ephemeral,
@@ -112,11 +124,21 @@ fn live_write_capability(ctx: &AppCtx) -> crate::identity_axis::WriteCapability 
         .as_ref()
         .map(|p| p.ephemeral_allowed)
         .unwrap_or(false);
-    let has_identity = !ctx.identity_name.read().trim().is_empty();
-    let identity_ephemeral = *ctx.identity_is_ephemeral.read();
-    let cert_expired = match (*ctx.cert_valid_until_unix_s.read(), now_unix_s()) {
-        (Some(valid_until), Some(now)) => now > valid_until,
-        _ => false,
+    // A provisioned operator key in the dashboard's own keyring is a real,
+    // non-ephemeral signing identity — predict read-write regardless of the
+    // forwarder's own (often ephemeral) identity. The forwarder still
+    // validates against its anchor; a refusal surfaces as a command error
+    // with bootstrap guidance.
+    let provisioned = crate::operator_keyring::is_provisioned();
+    let has_identity = provisioned || !ctx.identity_name.read().trim().is_empty();
+    let identity_ephemeral = !provisioned && *ctx.identity_is_ephemeral.read();
+    let cert_expired = if provisioned {
+        false
+    } else {
+        match (*ctx.cert_valid_until_unix_s.read(), now_unix_s()) {
+            (Some(valid_until), Some(now)) => now > valid_until,
+            _ => false,
+        }
     };
     crate::identity_axis::write_capability(
         require_signed,
