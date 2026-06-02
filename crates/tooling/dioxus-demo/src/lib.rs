@@ -35,7 +35,9 @@ pub mod webrtc_adapter;
 #[cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
 pub mod transit_bridge;
 
-#[cfg(all(target_arch = "wasm32", feature = "shared-engine"))]
+// Onboarding client: used by the shared-engine bundle (JS-facing JoinClient)
+// and by the `web` tab build's Join panel.
+#[cfg(all(target_arch = "wasm32", any(feature = "web", feature = "shared-engine")))]
 pub mod join;
 
 #[cfg(all(target_arch = "wasm32", feature = "web"))]

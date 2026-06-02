@@ -16,10 +16,14 @@ crate-type = ["cdylib", "rlib"]
 default = ["web"]
 web = [
   "dioxus/web",
+  "dep:wasm-bindgen",
   "dep:wasm-bindgen-futures",
   "dep:gloo-timers",
   "dep:web-sys",
   "dep:console_error_panic_hook",
+  # NDNCERT onboarding (the Join panel): IdbPib persistence + SafeBag wrapping.
+  "dep:ndn-pib-idb",
+  "dep:ndn-safebag",
   "ndn-packet/std-wasm",
   "ndn-tlv/std",
   "getrandom/js",

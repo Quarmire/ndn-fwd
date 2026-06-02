@@ -38,6 +38,7 @@ pub fn App() -> Element {
     rsx! {
         Header { face_status }
         main {
+            JoinPanel { url }
             FacePanel { face_status, url, producer_prefix, producer_counter }
             ConsumerPanel { interest_name, last_data, last_error, face_status }
             ProducerPanel { producer_prefix, producer_counter, face_status }
@@ -56,6 +57,133 @@ fn Header(face_status: Signal<FaceStatus>) -> Element {
                 class: "face-status {label}",
                 "data-testid": "face-status",
                 "{label}"
+            }
+        }
+    }
+}
+
+/// Read an invite token from the URL fragment (`#join=<token>`, optionally with
+/// `&`-separated extras), if present and non-empty.
+fn token_from_fragment() -> Option<String> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    hash.trim_start_matches('#')
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("join=").map(str::to_owned))
+        .filter(|t| !t.is_empty())
+}
+
+fn js_err(e: wasm_bindgen::JsValue) -> String {
+    e.as_string().unwrap_or_else(|| format!("{e:?}"))
+}
+
+/// NDNCERT onboarding gesture: paste (or scan via a `#join=` link) an invite
+/// token, enrol against the embedded CA over the forwarder face, and persist
+/// the identity in IndexedDB so a reload stays signed in.
+#[component]
+fn JoinPanel(url: Signal<String>) -> Element {
+    use crate::join::JoinClient;
+
+    let mut token = use_signal(|| token_from_fragment().unwrap_or_default());
+    // (cert_name, restored_from_this_device)
+    let mut identity = use_signal(|| None::<(String, bool)>);
+    let mut joining = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+
+    // On mount, restore a cached identity if one exists (no NDNCERT round-trip).
+    use_future(move || async move {
+        match JoinClient::open().await {
+            Ok(mut c) => match c.try_restore().await {
+                Ok(Some(info)) => identity.set(Some((info.cert_name(), info.restored()))),
+                Ok(None) => {}
+                Err(e) => error.set(Some(js_err(e))),
+            },
+            Err(e) => error.set(Some(js_err(e))),
+        }
+    });
+
+    let do_join = move |_| {
+        let host = url.read().clone();
+        let tok = token.read().clone();
+        if tok.is_empty() {
+            error.set(Some("paste an invite token first".into()));
+            return;
+        }
+        joining.set(true);
+        error.set(None);
+        spawn(async move {
+            let outcome = async {
+                let mut c = JoinClient::open().await.map_err(js_err)?;
+                let info = c
+                    .join(host, "/demo".to_owned(), "/demo/users".to_owned(), tok)
+                    .await
+                    .map_err(js_err)?;
+                Ok::<_, String>((info.cert_name(), info.restored()))
+            }
+            .await;
+            match outcome {
+                Ok(v) => identity.set(Some(v)),
+                Err(e) => error.set(Some(e)),
+            }
+            joining.set(false);
+        });
+    };
+
+    let do_forget = move |_| {
+        spawn(async move {
+            if let Ok(c) = JoinClient::open().await {
+                let _ = c.forget().await;
+            }
+            identity.set(None);
+            error.set(None);
+        });
+    };
+
+    let current = identity.read().clone();
+    let busy = *joining.read();
+    let err = error.read().clone();
+
+    rsx! {
+        section { class: "panel",
+            h2 { "Join a network" }
+            if let Some((cert, restored)) = current {
+                p { class: "muted", "Signed in." }
+                dl {
+                    dt { "Identity" }
+                    dd { "data-testid": "join-cert", "{cert}" }
+                    dt { "Source" }
+                    dd {
+                        if restored { "restored from this device" } else { "freshly enrolled" }
+                    }
+                }
+                button { "data-testid": "join-forget", onclick: do_forget, "Forget identity" }
+            } else {
+                div { class: "field",
+                    label { "Forwarder URL" }
+                    input {
+                        r#type: "text",
+                        value: "{url}",
+                        oninput: move |e| url.set(e.value()),
+                    }
+                }
+                div { class: "field",
+                    label { "Invite token" }
+                    input {
+                        r#type: "text",
+                        "data-testid": "join-token",
+                        placeholder: "paste an invite token (or open a #join=… link)",
+                        value: "{token}",
+                        oninput: move |e| token.set(e.value()),
+                    }
+                }
+                button {
+                    "data-testid": "join-submit",
+                    disabled: busy,
+                    onclick: do_join,
+                    if busy { "Joining…" } else { "Join" }
+                }
+                if let Some(e) = err {
+                    p { class: "muted", "Error: {e}" }
+                }
             }
         }
     }
@@ -97,10 +225,12 @@ fn FacePanel(
                         );
                     }
                     if let Ok(prefix) = parsed {
-                        // NDNCERT enrollment against /demo/CA: the issued cert
-                        // chains to the localhop trust anchor, so ndn-fwd
-                        // accepts /localhop/nfd/rib/register signed with it.
-                        let ca_prefix: Name = "/demo/CA".parse().expect("static demo CA prefix");
+                        // NDNCERT enrollment: `ca_prefix` is the CA *identity*
+                        // (`/demo`); the enroll client appends `/CA/NEW`, so the
+                        // CA (serving `/demo/CA/*`) answers. The issued cert
+                        // chains to the localhop trust anchor, so ndn-fwd accepts
+                        // /localhop/nfd/rib/register signed with it.
+                        let ca_prefix: Name = "/demo".parse().expect("static demo CA prefix");
                         let ident_name: Name = format!("/demo/browser/{}", random_short_id())
                             .parse()
                             .expect("synthesised identity name");
