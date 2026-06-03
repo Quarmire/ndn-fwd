@@ -17,9 +17,12 @@
 pub mod forwarder_profile;
 pub mod identity_axis;
 pub mod keyguard;
+pub mod mgmt;
 pub mod operator_keyring;
 pub mod operator_keyring_store;
 pub mod preprovision;
 pub mod security_chains;
 pub mod signed_data_chain;
 pub mod types;
+
+pub use mgmt::{ManagementClient, MgmtResponse};

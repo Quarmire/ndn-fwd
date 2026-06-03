@@ -28,6 +28,7 @@ web = [
 ]
 
 [dependencies]
+async-trait   = { workspace = true }
 ndn-config    = { workspace = true }
 ndn-mgmt-wire = { workspace = true }
 ndn-custodian = { workspace = true }

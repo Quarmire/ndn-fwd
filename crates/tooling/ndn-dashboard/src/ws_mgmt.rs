@@ -22,20 +22,10 @@ use ndn_security::Signer;
 #[cfg(feature = "browser-engine")]
 use crate::browser_engine::LocalMgmtChannels;
 
-/// For control verbs `status_code`/`status_text` come from the `ControlResponse`
-/// envelope; for dataset verbs we synthesise `status_code = 200`.
-#[derive(Debug, Clone)]
-pub struct MgmtResponse {
-    pub status_code: u64,
-    pub status_text: String,
-    pub body: Bytes,
-}
-
-impl MgmtResponse {
-    pub fn is_ok(&self) -> bool {
-        (200..300).contains(&self.status_code)
-    }
-}
+// The management response shape now lives in `ndn-dashboard-core` (the seam any
+// UI/engine shares); re-exported here so existing `crate::ws_mgmt::MgmtResponse`
+// paths keep resolving.
+pub use ndn_dashboard_core::{ManagementClient, MgmtResponse};
 
 enum Transport {
     /// `None` until [`WsMgmtClient::connect`] succeeds.
@@ -418,4 +408,22 @@ fn strip_lp(raw: Bytes) -> Bytes {
         return fragment;
     }
     raw
+}
+
+#[async_trait::async_trait(?Send)]
+impl ManagementClient for WsMgmtClient {
+    /// Delegates to the inherent `send_cmd` — method-call syntax resolves to the
+    /// inherent method (which takes precedence over a trait method of the same
+    /// name), so this doesn't recurse. The only adaptation is mapping the
+    /// `anyhow` error to `String` so the seam stays transport-agnostic.
+    async fn send_cmd(
+        &mut self,
+        module: &str,
+        verb: &str,
+        params: Option<&ControlParameters>,
+    ) -> std::result::Result<MgmtResponse, String> {
+        self.send_cmd(module, verb, params)
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
