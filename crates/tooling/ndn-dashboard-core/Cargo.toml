@@ -15,7 +15,7 @@ crate-type = ["rlib"]
 default = []
 # Mirror the dashboard's platform features so the moved modules' existing
 # `cfg(feature = "desktop"/"web")` gates resolve against this crate.
-desktop = ["dep:keyring", "dep:dirs-next", "ndn-packet/std", "ndn-tlv/std"]
+desktop = ["dep:keyring", "dep:dirs-next", "dep:ndn-cert", "ndn-packet/std", "ndn-tlv/std"]
 web = [
   "dep:web-sys",
   "dep:js-sys",
@@ -37,6 +37,9 @@ ndn-security  = { path = "../../ndn-security", default-features = false }
 ndn-packet    = { workspace = true }
 ndn-tlv       = { workspace = true }
 ndn-safebag   = { workspace = true }
+# Native token-join (NDNCERT enrollment). Desktop/native only — pulled by the
+# `desktop` feature so the wasm build never compiles it.
+ndn-cert      = { workspace = true, optional = true }
 bytes         = { workspace = true, features = ["std"] }
 base64        = { workspace = true }
 getrandom     = "0.2"

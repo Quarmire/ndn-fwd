@@ -19,6 +19,8 @@ pub mod forwarder_profile;
 pub mod identity_axis;
 pub mod keyguard;
 pub mod mgmt;
+#[cfg(feature = "desktop")]
+pub mod native_join;
 pub mod operator_keyring;
 pub mod operator_keyring_store;
 pub mod preprovision;
