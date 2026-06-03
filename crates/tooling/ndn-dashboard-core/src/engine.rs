@@ -12,7 +12,7 @@
 //! `app_web.rs` grew independently.
 
 use crate::mgmt::{ManagementClient, MgmtResponse};
-use crate::types::{CsInfo, FaceInfo, FibEntry, ForwarderStatus, NextHop, StrategyEntry};
+use crate::types::{CsInfo, FaceInfo, FibEntry, ForwarderStatus, StrategyEntry};
 use ndn_config::{ControlParameters, nfd_dataset};
 use ndn_packet::Name;
 
@@ -62,6 +62,12 @@ impl<M: ManagementClient> DashboardEngine<M> {
         &mut self.client
     }
 
+    /// Shared access to the underlying client, for transport-specific reads a
+    /// UI still drives directly (datasets the engine doesn't model yet).
+    pub fn client(&self) -> &M {
+        &self.client
+    }
+
     /// Poll the forwarding-plane read datasets once. Updates `state` in place
     /// and returns which views changed. Each block is best-effort: a forwarder
     /// missing a verb (older / cross-impl) degrades to "no data" without
@@ -80,8 +86,8 @@ impl<M: ManagementClient> DashboardEngine<M> {
             && resp.is_ok()
         {
             self.state.faces = nfd_dataset::FaceStatus::decode_all(&resp.body)
-                .iter()
-                .map(face_info)
+                .into_iter()
+                .map(FaceInfo::from)
                 .collect();
             changed.push(StateUpdate::Faces);
         }
@@ -90,8 +96,8 @@ impl<M: ManagementClient> DashboardEngine<M> {
             && resp.is_ok()
         {
             self.state.routes = nfd_dataset::FibEntry::decode_all(&resp.body)
-                .iter()
-                .map(fib_entry)
+                .into_iter()
+                .map(FibEntry::from)
                 .collect();
             changed.push(StateUpdate::Routes);
         }
@@ -107,8 +113,8 @@ impl<M: ManagementClient> DashboardEngine<M> {
             && resp.is_ok()
         {
             self.state.strategies = nfd_dataset::StrategyChoice::decode_all(&resp.body)
-                .iter()
-                .map(strategy_entry)
+                .into_iter()
+                .map(StrategyEntry::from)
                 .collect();
             changed.push(StateUpdate::Strategies);
         }
@@ -240,53 +246,6 @@ impl<M: ManagementClient> DashboardEngine<M> {
 fn parse_name(s: &str, what: &str) -> Result<Name, String> {
     s.parse::<Name>()
         .map_err(|e| format!("invalid {what} '{s}': {e:?}"))
-}
-
-fn face_info(fs: &nfd_dataset::FaceStatus) -> FaceInfo {
-    FaceInfo {
-        face_id: fs.face_id,
-        remote_uri: Some(fs.uri.clone()),
-        local_uri: if fs.local_uri.is_empty() {
-            None
-        } else {
-            Some(fs.local_uri.clone())
-        },
-        persistency: fs.persistency_str().to_string(),
-        kind: None,
-        face_scope: fs.face_scope,
-        link_type: fs.link_type,
-        mtu: fs.mtu,
-        n_in_interests: fs.n_in_interests,
-        n_out_interests: fs.n_out_interests,
-        n_in_data: fs.n_in_data,
-        n_out_data: fs.n_out_data,
-        n_in_bytes: fs.n_in_bytes,
-        n_out_bytes: fs.n_out_bytes,
-        n_in_nacks: fs.n_in_nacks,
-        n_out_nacks: fs.n_out_nacks,
-        flags: fs.flags,
-    }
-}
-
-fn fib_entry(fe: &nfd_dataset::FibEntry) -> FibEntry {
-    FibEntry {
-        prefix: fe.name.to_string(),
-        nexthops: fe
-            .nexthops
-            .iter()
-            .map(|nh| NextHop {
-                face_id: nh.face_id,
-                cost: nh.cost as u32,
-            })
-            .collect(),
-    }
-}
-
-fn strategy_entry(sc: &nfd_dataset::StrategyChoice) -> StrategyEntry {
-    StrategyEntry {
-        prefix: sc.name.to_string(),
-        strategy: sc.strategy.to_string(),
-    }
 }
 
 #[cfg(test)]

@@ -1158,7 +1158,6 @@ pub struct ChallengeAttestation {
     pub detail: String,
 }
 
-#[cfg(feature = "desktop")]
 impl From<ndn_config::FaceStatus> for FaceInfo {
     fn from(fs: ndn_config::FaceStatus) -> Self {
         let persistency = fs.persistency_str().to_owned();
@@ -1192,7 +1191,6 @@ impl From<ndn_config::FaceStatus> for FaceInfo {
     }
 }
 
-#[cfg(feature = "desktop")]
 impl From<ndn_config::FibEntry> for FibEntry {
     fn from(fe: ndn_config::FibEntry) -> Self {
         FibEntry {
@@ -1209,7 +1207,6 @@ impl From<ndn_config::FibEntry> for FibEntry {
     }
 }
 
-#[cfg(feature = "desktop")]
 impl From<ndn_config::StrategyChoice> for StrategyEntry {
     fn from(sc: ndn_config::StrategyChoice) -> Self {
         StrategyEntry {
