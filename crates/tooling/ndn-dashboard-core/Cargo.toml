@@ -90,3 +90,6 @@ security-framework = "3"
 ed25519-dalek = { workspace = true }
 async-trait   = { workspace = true }
 tokio         = { workspace = true, features = ["rt", "macros", "sync"] }
+# Live smoke test only (tests/smoke_engine.rs): drives the engine over a real
+# Unix-socket MgmtClient against a running forwarder. Native/test-only.
+ndn-ipc       = { workspace = true }
