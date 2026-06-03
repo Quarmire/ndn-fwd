@@ -14,6 +14,7 @@
 
 #![allow(clippy::result_large_err)]
 
+pub mod engine;
 pub mod forwarder_profile;
 pub mod identity_axis;
 pub mod keyguard;
@@ -25,4 +26,5 @@ pub mod security_chains;
 pub mod signed_data_chain;
 pub mod types;
 
+pub use engine::{DashboardEngine, DashboardState, StateUpdate};
 pub use mgmt::{ManagementClient, MgmtResponse};
