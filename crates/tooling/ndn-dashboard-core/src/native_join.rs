@@ -27,7 +27,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use ndn_cert::EnrollmentSession;
-use ndn_packet::Name;
+use ndn_packet::encode::InterestBuilder;
+use ndn_packet::{Data, Name, NameComponent};
 use ndn_safebag::{SafeBag, ed25519_seed_to_pkcs8};
 use ndn_security::Signer;
 
@@ -54,8 +55,15 @@ pub trait CaExchange: Send + Sync {
     /// `/<ca>/CA/NEW` — send the request body, return the response body.
     async fn new_request(&self, body: &[u8]) -> Result<Bytes, JoinError>;
     /// `/<ca>/CA/CHALLENGE/<request-id>` — send the challenge body, return the
-    /// response body.
-    async fn challenge_request(&self, request_id: &str, body: &[u8]) -> Result<Bytes, JoinError>;
+    /// response body. `request_id` is the CA's string key (for an in-process
+    /// CA); `request_id_bytes` is the raw 8-byte CHALLENGE Interest name
+    /// component (for a wire transport). Each impl uses the form it needs.
+    async fn challenge_request(
+        &self,
+        request_id: &str,
+        request_id_bytes: &[u8; 8],
+        body: &[u8],
+    ) -> Result<Bytes, JoinError>;
     /// Fetch the issued certificate's wire bytes by name.
     async fn fetch_cert(&self, cert_name: &str) -> Result<Bytes, JoinError>;
 }
@@ -116,7 +124,12 @@ pub async fn enroll_via_token(
         .request_id()
         .ok_or_else(|| JoinError::Protocol("no request_id after NEW".into()))?
         .to_string();
-    let chal_resp = exchange.challenge_request(&request_id, &chal_body).await?;
+    let request_id_bytes = *session
+        .request_id_bytes()
+        .ok_or_else(|| JoinError::Protocol("no request_id bytes after NEW".into()))?;
+    let chal_resp = exchange
+        .challenge_request(&request_id, &request_id_bytes, &chal_body)
+        .await?;
     session
         .handle_challenge_response(&chal_resp)
         .map_err(|e| JoinError::Protocol(format!("CHALLENGE response: {e}")))?;
@@ -140,6 +153,102 @@ pub async fn enroll_via_token(
         cert_name,
         cert_wire,
     })
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Native transport — signed NDNCERT Interests over a minimal wire port.
+
+/// A minimal duplex port: send one (signed) Interest wire, await the reply Data
+/// wire. Kept bytes-only so this crate needn't depend on `ndn-app` — the native
+/// app's adapter wraps an `ndn-app` `Connection` over the Phase-2 IPC seam (a
+/// `send` + `recv` to the tunnel forwarder, which routes to the CA), mirroring
+/// how the `ManagementClient` impls live outside the core.
+#[async_trait]
+pub trait WireExchange: Send + Sync {
+    async fn express(&self, interest_wire: Bytes) -> Result<Bytes, JoinError>;
+}
+
+/// A [`CaExchange`] that builds **signed** NDNCERT NEW / CHALLENGE Interests and
+/// a cert-fetch Interest, exchanging each over a [`WireExchange`]. This is the
+/// native enroll transport — pair it with a `WireExchange` over the IPC seam.
+pub struct SignedInterestCaExchange {
+    wire: Arc<dyn WireExchange>,
+    ca_prefix: Name,
+    signer: Arc<dyn Signer>,
+}
+
+impl SignedInterestCaExchange {
+    pub fn new(wire: Arc<dyn WireExchange>, ca_prefix: Name, signer: Arc<dyn Signer>) -> Self {
+        Self {
+            wire,
+            ca_prefix,
+            signer,
+        }
+    }
+
+    /// Build a signed command Interest (NEW / CHALLENGE) carrying `body` as
+    /// ApplicationParameters, signed by the enrolling key.
+    async fn signed_interest(&self, name: Name, body: &[u8]) -> Result<Bytes, JoinError> {
+        let key_locator = self
+            .signer
+            .cert_name()
+            .cloned()
+            .or_else(|| Some(self.signer.key_name().clone()));
+        let signer = Arc::clone(&self.signer);
+        InterestBuilder::new(name)
+            .must_be_fresh()
+            .app_parameters(body.to_vec())
+            .sign_fallible(self.signer.sig_type(), key_locator.as_ref(), |region| {
+                let signer = Arc::clone(&signer);
+                let region = Bytes::copy_from_slice(region);
+                async move { signer.sign(&region).await }
+            })
+            .await
+            .map_err(|e: ndn_security::TrustError| {
+                JoinError::Protocol(format!("sign interest: {e}"))
+            })
+    }
+}
+
+#[async_trait]
+impl CaExchange for SignedInterestCaExchange {
+    async fn new_request(&self, body: &[u8]) -> Result<Bytes, JoinError> {
+        let name = self.ca_prefix.clone().append(b"CA").append(b"NEW");
+        let interest = self.signed_interest(name, body).await?;
+        data_content(&self.wire.express(interest).await?)
+    }
+
+    async fn challenge_request(
+        &self,
+        _request_id: &str,
+        request_id_bytes: &[u8; 8],
+        body: &[u8],
+    ) -> Result<Bytes, JoinError> {
+        let name = self
+            .ca_prefix
+            .clone()
+            .append(b"CA")
+            .append(b"CHALLENGE")
+            .append_component(NameComponent::generic(Bytes::copy_from_slice(request_id_bytes)));
+        let interest = self.signed_interest(name, body).await?;
+        data_content(&self.wire.express(interest).await?)
+    }
+
+    async fn fetch_cert(&self, cert_name: &str) -> Result<Bytes, JoinError> {
+        let name: Name = cert_name
+            .parse()
+            .map_err(|e| JoinError::Cert(format!("cert name {cert_name}: {e:?}")))?;
+        let interest = InterestBuilder::new(name).must_be_fresh().build();
+        // The certificate *is* a Data packet — return its wire unchanged.
+        self.wire.express(interest).await
+    }
+}
+
+/// Extract the `Content` from a reply Data wire.
+fn data_content(data_wire: &[u8]) -> Result<Bytes, JoinError> {
+    let data = Data::decode(Bytes::copy_from_slice(data_wire))
+        .map_err(|e| JoinError::Protocol(format!("decode reply Data: {e:?}")))?;
+    Ok(data.content().cloned().unwrap_or_default())
 }
 
 /// A software identity restored from a SafeBag: the Ed25519 seed (to rebuild
@@ -179,6 +288,52 @@ pub fn load_software_safebag(path: &Path, passphrase: &[u8]) -> Result<RestoredI
     })
 }
 
+/// An enclave identity persisted **without** a private key: the issued cert
+/// plus the platform key-handle naming the enclave key to sign with later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnclaveIdentity {
+    /// Opaque platform reference to the enclave key (e.g. the Android Keystore
+    /// alias or the Secure-Enclave key tag) — rebound to an
+    /// [`EnclaveBackend`](ndn_custodian::EnclaveBackend) on load.
+    pub key_handle: String,
+    pub cert_wire: Bytes,
+}
+
+/// Persist an **enclave** identity at `path`. Unlike the software tier there is
+/// no SafeBag: the private key never leaves secure hardware, so only the issued
+/// cert and a reference to the enclave key handle are stored. On load the
+/// handle is rebound to the platform `EnclaveBackend` (Phase 4 wires the real
+/// Keystore/Enclave). Framing: `u32-BE handle_len ‖ handle ‖ cert_wire`.
+pub fn save_enclave_identity(
+    path: &Path,
+    key_handle: &str,
+    cert_wire: &Bytes,
+) -> Result<(), JoinError> {
+    let mut buf = Vec::with_capacity(4 + key_handle.len() + cert_wire.len());
+    buf.extend_from_slice(&(key_handle.len() as u32).to_be_bytes());
+    buf.extend_from_slice(key_handle.as_bytes());
+    buf.extend_from_slice(cert_wire);
+    std::fs::write(path, buf).map_err(|e| JoinError::Io(e.to_string()))
+}
+
+/// Reload an enclave identity persisted by [`save_enclave_identity`].
+pub fn load_enclave_identity(path: &Path) -> Result<EnclaveIdentity, JoinError> {
+    let buf = std::fs::read(path).map_err(|e| JoinError::Io(e.to_string()))?;
+    if buf.len() < 4 {
+        return Err(JoinError::Cert("enclave identity file truncated".into()));
+    }
+    let hl = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if buf.len() < 4 + hl {
+        return Err(JoinError::Cert("enclave identity handle truncated".into()));
+    }
+    let key_handle = String::from_utf8(buf[4..4 + hl].to_vec())
+        .map_err(|_| JoinError::Cert("enclave key handle is not UTF-8".into()))?;
+    Ok(EnclaveIdentity {
+        key_handle,
+        cert_wire: Bytes::copy_from_slice(&buf[4 + hl..]),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +363,7 @@ mod tests {
         async fn challenge_request(
             &self,
             request_id: &str,
+            _request_id_bytes: &[u8; 8],
             body: &[u8],
         ) -> Result<Bytes, JoinError> {
             self.state
@@ -302,5 +458,102 @@ mod tests {
             .await
             .expect_err("a wrong token must not yield a certificate");
         assert!(matches!(err, JoinError::Protocol(_)));
+    }
+
+    /// A [`WireExchange`] standing in for the CA reached over the IPC seam: it
+    /// decodes the signed Interest the native `SignedInterestCaExchange` builds,
+    /// routes NEW / CHALLENGE / cert-fetch to a real `CaState`, and wraps each
+    /// reply as a Data wire — exactly what a forwarder + CA would do over the
+    /// seam, minus the socket (the socket itself is witnessed by ndn-mgmt's
+    /// ipc_seam test).
+    struct CaWire {
+        ca: InProcessCa,
+    }
+
+    #[async_trait]
+    impl WireExchange for CaWire {
+        async fn express(&self, interest_wire: Bytes) -> Result<Bytes, JoinError> {
+            use ndn_packet::Interest;
+            use ndn_packet::encode::DataBuilder;
+
+            let interest = Interest::decode(interest_wire)
+                .map_err(|e| JoinError::Protocol(format!("CA decode interest: {e:?}")))?;
+            let comps = interest.name.components();
+            let verb_pos = |v: &[u8]| comps.iter().position(|c| c.value.as_ref() == v);
+
+            if verb_pos(b"NEW").is_some() {
+                let body = interest
+                    .app_parameters()
+                    .ok_or_else(|| JoinError::Protocol("NEW interest has no params".into()))?;
+                let resp = self.ca.new_request(body).await?;
+                Ok(DataBuilder::new(interest.name.as_ref().clone(), resp.as_ref()).sign_digest_sha256())
+            } else if let Some(i) = verb_pos(b"CHALLENGE") {
+                // The request-id component follows CHALLENGE (the trailing
+                // ParametersSha256Digest the signed-interest encoder appends is
+                // after it). `request_id` (the CA's key) is hex of those bytes.
+                let rid = comps
+                    .get(i + 1)
+                    .ok_or_else(|| JoinError::Protocol("CHALLENGE missing request-id".into()))?
+                    .value
+                    .clone();
+                let rid_bytes: [u8; 8] = rid
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| JoinError::Protocol("request-id not 8 bytes".into()))?;
+                let request_id: String = rid_bytes.iter().map(|b| format!("{b:02x}")).collect();
+                let body = interest.app_parameters().ok_or_else(|| {
+                    JoinError::Protocol("CHALLENGE interest has no params".into())
+                })?;
+                let resp = self
+                    .ca
+                    .challenge_request(&request_id, &rid_bytes, body)
+                    .await?;
+                Ok(DataBuilder::new(interest.name.as_ref().clone(), resp.as_ref()).sign_digest_sha256())
+            } else {
+                // Cert fetch — the served cert is already a Data wire.
+                self.ca.fetch_cert(&interest.name.to_string()).await
+            }
+        }
+    }
+
+    /// Phase-4 fold-in (seam 1): the native enroll transport — signed NEW /
+    /// CHALLENGE Interests over a `WireExchange` — drives a full token
+    /// enrollment against a real CA and yields a usable certificate.
+    #[tokio::test]
+    async fn signed_interest_exchange_enrolls_over_the_wire() {
+        let ca_prefix: Name = "/home/bob/CA".parse().unwrap();
+        let wire = Arc::new(CaWire {
+            ca: InProcessCa {
+                state: make_token_ca("over-the-wire"),
+            },
+        });
+
+        let key_name: Name = "/home/bob/phone/KEY/k2".parse().unwrap();
+        let signer = Arc::new(Ed25519Signer::from_seed(&[0x77u8; 32], key_name.clone()));
+        let exchange =
+            SignedInterestCaExchange::new(wire, ca_prefix, Arc::clone(&signer) as Arc<dyn Signer>);
+
+        let joined = enroll_via_token(&exchange, key_name, signer, "over-the-wire", 86_400)
+            .await
+            .expect("token enrollment over the signed-interest wire transport");
+        assert!(joined.cert_name.to_string().starts_with("/home/bob/phone"));
+        assert!(!joined.cert_wire.is_empty());
+        // The issued cert decodes as a Data packet.
+        assert!(ndn_packet::Data::decode(joined.cert_wire.clone()).is_ok());
+    }
+
+    /// Enclave persistence tier: cert + key-handle round-trips (no SafeBag — an
+    /// enclave key's private half never leaves secure hardware).
+    #[test]
+    fn enclave_identity_round_trips() {
+        let cert = Bytes::from_static(b"\x06\x20issued-cert-data-wire-stand-in...");
+        let path = std::env::temp_dir().join(format!("ndn-enclave-id-{}.bin", std::process::id()));
+
+        save_enclave_identity(&path, "android-keystore://ndn-op-key", &cert).expect("save");
+        let loaded = load_enclave_identity(&path).expect("load");
+
+        assert_eq!(loaded.key_handle, "android-keystore://ndn-op-key");
+        assert_eq!(loaded.cert_wire, cert);
+        let _ = std::fs::remove_file(&path);
     }
 }
