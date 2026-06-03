@@ -8,9 +8,10 @@
 //! client falls back to `DigestSha256` — that fallback is the "gate".
 //!
 //! This module is deliberately Dioxus-free so it stays unit-testable and is
-//! shared verbatim by the native and wasm builds. UI reactivity is handled at
-//! the call sites via [`crate::app_shared::bump_keyring_gen`] after a mutation;
-//! views that render keyring state subscribe by reading `KEYRING_GEN`.
+//! shared verbatim by the native and wasm builds. UI reactivity is handled by
+//! the *caller's* UI layer after a mutation (the Dioxus dashboard bumps a
+//! change generation; a native UI re-reads or subscribes) — this core neither
+//! knows nor depends on any UI framework.
 //!
 //! Each held identity carries its *own* backing [`Custodian`]: on-host
 //! identities share the keyring's [`InPageCustodian`], while a remote-signer
@@ -138,8 +139,8 @@ fn fingerprint_of(pk: Option<&Bytes>) -> String {
 /// Core: add (or replace) a held identity in the keyring and make it active.
 /// `custodian` is the backend that signs for it (the shared `InPageCustodian`
 /// for on-host keys, a `RemoteCustodian` for off-host ones); `custodian_ref`
-/// records where the key lives. Callers from the UI should follow with
-/// [`crate::app_shared::bump_keyring_gen`].
+/// records where the key lives. Callers should refresh their UI's keyring view
+/// after a mutation.
 #[allow(clippy::too_many_arguments)]
 fn insert_held(
     key_id: KeyId,

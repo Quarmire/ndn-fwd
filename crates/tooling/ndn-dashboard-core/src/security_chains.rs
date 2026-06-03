@@ -981,7 +981,7 @@ mod tests {
         crate::security_chains::append_audit_entry(entry.clone());
         let after = crate::security_chains::audit_chain_snapshot();
         assert!(
-            after.len() >= before + 1,
+            after.len() > before,
             "snapshot length didn't grow: before={before} after={}",
             after.len()
         );
@@ -1053,7 +1053,7 @@ mod tests {
         };
         crate::security_chains::append_schema_entry(entry);
         let after = crate::security_chains::schema_journal_snapshot();
-        assert!(after.len() >= before + 1);
+        assert!(after.len() > before);
         let last = after.last().expect("non-empty after append");
         assert_eq!(last.kind, SchemaJournalKind::AnchorAdd);
         assert!(last.subject_name.starts_with("anchor=/lab/ca/KEY/k0"));

@@ -21,28 +21,26 @@ mod browser_engine;
 mod fonts;
 #[cfg(feature = "desktop")]
 mod forwarder_proc;
-pub mod forwarder_profile;
-mod identity_axis;
 #[cfg(feature = "desktop")]
 mod notify_sub;
-mod keyguard;
-mod operator_keyring;
-mod operator_keyring_store;
-mod preprovision;
 mod resizable;
-mod security_chains;
 mod security_gate;
 mod security_state;
 mod security_surfaces;
 pub mod settings;
-mod signed_data_chain;
 mod styles;
 #[cfg(feature = "desktop")]
 pub mod tool_runner;
 #[cfg(feature = "desktop")]
 mod tray;
-mod types;
 mod views;
+
+// UI-agnostic logic + data models now live in `ndn-dashboard-core`; re-export
+// them at the crate root so existing `crate::<module>::…` paths keep resolving.
+pub use ndn_dashboard_core::{
+    forwarder_profile, identity_axis, keyguard, operator_keyring, operator_keyring_store,
+    preprovision, security_chains, signed_data_chain, types,
+};
 
 #[cfg(feature = "web")]
 mod ws_mgmt;

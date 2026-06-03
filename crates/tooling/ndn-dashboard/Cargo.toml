@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["desktop"]
 desktop = [
+  "ndn-dashboard-core/desktop",
   "dep:tray-icon",
   "dep:dirs-next",
   "dep:which",
@@ -39,6 +40,7 @@ desktop = [
   "ndn-tlv/std",
 ]
 web = [
+  "ndn-dashboard-core/web",
   "dioxus/web",
   "dep:gloo-net",
   "dep:web-sys",
@@ -85,6 +87,9 @@ witness-export = [
 ]
 
 [dependencies]
+# UI-agnostic logic + data models (operator keyring/custodian, trust/audit
+# chains, forwarder profile, the data structs the UI renders). Dioxus-free.
+ndn-dashboard-core = { path = "../ndn-dashboard-core" }
 ndn-config = { workspace = true, optional = true }
 ndn-mgmt-wire = { workspace = true }
 # Wasm-safe Custodian trait + CustodianRef (the canonical "where the key lives"
