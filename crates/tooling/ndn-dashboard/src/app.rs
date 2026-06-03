@@ -613,8 +613,15 @@ pub fn App() -> Element {
             crate::security_state::reset_acceptance();
             *LAST_LOG_SEQ.write() = 0;
 
+            // The engine owns the connected client: the poll loop drives it
+            // (forwarding plane via `poll_forwarding`) while commands and the
+            // not-yet-modeled datasets borrow it back via `client`/`client_mut`.
+            let mut engine = ndn_dashboard_core::DashboardEngine::new(
+                crate::native_mgmt::NativeMgmtClient(client),
+            );
+
             if let Err(e) = poll_all(
-                &client,
+                &mut engine,
                 status,
                 faces,
                 routes,
@@ -677,7 +684,7 @@ pub fn App() -> Element {
             'session: loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history).await {
+                        if let Err(e) = poll_all(&mut engine, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history).await {
                             conn_state.set(ConnState::Disconnected);
                             error_msg.set(Some(e));
                             break 'session;
@@ -689,14 +696,18 @@ pub fn App() -> Element {
                             // Event-driven immediate poll (notify_sub) — same
                             // refresh as an interval tick, off-cadence.
                             DashCmd::RefreshNow => {
-                                if let Err(e) = poll_all(&client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history).await {
+                                if let Err(e) = poll_all(&mut engine, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history).await {
                                     conn_state.set(ConnState::Disconnected);
                                     error_msg.set(Some(e));
                                     break 'session;
                                 }
                             }
                             _ => {
-                                run_cmd(cmd_msg, &client, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history, trust_validation).await;
+                                run_cmd(cmd_msg, &engine, status, faces, routes, rib_entries, cs, strategies, counters, measurements, error_msg, config_toml, throughput, prev_counters, session_log, recording, neighbors, security_keys, security_anchors, ca_info, schema_rules, yubikey_status, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history, trust_validation).await;
+                                // Immediate post-command refresh — moved out of run_cmd (which now
+                                // takes a shared &engine) into the loop, which owns the &mut engine.
+                                // Best-effort: a failure surfaces on the next interval tick.
+                                let _ = poll_all(&mut engine, status, faces, routes, rib_entries, cs, strategies, counters, measurements, config_toml, throughput, prev_counters, neighbors, security_keys, security_anchors, ca_info, schema_rules, cs_hit_history, face_throughput, face_prev_ctr, discovery_status, dvr_status, identity_name, identity_is_ephemeral, identity_pib_path, cert_valid_until_unix_s, mgmt_signed_commands_required, mgmt_access_policy, security_surface_supported, validation_stats, validation_history).await;
                             }
                         }
                     }
@@ -1601,7 +1612,7 @@ fn default_socket_path() -> String {
 
 #[allow(clippy::too_many_arguments)]
 async fn poll_all(
-    client: &MgmtClient,
+    engine: &mut ndn_dashboard_core::DashboardEngine<crate::native_mgmt::NativeMgmtClient>,
     mut status: Signal<Option<ForwarderStatus>>,
     mut faces: Signal<Vec<FaceInfo>>,
     mut routes: Signal<Vec<FibEntry>>,
@@ -1633,52 +1644,53 @@ async fn poll_all(
     mut validation_stats: Signal<Option<ValidationStats>>,
     mut validation_history: Signal<VecDeque<(u64, u64)>>,
 ) -> Result<(), String> {
-    match client.status().await {
-        Ok(gs) => status.set(Some(ForwarderStatus::from_general(&gs))),
-        Err(e) => return Err(e.to_string()),
-    }
-    match client.face_list().await {
-        Ok(faces_data) => {
-            let face_infos: Vec<FaceInfo> = faces_data
-                .iter()
-                .map(|fs| FaceInfo::from(fs.clone()))
-                .collect();
-            let derived_counters: Vec<FaceCounter> = face_infos
-                .iter()
-                .map(|f| FaceCounter {
-                    face_id: f.face_id,
-                    in_interests: f.n_in_interests,
-                    in_data: f.n_in_data,
-                    out_interests: f.n_out_interests,
-                    out_data: f.n_out_data,
-                    in_bytes: f.n_in_bytes,
-                    out_bytes: f.n_out_bytes,
-                })
-                .collect();
-            faces.set(face_infos);
-            counters.set(derived_counters);
+    use ndn_dashboard_core::StateUpdate;
+
+    // Forwarding plane via the engine (status/faces/fib/cs/strategy), with the
+    // engine owning the wire→view-model mapping. The desktop treats these as
+    // fatal — a missing one means the forwarder or socket is unhealthy, so we
+    // reconnect (unlike the web's best-effort poll). The throughput/per-face
+    // history derivation below is unchanged; it reads the `counters` signal.
+    let updates = engine.poll_forwarding().await;
+    for essential in [
+        StateUpdate::Status,
+        StateUpdate::Faces,
+        StateUpdate::Routes,
+        StateUpdate::Cs,
+        StateUpdate::Strategies,
+    ] {
+        if !updates.contains(&essential) {
+            return Err(format!("forwarding poll incomplete ({essential:?} missing)"));
         }
-        Err(e) => return Err(e.to_string()),
     }
-    match client.route_list().await {
-        Ok(fib_data) => routes.set(fib_data.into_iter().map(FibEntry::from).collect()),
-        Err(e) => return Err(e.to_string()),
+    {
+        let st = engine.state();
+        status.set(st.status.clone());
+        let face_infos = st.faces.clone();
+        let derived_counters: Vec<FaceCounter> = face_infos
+            .iter()
+            .map(|f| FaceCounter {
+                face_id: f.face_id,
+                in_interests: f.n_in_interests,
+                in_data: f.n_in_data,
+                out_interests: f.n_out_interests,
+                out_data: f.n_out_data,
+                in_bytes: f.n_in_bytes,
+                out_bytes: f.n_out_bytes,
+            })
+            .collect();
+        faces.set(face_infos);
+        counters.set(derived_counters);
+        routes.set(st.routes.clone());
+        cs.set(st.cs.clone());
+        strategies.set(st.strategies.clone());
     }
+
+    // Datasets the engine doesn't model yet — drive the engine's client
+    // directly. These stay best-effort, as before.
+    let client = &engine.client().0;
     if let Ok(rib_data) = client.rib_list().await {
         rib_entries.set(rib_data.into_iter().map(RibEntryInfo::from).collect());
-    }
-    match client.cs_info().await {
-        Ok(r) => cs.set(CsInfo::parse(&r.status_text)),
-        Err(e) => return Err(e.to_string()),
-    }
-    match client.strategy_list().await {
-        Ok(strategies_data) => strategies.set(
-            strategies_data
-                .into_iter()
-                .map(StrategyEntry::from)
-                .collect(),
-        ),
-        Err(e) => return Err(e.to_string()),
     }
     if let Ok(r) = client.measurements_list().await {
         measurements.set(MeasurementEntry::parse_list(&r.status_text));
@@ -1936,7 +1948,7 @@ fn cmd_to_session_entry(cmd: &DashCmd) -> Option<SessionEntry> {
 #[allow(clippy::too_many_arguments)]
 async fn run_cmd(
     cmd: DashCmd,
-    client: &MgmtClient,
+    engine: &ndn_dashboard_core::DashboardEngine<crate::native_mgmt::NativeMgmtClient>,
     status: Signal<Option<ForwarderStatus>>,
     faces: Signal<Vec<FaceInfo>>,
     routes: Signal<Vec<FibEntry>>,
@@ -1973,6 +1985,11 @@ async fn run_cmd(
     validation_history: Signal<VecDeque<(u64, u64)>>,
     mut trust_validation: Signal<Option<(String, TrustValidationResult)>>,
 ) {
+    // The engine owns the client; command dispatch reads it through a shared
+    // borrow (ndn-ipc's methods are `&self`). The typed `client.*` calls below
+    // are unchanged. The native UI calls the engine's command builders instead.
+    let client = &engine.client().0;
+
     if *recording.read()
         && let Some(entry) = cmd_to_session_entry(&cmd)
     {
@@ -2104,7 +2121,7 @@ async fn run_cmd(
                     recording.set(false);
                     Box::pin(run_cmd(
                         replay_cmd,
-                        client,
+                        engine,
                         status,
                         faces,
                         routes,
@@ -2447,40 +2464,8 @@ async fn run_cmd(
             if let Some(label) = op_label {
                 push_toast(label, ToastLevel::Success);
             }
-            let _ = poll_all(
-                client,
-                status,
-                faces,
-                routes,
-                rib_entries,
-                cs,
-                strategies,
-                counters,
-                measurements,
-                config_toml,
-                throughput,
-                prev_counters,
-                neighbors,
-                security_keys,
-                security_anchors,
-                ca_info,
-                schema_rules,
-                cs_hit_history,
-                face_throughput,
-                face_prev_ctr,
-                discovery_status,
-                dvr_status,
-                identity_name,
-                identity_is_ephemeral,
-                identity_pib_path,
-                cert_valid_until_unix_s,
-                mgmt_signed_commands_required,
-                mgmt_access_policy,
-                security_surface_supported,
-                validation_stats,
-                validation_history,
-            )
-            .await;
+            // The immediate post-command refresh now runs in the coroutine loop
+            // (which owns `&mut engine`) right after run_cmd returns.
         }
         Err(e) => {
             push_toast(humanize_cmd_error(&e), ToastLevel::Error);

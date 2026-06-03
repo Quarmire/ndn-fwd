@@ -12,9 +12,6 @@ use ndn_ipc::MgmtClient;
 
 /// Newtype wrapper so the dashboard can implement the core-defined
 /// `ManagementClient` over the ndn-ipc Unix-socket client.
-// `allow(dead_code)`: the consumer is the headless `DashboardEngine` (the next
-// slice of the generic-send-cmd unification); remove the allow when it lands.
-#[allow(dead_code)]
 pub struct NativeMgmtClient(pub MgmtClient);
 
 #[async_trait::async_trait(?Send)]

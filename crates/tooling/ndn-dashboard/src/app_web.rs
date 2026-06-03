@@ -71,10 +71,10 @@ pub fn AppWeb() -> Element {
     let mut conn_state: Signal<ConnState> = use_signal(|| ConnState::Disconnected);
     let mut ws_url: Signal<String> = use_signal(default_ws_url);
     let status: Signal<Option<ForwarderStatus>> = use_signal(|| None);
-    let mut faces: Signal<Vec<FaceInfo>> = use_signal(Vec::new);
-    let mut routes: Signal<Vec<FibEntry>> = use_signal(Vec::new);
+    let faces: Signal<Vec<FaceInfo>> = use_signal(Vec::new);
+    let routes: Signal<Vec<FibEntry>> = use_signal(Vec::new);
     let rib_entries: Signal<Vec<RibEntryInfo>> = use_signal(Vec::new);
-    let mut cs: Signal<Option<CsInfo>> = use_signal(|| None);
+    let cs: Signal<Option<CsInfo>> = use_signal(|| None);
     let strategies: Signal<Vec<StrategyEntry>> = use_signal(Vec::new);
     let counters: Signal<Vec<FaceCounter>> = use_signal(Vec::new);
     let measurements: Signal<Vec<MeasurementEntry>> = use_signal(Vec::new);
