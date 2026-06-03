@@ -44,6 +44,8 @@ pub use ndn_dashboard_core::{
 
 #[cfg(feature = "web")]
 mod ws_mgmt;
+#[cfg(feature = "desktop")]
+mod native_mgmt;
 
 fn main() {
     #[cfg(feature = "desktop")]
