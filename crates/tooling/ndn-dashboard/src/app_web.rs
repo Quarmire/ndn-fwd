@@ -202,9 +202,14 @@ pub fn AppWeb() -> Element {
             crate::security_state::reset_acceptance();
             *LAST_LOG_SEQ.write() = 0;
 
+            // The engine now owns the connected client: the poll loop drives it
+            // (forwarding plane via `poll_forwarding`) and commands borrow it
+            // back via `client_mut`.
+            let mut engine = ndn_dashboard_core::DashboardEngine::new(client);
+
             // Initial poll
             if let Err(e) = poll_all_web(
-                &mut client,
+                &mut engine,
                 &status,
                 &faces,
                 &routes,
@@ -268,7 +273,7 @@ pub fn AppWeb() -> Element {
                         other => {
                             run_cmd_web(
                                 other,
-                                &mut client,
+                                engine.client_mut(),
                                 &error_msg,
                                 &trust_validation,
                                 &identity_name,
@@ -285,7 +290,7 @@ pub fn AppWeb() -> Element {
 
                 // Poll
                 if let Err(e) = poll_all_web(
-                    &mut client,
+                    &mut engine,
                     &status,
                     &faces,
                     &routes,
@@ -762,7 +767,7 @@ fn render_view_web(view: View) -> Element {
 
 #[allow(clippy::too_many_arguments)]
 async fn poll_all_web(
-    client: &mut WsMgmtClient,
+    engine: &mut ndn_dashboard_core::DashboardEngine<WsMgmtClient>,
     status: &Signal<Option<ForwarderStatus>>,
     faces: &Signal<Vec<FaceInfo>>,
     routes: &Signal<Vec<FibEntry>>,
@@ -782,92 +787,43 @@ async fn poll_all_web(
     validation_stats: &Signal<Option<ValidationStats>>,
     validation_history: &Signal<VecDeque<(u64, u64)>>,
 ) -> Result<(), String> {
-    use ndn_config::nfd_dataset;
+    use ndn_dashboard_core::StateUpdate;
 
-    if let Ok(resp) = client.status_general().await
-        && let Ok(gs) = ndn_mgmt_wire::GeneralStatus::decode(resp.body.clone())
-    {
-        let mut status_sig = *status;
-        status_sig.set(Some(ForwarderStatus::from_general(&gs)));
+    // Forwarding plane: one engine poll replaces the per-dataset fetch+parse
+    // that used to live here and (duplicated) in app.rs — the engine owns the
+    // wire→view-model mapping now. Each StateUpdate copies the engine's state
+    // into the matching Signal; a block that didn't refresh leaves its Signal
+    // (and the engine's retained value) untouched, the same best-effort
+    // semantics as before.
+    for upd in engine.poll_forwarding().await {
+        let st = engine.state();
+        match upd {
+            StateUpdate::Status => {
+                let mut s = *status;
+                s.set(st.status.clone());
+            }
+            StateUpdate::Faces => {
+                let mut s = *faces;
+                s.set(st.faces.clone());
+            }
+            StateUpdate::Routes => {
+                let mut s = *routes;
+                s.set(st.routes.clone());
+            }
+            StateUpdate::Cs => {
+                let mut s = *cs;
+                s.set(st.cs.clone());
+            }
+            StateUpdate::Strategies => {
+                let mut s = *strategies;
+                s.set(st.strategies.clone());
+            }
+        }
     }
 
-    if let Ok(resp) = client.list_faces().await
-        && resp.is_ok()
-    {
-        let entries = nfd_dataset::FaceStatus::decode_all(&resp.body);
-        let mapped: Vec<FaceInfo> = entries
-            .into_iter()
-            .map(|fs| FaceInfo {
-                face_id: fs.face_id,
-                remote_uri: Some(fs.uri.clone()),
-                local_uri: if fs.local_uri.is_empty() {
-                    None
-                } else {
-                    Some(fs.local_uri.clone())
-                },
-                persistency: fs.persistency_str().to_string(),
-                kind: None,
-                face_scope: fs.face_scope,
-                link_type: fs.link_type,
-                mtu: fs.mtu,
-                n_in_interests: fs.n_in_interests,
-                n_out_interests: fs.n_out_interests,
-                n_in_data: fs.n_in_data,
-                n_out_data: fs.n_out_data,
-                n_in_bytes: fs.n_in_bytes,
-                n_out_bytes: fs.n_out_bytes,
-                n_in_nacks: fs.n_in_nacks,
-                n_out_nacks: fs.n_out_nacks,
-                flags: fs.flags,
-            })
-            .collect();
-        let mut faces_sig = *faces;
-        faces_sig.set(mapped);
-    }
-
-    if let Ok(resp) = client.list_fib().await
-        && resp.is_ok()
-    {
-        let entries = nfd_dataset::FibEntry::decode_all(&resp.body);
-        let mapped: Vec<FibEntry> = entries
-            .into_iter()
-            .map(|fe| FibEntry {
-                prefix: fe.name.to_string(),
-                nexthops: fe
-                    .nexthops
-                    .iter()
-                    .map(|nh| NextHop {
-                        face_id: nh.face_id,
-                        cost: nh.cost as u32,
-                    })
-                    .collect(),
-            })
-            .collect();
-        let mut routes_sig = *routes;
-        routes_sig.set(mapped);
-    }
-
-    if let Ok(resp) = client.cs_info().await
-        && resp.is_ok()
-    {
-        let mut cs_sig = *cs;
-        cs_sig.set(CsInfo::parse(&resp.status_text));
-    }
-
-    if let Ok(resp) = client.list_strategy().await
-        && resp.is_ok()
-    {
-        let entries = nfd_dataset::StrategyChoice::decode_all(&resp.body);
-        let mapped: Vec<StrategyEntry> = entries
-            .into_iter()
-            .map(|sc| StrategyEntry {
-                prefix: sc.name.to_string(),
-                strategy: sc.strategy.to_string(),
-            })
-            .collect();
-        let mut strategies_sig = *strategies;
-        strategies_sig.set(mapped);
-    }
+    // The security/identity datasets aren't in the engine yet; reborrow the
+    // engine's client and poll them as before.
+    let client = engine.client_mut();
 
     // Auth-exempt verbs per `is_public_dataset_verb`; the web build
     // now polls them so chip + gate + tabs hit feature parity with

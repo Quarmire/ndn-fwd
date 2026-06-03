@@ -280,29 +280,9 @@ impl WsMgmtClient {
         }
     }
 
-    pub async fn status_general(&mut self) -> Result<MgmtResponse> {
-        self.send_cmd("status", "general", None).await
-    }
-
-    pub async fn list_faces(&mut self) -> Result<MgmtResponse> {
-        self.send_cmd("faces", "list", None).await
-    }
-
-    pub async fn list_fib(&mut self) -> Result<MgmtResponse> {
-        self.send_cmd("fib", "list", None).await
-    }
-
-    pub async fn list_rib(&mut self) -> Result<MgmtResponse> {
-        self.send_cmd("rib", "list", None).await
-    }
-
-    pub async fn cs_info(&mut self) -> Result<MgmtResponse> {
-        self.send_cmd("cs", "info", None).await
-    }
-
-    pub async fn list_strategy(&mut self) -> Result<MgmtResponse> {
-        self.send_cmd("strategy-choice", "list", None).await
-    }
+    // The forwarding-plane datasets (status/faces/fib/rib/cs/strategy) are now
+    // polled through `DashboardEngine::poll_forwarding`; the security datasets
+    // below stay here until the engine grows a security-poll path.
 
     pub async fn security_identity_list(&mut self) -> Result<MgmtResponse> {
         self.send_cmd("security", "identity-list", None).await
