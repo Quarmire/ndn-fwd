@@ -11,9 +11,10 @@
 //! shares one parse layer instead of duplicating the closures `app.rs` /
 //! `app_web.rs` grew independently.
 
-use crate::mgmt::ManagementClient;
+use crate::mgmt::{ManagementClient, MgmtResponse};
 use crate::types::{CsInfo, FaceInfo, FibEntry, ForwarderStatus, NextHop, StrategyEntry};
-use ndn_config::nfd_dataset;
+use ndn_config::{ControlParameters, nfd_dataset};
+use ndn_packet::Name;
 
 /// Headless snapshot of a forwarder's forwarding-plane state. Plain data owned
 /// by the engine and mutated under `&mut self`; a UI reads snapshots from it.
@@ -114,6 +115,131 @@ impl<M: ManagementClient> DashboardEngine<M> {
 
         changed
     }
+
+    // ── command dispatch (forwarding plane) ─────────────────────────────
+    //
+    // Typed builders construct the `ControlParameters` for a verb and send it,
+    // so a UI calls `engine.route_register(prefix, face, cost)` instead of
+    // hand-rolling parameters — the logic the Dioxus `run_cmd` arms duplicated
+    // now lives once, reusable from a native UI. UI-side effects (audit
+    // journaling, error toasts, re-poll) stay in the caller. Security / schema
+    // / CA verbs (which carry audit side-effects) are a follow-up slice; the
+    // generic `command` escape hatch covers them in the meantime.
+
+    /// Generic command escape hatch — send any `/localhost/nfd/<module>/<verb>`
+    /// with optional parameters.
+    pub async fn command(
+        &mut self,
+        module: &str,
+        verb: &str,
+        params: Option<&ControlParameters>,
+    ) -> Result<MgmtResponse, String> {
+        self.client.send_cmd(module, verb, params).await
+    }
+
+    pub async fn face_create(&mut self, uri: String) -> Result<MgmtResponse, String> {
+        let params = ControlParameters {
+            uri: Some(uri),
+            ..Default::default()
+        };
+        self.client.send_cmd("faces", "create", Some(&params)).await
+    }
+
+    pub async fn face_destroy(&mut self, face_id: u64) -> Result<MgmtResponse, String> {
+        let params = ControlParameters {
+            face_id: Some(face_id),
+            ..Default::default()
+        };
+        self.client.send_cmd("faces", "destroy", Some(&params)).await
+    }
+
+    pub async fn route_register(
+        &mut self,
+        prefix: &str,
+        face_id: u64,
+        cost: u64,
+    ) -> Result<MgmtResponse, String> {
+        let name = parse_name(prefix, "prefix")?;
+        let params = ControlParameters {
+            name: Some(name),
+            // face_id == 0 means "use the requesting face" — leave it unset so
+            // the forwarder resolves it from the PIT.
+            face_id: (face_id != 0).then_some(face_id),
+            cost: Some(cost),
+            ..Default::default()
+        };
+        self.client.send_cmd("rib", "register", Some(&params)).await
+    }
+
+    pub async fn route_unregister(
+        &mut self,
+        prefix: &str,
+        face_id: u64,
+    ) -> Result<MgmtResponse, String> {
+        let name = parse_name(prefix, "prefix")?;
+        let params = ControlParameters {
+            name: Some(name),
+            face_id: (face_id != 0).then_some(face_id),
+            ..Default::default()
+        };
+        self.client.send_cmd("rib", "unregister", Some(&params)).await
+    }
+
+    pub async fn strategy_set(
+        &mut self,
+        prefix: &str,
+        strategy: &str,
+    ) -> Result<MgmtResponse, String> {
+        let name = parse_name(prefix, "prefix")?;
+        let strategy_name = parse_name(strategy, "strategy")?;
+        let params = ControlParameters {
+            name: Some(name),
+            strategy: Some(strategy_name),
+            ..Default::default()
+        };
+        self.client
+            .send_cmd("strategy-choice", "set", Some(&params))
+            .await
+    }
+
+    pub async fn strategy_unset(&mut self, prefix: &str) -> Result<MgmtResponse, String> {
+        let name = parse_name(prefix, "prefix")?;
+        let params = ControlParameters {
+            name: Some(name),
+            ..Default::default()
+        };
+        self.client
+            .send_cmd("strategy-choice", "unset", Some(&params))
+            .await
+    }
+
+    pub async fn cs_capacity(&mut self, capacity: u64) -> Result<MgmtResponse, String> {
+        let params = ControlParameters {
+            capacity: Some(capacity),
+            ..Default::default()
+        };
+        self.client.send_cmd("cs", "config", Some(&params)).await
+    }
+
+    pub async fn cs_erase(&mut self, prefix: &str) -> Result<MgmtResponse, String> {
+        let name = parse_name(prefix, "prefix")?;
+        let params = ControlParameters {
+            name: Some(name),
+            ..Default::default()
+        };
+        self.client.send_cmd("cs", "erase", Some(&params)).await
+    }
+
+    pub async fn shutdown(&mut self) -> Result<MgmtResponse, String> {
+        self.client.send_cmd("status", "shutdown", None).await
+    }
+}
+
+/// Parse an NDN name argument, turning a parse failure into a UI-displayable
+/// error (`what` names the field, e.g. "prefix" / "strategy").
+fn parse_name(s: &str, what: &str) -> Result<Name, String> {
+    s.parse::<Name>()
+        .map_err(|e| format!("invalid {what} '{s}': {e:?}"))
 }
 
 fn face_info(fs: &nfd_dataset::FaceStatus) -> FaceInfo {
@@ -202,6 +328,68 @@ mod tests {
                 other => Err(format!("unexpected verb: {other:?}")),
             }
         }
+    }
+
+    /// Records every command so a builder's `(module, verb, params)` can be
+    /// asserted without a live forwarder.
+    #[derive(Default)]
+    struct RecordingClient {
+        calls: Vec<(String, String, Option<ControlParameters>)>,
+    }
+
+    #[async_trait(?Send)]
+    impl ManagementClient for RecordingClient {
+        async fn send_cmd(
+            &mut self,
+            module: &str,
+            verb: &str,
+            params: Option<&ControlParameters>,
+        ) -> Result<MgmtResponse, String> {
+            self.calls
+                .push((module.to_string(), verb.to_string(), params.cloned()));
+            Ok(MgmtResponse {
+                status_code: 200,
+                status_text: "OK".to_string(),
+                body: Bytes::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn command_builders_construct_expected_params() {
+        let mut engine = DashboardEngine::new(RecordingClient::default());
+
+        engine.route_register("/demo/app", 5, 100).await.unwrap();
+        engine.strategy_set("/demo", "/strat/bmf").await.unwrap();
+        engine.face_destroy(7).await.unwrap();
+
+        let calls = &engine.client_mut().calls;
+        assert_eq!(calls.len(), 3);
+
+        let (m, v, p) = &calls[0];
+        assert_eq!((m.as_str(), v.as_str()), ("rib", "register"));
+        let p = p.as_ref().unwrap();
+        assert_eq!(p.name.as_ref().unwrap().to_string(), "/demo/app");
+        assert_eq!(p.face_id, Some(5));
+        assert_eq!(p.cost, Some(100));
+
+        let (m, v, p) = &calls[1];
+        assert_eq!((m.as_str(), v.as_str()), ("strategy-choice", "set"));
+        let p = p.as_ref().unwrap();
+        assert_eq!(p.strategy.as_ref().unwrap().to_string(), "/strat/bmf");
+
+        let (m, v, p) = &calls[2];
+        assert_eq!((m.as_str(), v.as_str()), ("faces", "destroy"));
+        assert_eq!(p.as_ref().unwrap().face_id, Some(7));
+    }
+
+    /// face_id == 0 is "the requesting face" — must be left unset, not sent.
+    #[tokio::test]
+    async fn route_register_omits_zero_face_id() {
+        let mut engine = DashboardEngine::new(RecordingClient::default());
+        engine.route_register("/x", 0, 0).await.unwrap();
+        let (_, _, p) = &engine.client_mut().calls[0];
+        assert_eq!(p.as_ref().unwrap().face_id, None);
     }
 
     #[tokio::test]
