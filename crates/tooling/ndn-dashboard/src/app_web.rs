@@ -914,13 +914,8 @@ async fn poll_all_web(
     Ok(())
 }
 
-/// Identity-status text parser (web mirror of the desktop helper in
-/// `app.rs`). Format per `ndn-mgmt::security_identity_status`:
-/// `identity=<name> is_ephemeral=<bool> pib_path=<path>`.
-/// Web-side mirror of `ndn_ipc::mgmt_client::decode_pending_approvals`.
-/// Inlined here so the web build doesn't pull the Unix-socket-only
-/// `ndn-ipc` crate. TLV codes match `ndn-mgmt/src/modules/ca.rs`.
-/// Pull `ca/list-approvals` and reconcile `CA_APPROVALS_STATE`. Used
+/// Pull `ca/list-approvals` and reconcile `CA_APPROVALS_STATE`. Decodes the
+/// dataset through the shared `ndn_mgmt_wire::PendingApproval` codec. Used
 /// both by the operator-driven refresh button and by the
 /// post-approve/post-deny refresh paths so the operator's view stays
 /// in sync after each mutation. Always returns the underlying
@@ -936,15 +931,15 @@ async fn refresh_ca_approvals_web(
         .ok();
     match &resp {
         Ok(r) if r.is_ok() => {
-            let rows = decode_pending_approvals_web(&r.body);
-            let mapped: Vec<PendingApprovalRow> = rows
-                .into_iter()
-                .map(|(id, cert_name, description)| PendingApprovalRow {
-                    id,
-                    cert_name,
-                    description,
-                })
-                .collect();
+            let mapped: Vec<PendingApprovalRow> =
+                ndn_mgmt_wire::PendingApproval::decode_all(&r.body)
+                    .into_iter()
+                    .map(|a| PendingApprovalRow {
+                        id: a.request_id,
+                        cert_name: a.cert_name,
+                        description: a.description,
+                    })
+                    .collect();
             *crate::app_shared::CA_APPROVALS_STATE.write() = CaApprovalsState {
                 rows: mapped,
                 last_refresh_unix_s: now,
@@ -967,40 +962,6 @@ async fn refresh_ca_approvals_web(
         }
     }
     resp
-}
-
-fn decode_pending_approvals_web(bytes: &[u8]) -> Vec<(String, String, String)> {
-    const TYPE_PENDING_APPROVAL: u64 = 0xCA;
-    const TYPE_REQUEST_ID: u64 = 0xCC;
-    const TYPE_CERT_NAME: u64 = 0xCE;
-    const TYPE_DESCRIPTION: u64 = 0xD0;
-    let mut out = Vec::new();
-    let mut reader = ndn_tlv::TlvReader::new(bytes::Bytes::copy_from_slice(bytes));
-    while !reader.is_empty() {
-        let Ok((typ, body)) = reader.read_tlv() else {
-            break;
-        };
-        if typ != TYPE_PENDING_APPROVAL {
-            continue;
-        }
-        let mut inner = ndn_tlv::TlvReader::new(body);
-        let (mut id, mut cert, mut desc) = (String::new(), String::new(), String::new());
-        while !inner.is_empty() {
-            let Ok((t, v)) = inner.read_tlv() else {
-                break;
-            };
-            match t {
-                TYPE_REQUEST_ID => id = String::from_utf8_lossy(&v).into_owned(),
-                TYPE_CERT_NAME => cert = String::from_utf8_lossy(&v).into_owned(),
-                TYPE_DESCRIPTION => desc = String::from_utf8_lossy(&v).into_owned(),
-                _ => {}
-            }
-        }
-        if !id.is_empty() && !cert.is_empty() {
-            out.push((id, cert, desc));
-        }
-    }
-    out
 }
 
 fn parse_identity_status_web(text: &str) -> (String, bool, Option<String>) {
