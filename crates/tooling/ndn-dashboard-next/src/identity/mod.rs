@@ -594,7 +594,7 @@ impl AdoptionFlowState {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn from_security_contexts(contexts: &[std::sync::Arc<ndn_security::TrustContext>]) -> Self {
+    fn from_security_contexts(contexts: &[std::sync::Arc<ndn_security::SignedTrustContext>]) -> Self {
         let Some(context) = contexts.first() else {
             return Self {
                 available: true,
@@ -699,7 +699,7 @@ impl EnrollmentFlowState {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn from_security_contexts(contexts: &[std::sync::Arc<ndn_security::TrustContext>]) -> Self {
+    fn from_security_contexts(contexts: &[std::sync::Arc<ndn_security::SignedTrustContext>]) -> Self {
         let ca_endpoints = contexts
             .iter()
             .flat_map(|context| context.ca_endpoints().iter().map(ToString::to_string))
@@ -763,7 +763,7 @@ pub struct TofuAdoptionReport {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn execute_tofu_adoption(
     keyring: &ndn_security::Keyring,
-    context: std::sync::Arc<ndn_security::TrustContext>,
+    context: std::sync::Arc<ndn_security::SignedTrustContext>,
     request: &TofuAdoptionRequest,
 ) -> Result<TofuAdoptionReport, String> {
     if !request.confirmed_oob {
@@ -1201,7 +1201,7 @@ mod tests {
         use std::sync::Arc;
 
         let validator = ndn_security::Validator::new(ndn_security::TrustSchema::new());
-        let context = ndn_security::TrustContext::hierarchical("/lab".parse().unwrap())
+        let context = ndn_security::SignedTrustContext::hierarchical("/lab".parse().unwrap())
             .with_version(4)
             .with_ca_endpoint("/lab/CA".parse().unwrap())
             .with_enrollment_hint(ndn_security::EnrollmentHint::hub_default());

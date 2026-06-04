@@ -121,7 +121,7 @@ pub(crate) fn spawn(
     cfg: &DemoCaConfig,
     _engine: &ForwarderEngine,
 ) -> Result<()> {
-    let identity = ndn_identity::NdnIdentity::from_keychain_public(prep.keychain);
+    let identity = ndn_identity::Identity::from_keychain_public(prep.keychain);
 
     let challenges = build_challenges(cfg)?;
     tracing::info!(
