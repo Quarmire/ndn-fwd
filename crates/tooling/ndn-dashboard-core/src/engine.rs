@@ -12,7 +12,9 @@
 //! `app_web.rs` grew independently.
 
 use crate::mgmt::{ManagementClient, MgmtResponse};
-use crate::types::{CsInfo, FaceInfo, FibEntry, ForwarderStatus, StrategyEntry};
+use crate::types::{
+    AnchorInfo, CsInfo, FaceInfo, FibEntry, ForwarderStatus, SecurityKeyInfo, StrategyEntry,
+};
 use ndn_config::{ControlParameters, nfd_dataset};
 use ndn_packet::Name;
 
@@ -36,16 +38,25 @@ pub enum StateUpdate {
     Cs,
     Strategies,
     Approvals,
+    Identities,
+    Anchors,
 }
 
 /// Headless snapshot of a forwarder's identity/trust plane — polled separately
 /// from the forwarding plane (it's an operator-opens-the-view axis, not a
-/// hot-path refresh). Today: the CA pending-approval queue.
+/// hot-path refresh): the CA pending-approval queue plus the trust posture
+/// (local identities/keys and the configured trust anchors).
 #[derive(Debug, Clone, Default)]
 pub struct IdentityState {
     /// Device-approval requests awaiting an operator decision
     /// (`/localhost/nfd/ca/list-approvals`).
     pub approvals: Vec<ndn_mgmt_wire::PendingApproval>,
+    /// Local identity keys and their certificate expiry
+    /// (`/localhost/nfd/security/identity-list`).
+    pub identities: Vec<SecurityKeyInfo>,
+    /// Configured trust anchors and which store each lives in
+    /// (`/localhost/nfd/security/anchor-list`).
+    pub anchors: Vec<AnchorInfo>,
 }
 
 /// Drives a forwarder over any [`ManagementClient`] transport (web WebSocket,
@@ -265,8 +276,12 @@ impl<M: ManagementClient> DashboardEngine<M> {
     // codec; approve/deny are signed commands (the forwarder gates them —
     // the signer's identity authorises the decision).
 
-    /// Refresh the CA pending-approval queue. Returns `[Approvals]` if it
-    /// changed the snapshot, `[]` on a failed/empty poll (prior queue kept).
+    /// Refresh the identity/trust plane: the CA pending-approval queue, the
+    /// local identity keys, and the configured trust anchors. Each dataset is
+    /// independent — a failed query leaves that axis's prior value in place.
+    /// Returns the `StateUpdate`s that changed. The `security/*` datasets are
+    /// ndn-rs extensions; a cross-impl forwarder (NFD/YaNFD) 404s them and they
+    /// simply don't refresh.
     pub async fn poll_identity(&mut self) -> Vec<StateUpdate> {
         let mut changed = Vec::new();
         if let Ok(resp) = self.client.send_cmd("ca", "list-approvals", None).await
@@ -275,7 +290,33 @@ impl<M: ManagementClient> DashboardEngine<M> {
             self.identity.approvals = ndn_mgmt_wire::PendingApproval::decode_all(&resp.body);
             changed.push(StateUpdate::Approvals);
         }
+        if let Ok(resp) = self.client.send_cmd("security", "identity-list", None).await
+            && resp.is_ok()
+        {
+            self.identity.identities = SecurityKeyInfo::parse_list(&resp.status_text);
+            changed.push(StateUpdate::Identities);
+        }
+        if let Ok(resp) = self.client.send_cmd("security", "anchor-list", None).await
+            && resp.is_ok()
+        {
+            self.identity.anchors = AnchorInfo::parse_list(&resp.status_text);
+            changed.push(StateUpdate::Anchors);
+        }
         changed
+    }
+
+    /// Remove a trust anchor by its certificate key name — stops the forwarder
+    /// trusting it (local trust withdrawal, not a network revocation). Signed
+    /// command.
+    pub async fn anchor_remove(&mut self, key_name: &str) -> Result<MgmtResponse, String> {
+        let name = parse_name(key_name, "key_name")?;
+        let params = ControlParameters {
+            name: Some(name),
+            ..Default::default()
+        };
+        self.client
+            .send_cmd("security", "anchor-remove", Some(&params))
+            .await
     }
 
     /// Approve a pending device-approval request by id. Signed command.
@@ -448,22 +489,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_identity_decodes_approval_queue() {
-        struct CaMock(Bytes);
+    async fn poll_identity_populates_all_three_axes() {
+        // Canned identity plane: an approval queue (TLV body) plus the two
+        // text-line security datasets the trust posture parses.
+        struct IdMock(Bytes);
         #[async_trait(?Send)]
-        impl ManagementClient for CaMock {
+        impl ManagementClient for IdMock {
             async fn send_cmd(
                 &mut self,
                 module: &str,
                 verb: &str,
                 _params: Option<&ControlParameters>,
             ) -> Result<MgmtResponse, String> {
+                let ok_text = |t: &str| {
+                    Ok(MgmtResponse {
+                        status_code: 200,
+                        status_text: t.to_string(),
+                        body: Bytes::new(),
+                    })
+                };
                 match (module, verb) {
                     ("ca", "list-approvals") => Ok(MgmtResponse {
                         status_code: 200,
                         status_text: "OK".to_string(),
                         body: self.0.clone(),
                     }),
+                    ("security", "identity-list") => {
+                        ok_text("name=/lab/alice has_cert=true valid_until=never")
+                    }
+                    ("security", "anchor-list") => {
+                        ok_text("name=/lab/router-ca/KEY/k0 source=mgmt")
+                    }
                     other => Err(format!("unexpected verb: {other:?}")),
                 }
             }
@@ -474,23 +530,36 @@ mod tests {
             cert_name: "/lab/alice/devices/laptop".into(),
             description: "laptop".into(),
         }]);
-        let mut engine = DashboardEngine::new(CaMock(wire));
+        let mut engine = DashboardEngine::new(IdMock(wire));
 
         let changed = engine.poll_identity().await;
-        assert_eq!(changed, vec![StateUpdate::Approvals]);
+        assert_eq!(
+            changed,
+            vec![
+                StateUpdate::Approvals,
+                StateUpdate::Identities,
+                StateUpdate::Anchors
+            ]
+        );
 
-        let q = &engine.identity_state().approvals;
-        assert_eq!(q.len(), 1);
-        assert_eq!(q[0].request_id, "req-1");
-        assert_eq!(q[0].cert_name, "/lab/alice/devices/laptop");
+        let id = engine.identity_state();
+        assert_eq!(id.approvals.len(), 1);
+        assert_eq!(id.approvals[0].request_id, "req-1");
+        assert_eq!(id.identities.len(), 1);
+        assert_eq!(id.identities[0].name, "/lab/alice");
+        assert!(id.identities[0].has_cert);
+        assert_eq!(id.anchors.len(), 1);
+        assert_eq!(id.anchors[0].name, "/lab/router-ca/KEY/k0");
+        assert_eq!(id.anchors[0].source.as_deref(), Some("mgmt"));
     }
 
     #[tokio::test]
-    async fn ca_approve_and_deny_build_expected_params() {
+    async fn ca_and_anchor_commands_build_expected_params() {
         let mut engine = DashboardEngine::new(RecordingClient::default());
         engine.ca_approve("req-1").await.unwrap();
         engine.ca_deny("req-2", "expired").await.unwrap();
         engine.ca_deny("req-3", "").await.unwrap();
+        engine.anchor_remove("/lab/router-ca/KEY/k0").await.unwrap();
 
         let calls = &engine.client().calls;
         assert_eq!(calls[0].0, "ca");
@@ -505,5 +574,12 @@ mod tests {
         );
         // …and an empty reason sends the bare id.
         assert_eq!(calls[2].2.as_ref().unwrap().uri.as_deref(), Some("req-3"));
+
+        // anchor-remove carries the key name, not a uri.
+        assert_eq!((calls[3].0.as_str(), calls[3].1.as_str()), ("security", "anchor-remove"));
+        assert_eq!(
+            calls[3].2.as_ref().unwrap().name.as_ref().map(|n| n.to_string()),
+            Some("/lab/router-ca/KEY/k0".to_string())
+        );
     }
 }
