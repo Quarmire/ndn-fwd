@@ -171,4 +171,49 @@ mod tests {
         };
         assert!(build_context(&spec).is_err());
     }
+
+    /// Cross-impl interop substrate: a context's *wrapper* is an ndn-rs
+    /// extension, but its **anchors** are plain NDN certificates — encoded as
+    /// standard Data (0x06) packets, named per the
+    /// `/<identity>/KEY/<keyid>/<issuerid>/<version>` convention
+    /// (ndn-cxx `security/certificate.hpp`, lines ~37/151). A reference impl
+    /// (ndn-cxx / ndnd) consumes them with ordinary cert-chain validation, so
+    /// Data signed under a context's anchors validates cross-impl (the existing
+    /// `testbed/tests/interop/fwd_cxx_*` already prove ndn-rs↔ndn-cxx Data).
+    #[tokio::test]
+    async fn context_anchors_survive_as_spec_compliant_certs() {
+        use ndn_security::{Ed25519Signer, Signer, encode_cert_data};
+
+        // A self-signed anchor certificate (standard NDN Certificate).
+        let key_name: Name = "/home/bob/KEY/k0".parse().unwrap();
+        let signer = Ed25519Signer::from_seed(&[7u8; 32], key_name.clone());
+        let pubkey = signer.public_key().unwrap();
+        let cert_name: Name = "/home/bob/KEY/k0/self/v=1".parse().unwrap();
+        let cert_wire = encode_cert_data(&cert_name, &pubkey, &signer, 0, u64::MAX)
+            .await
+            .expect("encode cert");
+
+        // Author a context carrying it, then round-trip the join payload.
+        let spec = ContextSpec {
+            namespace: "/home/bob".parse().unwrap(),
+            version: 1,
+            anchor_wires: vec![cert_wire.to_vec()],
+            ..Default::default()
+        };
+        let (v, content) = parse_envelope(&build_join_payload(&spec).unwrap()).unwrap();
+        // decode_content Data-decodes each anchor from the AnchorSet — i.e. the
+        // anchors are on the wire as ordinary NDN Data certs an external impl
+        // can parse. Success here *is* the wire-compat proof.
+        let adopted = SignedTrustContext::decode_content(&content, v).unwrap();
+
+        assert_eq!(adopted.anchors().len(), 1);
+        let anchor = adopted.anchors().iter().next().unwrap();
+        assert!(
+            anchor.name.to_string().contains("/KEY/"),
+            "anchor cert follows the /KEY/ naming convention: {}",
+            anchor.name
+        );
+        assert!(anchor.valid_until >= anchor.valid_from);
+        assert!(!anchor.public_key.is_empty());
+    }
 }

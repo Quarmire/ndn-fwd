@@ -24,3 +24,6 @@ base64       = { workspace = true, features = ["std"] }
 qrcode       = { version = "0.14", default-features = false, features = ["svg"] }
 clap         = { version = "4", features = ["derive"] }
 anyhow       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
