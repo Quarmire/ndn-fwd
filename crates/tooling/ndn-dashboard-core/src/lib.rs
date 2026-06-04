@@ -28,5 +28,5 @@ pub mod security_chains;
 pub mod signed_data_chain;
 pub mod types;
 
-pub use engine::{DashboardEngine, DashboardState, StateUpdate};
+pub use engine::{DashboardEngine, DashboardState, IdentityState, StateUpdate};
 pub use mgmt::{ManagementClient, MgmtResponse};

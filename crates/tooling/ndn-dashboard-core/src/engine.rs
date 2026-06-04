@@ -35,6 +35,17 @@ pub enum StateUpdate {
     Routes,
     Cs,
     Strategies,
+    Approvals,
+}
+
+/// Headless snapshot of a forwarder's identity/trust plane — polled separately
+/// from the forwarding plane (it's an operator-opens-the-view axis, not a
+/// hot-path refresh). Today: the CA pending-approval queue.
+#[derive(Debug, Clone, Default)]
+pub struct IdentityState {
+    /// Device-approval requests awaiting an operator decision
+    /// (`/localhost/nfd/ca/list-approvals`).
+    pub approvals: Vec<ndn_mgmt_wire::PendingApproval>,
 }
 
 /// Drives a forwarder over any [`ManagementClient`] transport (web WebSocket,
@@ -42,6 +53,7 @@ pub enum StateUpdate {
 pub struct DashboardEngine<M: ManagementClient> {
     client: M,
     state: DashboardState,
+    identity: IdentityState,
 }
 
 impl<M: ManagementClient> DashboardEngine<M> {
@@ -49,12 +61,18 @@ impl<M: ManagementClient> DashboardEngine<M> {
         Self {
             client,
             state: DashboardState::default(),
+            identity: IdentityState::default(),
         }
     }
 
     /// The current state snapshot.
     pub fn state(&self) -> &DashboardState {
         &self.state
+    }
+
+    /// The current identity/trust-plane snapshot.
+    pub fn identity_state(&self) -> &IdentityState {
+        &self.identity
     }
 
     /// The underlying client — e.g. for command dispatch by a UI adapter.
@@ -239,6 +257,51 @@ impl<M: ManagementClient> DashboardEngine<M> {
     pub async fn shutdown(&mut self) -> Result<MgmtResponse, String> {
         self.client.send_cmd("status", "shutdown", None).await
     }
+
+    // ── identity / trust plane ──────────────────────────────────────────
+    //
+    // Polled and mutated separately from the forwarding plane. The
+    // pending-approval queue decodes through the shared `ndn_mgmt_wire`
+    // codec; approve/deny are signed commands (the forwarder gates them —
+    // the signer's identity authorises the decision).
+
+    /// Refresh the CA pending-approval queue. Returns `[Approvals]` if it
+    /// changed the snapshot, `[]` on a failed/empty poll (prior queue kept).
+    pub async fn poll_identity(&mut self) -> Vec<StateUpdate> {
+        let mut changed = Vec::new();
+        if let Ok(resp) = self.client.send_cmd("ca", "list-approvals", None).await
+            && resp.is_ok()
+        {
+            self.identity.approvals = ndn_mgmt_wire::PendingApproval::decode_all(&resp.body);
+            changed.push(StateUpdate::Approvals);
+        }
+        changed
+    }
+
+    /// Approve a pending device-approval request by id. Signed command.
+    pub async fn ca_approve(&mut self, request_id: &str) -> Result<MgmtResponse, String> {
+        let params = ControlParameters {
+            uri: Some(request_id.to_owned()),
+            ..Default::default()
+        };
+        self.client.send_cmd("ca", "approve", Some(&params)).await
+    }
+
+    /// Deny a pending request by id. An empty `reason` records the default
+    /// denial detail. Signed command. The id/reason are joined as
+    /// `id:reason` to match the forwarder's `ca/deny` parameter shape.
+    pub async fn ca_deny(&mut self, request_id: &str, reason: &str) -> Result<MgmtResponse, String> {
+        let uri = if reason.is_empty() {
+            request_id.to_owned()
+        } else {
+            format!("{request_id}:{reason}")
+        };
+        let params = ControlParameters {
+            uri: Some(uri),
+            ..Default::default()
+        };
+        self.client.send_cmd("ca", "deny", Some(&params)).await
+    }
 }
 
 /// Parse an NDN name argument, turning a parse failure into a UI-displayable
@@ -382,5 +445,65 @@ mod tests {
         assert!(st.faces.is_empty());
         assert!(st.routes.is_empty());
         assert!(st.strategies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_identity_decodes_approval_queue() {
+        struct CaMock(Bytes);
+        #[async_trait(?Send)]
+        impl ManagementClient for CaMock {
+            async fn send_cmd(
+                &mut self,
+                module: &str,
+                verb: &str,
+                _params: Option<&ControlParameters>,
+            ) -> Result<MgmtResponse, String> {
+                match (module, verb) {
+                    ("ca", "list-approvals") => Ok(MgmtResponse {
+                        status_code: 200,
+                        status_text: "OK".to_string(),
+                        body: self.0.clone(),
+                    }),
+                    other => Err(format!("unexpected verb: {other:?}")),
+                }
+            }
+        }
+
+        let wire = ndn_mgmt_wire::PendingApproval::encode_all(&[ndn_mgmt_wire::PendingApproval {
+            request_id: "req-1".into(),
+            cert_name: "/lab/alice/devices/laptop".into(),
+            description: "laptop".into(),
+        }]);
+        let mut engine = DashboardEngine::new(CaMock(wire));
+
+        let changed = engine.poll_identity().await;
+        assert_eq!(changed, vec![StateUpdate::Approvals]);
+
+        let q = &engine.identity_state().approvals;
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].request_id, "req-1");
+        assert_eq!(q[0].cert_name, "/lab/alice/devices/laptop");
+    }
+
+    #[tokio::test]
+    async fn ca_approve_and_deny_build_expected_params() {
+        let mut engine = DashboardEngine::new(RecordingClient::default());
+        engine.ca_approve("req-1").await.unwrap();
+        engine.ca_deny("req-2", "expired").await.unwrap();
+        engine.ca_deny("req-3", "").await.unwrap();
+
+        let calls = &engine.client().calls;
+        assert_eq!(calls[0].0, "ca");
+        assert_eq!(calls[0].1, "approve");
+        assert_eq!(calls[0].2.as_ref().unwrap().uri.as_deref(), Some("req-1"));
+
+        // Reason is appended as `id:reason`…
+        assert_eq!(calls[1].1, "deny");
+        assert_eq!(
+            calls[1].2.as_ref().unwrap().uri.as_deref(),
+            Some("req-2:expired")
+        );
+        // …and an empty reason sends the bare id.
+        assert_eq!(calls[2].2.as_ref().unwrap().uri.as_deref(), Some("req-3"));
     }
 }
