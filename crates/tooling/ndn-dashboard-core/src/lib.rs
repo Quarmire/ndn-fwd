@@ -29,4 +29,7 @@ pub mod signed_data_chain;
 pub mod types;
 
 pub use engine::{DashboardEngine, DashboardState, IdentityState, StateUpdate};
+// Part of the public `IdentityState` surface — re-exported so consumers don't
+// reach into `ndn-mgmt-wire` to name the queue's row type.
+pub use ndn_mgmt_wire::PendingApproval;
 pub use mgmt::{ManagementClient, MgmtResponse};
