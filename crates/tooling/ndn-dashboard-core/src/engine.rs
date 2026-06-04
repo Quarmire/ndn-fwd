@@ -319,6 +319,48 @@ impl<M: ManagementClient> DashboardEngine<M> {
             .await
     }
 
+    /// Add a trust anchor from a certificate's wire bytes. `key_name` must
+    /// equal the certificate's own name — the forwarder cross-checks and
+    /// rejects a mismatch. Signed command.
+    pub async fn anchor_add(
+        &mut self,
+        key_name: &str,
+        cert_wire: &[u8],
+    ) -> Result<MgmtResponse, String> {
+        let name = parse_name(key_name, "key_name")?;
+        let params = ControlParameters {
+            name: Some(name),
+            uri: Some(to_hex(cert_wire)),
+            ..Default::default()
+        };
+        self.client
+            .send_cmd("security", "anchor-add", Some(&params))
+            .await
+    }
+
+    /// Import an ndn-cxx-compatible SafeBag (encrypted private key + cert) into
+    /// the PIB, making it a usable signing identity. `key_name` is the key the
+    /// bag carries; `passphrase` decrypts the wrapped PKCS#8. Both blobs are
+    /// hex-encoded into the `<safebag>:<passphrase>` parameter the forwarder
+    /// expects. Signed command. The passphrase never appears in a log line.
+    pub async fn safebag_import(
+        &mut self,
+        key_name: &str,
+        safebag_wire: &[u8],
+        passphrase: &[u8],
+    ) -> Result<MgmtResponse, String> {
+        let name = parse_name(key_name, "key_name")?;
+        let uri = format!("{}:{}", to_hex(safebag_wire), to_hex(passphrase));
+        let params = ControlParameters {
+            name: Some(name),
+            uri: Some(uri),
+            ..Default::default()
+        };
+        self.client
+            .send_cmd("security", "safebag-import", Some(&params))
+            .await
+    }
+
     /// Approve a pending device-approval request by id. Signed command.
     pub async fn ca_approve(&mut self, request_id: &str) -> Result<MgmtResponse, String> {
         let params = ControlParameters {
@@ -350,6 +392,17 @@ impl<M: ManagementClient> DashboardEngine<M> {
 fn parse_name(s: &str, what: &str) -> Result<Name, String> {
     s.parse::<Name>()
         .map_err(|e| format!("invalid {what} '{s}': {e:?}"))
+}
+
+/// Lowercase hex, matching the `{:02x}` convention the management wire uses for
+/// byte-blob parameters (cert wire, SafeBag, passphrase).
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 #[cfg(test)]
@@ -581,5 +634,30 @@ mod tests {
             calls[3].2.as_ref().unwrap().name.as_ref().map(|n| n.to_string()),
             Some("/lab/router-ca/KEY/k0".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn anchor_add_and_safebag_import_hex_encode_blobs() {
+        let mut engine = DashboardEngine::new(RecordingClient::default());
+        engine
+            .anchor_add("/lab/ca/KEY/k0", &[0xde, 0xad, 0xbe, 0xef])
+            .await
+            .unwrap();
+        engine
+            .safebag_import("/lab/me/KEY/k1", &[0x01, 0x02], b"pw")
+            .await
+            .unwrap();
+
+        let calls = &engine.client().calls;
+
+        // anchor-add: name = cert key name, uri = cert wire as lowercase hex.
+        assert_eq!((calls[0].0.as_str(), calls[0].1.as_str()), ("security", "anchor-add"));
+        let p0 = calls[0].2.as_ref().unwrap();
+        assert_eq!(p0.name.as_ref().map(|n| n.to_string()), Some("/lab/ca/KEY/k0".into()));
+        assert_eq!(p0.uri.as_deref(), Some("deadbeef"));
+
+        // safebag-import: uri = `<safebag_hex>:<passphrase_hex>` ("pw" = 70 77).
+        assert_eq!(calls[1].1, "safebag-import");
+        assert_eq!(calls[1].2.as_ref().unwrap().uri.as_deref(), Some("0102:7077"));
     }
 }
