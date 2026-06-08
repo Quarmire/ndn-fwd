@@ -1,0 +1,14 @@
+[package]
+name = "ndn-pair-kiosk"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal stand-in for an untrusted peer (kiosk/dashboard) pairing with the phone via the remote-signer model."
+
+[dependencies]
+ndn-trust-envelope = { workspace = true }
+ndn-custodian = { workspace = true }
+ndn-security  = { workspace = true }
+ndn-packet    = { workspace = true, features = ["std"] }
+bytes  = { workspace = true, features = ["std"] }
+base64 = { workspace = true }
+futures = { workspace = true }
