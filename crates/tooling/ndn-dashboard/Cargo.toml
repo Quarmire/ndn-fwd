@@ -31,8 +31,11 @@ desktop = [
   "dep:arboard",
   "dep:keyring",
   "dep:ndn-ipc",
+  "dep:ndn-app",
   "dep:ndn-tools-core",
   "dep:ndn-config",
+  "dep:ndn-trust-envelope",
+  "dep:qrcode",
   "dioxus/desktop",
   "tokio/process",
   "tokio/rt-multi-thread",
@@ -127,7 +130,15 @@ arboard        = { version = "3", optional = true }
 # password. Native backends only (no extra system daemons on macOS).
 keyring        = { version = "3", optional = true, features = ["apple-native", "windows-native", "sync-secret-service"] }
 ndn-ipc        = { workspace = true, optional = true }
+# NDN consumer for the remote-signer transport: send a WireSignRequest Interest
+# to the paired phone's `…/signer` responder over the same forwarder socket.
+ndn-app        = { workspace = true, optional = true }
 ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"], optional = true }
+# The shared `ndn-trust://` envelope codec (capability request/grant) + a pure-Rust
+# QR renderer for the Pairing screen's request code. Desktop-only (the pairing
+# flow binds a phone fob to this operator console).
+ndn-trust-envelope = { path = "../../ndn-trust-envelope", optional = true }
+qrcode         = { version = "0.14", default-features = false, features = ["svg"], optional = true }
 
 # ed25519-dalek powers the DashboardSigner used to sign every chain
 # entry (audit log + schema journal). Available on every target —

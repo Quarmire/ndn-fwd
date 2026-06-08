@@ -46,6 +46,8 @@ pub use ndn_dashboard_core::{
 mod ws_mgmt;
 #[cfg(feature = "desktop")]
 mod native_mgmt;
+#[cfg(feature = "desktop")]
+mod remote_signer;
 
 fn main() {
     #[cfg(feature = "desktop")]

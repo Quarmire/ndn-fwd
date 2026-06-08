@@ -1580,6 +1580,7 @@ fn render_view(view: View) -> Element {
         View::Tools => rsx! { Tools {} },
         View::Compose => rsx! { crate::views::compose::Compose {} },
         View::TrustContext => rsx! { crate::views::trust_context::TrustContext {} },
+        View::Pairing => rsx! { crate::views::pairing::Pairing {} },
         View::DashboardConfig => rsx! { DashboardConfig {} },
         View::RouterConfig => rsx! { Config {} },
     }

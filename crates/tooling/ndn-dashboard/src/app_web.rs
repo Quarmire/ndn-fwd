@@ -756,7 +756,7 @@ fn render_view_web(view: View) -> Element {
         // Desktop-only views render a placeholder on web.
         // Coding/RateLimit will move to web once their fetch path is
         // ported off `ndn-ipc::MgmtClient` (§1d).
-        View::Tools | View::Session | View::Coding | View::RateLimit => rsx! {
+        View::Tools | View::Session | View::Coding | View::RateLimit | View::Pairing => rsx! {
             div { class: "placeholder",
                 style: "padding:2rem;color:var(--text2);",
                 "This feature requires the desktop version of the dashboard."

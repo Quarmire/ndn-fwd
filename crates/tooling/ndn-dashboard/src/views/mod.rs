@@ -22,6 +22,8 @@ pub mod logs;
 pub mod modals;
 pub mod onboarding;
 pub mod overview;
+#[cfg(feature = "desktop")]
+pub mod pairing;
 pub mod radio;
 #[cfg(feature = "desktop")]
 pub mod rate_limit;
@@ -55,6 +57,7 @@ pub enum View {
     Tools,
     Compose,
     TrustContext,
+    Pairing,
     DashboardConfig,
     RouterConfig,
 }
@@ -100,7 +103,12 @@ impl Bucket {
                 View::Fleet,
                 View::Tools,
             ],
-            Bucket::Identity => &[View::TrustContext, View::Security, View::Session],
+            Bucket::Identity => &[
+                View::TrustContext,
+                View::Security,
+                View::Pairing,
+                View::Session,
+            ],
             Bucket::Compose => &[View::Compose],
         }
     }
@@ -122,6 +130,7 @@ impl View {
             View::Tools => "Tools",
             View::Compose => "Published",
             View::TrustContext => "Trust Context",
+            View::Pairing => "Pairing",
             View::DashboardConfig => "Dashboard Config",
             View::RouterConfig => "Router Config",
         }
@@ -142,7 +151,9 @@ impl View {
             | View::Tools
             | View::DashboardConfig
             | View::RouterConfig => Bucket::Engine,
-            View::Security | View::Session | View::TrustContext => Bucket::Identity,
+            View::Security | View::Session | View::TrustContext | View::Pairing => {
+                Bucket::Identity
+            }
             View::Compose => Bucket::Compose,
         }
     }
