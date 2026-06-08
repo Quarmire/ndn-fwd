@@ -12,3 +12,7 @@ ndn-packet    = { workspace = true, features = ["std"] }
 bytes  = { workspace = true, features = ["std"] }
 base64 = { workspace = true }
 futures = { workspace = true }
+# `signnet`: send a WireSignRequest to the phone's `…/signer` responder over a
+# real forwarder, exercising the same NDN path the dashboard's transport uses.
+ndn-app = { workspace = true }
+tokio   = { workspace = true, features = ["rt", "macros", "time"] }

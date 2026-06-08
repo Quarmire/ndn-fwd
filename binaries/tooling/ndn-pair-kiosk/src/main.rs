@@ -15,11 +15,15 @@
 //! `<operator-pubkey-b64>` is the key the phone returns in the `Capability{Grant}`
 //! envelope; the signature it verifies is what `respond_to_sign_request` produced.
 
+use std::time::Duration;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use bytes::Bytes;
+use ndn_app::Consumer;
 use ndn_custodian::{WireSignRequest, WireSignResponse};
 use ndn_packet::Name;
+use ndn_packet::encode::InterestBuilder;
 use ndn_security::verifier::{EcdsaSha256Verifier, VerifyOutcome, Verifier};
 use ndn_trust_envelope::{CapDirection, Capability, TrustEnvelope};
 
@@ -80,7 +84,74 @@ fn main() {
                 WireSignResponse::Denied { .. } => die("DENIED by operator"),
             }
         }
-        _ => die("usage: ndn-pair-kiosk (request <ns> <ttl> | signreq <name> | verify <name> <resp-b64> <pubkey-b64>)"),
+        // Send a sign request to the phone's `…/signer` responder over a real
+        // forwarder — the same NDN path the dashboard's transport uses.
+        //   signnet <socket> <signer-prefix> <name> [operator-pubkey-b64]
+        Some("signnet") if args.len() == 4 || args.len() == 5 => {
+            let socket = args[1].clone();
+            let signer_prefix: Name = args[2]
+                .parse()
+                .unwrap_or_else(|_| die(&format!("invalid signer prefix: {}", args[2])));
+            let name = args[3].clone();
+            let pubkey_b64 = args.get(4).cloned();
+            let region = region_for(&name);
+            let wire = WireSignRequest {
+                req_id: 1,
+                region: Bytes::from(region.clone()),
+            }
+            .encode();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let mut consumer = Consumer::connect(&socket)
+                    .await
+                    .unwrap_or_else(|e| die(&format!("connect {socket}: {e}")));
+                let builder = InterestBuilder::new(signer_prefix)
+                    .app_parameters(wire.to_vec())
+                    .must_be_fresh()
+                    .lifetime(Duration::from_secs(20));
+                let data = consumer
+                    .fetch_with(builder)
+                    .await
+                    .unwrap_or_else(|e| die(&format!("no response from signer: {e}")));
+                let content = data.content().unwrap_or_else(|| die("empty signer response"));
+                match WireSignResponse::decode(content)
+                    .unwrap_or_else(|e| die(&format!("decode response: {e:?}")))
+                {
+                    WireSignResponse::Approved { signature, .. } => {
+                        println!("APPROVED over NDN — {}-byte signature for {name}", signature.len());
+                        if let Some(arg) = pubkey_b64 {
+                            // Accept either a raw pubkey (base64) or the grant URI
+                            // (extract the operator key from the certificate it carries).
+                            let pk = if arg.starts_with("ndn-trust://") {
+                                match TrustEnvelope::from_uri(arg.trim()) {
+                                    Ok(TrustEnvelope::Capability(Capability {
+                                        grant: Some(cert),
+                                        ..
+                                    })) => ndn_packet::Data::decode(cert)
+                                        .ok()
+                                        .and_then(|d| d.content().cloned())
+                                        .map(|b| b.to_vec())
+                                        .unwrap_or_else(|| die("grant cert has no public key")),
+                                    _ => die("not a capability grant"),
+                                }
+                            } else {
+                                B64.decode(arg.trim()).unwrap_or_else(|_| die("bad pubkey base64"))
+                            };
+                            match EcdsaSha256Verifier.verify(&region, &signature, &pk).await {
+                                Ok(VerifyOutcome::Valid) => {
+                                    println!("VALID — the phone signed {name}")
+                                }
+                                other => die(&format!("INVALID signature: {other:?}")),
+                            }
+                        }
+                    }
+                    WireSignResponse::Denied { .. } => {
+                        println!("DENIED over NDN (channel works end-to-end; no in-scope grant open)")
+                    }
+                }
+            });
+        }
+        _ => die("usage: ndn-pair-kiosk (request <ns> <ttl> | signreq <name> | verify <name> <resp-b64> <pubkey-b64> | signnet <socket> <signer-prefix> <name> [pubkey-b64])"),
     }
 }
 
