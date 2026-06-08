@@ -622,6 +622,34 @@ async fn main() -> Result<()> {
     // deferred Producer tasks bind to the same shutdown signal.
     let cancel = CancellationToken::new();
 
+    // Give the localhop validator an engine-backed certificate fetcher so it can
+    // authorise a remote node whose operator cert isn't cached locally but is
+    // reachable over NDN (e.g. fetched from the CA that issued it). Without this,
+    // only certs already in the validator's cache validate; with it, any operator
+    // whose cert is fetchable *and* chains to a trusted localhop anchor can
+    // self-register a prefix via `/localhop/nfd/rib/register`. One pooled app
+    // consumer (cert fetches are rare and the CertFetcher dedups them).
+    if let Some(ref validator) = localhop_validator {
+        use ndn_app::EngineAppExt;
+        let consumer = std::sync::Arc::new(tokio::sync::Mutex::new(
+            engine.app_consumer(cancel.child_token()),
+        ));
+        let fetch_fn: ndn_security::FetchFn = std::sync::Arc::new(move |name: ndn_packet::Name| {
+            let consumer = std::sync::Arc::clone(&consumer);
+            Box::pin(async move { consumer.lock().await.fetch(name).await.ok() })
+        });
+        let fetcher = std::sync::Arc::new(ndn_security::CertFetcher::new(
+            validator.cert_cache_arc(),
+            fetch_fn,
+            std::time::Duration::from_secs(4),
+        ));
+        let _ = validator.set_cert_fetcher(fetcher);
+        tracing::info!(
+            target: "security",
+            "localhop validator: engine-backed certificate fetcher attached"
+        );
+    }
+
     post_build.apply(&engine, &cancel);
 
     for route in &fwd_config.routes {
