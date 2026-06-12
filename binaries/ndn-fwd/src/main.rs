@@ -742,6 +742,7 @@ async fn main() -> Result<()> {
         Arc::new(fwd_config.clone()),
         pib.clone(),
         mgmt_ndn::MgmtHandles {
+            extra_modules: Vec::new(),
             discovery_cfg: mgmt_discovery_cfg,
             security_is_ephemeral,
             // None when [security.mgmt].trust_anchor_pib is unset. With
