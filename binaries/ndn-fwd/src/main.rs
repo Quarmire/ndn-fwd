@@ -55,8 +55,8 @@ mod transport_listeners;
 
 pub(crate) use face_setup::{FaceSetupState, run_face_setup};
 pub(crate) use host_helpers::{
-    build_cs, load_coding_handler, load_localhop_validator, load_mgmt_validator,
-    load_rate_limit_pair, parse_bind_addr, parse_name,
+    build_cs, load_coding_handler, load_discovery_verifier, load_localhop_validator,
+    load_mgmt_validator, load_rate_limit_pair, parse_bind_addr, parse_name,
 };
 pub(crate) use security_init::load_security;
 use tracing_init::{build_log_inspector, init_tracing};
@@ -519,6 +519,21 @@ async fn main() -> Result<()> {
         }
         if let Some(v) = fwd_config.discovery.auto_fib_ttl_multiplier {
             svc_cfg.auto_fib_ttl_multiplier = v;
+        }
+        // Sign service records / bodies / peer lists with the forwarder's
+        // identity key (replaces the default DigestSha256 self-sign).
+        if let Some(signer) = &identity_signer {
+            svc_cfg.record_signer =
+                std::sync::Arc::new(ndn_discovery::SignerAdapter(std::sync::Arc::clone(signer)));
+        }
+        // Verify peer records against the configured discovery trust
+        // anchors; absent ⇒ fail-closed (browse-only, no auto-FIB).
+        svc_cfg.record_verifier =
+            load_discovery_verifier(fwd_config.discovery.trust_anchor_pib.as_deref())?;
+        if svc_cfg.record_verifier.is_some() {
+            tracing::info!(target: "discovery", "discovery: peer-record verification enabled (auto-FIB gated on trust)");
+        } else {
+            tracing::info!(target: "discovery", "discovery: no trust_anchor_pib — fail-closed (browse-only, no auto-FIB)");
         }
 
         let sd = std::sync::Arc::new(ndn_discovery::ServiceDiscoveryProtocol::new(

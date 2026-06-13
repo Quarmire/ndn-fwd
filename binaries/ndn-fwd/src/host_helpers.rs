@@ -110,6 +110,121 @@ pub fn load_localhop_validator(
     Ok(Some(Arc::new(validator)))
 }
 
+/// A [`RecordVerifier`](ndn_discovery::RecordVerifier) backed by an
+/// `ndn_security::Validator` (trust anchors for peer service records). The
+/// discovery `on_inbound` path is synchronous and the validator's only
+/// `.await` points are pure-CPU signature checks, so a single poll drives
+/// `validate` to completion; a missing cert yields `Pending` → `Untrusted`
+/// (fail-closed).
+struct DiscoveryVerifier {
+    validator: Arc<ndn_security::Validator>,
+}
+
+impl ndn_discovery::RecordVerifier for DiscoveryVerifier {
+    fn verify(&self, data: &ndn_packet::Data) -> ndn_discovery::VerifyVerdict {
+        use ndn_discovery::VerifyVerdict;
+        let identity = data
+            .sig_info()
+            .and_then(|si| si.key_locator_name())
+            .map(|n| (*n).clone());
+        match poll_once(self.validator.validate(data)) {
+            Some(ndn_security::ValidationResult::Valid(_)) => VerifyVerdict::Verified {
+                identity: identity.unwrap_or_else(|| (*data.name).clone()),
+            },
+            _ => VerifyVerdict::Untrusted,
+        }
+    }
+}
+
+/// Drive a non-pending (pure-CPU) future to completion with one poll.
+fn poll_once<F: std::future::Future>(fut: F) -> Option<F::Output> {
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut fut = std::pin::pin!(fut);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(v) => Some(v),
+        Poll::Pending => None,
+    }
+}
+
+/// Build the service-discovery record verifier from
+/// `[discovery].trust_anchor_pib`. `None` ⇒ fail-closed (peer records are
+/// browseable but never auto-install FIB). Mirrors [`load_mgmt_validator`].
+pub fn load_discovery_verifier(
+    trust_anchor_pib: Option<&str>,
+) -> Result<Option<Arc<dyn ndn_discovery::RecordVerifier>>> {
+    let Some(pib_path_str) = trust_anchor_pib else {
+        return Ok(None);
+    };
+    let pib_path = PathBuf::from(pib_path_str);
+    let pib = ndn_security::FilePib::open(&pib_path).map_err(|e| {
+        anyhow::anyhow!("[discovery] cannot open trust_anchor_pib '{pib_path_str}': {e}")
+    })?;
+    let anchors = pib
+        .trust_anchors()
+        .map_err(|e| anyhow::anyhow!("[discovery] failed to load anchors: {e}"))?;
+    if anchors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "[discovery] trust_anchor_pib '{pib_path_str}' contains no trust anchors"
+        ));
+    }
+    let validator = ndn_security::Validator::new(ndn_security::TrustSchema::accept_all());
+    for anchor in anchors {
+        tracing::info!(target: "discovery", name = %anchor.name, "discovery: loaded trust anchor");
+        validator.add_trust_anchor(anchor);
+    }
+    Ok(Some(Arc::new(DiscoveryVerifier {
+        validator: Arc::new(validator),
+    })))
+}
+
+#[cfg(test)]
+mod discovery_verifier_tests {
+    use super::*;
+    use ndn_discovery::RecordVerifier;
+    use ndn_security::KeyChain;
+
+    #[test]
+    fn verifier_accepts_anchored_signer_rejects_others() {
+        // The forwarder's identity key, self-signed cert added as a
+        // discovery trust anchor.
+        let kc = KeyChain::ephemeral_ecdsa("/ndn/fwd/peerA").unwrap();
+        let anchor = kc.manager_arc().trust_anchor(kc.key_name()).unwrap();
+        let validator = ndn_security::Validator::new(ndn_security::TrustSchema::accept_all());
+        validator.add_trust_anchor(anchor);
+        let verifier = DiscoveryVerifier {
+            validator: Arc::new(validator),
+        };
+
+        let rec = ndn_discovery::ServiceRecord::new(
+            "/ndn/svc/x".parse().unwrap(),
+            "/ndn/fwd/peerA".parse().unwrap(),
+        );
+
+        // Signed by the anchored key → Verified (proves poll_once drives
+        // the ECDSA validate to completion).
+        let pkt = rec.build_data_signed(1, &ndn_discovery::SignerAdapter(kc.signer().unwrap()));
+        let data = ndn_packet::Data::decode(pkt).unwrap();
+        assert!(
+            matches!(
+                verifier.verify(&data),
+                ndn_discovery::VerifyVerdict::Verified { .. }
+            ),
+            "record signed by an anchored key must verify"
+        );
+
+        // Signed by a different, un-anchored key → Untrusted.
+        let kc2 = KeyChain::ephemeral_ecdsa("/ndn/fwd/attacker").unwrap();
+        let pkt2 = rec.build_data_signed(2, &ndn_discovery::SignerAdapter(kc2.signer().unwrap()));
+        let data2 = ndn_packet::Data::decode(pkt2).unwrap();
+        assert_eq!(
+            verifier.verify(&data2),
+            ndn_discovery::VerifyVerdict::Untrusted,
+            "record signed by an un-anchored key must be untrusted"
+        );
+    }
+}
+
 pub fn build_cs(cfg: &CsConfig) -> Arc<dyn ErasedContentStore> {
     let cap = cfg.capacity_mb * 1024 * 1024;
     match cfg.variant.as_str() {
