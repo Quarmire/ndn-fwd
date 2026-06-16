@@ -67,6 +67,7 @@ browser-engine = [
   "dep:ndn-engine",
   "dep:ndn-mgmt",
   "dep:ndn-config",
+  "ndn-config/mgmt",
   "dep:ndn-runtime",
   "dep:ndn-transport",
   "dep:ndn-coding",

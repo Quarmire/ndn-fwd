@@ -64,7 +64,7 @@ ndn-runtime   = { workspace = true }
 ndn-transport = { workspace = true }
 ndn-engine    = { workspace = true }
 ndn-mgmt      = { workspace = true }
-ndn-config    = { workspace = true }
+ndn-config    = { workspace = true, features = ["mgmt"] }
 ndn-store     = { workspace = true }
 ndn-face-webtransport-wasm = { workspace = true }
 ndn-cert      = { path = "../../ndn-cert", default-features = false, features = ["wasm-client"] }

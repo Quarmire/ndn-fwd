@@ -79,7 +79,7 @@ ndn-identity     = { workspace = true }
 ndn-face-webrtc  = { workspace = true, optional = true }
 ndn-rtc-signaling-relay = { workspace = true, optional = true }
 dashmap          = { workspace = true }
-ndn-config       = { workspace = true }
+ndn-config       = { workspace = true, features = ["mgmt"] }
 ndn-routing      = { workspace = true }
 ndn-sync         = { workspace = true }
 getrandom        = "0.2"
