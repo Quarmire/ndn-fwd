@@ -190,6 +190,7 @@ impl Engine {
             let mgmt_config = Arc::new(ndn_config::ForwarderConfig::default());
             let mgmt_handles = ndn_mgmt::MgmtHandles {
                 extra_modules: Vec::new(),
+                face_provisioners: Vec::new(),
                 security_is_ephemeral: true,
                 command_validator: None,
                 localhop_command_validator: None,

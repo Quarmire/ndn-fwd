@@ -115,6 +115,7 @@ pub fn init() -> EngineHandle {
         let replay_cache: ndn_mgmt::CommandReplayCache = Arc::new(StdMutex::new(HashMap::new()));
         let mgmt_handles = ndn_mgmt::MgmtHandles {
             extra_modules: Vec::new(),
+            face_provisioners: Vec::new(),
             security_is_ephemeral: true,
             command_validator: None,
             localhop_command_validator: None,

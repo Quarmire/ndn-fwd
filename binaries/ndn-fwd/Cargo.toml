@@ -29,9 +29,9 @@ af-xdp      = ["l2", "ndn-face-native/af-xdp"]
 # BLE faces: ble:// (central) and ble-peripheral:// (server). Opt-in, not
 # default — on Linux `bluer` needs libdbus dev headers at build time.
 bluetooth   = ["ndn-face-native/bluetooth", "ndn-mgmt/bluetooth", "dep:async-trait"]
-webtransport = ["dep:ndn-face-webtransport", "ndn-mgmt/webtransport", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
+webtransport = ["dep:ndn-face-webtransport", "dep:async-trait", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
 # Raw-QUIC forwarder-to-forwarder backbone face (TLS 1.3, connection migration).
-quic        = ["dep:ndn-face-quic", "ndn-mgmt/quic"]
+quic        = ["dep:ndn-face-quic", "dep:async-trait"]
 # Browser-as-peer WebRTC datachannel faces + signaling-relay listener.
 # Pulls in the full webrtc stack (DTLS/SCTP/ICE/SRTP), so it is opt-in.
 webrtc      = ["dep:ndn-face-webrtc", "dep:ndn-rtc-signaling-relay"]

@@ -43,6 +43,7 @@ fn build_obs_retention(
 }
 
 mod demo_ca;
+mod face_provision;
 mod face_setup;
 mod host_helpers;
 mod installs;
@@ -758,6 +759,7 @@ async fn main() -> Result<()> {
         pib.clone(),
         mgmt_ndn::MgmtHandles {
             extra_modules: Vec::new(),
+            face_provisioners: face_provision::face_provisioners(),
             discovery_cfg: mgmt_discovery_cfg,
             security_is_ephemeral,
             // None when [security.mgmt].trust_anchor_pib is unset. With
