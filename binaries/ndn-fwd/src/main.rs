@@ -760,6 +760,7 @@ async fn main() -> Result<()> {
         mgmt_ndn::MgmtHandles {
             extra_modules: Vec::new(),
             face_provisioners: face_provision::face_provisioners(),
+            control_surfaces: Vec::new(),
             discovery_cfg: mgmt_discovery_cfg,
             security_is_ephemeral,
             // None when [security.mgmt].trust_anchor_pib is unset. With
