@@ -33,7 +33,7 @@ ndn-config    = { workspace = true }
 ndn-mgmt-wire = { workspace = true }
 ndn-custodian = { workspace = true }
 # default-features = false drops sqlite-pib so the web target stays wasm-safe.
-ndn-security  = { path = "../../../../ndn-rs/crates/ndn-security", default-features = false }
+ndn-security  = { path = "../../../../ndn-rs/crates/security/ndn-security", default-features = false }
 ndn-packet    = { workspace = true }
 ndn-tlv       = { workspace = true }
 ndn-safebag   = { workspace = true }

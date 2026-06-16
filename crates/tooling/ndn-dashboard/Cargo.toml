@@ -101,7 +101,7 @@ ndn-mgmt-wire = { workspace = true }
 ndn-custodian = { workspace = true }
 # default-features = false drops sqlite-pib so the web target stays wasm-safe;
 # used by operator_keyring to hold the dashboard's own Ed25519 signing key.
-ndn-security = { path = "../../../../ndn-rs/crates/ndn-security", default-features = false }
+ndn-security = { path = "../../../../ndn-rs/crates/security/ndn-security", default-features = false }
 # Desktop gets full std (with ring/blake3); web gets std-wasm (no native crypto)
 ndn-packet = { workspace = true }
 ndn-tlv    = { workspace = true }
@@ -138,7 +138,7 @@ ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"]
 # The shared `ndn-trust://` envelope codec (capability request/grant) + a pure-Rust
 # QR renderer for the Pairing screen's request code. Desktop-only (the pairing
 # flow binds a phone fob to this operator console).
-ndn-trust-envelope = { path = "../../../../ndn-rs/crates/ndn-trust-envelope", optional = true }
+ndn-trust-envelope = { path = "../../../../ndn-rs/crates/security/ndn-trust-envelope", optional = true }
 qrcode         = { version = "0.14", default-features = false, features = ["svg"], optional = true }
 
 # ed25519-dalek powers the DashboardSigner used to sign every chain
