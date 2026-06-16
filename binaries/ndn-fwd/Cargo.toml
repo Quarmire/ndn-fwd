@@ -19,7 +19,7 @@ default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "quic", "fec
 # Per-worker partitioned forwarding data plane (selected via `[engine]
 # data_plane = "partitioned"`). Without it, that config falls back to shared.
 partitioned-fwd = ["ndn-engine/partitioned-fwd"]
-spsc-shm    = ["ndn-face/spsc-shm", "ndn-mgmt/spsc-shm"]
+spsc-shm    = ["dep:ndn-face-shm"]
 websocket   = ["dep:ndn-face-websocket", "dep:tokio-tungstenite"]
 serial      = ["dep:ndn-face-serial"]
 l2          = ["ndn-face/l2", "ndn-mgmt/l2"]
@@ -68,6 +68,7 @@ ndn-app          = { workspace = true }
 ndn-face        = { workspace = true }
 ndn-face-serial = { workspace = true, optional = true }
 ndn-face-websocket = { workspace = true, optional = true }
+ndn-face-shm    = { workspace = true, optional = true }
 ndn-face-webtransport = { workspace = true, optional = true }
 ndn-face-quic         = { workspace = true, optional = true }
 ndn-acme              = { workspace = true, optional = true }
