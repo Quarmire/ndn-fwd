@@ -750,18 +750,27 @@ async fn main() -> Result<()> {
     #[cfg(not(all(feature = "bluetooth", any(target_os = "linux", target_os = "macos"))))]
     let ble_handler: Option<Arc<dyn mgmt_ndn::BleMgmtBackend>> = None;
 
+    // The discovery + service management modules live in ndn-discovery now
+    // (so ndn-mgmt doesn't depend on the discovery extension); register them
+    // here via extra_modules, capturing the discovery handles.
+    let discovery_modules: Vec<Arc<dyn mgmt_ndn::MgmtModule>> = vec![
+        Arc::new(ndn_discovery::mgmt::DiscoveryMgmtModule::new(
+            mgmt_discovery_cfg,
+        )),
+        Arc::new(ndn_discovery::mgmt::ServiceMgmtModule::new(
+            mgmt_discovery_sd,
+            mgmt_discovery_claimed,
+        )),
+    ];
     let ndn_handler_task = tokio::spawn(mgmt_ndn::mount_management(
         &engine,
         cancel.clone(),
-        mgmt_discovery_sd.clone(),
-        mgmt_discovery_claimed.clone(),
         Arc::new(fwd_config.clone()),
         pib.clone(),
         mgmt_ndn::MgmtHandles {
-            extra_modules: Vec::new(),
+            extra_modules: discovery_modules,
             face_provisioners: face_provision::face_provisioners(),
             control_surfaces: Vec::new(),
-            discovery_cfg: mgmt_discovery_cfg,
             security_is_ephemeral,
             // None when [security.mgmt].trust_anchor_pib is unset. With
             // require_signed_commands=true and no validator, every command

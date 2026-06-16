@@ -63,7 +63,7 @@ humantime        = "2"
 ndn-coding       = { workspace = true, optional = true }
 ndn-ratelimit    = { workspace = true, optional = true }
 ndn-strategy-cclf = { workspace = true, optional = true }
-ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd"] }
+ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd", "mgmt"] }
 ndn-app          = { workspace = true }
 ndn-face        = { workspace = true }
 ndn-face-serial = { workspace = true, optional = true }
