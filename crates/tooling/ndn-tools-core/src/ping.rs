@@ -41,6 +41,7 @@ pub async fn run_server(params: PingServerParams, tx: mpsc::Sender<ToolEvent>) -
     // without re-tuning the FIB.
     let prefix = parent.clone().append("ping");
     let client = if params.conn.use_shm {
+        ndn_ipc_shm::install();
         ForwarderClient::connect(&params.conn.face_socket).await?
     } else {
         ForwarderClient::connect_unix_only(&params.conn.face_socket).await?

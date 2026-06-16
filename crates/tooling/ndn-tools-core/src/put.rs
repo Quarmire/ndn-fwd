@@ -69,6 +69,7 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
     // default slot.
     let mtu_hint = params.conn.mtu.or(Some(chunk_size));
     let client = if params.conn.use_shm {
+        ndn_ipc_shm::install();
         ForwarderClient::connect_with_mtu(&params.conn.face_socket, mtu_hint).await?
     } else {
         ForwarderClient::connect_unix_only(&params.conn.face_socket).await?

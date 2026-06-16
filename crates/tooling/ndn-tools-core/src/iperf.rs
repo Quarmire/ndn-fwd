@@ -95,6 +95,7 @@ pub struct IperfClientParams {
 
 async fn connect_client(conn: &ConnectConfig) -> Result<ForwarderClient> {
     if conn.use_shm {
+        ndn_ipc_shm::install();
         Ok(ForwarderClient::connect(&conn.face_socket).await?)
     } else {
         Ok(ForwarderClient::connect_unix_only(&conn.face_socket).await?)

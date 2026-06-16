@@ -20,6 +20,7 @@ recv    = []
 [dependencies]
 ndn-app        = { workspace = true }
 ndn-ipc        = { workspace = true }
+ndn-ipc-shm    = { workspace = true }
 ndn-packet     = { workspace = true, features = ["std"] }
 ndn-security   = { workspace = true }
 ndn-transport  = { workspace = true }
