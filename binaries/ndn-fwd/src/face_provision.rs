@@ -10,7 +10,12 @@
 use std::sync::Arc;
 
 use ndn_mgmt::FaceProvisioner;
-#[cfg(any(feature = "quic", feature = "webtransport", feature = "spsc-shm"))]
+#[cfg(any(
+    feature = "quic",
+    feature = "webtransport",
+    feature = "spsc-shm",
+    feature = "bluetooth"
+))]
 use ndn_mgmt::{ProvisionError, ProvisionRequest, ProvisionedFace};
 
 /// The provisioners this build links, one per enabled extension transport.
@@ -23,7 +28,82 @@ pub fn face_provisioners() -> Vec<Arc<dyn FaceProvisioner>> {
     v.push(Arc::new(WebTransportProvisioner));
     #[cfg(feature = "spsc-shm")]
     v.push(Arc::new(ShmProvisioner));
+    #[cfg(feature = "bluetooth")]
+    v.push(Arc::new(BleProvisioner));
     v
+}
+
+/// `ble://<name-or-address>[?framing=ndnts|ndnlpv2][&adapter=hci0]` — dial a BLE
+/// peripheral as a GATT central. The peripheral (GATT server) is a listener
+/// (`[listeners.ble]`), not created here. BLE moved to the `ndn-face-bluetooth`
+/// extension crate.
+#[cfg(feature = "bluetooth")]
+struct BleProvisioner;
+
+#[cfg(feature = "bluetooth")]
+#[async_trait::async_trait]
+impl FaceProvisioner for BleProvisioner {
+    fn handles(&self, uri: &str) -> bool {
+        uri.starts_with("ble://")
+    }
+
+    async fn provision(
+        &self,
+        req: ProvisionRequest<'_>,
+    ) -> Result<ProvisionedFace, ProvisionError> {
+        use ndn_face_bluetooth::BleCentralFace;
+        use ndn_transport::{FacePersistency, Transport};
+        use tokio_util::sync::CancellationToken;
+
+        let rest = req.uri.strip_prefix("ble://").unwrap_or(req.uri);
+        let (target, query) = match rest.split_once('?') {
+            Some((t, q)) => (t, Some(q)),
+            None => (rest, None),
+        };
+        let framing = query.and_then(parse_ble_framing);
+        let adapter = query.and_then(|q| parse_ble_query(q, "adapter"));
+
+        let face_id = req.engine.faces().alloc_id();
+        match BleCentralFace::connect(face_id, target, framing, adapter.as_deref()).await {
+            Ok(face) => {
+                let remote_uri = face
+                    .remote_uri()
+                    .unwrap_or_else(|| format!("ble://{target}"));
+                req.engine.add_face_with_persistency(
+                    face,
+                    CancellationToken::new(),
+                    FacePersistency::Persistent,
+                );
+                Ok(ProvisionedFace {
+                    face_id,
+                    remote_uri: remote_uri.clone(),
+                    local_uri: Some(remote_uri),
+                    persistency: FacePersistency::Persistent,
+                })
+            }
+            Err(e) => Err(ProvisionError::Server(format!("BLE central failed: {e}"))),
+        }
+    }
+}
+
+/// Parse `framing=ndnts|ndnlpv2` out of a `ble://` URI query string.
+#[cfg(feature = "bluetooth")]
+fn parse_ble_framing(query: &str) -> Option<ndn_face_bluetooth::BleFraming> {
+    let v = parse_ble_query(query, "framing")?;
+    match v.to_ascii_lowercase().as_str() {
+        "ndnts" => Some(ndn_face_bluetooth::BleFraming::Ndnts),
+        "ndnlpv2" => Some(ndn_face_bluetooth::BleFraming::Ndnlpv2),
+        _ => None,
+    }
+}
+
+/// Extract `key=value` from a `&`-separated query string.
+#[cfg(feature = "bluetooth")]
+fn parse_ble_query(query: &str, key: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+        .map(str::to_owned)
 }
 
 /// `shm://<name>` — a zero-copy shared-memory ring face (the app<->engine IPC

@@ -28,7 +28,7 @@ l2          = ["ndn-face/l2", "ndn-mgmt/l2"]
 af-xdp      = ["l2", "ndn-face/af-xdp"]
 # BLE faces: ble:// (central) and ble-peripheral:// (server). Opt-in, not
 # default — on Linux `bluer` needs libdbus dev headers at build time.
-bluetooth   = ["ndn-face/bluetooth", "ndn-mgmt/bluetooth", "dep:async-trait"]
+bluetooth   = ["dep:ndn-face-bluetooth", "dep:async-trait"]
 webtransport = ["dep:ndn-face-webtransport", "dep:async-trait", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
 # Raw-QUIC forwarder-to-forwarder backbone face (TLS 1.3, connection migration).
 quic        = ["dep:ndn-face-quic", "dep:async-trait"]
@@ -69,6 +69,7 @@ ndn-face        = { workspace = true }
 ndn-face-serial = { workspace = true, optional = true }
 ndn-face-websocket = { workspace = true, optional = true }
 ndn-face-shm    = { workspace = true, optional = true }
+ndn-face-bluetooth = { workspace = true, optional = true }
 ndn-face-webtransport = { workspace = true, optional = true }
 ndn-face-quic         = { workspace = true, optional = true }
 ndn-acme              = { workspace = true, optional = true }
