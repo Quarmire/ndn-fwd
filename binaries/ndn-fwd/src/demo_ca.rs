@@ -14,7 +14,7 @@ use ndn_cert::{
 };
 use ndn_config::DemoCaConfig;
 use ndn_engine::ForwarderEngine;
-use ndn_face_native::local::{InProcFace, InProcHandle};
+use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_identity::NdncertCa;
 use ndn_packet::Name;
 use ndn_security::{KeyChain, Validator};

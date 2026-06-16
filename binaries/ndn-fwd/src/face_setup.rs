@@ -23,7 +23,7 @@ pub struct FaceSetupState {
     pub auto_udp_pre_alloc: Vec<(FaceId, String, std::net::Ipv4Addr)>,
     pub auto_ether_pre_alloc: Vec<(FaceId, String)>,
     pub auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
-    pub auto_ether_ifaces: Vec<ndn_face_native::iface::InterfaceInfo>,
+    pub auto_ether_ifaces: Vec<ndn_face::iface::InterfaceInfo>,
 }
 
 /// Spawn every face listener, WebTransport / WebRTC listener, auto-
@@ -70,7 +70,7 @@ async fn run_face_setup_inner(
     auto_udp_pre_alloc: Vec<(FaceId, String, std::net::Ipv4Addr)>,
     auto_ether_pre_alloc: Vec<(FaceId, String)>,
     auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
-    auto_ether_ifaces: Vec<ndn_face_native::iface::InterfaceInfo>,
+    auto_ether_ifaces: Vec<ndn_face::iface::InterfaceInfo>,
 ) {
     // Resolve a config-face index to its pre-assigned FaceId; fall back to a
     // fresh id for the synthetic default listeners (empty `[[face]]`).
@@ -122,7 +122,7 @@ async fn run_face_setup_inner(
                     };
                     let eng = engine.clone();
                     tokio::spawn(async move {
-                        match ndn_face_native::net::UdpFace::bind(local, peer, face_id).await {
+                        match ndn_face::net::UdpFace::bind(local, peer, face_id).await {
                             Ok(face) => {
                                 let c = CancellationToken::new();
                                 tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, "udp pre-connected face created");
@@ -181,7 +181,7 @@ async fn run_face_setup_inner(
                 let eng = engine.clone();
                 let c = cancel.child_token();
                 tokio::spawn(async move {
-                    match ndn_face_native::net::MulticastUdpFace::new(iface, port, group_addr, id)
+                    match ndn_face::net::MulticastUdpFace::new(iface, port, group_addr, id)
                         .await
                     {
                         Ok(face) => {
@@ -314,7 +314,7 @@ async fn run_face_setup_inner(
                 #[cfg(feature = "serial")]
                 {
                     let id = id_for(face_idx);
-                    match ndn_face_native::serial::serial_face_open(id, path, *baud) {
+                    match ndn_face::serial::serial_face_open(id, path, *baud) {
                         Ok(face) => {
                             let c = cancel.child_token();
                             engine.add_face(face, c);
@@ -335,7 +335,7 @@ async fn run_face_setup_inner(
                 #[cfg(target_os = "linux")]
                 {
                     let id = id_for(face_idx);
-                    match ndn_face_native::l2::MulticastEtherFace::new(id, interface) {
+                    match ndn_face::l2::MulticastEtherFace::new(id, interface) {
                         Ok(face) => {
                             let c = cancel.child_token();
                             engine.add_face_with_persistency(
@@ -386,14 +386,14 @@ async fn run_face_setup_inner(
                         // A `bpf-object` path overrides the embedded default
                         // redirect program (`bpf/redirect.bpf.o`).
                         let opened = match bpf_object.clone() {
-                            Some(obj) => ndn_face_native::l2::AfXdpFace::new(
+                            Some(obj) => ndn_face::l2::AfXdpFace::new(
                                 id,
                                 interface,
                                 0,
                                 mac,
                                 obj.into(),
                             ),
-                            None => ndn_face_native::l2::AfXdpFace::new_with_embedded_redirect(
+                            None => ndn_face::l2::AfXdpFace::new_with_embedded_redirect(
                                 id, interface, 0, mac,
                             ),
                         };
@@ -417,12 +417,12 @@ async fn run_face_setup_inner(
                         tracing::warn!(target: "face.eth", iface=%interface, "ether io=afxdp needs ndn-fwd built --features af-xdp on Linux; using af_packet");
                     }
 
-                    match ndn_face_native::l2::NamedEtherFace::new(
+                    match ndn_face::l2::NamedEtherFace::new(
                         id,
                         ndn_packet::Name::root(),
                         mac,
                         interface.clone(),
-                        ndn_face_native::l2::RadioFaceMetadata::default(),
+                        ndn_face::l2::RadioFaceMetadata::default(),
                     ) {
                         Ok(face) => {
                             let c = cancel.child_token();
@@ -491,7 +491,7 @@ async fn run_face_setup_inner(
     #[cfg(target_os = "linux")]
     for (pre_id, iface_name) in &auto_ether_pre_alloc {
         let id = *pre_id;
-        match ndn_face_native::l2::MulticastEtherFace::new(id, iface_name) {
+        match ndn_face::l2::MulticastEtherFace::new(id, iface_name) {
             Ok(face) => {
                 let c = cancel.child_token();
                 engine.add_face_with_persistency(
@@ -514,7 +514,7 @@ async fn run_face_setup_inner(
         let eng = engine.clone();
         let c = cancel.child_token();
         tokio::spawn(async move {
-            match ndn_face_native::net::MulticastUdpFace::ndn_default(addr, id).await {
+            match ndn_face::net::MulticastUdpFace::ndn_default(addr, id).await {
                 Ok(face) => {
                     let face = if udp_ad_hoc { face.ad_hoc() } else { face };
                     eng.add_face_with_persistency(
@@ -531,12 +531,12 @@ async fn run_face_setup_inner(
         });
     }
     // Auto-multicast enumeration + interface hotplug now live in the reusable
-    // `ndn_face_native::provision` module (shared with the mobile/in-browser
+    // `ndn_face::provision` module (shared with the mobile/in-browser
     // engines via the `FaceSink` seam). When neighbour discovery pre-allocated
     // the startup faces above, skip the provisioner's initial enumeration to
     // avoid double-creating them — but still run the hotplug watcher so later
     // interfaces are picked up.
-    let provision_cfg = ndn_face_native::provision::MulticastProvisionConfig {
+    let provision_cfg = ndn_face::provision::MulticastProvisionConfig {
         udp_auto: fwd_config.face_system.udp.auto_multicast,
         udp_ad_hoc,
         udp_whitelist: fwd_config.face_system.udp.whitelist.clone(),
@@ -549,14 +549,14 @@ async fn run_face_setup_inner(
     let pre_allocated = !auto_udp_pre_alloc.is_empty() || !auto_ether_pre_alloc.is_empty();
     if pre_allocated {
         if provision_cfg.watch_interfaces {
-            ndn_face_native::provision::spawn_hotplug_watcher(
+            ndn_face::provision::spawn_hotplug_watcher(
                 engine.clone(),
                 provision_cfg,
                 cancel.child_token(),
             );
         }
     } else {
-        ndn_face_native::provision::provision(&engine, &provision_cfg, cancel);
+        ndn_face::provision::provision(&engine, &provision_cfg, cancel);
     }
 
     tracing::info!(target: "engine", "engine running");

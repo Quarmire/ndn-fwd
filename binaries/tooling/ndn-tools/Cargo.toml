@@ -63,7 +63,7 @@ ndn-security   = { workspace = true }
 ndn-sync       = { workspace = true }
 ndn-config     = { workspace = true }
 ndn-transport  = { workspace = true }
-ndn-face-native     = { workspace = true }
+ndn-face     = { workspace = true }
 bytes          = { workspace = true, features = ["std"] }
 base64         = { workspace = true, features = ["std"] }
 serde          = { workspace = true }

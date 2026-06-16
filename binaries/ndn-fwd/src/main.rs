@@ -323,9 +323,9 @@ async fn main() -> Result<()> {
     let auto_udp_pre_alloc: Vec<(ndn_transport::FaceId, String, std::net::Ipv4Addr)>;
     let mgmt_discovery_cfg: Option<Arc<RwLock<ndn_discovery::DiscoveryConfig>>> = None;
 
-    let auto_ether_ifaces: Vec<ndn_face_native::iface::InterfaceInfo> =
+    let auto_ether_ifaces: Vec<ndn_face::iface::InterfaceInfo> =
         if fwd_config.face_system.ether.auto_multicast {
-            let list = ndn_face_native::iface::list_interfaces();
+            let list = ndn_face::iface::list_interfaces();
             tracing::debug!(
                 target: "face.system",
                 total = list.len(),
@@ -334,7 +334,7 @@ async fn main() -> Result<()> {
             list.into_iter()
                 .filter(|i| i.is_up && i.is_multicast && !i.is_loopback)
                 .filter(|i| {
-                    ndn_face_native::iface::interface_allowed(
+                    ndn_face::iface::interface_allowed(
                         &i.name,
                         &fwd_config.face_system.ether.whitelist,
                         &fwd_config.face_system.ether.blacklist,
@@ -347,7 +347,7 @@ async fn main() -> Result<()> {
 
     let auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)> =
         if fwd_config.face_system.udp.auto_multicast {
-            let list = ndn_face_native::iface::list_interfaces();
+            let list = ndn_face::iface::list_interfaces();
             tracing::debug!(
                 target: "face.system",
                 total = list.len(),
@@ -356,7 +356,7 @@ async fn main() -> Result<()> {
             list.into_iter()
                 .filter(|i| i.is_up && i.is_multicast && !i.is_loopback)
                 .filter(|i| {
-                    ndn_face_native::iface::interface_allowed(
+                    ndn_face::iface::interface_allowed(
                         &i.name,
                         &fwd_config.face_system.udp.whitelist,
                         &fwd_config.face_system.udp.blacklist,
@@ -467,7 +467,7 @@ async fn main() -> Result<()> {
                     ndn_config::FaceConfig::EtherMulticast { interface } => interface.as_str(),
                     _ => unreachable!(),
                 };
-                match ndn_face_native::l2::get_interface_mac(iface) {
+                match ndn_face::l2::get_interface_mac(iface) {
                     Ok(local_mac) => {
                         let ether_nd = ndn_discovery::EtherNeighborDiscovery::new_with_config(
                             *ether_id,
@@ -485,7 +485,7 @@ async fn main() -> Result<()> {
                 }
             }
             for (ether_id, iface_name) in &auto_ether_ids {
-                match ndn_face_native::l2::get_interface_mac(iface_name) {
+                match ndn_face::l2::get_interface_mac(iface_name) {
                     Ok(local_mac) => {
                         let ether_nd = ndn_discovery::EtherNeighborDiscovery::new_with_config(
                             *ether_id,

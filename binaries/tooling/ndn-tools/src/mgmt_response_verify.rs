@@ -10,7 +10,7 @@ use ndn_config::{
     ControlParameters, ControlResponse,
     nfd_command::{command_name, module, verb},
 };
-use ndn_face_native::local::ipc_face_connect;
+use ndn_face::local::ipc_face_connect;
 use ndn_packet::{
     Data, Name, SignatureType,
     encode::InterestBuilder,

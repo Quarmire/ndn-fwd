@@ -9,7 +9,7 @@ use clap::Parser;
 use tokio::task::JoinSet;
 
 use ndn_engine::{EngineBuilder, EngineConfig};
-use ndn_face_native::local::{InProcFace, InProcHandle};
+use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_packet::encode::{encode_data_unsigned, encode_interest};
 use ndn_packet::lp::is_lp_packet;
 use ndn_packet::{Interest, Name};

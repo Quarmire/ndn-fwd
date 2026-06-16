@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use bytes::Bytes;
 use clap::Parser;
-use ndn_face_native::local::ipc_face_connect;
+use ndn_face::local::ipc_face_connect;
 use ndn_packet::{
     Data, Name, NameComponent,
     encode::InterestBuilder,

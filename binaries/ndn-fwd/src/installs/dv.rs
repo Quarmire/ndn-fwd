@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ndn_engine::{EngineBuilder, InstallableProtocol, PostBuildQueue, RoutingProtocol};
-use ndn_face_native::local::InProcFace;
+use ndn_face::local::InProcFace;
 use ndn_packet::Name;
 use ndn_transport::FaceId;
 
@@ -76,7 +76,7 @@ pub async fn prepare(
             "[::]:0".parse().unwrap()
         };
         let face_id = builder.alloc_face_id();
-        match ndn_face_native::net::UdpFace::bind(local, peer, face_id).await {
+        match ndn_face::net::UdpFace::bind(local, peer, face_id).await {
             Ok(face) => {
                 builder.add_face(face);
                 neighbour_seeds.push((neighbour_name.clone(), face_id));
