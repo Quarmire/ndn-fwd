@@ -25,7 +25,7 @@ serial      = ["dep:ndn-face-serial"]
 l2          = ["ndn-face/l2", "ndn-mgmt/l2"]
 # AF_XDP kernel-bypass backend for the Ethernet face (Linux). Selected via
 # `[[face]] kind="ether" io="afxdp" bpf-object="…"`.
-af-xdp      = ["l2", "ndn-face/af-xdp"]
+af-xdp      = ["l2", "dep:ndn-face-afxdp"]
 # BLE faces: ble:// (central) and ble-peripheral:// (server). Opt-in, not
 # default — on Linux `bluer` needs libdbus dev headers at build time.
 bluetooth   = ["dep:ndn-face-bluetooth", "dep:async-trait"]
@@ -70,6 +70,7 @@ ndn-face-serial = { workspace = true, optional = true }
 ndn-face-websocket = { workspace = true, optional = true }
 ndn-face-shm    = { workspace = true, optional = true }
 ndn-face-bluetooth = { workspace = true, optional = true }
+ndn-face-afxdp  = { workspace = true, optional = true }
 ndn-face-webtransport = { workspace = true, optional = true }
 ndn-face-quic         = { workspace = true, optional = true }
 ndn-acme              = { workspace = true, optional = true }

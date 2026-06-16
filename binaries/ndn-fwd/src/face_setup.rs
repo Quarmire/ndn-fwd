@@ -386,14 +386,14 @@ async fn run_face_setup_inner(
                         // A `bpf-object` path overrides the embedded default
                         // redirect program (`bpf/redirect.bpf.o`).
                         let opened = match bpf_object.clone() {
-                            Some(obj) => ndn_face::l2::AfXdpFace::new(
+                            Some(obj) => ndn_face_afxdp::AfXdpFace::new(
                                 id,
                                 interface,
                                 0,
                                 mac,
                                 obj.into(),
                             ),
-                            None => ndn_face::l2::AfXdpFace::new_with_embedded_redirect(
+                            None => ndn_face_afxdp::AfXdpFace::new_with_embedded_redirect(
                                 id, interface, 0, mac,
                             ),
                         };
