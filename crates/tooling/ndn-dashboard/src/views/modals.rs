@@ -180,6 +180,7 @@ fn assemble_config(
         observability: Default::default(),
         reflexive: Default::default(),
         cclf: Default::default(),
+        extensions: Default::default(),
     };
     cfg.to_toml_string().unwrap_or_default()
 }
