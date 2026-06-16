@@ -6,7 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [package.metadata.scope]
-classification = "spec"
+# The reference forwarder *binary* — an application that aggregates extension
+# faces/strategies, not part of the pure library. Splits out (ndn-tools-rs).
+classification = "tooling"
 
 [[bin]]
 name = "ndn-fwd"
