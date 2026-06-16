@@ -314,7 +314,7 @@ async fn run_face_setup_inner(
                 #[cfg(feature = "serial")]
                 {
                     let id = id_for(face_idx);
-                    match ndn_face::serial::serial_face_open(id, path, *baud) {
+                    match ndn_face_serial::serial_face_open(id, path, *baud) {
                         Ok(face) => {
                             let c = cancel.child_token();
                             engine.add_face(face, c);

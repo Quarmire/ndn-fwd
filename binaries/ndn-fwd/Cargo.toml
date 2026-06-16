@@ -21,7 +21,7 @@ default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "quic", "fec
 partitioned-fwd = ["ndn-engine/partitioned-fwd"]
 spsc-shm    = ["ndn-face/spsc-shm", "ndn-mgmt/spsc-shm"]
 websocket   = ["ndn-face/websocket", "dep:tokio-tungstenite"]
-serial      = ["ndn-face/serial"]
+serial      = ["dep:ndn-face-serial"]
 l2          = ["ndn-face/l2", "ndn-mgmt/l2"]
 # AF_XDP kernel-bypass backend for the Ethernet face (Linux). Selected via
 # `[[face]] kind="ether" io="afxdp" bpf-object="…"`.
@@ -66,6 +66,7 @@ ndn-strategy-cclf = { workspace = true, optional = true }
 ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd"] }
 ndn-app          = { workspace = true }
 ndn-face        = { workspace = true }
+ndn-face-serial = { workspace = true, optional = true }
 ndn-face-webtransport = { workspace = true, optional = true }
 ndn-face-quic         = { workspace = true, optional = true }
 ndn-acme              = { workspace = true, optional = true }
