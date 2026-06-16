@@ -473,7 +473,7 @@ pub async fn run_ws_listener(
         };
 
         let face_id = engine.faces().alloc_id();
-        let face = ndn_face::net::WebSocketFace::from_stream(
+        let face = ndn_face_websocket::WebSocketFace::from_stream(
             face_id,
             ws,
             peer.to_string(),
