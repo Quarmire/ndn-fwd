@@ -138,7 +138,7 @@ ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"]
 # The shared `ndn-trust://` envelope codec (capability request/grant) + a pure-Rust
 # QR renderer for the Pairing screen's request code. Desktop-only (the pairing
 # flow binds a phone fob to this operator console).
-ndn-trust-envelope = { path = "../../../../ndn-rs/crates/security/ndn-trust-envelope", optional = true }
+ndn-trust-envelope = { path = "../../../../ndn-trust-envelope/crates/ndn-trust-envelope", optional = true }
 qrcode         = { version = "0.14", default-features = false, features = ["svg"], optional = true }
 
 # ed25519-dalek powers the DashboardSigner used to sign every chain
