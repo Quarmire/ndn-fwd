@@ -15,7 +15,7 @@
 //! - **Software key** — the seed + issued cert persist as an encrypted
 //!   `SafeBag` (spec-canonical, `ndnsec`-importable), the same shape as the web
 //!   path. Implemented here ([`save_software_safebag`] / [`load_software_safebag`]).
-//! - **Enclave key** — an [`EnclaveCustodian`](ndn_custodian::EnclaveCustodian)
+//! - **Enclave key** — an [`EnclaveCustodian`](ndn_security::custodian::EnclaveCustodian)
 //!   key's private half never leaves secure hardware, so it **cannot** go into
 //!   a SafeBag. It persists as the issued cert plus a reference to the enclave
 //!   key handle. That tier lands with Phase 4 (the real Keystore/Enclave key);
@@ -29,7 +29,7 @@ use bytes::Bytes;
 use ndn_cert::EnrollmentSession;
 use ndn_packet::encode::InterestBuilder;
 use ndn_packet::{Data, Name, NameComponent};
-use ndn_safebag::{SafeBag, ed25519_seed_to_pkcs8};
+use ndn_security::safebag::{SafeBag, ed25519_seed_to_pkcs8};
 use ndn_security::Signer;
 
 /// The NDNCERT token challenge type code, per the CA's offered challenges.
@@ -294,7 +294,7 @@ pub fn load_software_safebag(path: &Path, passphrase: &[u8]) -> Result<RestoredI
 pub struct EnclaveIdentity {
     /// Opaque platform reference to the enclave key (e.g. the Android Keystore
     /// alias or the Secure-Enclave key tag) — rebound to an
-    /// [`EnclaveBackend`](ndn_custodian::EnclaveBackend) on load.
+    /// [`EnclaveBackend`](ndn_security::custodian::EnclaveBackend) on load.
     pub key_handle: String,
     pub cert_wire: Bytes,
 }

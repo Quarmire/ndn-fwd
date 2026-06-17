@@ -25,7 +25,7 @@
 use std::sync::{Arc, OnceLock, RwLock};
 
 use bytes::Bytes;
-use ndn_custodian::{
+use ndn_security::custodian::{
     Custodian, CustodianRef, CustodianSigner, InPageCustodian, KeyId, RemoteCustodian,
     RemoteSignerTransport,
 };
@@ -232,7 +232,7 @@ pub fn provision_remote_signer(
 
 /// Provision a remote-signer identity from the operator certificate learned at
 /// pairing. The paired device sends its **self-signed** operator certificate
-/// (the reply to a [`ndn_custodian::PairingOffer`]); the public key, names, and
+/// (the reply to a [`ndn_security::custodian::PairingOffer`]); the public key, names, and
 /// algorithm all live inside it, so this is the single entry point from a
 /// completed pairing to an active off-host identity.
 ///
@@ -325,7 +325,7 @@ pub fn provision_imported(
 /// it's the single entry point for both SafeBag import and unlocking a
 /// persisted identity. Returns the identity name on success.
 pub fn provision_from_safebag(wire: &[u8], passphrase: &[u8]) -> Result<String, String> {
-    let bag = ndn_safebag::SafeBag::decode(wire).map_err(|e| format!("SafeBag decode: {e}"))?;
+    let bag = ndn_security::safebag::SafeBag::decode(wire).map_err(|e| format!("SafeBag decode: {e}"))?;
     let pkcs8 = bag
         .decrypt_pkcs8(passphrase)
         .map_err(|e| format!("decrypt failed (wrong passphrase?): {e}"))?;
@@ -446,7 +446,7 @@ pub fn export_safebag_for(key_name: &str, passphrase: &[u8]) -> Option<Result<Ve
 }
 
 fn encrypt_safebag(exp: &Exportable, passphrase: &[u8]) -> Result<Vec<u8>, String> {
-    ndn_safebag::SafeBag::encrypt(exp.cert_wire.clone(), &exp.pkcs8, passphrase)
+    ndn_security::safebag::SafeBag::encrypt(exp.cert_wire.clone(), &exp.pkcs8, passphrase)
         .map(|bag| bag.encode().to_vec())
         .map_err(|e| format!("SafeBag encrypt: {e}"))
 }
@@ -496,7 +496,7 @@ pub fn command_signer() -> Option<Arc<dyn Signer>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndn_custodian::{CustodianError, RemoteSignRequest};
+    use ndn_security::custodian::{CustodianError, RemoteSignRequest};
     use ndn_security::verifier::EcdsaSha256Verifier;
     use ndn_security::{VerifyOutcome, Verifier, encode_cert_data};
 

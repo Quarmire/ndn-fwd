@@ -6,8 +6,7 @@ description = "Minimal stand-in for an untrusted peer (kiosk/dashboard) pairing 
 
 [dependencies]
 ndn-trust-envelope = { workspace = true }
-ndn-custodian = { workspace = true }
-ndn-security  = { workspace = true }
+ndn-security  = { workspace = true, features = ["custodian"] }
 ndn-packet    = { workspace = true, features = ["std"] }
 bytes  = { workspace = true, features = ["std"] }
 base64 = { workspace = true }

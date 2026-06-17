@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 use ndn_packet::Name;
-use ndn_safebag::SafeBag;
+use ndn_security::safebag::SafeBag;
 use ndn_security::{Signer, Validator};
 use thiserror::Error;
 

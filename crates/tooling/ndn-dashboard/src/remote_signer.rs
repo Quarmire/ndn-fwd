@@ -1,7 +1,7 @@
 //! NDN transport for the remote signer — the dashboard's side of the pairing
 //! channel.
 //!
-//! A [`ndn_custodian::RemoteCustodian`] built on this sends each command's
+//! A [`ndn_security::custodian::RemoteCustodian`] built on this sends each command's
 //! signed region to the paired phone as a [`WireSignRequest`] in an Interest's
 //! application parameters, addressed to the phone's `…/signer` responder prefix.
 //! The phone signs it — only within the scope and window the operator granted —
@@ -20,7 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use ndn_app::Consumer;
-use ndn_custodian::{
+use ndn_security::custodian::{
     CustodianError, CustodianRef, RemoteSignRequest, RemoteSignerTransport, WireSignRequest,
     WireSignResponse,
 };

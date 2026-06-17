@@ -23,7 +23,6 @@ web = [
   "dep:console_error_panic_hook",
   # NDNCERT onboarding (the Join panel): IdbPib persistence + SafeBag wrapping.
   "dep:ndn-pib-idb",
-  "dep:ndn-safebag",
   "ndn-packet/std-wasm",
   "ndn-tlv/std",
   "getrandom/js",
@@ -40,7 +39,6 @@ shared-engine = [
   "dep:console_error_panic_hook",
   "dep:ndn-face-shared-worker",
   "dep:ndn-pib-idb",
-  "dep:ndn-safebag",
   "ndn-packet/std-wasm",
   "ndn-tlv/std",
   "getrandom/js",
@@ -72,7 +70,6 @@ ndn-security  = { path = "../../../../ndn-rs/crates/security/ndn-security", defa
 ndn-face-webrtc = { workspace = true }
 ndn-face-shared-worker = { workspace = true, optional = true }
 ndn-pib-idb            = { workspace = true, optional = true }
-ndn-safebag            = { workspace = true, optional = true }
 tokio-util = { workspace = true, features = ["rt"] }
 
 wasm-bindgen              = { version = "0.2", optional = true }

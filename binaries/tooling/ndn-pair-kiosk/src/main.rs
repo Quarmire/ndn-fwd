@@ -21,7 +21,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use bytes::Bytes;
 use ndn_app::Consumer;
-use ndn_custodian::{WireSignRequest, WireSignResponse};
+use ndn_security::custodian::{WireSignRequest, WireSignResponse};
 use ndn_packet::Name;
 use ndn_packet::encode::InterestBuilder;
 use ndn_security::verifier::{EcdsaSha256Verifier, VerifyOutcome, Verifier};

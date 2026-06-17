@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use js_sys::{Array, Uint8Array};
 use ndn_packet::{Data, Name};
-use ndn_safebag::SafeBag;
-use ndn_safebag::SafeBagAlgorithm;
+use ndn_security::safebag::SafeBag;
+use ndn_security::safebag::SafeBagAlgorithm;
 use ndn_security::{
     Certificate, EcdsaP256Signer, Ed25519Signer, Signer, Validator, trust_schema::TrustSchema,
 };

@@ -1,7 +1,7 @@
 //! Runtime-classification pill rendered next to the conn-bar identity chip.
 
 use dioxus::prelude::*;
-use ndn_custodian::CustodianRef;
+use ndn_security::custodian::CustodianRef;
 
 /// Computed at startup from compile-time features + the `?engine=` query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

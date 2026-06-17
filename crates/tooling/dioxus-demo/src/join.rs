@@ -7,7 +7,7 @@ use std::sync::Arc;
 use ndn_packet::Name;
 use ndn_pib_idb::{IdbPib, IdbPibError};
 use ndn_runtime::default_runtime;
-use ndn_safebag::{SafeBag, ed25519_seed_to_pkcs8};
+use ndn_security::safebag::{SafeBag, ed25519_seed_to_pkcs8};
 use ndn_security::{Ed25519Signer, Signer};
 use wasm_bindgen::prelude::*;
 

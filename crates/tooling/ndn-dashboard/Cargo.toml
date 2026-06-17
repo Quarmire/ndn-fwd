@@ -98,10 +98,9 @@ ndn-config = { workspace = true, optional = true }
 ndn-mgmt-wire = { workspace = true }
 # Wasm-safe Custodian trait + CustodianRef (the canonical "where the key lives"
 # vocabulary) — backs the Trust Context machine-trust surfacing.
-ndn-custodian = { workspace = true }
 # default-features = false drops sqlite-pib so the web target stays wasm-safe;
 # used by operator_keyring to hold the dashboard's own Ed25519 signing key.
-ndn-security = { path = "../../../../ndn-rs/crates/security/ndn-security", default-features = false }
+ndn-security = { path = "../../../../ndn-rs/crates/security/ndn-security", default-features = false, features = ["custodian"] }
 # Desktop gets full std (with ring/blake3); web gets std-wasm (no native crypto)
 ndn-packet = { workspace = true }
 ndn-tlv    = { workspace = true }
@@ -152,7 +151,6 @@ ed25519-dalek  = { workspace = true }
 # import modal's local preview + trust check; the modal decodes the
 # dropped file in-browser so the operator sees identity/key/cert
 # *before* committing the wire.
-ndn-safebag    = { workspace = true }
 
 # Web-only dependencies (optional, activated by "web" feature)
 gloo-net     = { version = "0.6", optional = true }

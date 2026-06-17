@@ -18,7 +18,7 @@ use crate::edu_gloss::EduGloss;
 use crate::types::{AnchorInfo, SchemaRuleInfo};
 use crate::views::engine_pill::{FdeDetection, probe_fde};
 use dioxus::prelude::*;
-use ndn_safebag::{SafeBag, SafeBagAlgorithm};
+use ndn_security::safebag::{SafeBag, SafeBagAlgorithm};
 
 /// State of the §5.1 SafeBag import modal — held in a global signal
 /// so the layout-root drag-drop handler can push the dropped wire

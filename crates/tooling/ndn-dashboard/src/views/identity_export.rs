@@ -777,11 +777,11 @@ mod tests {
             .await
             .unwrap();
 
-        let bag = ndn_safebag::SafeBag::encrypt(Bytes::from(cert_wire.to_vec()), &pkcs8, b"pw")
+        let bag = ndn_security::safebag::SafeBag::encrypt(Bytes::from(cert_wire.to_vec()), &pkcs8, b"pw")
             .expect("encrypt");
         let wire = bag.encode();
 
-        let parsed = ndn_safebag::SafeBag::decode(&wire).expect("decode");
+        let parsed = ndn_security::safebag::SafeBag::decode(&wire).expect("decode");
         let cert_data = ndn_packet::Data::decode(parsed.certificate.clone()).expect("cert data");
         assert_eq!(cert_data.name.to_string(), "/op/test/KEY/k0/self/v=0");
         assert!(parsed.decrypt_pkcs8(b"pw").is_ok());
