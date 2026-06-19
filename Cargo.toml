@@ -15,9 +15,6 @@ members = [
     "binaries/ndn-trust-context",
     "binaries/tooling/audit-strict-mgmt-validation",
     "binaries/tooling/ndn-otel-bridge",
-    "crates/tooling/ndn-dashboard",
-    "crates/tooling/ndn-dashboard-next",
-    "crates/tooling/dash-glossary",
 ]
 default-members = [
     "crates/ndn-pib-idb",
@@ -33,9 +30,6 @@ default-members = [
     "binaries/ndn-trust-context",
     "binaries/tooling/audit-strict-mgmt-validation",
     "binaries/tooling/ndn-otel-bridge",
-    "crates/tooling/ndn-dashboard",
-    "crates/tooling/ndn-dashboard-next",
-    "crates/tooling/dash-glossary",
 ]
 
 [workspace.package]

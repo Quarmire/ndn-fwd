@@ -52,13 +52,3 @@ jobs:
       - name: Test
         working-directory: ndn-fwd
         run: cargo test
-      - name: ndn-dashboard glossary is exhaustive (EduGloss guard)
-        working-directory: ndn-fwd
-        run: cargo run -q -p dash-glossary -- check .
-      - name: ndn-dashboard ships zero authored JavaScript
-        working-directory: ndn-fwd
-        run: |
-          set -e
-          hits=$(grep -RIn 'document::eval' crates/tooling/ndn-dashboard/src \
-            | grep -v '^[^:]*:[0-9]*:\s*//' || true)
-          if [ -n "$hits" ]; then echo "document::eval found:"; echo "$hits"; exit 1; fi
