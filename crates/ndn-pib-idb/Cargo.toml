@@ -16,7 +16,7 @@ ndn-packet  = { workspace = true, features = ["std-wasm"] }
 # `default-features = false` skips `sqlite-pib` (libsqlite3-sys); the
 # wasm validator path needs `Certificate` + `Validator` + `TrustSchema`,
 # which are pure-Rust.
-ndn-security = { path = "../../../ndn-rs/crates/security/ndn-security", default-features = false }
+ndn-security = { git = "https://github.com/Quarmire/ndn-rs", tag = "v0.1.0-alpha.1", default-features = false }
 bytes       = { workspace = true, features = ["std"] }
 thiserror   = { workspace = true }
 tracing     = { workspace = true }
@@ -46,6 +46,6 @@ web-sys = { version = "0.3", features = [
 # without forcing the full wasm dep set on host toolchains.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ndn-packet  = { workspace = true, features = ["std"] }
-ndn-security = { path = "../../../ndn-rs/crates/security/ndn-security", default-features = false }
+ndn-security = { git = "https://github.com/Quarmire/ndn-rs", tag = "v0.1.0-alpha.1", default-features = false }
 bytes       = { workspace = true, features = ["std"] }
 thiserror   = { workspace = true }

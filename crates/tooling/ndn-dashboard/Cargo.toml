@@ -93,14 +93,14 @@ witness-export = [
 [dependencies]
 # UI-agnostic logic + data models (operator keyring/custodian, trust/audit
 # chains, forwarder profile, the data structs the UI renders). Dioxus-free.
-ndn-dashboard-core = { path = "../../../../ndn-ext/crates/dashboard/ndn-dashboard-core" }
+ndn-dashboard-core = { git = "https://github.com/Quarmire/ndn-ext", tag = "v0.1.0-alpha.1" }
 ndn-config = { workspace = true, optional = true }
 ndn-mgmt-wire = { workspace = true }
 # Wasm-safe Custodian trait + CustodianRef (the canonical "where the key lives"
 # vocabulary) — backs the Trust Context machine-trust surfacing.
 # default-features = false drops sqlite-pib so the web target stays wasm-safe;
 # used by operator_keyring to hold the dashboard's own Ed25519 signing key.
-ndn-security = { path = "../../../../ndn-rs/crates/security/ndn-security", default-features = false, features = ["custodian"] }
+ndn-security = { git = "https://github.com/Quarmire/ndn-rs", tag = "v0.1.0-alpha.1", default-features = false, features = ["custodian"] }
 # Desktop gets full std (with ring/blake3); web gets std-wasm (no native crypto)
 ndn-packet = { workspace = true }
 ndn-tlv    = { workspace = true }
@@ -137,7 +137,7 @@ ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"]
 # The shared `ndn-trust://` envelope codec (capability request/grant) + a pure-Rust
 # QR renderer for the Pairing screen's request code. Desktop-only (the pairing
 # flow binds a phone fob to this operator console).
-ndn-trust-envelope = { path = "../../../../ndn-ext/crates/onboarding/ndn-trust-envelope", optional = true }
+ndn-trust-envelope = { git = "https://github.com/Quarmire/ndn-ext", tag = "v0.1.0-alpha.1", optional = true }
 qrcode         = { version = "0.14", default-features = false, features = ["svg"], optional = true }
 
 # ed25519-dalek powers the DashboardSigner used to sign every chain
