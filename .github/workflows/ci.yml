@@ -1,0 +1,64 @@
+name: CI — ndn-fwd
+
+# Depends on ndn-rs + ndn-ext via ../ path deps → checked out as siblings.
+# Switch to { git, tag } deps to drop the sibling checkouts.
+
+on:
+  push:
+    branches: [main]
+    paths: ["crates/**", "binaries/**", "Cargo.toml", ".github/workflows/ci.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["crates/**", "binaries/**", "Cargo.toml", ".github/workflows/ci.yml"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: fwd (build / clippy / test) + dashboard guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ndn-fwd }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt, clippy }
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ndn-fwd/target
+          key: ${{ runner.os }}-cargo-fwd-${{ hashFiles('ndn-fwd/**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-fwd-
+      # ndn-dashboard (Dioxus desktop) needs WebKit2GTK on Linux.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+      - name: Format
+        working-directory: ndn-fwd
+        run: cargo fmt --all -- --check
+      - name: Lint
+        working-directory: ndn-fwd
+        run: cargo clippy -- -D warnings
+      - name: Test
+        working-directory: ndn-fwd
+        run: cargo test
+      - name: ndn-dashboard glossary is exhaustive (EduGloss guard)
+        working-directory: ndn-fwd
+        run: cargo run -q -p dash-glossary -- check .
+      - name: ndn-dashboard ships zero authored JavaScript
+        working-directory: ndn-fwd
+        run: |
+          set -e
+          hits=$(grep -RIn 'document::eval' crates/tooling/ndn-dashboard/src \
+            | grep -v '^[^:]*:[0-9]*:\s*//' || true)
+          if [ -n "$hits" ]; then echo "document::eval found:"; echo "$hits"; exit 1; fi
