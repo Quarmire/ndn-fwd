@@ -108,3 +108,6 @@ async-trait      = { workspace = true, optional = true }
 ndn-ipc       = { workspace = true }
 ndn-strategy  = { workspace = true }
 tempfile      = "3"
+# Capability-scoped shm:// face integration test (tests/shm_capability_face.rs).
+ndn-face-shm  = { workspace = true }
+bytes         = { workspace = true }
