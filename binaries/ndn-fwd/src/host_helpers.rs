@@ -192,6 +192,9 @@ pub fn load_discovery_verifier(
     })))
 }
 
+// This test module sits mid-file (next to the discovery helpers it covers); the
+// crate's other `pub fn` helpers follow it, which trips the style lint.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod discovery_verifier_tests {
     use super::*;
@@ -236,6 +239,113 @@ mod discovery_verifier_tests {
             verifier.verify(&data2),
             ndn_discovery::VerifyVerdict::Untrusted,
             "record signed by an un-anchored key must be untrusted"
+        );
+    }
+
+    /// End-to-end: the forwarder's real `DiscoveryVerifier` wired into a live
+    /// `ServiceDiscoveryProtocol` with auto-FIB, exercising both the SEC-11
+    /// (authenticity) and SEC-12 (name→authority) gates against an actual inbound
+    /// signed `ServiceRecord` — a keyed, name-bound record installs a route; a
+    /// digest-signed one and a keyed-but-foreign-prefix one do not.
+    #[test]
+    fn discovery_auto_fib_gate_end_to_end() {
+        use bytes::Bytes;
+        use ndn_discovery::{
+            DiscoveryContext, DiscoveryProtocol, FaceLifecycleContext, InboundMeta, NeighborContext,
+            NeighborTable, NeighborTableView, NeighborUpdate, ProtocolId, RoutingTableContext,
+            ServiceDiscoveryConfig, ServiceDiscoveryProtocol, ServiceRecord, SignerAdapter,
+        };
+        use ndn_transport::FaceId;
+        use std::sync::Mutex;
+        use std::time::Instant;
+
+        // A DiscoveryContext that records FIB installs.
+        struct FibCtx {
+            now: Instant,
+            added: Mutex<Vec<Name>>,
+        }
+        impl FaceLifecycleContext for FibCtx {
+            fn alloc_face_id(&self) -> FaceId {
+                FaceId(0)
+            }
+            fn add_face(&self, _: Arc<ndn_transport::Face>) -> FaceId {
+                FaceId(0)
+            }
+            fn remove_face(&self, _: FaceId) {}
+        }
+        impl RoutingTableContext for FibCtx {
+            fn add_fib_entry(&self, p: &Name, _: FaceId, _: u32, _: ProtocolId) {
+                self.added.lock().unwrap().push(p.clone());
+            }
+            fn remove_fib_entry(&self, _: &Name, _: FaceId, _: ProtocolId) {}
+            fn remove_fib_entries_by_owner(&self, _: ProtocolId) {}
+        }
+        impl NeighborContext for FibCtx {
+            fn neighbors(&self) -> Arc<dyn NeighborTableView> {
+                NeighborTable::new()
+            }
+            fn update_neighbor(&self, _: NeighborUpdate) {}
+        }
+        impl DiscoveryContext for FibCtx {
+            fn send_on(&self, _: FaceId, _: Bytes) {}
+            fn now(&self) -> Instant {
+                self.now
+            }
+        }
+
+        // The forwarder's anchored identity key (KeyLocator => /ndn/fwd/peerA/KEY/..,
+        // so its signing namespace for SEC-12 is /ndn/fwd/peerA).
+        let kc = KeyChain::ephemeral_ecdsa("/ndn/fwd/peerA").unwrap();
+        let anchor = kc.manager_arc().trust_anchor(kc.key_name()).unwrap();
+        let validator = ndn_security::Validator::new(ndn_security::TrustSchema::accept_all());
+        validator.add_trust_anchor(anchor);
+        let verifier = Arc::new(DiscoveryVerifier {
+            validator: Arc::new(validator),
+        });
+        let signer = SignerAdapter(kc.signer().unwrap());
+
+        let build_sd = || {
+            // record_verifier present + auto-FIB (on by default) = the gated path.
+            let cfg = ServiceDiscoveryConfig {
+                record_verifier: Some(verifier.clone() as Arc<dyn ndn_discovery::RecordVerifier>),
+                ..ServiceDiscoveryConfig::default()
+            };
+            ServiceDiscoveryProtocol::new(
+                parse_name("/ndn/fwd/here"),
+                ndn_discovery::sd_root().clone(),
+                cfg,
+            )
+        };
+        let fresh_ctx = || FibCtx {
+            now: Instant::now(),
+            added: Mutex::new(Vec::new()),
+        };
+        let installed = |sd: &ServiceDiscoveryProtocol, prefix: &str, ts: u64, keyed: bool| {
+            let ctx = fresh_ctx();
+            let rec = ServiceRecord::new(parse_name(prefix), parse_name("/ndn/fwd/peerA"));
+            let pkt = if keyed {
+                rec.build_data_signed(ts, &signer)
+            } else {
+                rec.build_data(ts) // default DigestSha256 signer
+            };
+            sd.on_inbound(&pkt, FaceId(10), &InboundMeta::none(), &ctx);
+            ctx.added.lock().unwrap().clone()
+        };
+
+        // 1. Keyed + announced prefix under the signer's namespace → route installed.
+        let added = installed(&build_sd(), "/ndn/fwd/peerA/svc", 1, true);
+        assert_eq!(added, vec![parse_name("/ndn/fwd/peerA/svc")], "authentic, name-bound record installs FIB");
+
+        // 2. Digest-signed (integrity only, not authentic) → NO route (SEC-11).
+        assert!(
+            installed(&build_sd(), "/ndn/fwd/peerA/svc", 2, false).is_empty(),
+            "a digest-only record must not install FIB (SEC-11)"
+        );
+
+        // 3. Keyed but announced prefix NOT under the signer's namespace → NO route (SEC-12).
+        assert!(
+            installed(&build_sd(), "/ndn/bank/api", 3, true).is_empty(),
+            "a signer cannot install a route outside its own namespace (SEC-12)"
         );
     }
 }
