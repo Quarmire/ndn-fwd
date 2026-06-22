@@ -192,9 +192,88 @@ pub fn load_discovery_verifier(
     })))
 }
 
-// This test module sits mid-file (next to the discovery helpers it covers); the
-// crate's other `pub fn` helpers follow it, which trips the style lint.
-#[allow(clippy::items_after_test_module)]
+pub fn build_cs(cfg: &CsConfig) -> Arc<dyn ErasedContentStore> {
+    let cap = cfg.capacity_mb * 1024 * 1024;
+    match cfg.variant.as_str() {
+        "null" => {
+            tracing::info!(target: "engine", "content store disabled (variant=null)");
+            Arc::new(NullCs)
+        }
+        "sharded-lru" => {
+            let n = cfg.shards.unwrap_or(4);
+            tracing::info!(
+                target: "engine",
+                variant = "sharded-lru",
+                shards = n,
+                capacity_mb = cfg.capacity_mb,
+                "content store"
+            );
+            Arc::new(ShardedCs::new(
+                (0..n).map(|_| LruCs::new(cap / n)).collect(),
+            ))
+        }
+        _ => {
+            tracing::info!(
+                target: "engine",
+                variant = "lru",
+                capacity_mb = cfg.capacity_mb,
+                "content store"
+            );
+            Arc::new(LruCs::new(cap))
+        }
+    }
+}
+
+#[cfg(feature = "fec")]
+pub fn load_coding_handler(raw_toml: &str) -> Result<Arc<ndn_coding::CodingMgmtHandler>> {
+    use anyhow::Context as _;
+    let cfg = ndn_coding::CodingConfig::from_toml(raw_toml)
+        .map_err(|e| anyhow::anyhow!("parse [coding]: {e}"))?;
+    let table: ndn_coding::SharedPolicyTable = Arc::new(ndn_coding::CodingPolicyTable::new());
+    cfg.populate(&table)
+        .map_err(|e| anyhow::anyhow!("apply [coding]: {e}"))
+        .context("[coding] policy")?;
+    let n_entries = table.entries().len();
+    if n_entries > 0 {
+        tracing::info!(
+            target: "engine",
+            entries = n_entries,
+            "fec: installed coding policies from config"
+        );
+    }
+    Ok(Arc::new(ndn_coding::CodingMgmtHandler::new(table)))
+}
+
+#[cfg(feature = "rate-limit")]
+type RateLimitPair = (
+    Option<Arc<ndn_ratelimit::RateLimitMgmtHandler>>,
+    Option<Arc<dyn ndn_engine::RateLimitHook>>,
+);
+
+#[cfg(feature = "rate-limit")]
+pub fn load_rate_limit_pair(raw_toml: &str) -> Result<RateLimitPair> {
+    use anyhow::Context as _;
+    let cfg = ndn_ratelimit::RateLimitConfig::from_toml(raw_toml)
+        .map_err(|e| anyhow::anyhow!("parse [rate-limit]: {e}"))?;
+    if cfg.policy.is_empty() {
+        return Ok((None, None));
+    }
+    let table: ndn_ratelimit::SharedPolicyTable =
+        Arc::new(ndn_ratelimit::RateLimitPolicyTable::new());
+    cfg.populate(&table)
+        .map_err(|e| anyhow::anyhow!("apply [rate-limit]: {e}"))
+        .context("[rate-limit] policy")?;
+    tracing::info!(
+        target: "engine",
+        entries = table.len(),
+        "rate-limit: installed cells from config"
+    );
+    let handler = Arc::new(ndn_ratelimit::RateLimitMgmtHandler::new(Arc::clone(&table)));
+    let hook: Arc<dyn ndn_engine::RateLimitHook> =
+        Arc::new(ndn_ratelimit::EngineRateLimitHook::new(table));
+    Ok((Some(handler), Some(hook)))
+}
+
 #[cfg(test)]
 mod discovery_verifier_tests {
     use super::*;
@@ -348,86 +427,4 @@ mod discovery_verifier_tests {
             "a signer cannot install a route outside its own namespace (SEC-12)"
         );
     }
-}
-
-pub fn build_cs(cfg: &CsConfig) -> Arc<dyn ErasedContentStore> {
-    let cap = cfg.capacity_mb * 1024 * 1024;
-    match cfg.variant.as_str() {
-        "null" => {
-            tracing::info!(target: "engine", "content store disabled (variant=null)");
-            Arc::new(NullCs)
-        }
-        "sharded-lru" => {
-            let n = cfg.shards.unwrap_or(4);
-            tracing::info!(
-                target: "engine",
-                variant = "sharded-lru",
-                shards = n,
-                capacity_mb = cfg.capacity_mb,
-                "content store"
-            );
-            Arc::new(ShardedCs::new(
-                (0..n).map(|_| LruCs::new(cap / n)).collect(),
-            ))
-        }
-        _ => {
-            tracing::info!(
-                target: "engine",
-                variant = "lru",
-                capacity_mb = cfg.capacity_mb,
-                "content store"
-            );
-            Arc::new(LruCs::new(cap))
-        }
-    }
-}
-
-#[cfg(feature = "fec")]
-pub fn load_coding_handler(raw_toml: &str) -> Result<Arc<ndn_coding::CodingMgmtHandler>> {
-    use anyhow::Context as _;
-    let cfg = ndn_coding::CodingConfig::from_toml(raw_toml)
-        .map_err(|e| anyhow::anyhow!("parse [coding]: {e}"))?;
-    let table: ndn_coding::SharedPolicyTable = Arc::new(ndn_coding::CodingPolicyTable::new());
-    cfg.populate(&table)
-        .map_err(|e| anyhow::anyhow!("apply [coding]: {e}"))
-        .context("[coding] policy")?;
-    let n_entries = table.entries().len();
-    if n_entries > 0 {
-        tracing::info!(
-            target: "engine",
-            entries = n_entries,
-            "fec: installed coding policies from config"
-        );
-    }
-    Ok(Arc::new(ndn_coding::CodingMgmtHandler::new(table)))
-}
-
-#[cfg(feature = "rate-limit")]
-type RateLimitPair = (
-    Option<Arc<ndn_ratelimit::RateLimitMgmtHandler>>,
-    Option<Arc<dyn ndn_engine::RateLimitHook>>,
-);
-
-#[cfg(feature = "rate-limit")]
-pub fn load_rate_limit_pair(raw_toml: &str) -> Result<RateLimitPair> {
-    use anyhow::Context as _;
-    let cfg = ndn_ratelimit::RateLimitConfig::from_toml(raw_toml)
-        .map_err(|e| anyhow::anyhow!("parse [rate-limit]: {e}"))?;
-    if cfg.policy.is_empty() {
-        return Ok((None, None));
-    }
-    let table: ndn_ratelimit::SharedPolicyTable =
-        Arc::new(ndn_ratelimit::RateLimitPolicyTable::new());
-    cfg.populate(&table)
-        .map_err(|e| anyhow::anyhow!("apply [rate-limit]: {e}"))
-        .context("[rate-limit] policy")?;
-    tracing::info!(
-        target: "engine",
-        entries = table.len(),
-        "rate-limit: installed cells from config"
-    );
-    let handler = Arc::new(ndn_ratelimit::RateLimitMgmtHandler::new(Arc::clone(&table)));
-    let hook: Arc<dyn ndn_engine::RateLimitHook> =
-        Arc::new(ndn_ratelimit::EngineRateLimitHook::new(table));
-    Ok((Some(handler), Some(hook)))
 }
