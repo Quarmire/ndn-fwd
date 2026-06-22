@@ -127,19 +127,70 @@ impl FaceProvisioner for ShmProvisioner {
 
         let shm_name = req.uri.strip_prefix("shm://").unwrap_or(req.uri);
         let face_id = req.engine.faces().alloc_id();
+        // Scope the SHM face's lifetime to the requesting (client) face when
+        // known, so it tears down with the client.
+        let cancel = req
+            .source_face
+            .and_then(|sf| req.engine.face_token(sf))
+            .map(|t| t.child_token())
+            .unwrap_or_default();
+
+        // Capability-scoped (Option-A) path: the client supplied a one-time
+        // token in the (signed) face-create command. Create an ANONYMOUS region
+        // (no named SHM object / FIFOs) and hand its fds over a token-derived,
+        // unguessable control socket — nothing crosses the wire but the token.
+        if let Some(tok) = req.params.shm_control_token.as_ref() {
+            if tok.len() != 32 {
+                return Err(ProvisionError::Server(
+                    "shm control token must be 32 bytes".into(),
+                ));
+            }
+            let mut token = [0u8; 32];
+            token.copy_from_slice(tok);
+
+            let (face, fds) = match req.params.mtu {
+                Some(m) => ndn_face_shm::ShmFace::create_anon_for_mtu(face_id, m as usize),
+                None => ndn_face_shm::ShmFace::create_anon(face_id),
+            }
+            .map_err(|e| ProvisionError::Server(format!("SHM creation failed: {e}")))?;
+
+            let path = ndn_face_shm::control_socket_path(&token);
+            let _ = std::fs::remove_file(&path);
+            let listener = tokio::net::UnixListener::bind(&path)
+                .map_err(|e| ProvisionError::Server(format!("shm control bind: {e}")))?;
+
+            // Serve the fd handoff to the first authorized client, then exit;
+            // tied to the face's cancel so it can't leak the listener/socket.
+            let serve_cancel = cancel.clone();
+            let cleanup_path = path.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    r = ndn_face_shm::serve_fd_handoff(listener, token, fds) => {
+                        if let Err(e) = r {
+                            tracing::warn!(target: "shm", "fd handoff failed: {e}");
+                        }
+                    }
+                    _ = serve_cancel.cancelled() => {}
+                }
+                let _ = std::fs::remove_file(&cleanup_path);
+            });
+
+            req.engine.add_face(face, cancel);
+            return Ok(ProvisionedFace {
+                face_id,
+                remote_uri: format!("shm://{shm_name}"),
+                local_uri: None,
+                persistency: FacePersistency::OnDemand,
+            });
+        }
+
+        // Legacy named-region path (client sent no token).
         let face_result = match req.params.mtu {
             Some(m) => ndn_face_shm::spsc::SpscFace::create_for_mtu(face_id, shm_name, m as usize),
             None => ndn_face_shm::ShmFace::create(face_id, shm_name),
         };
         match face_result {
             Ok(face) => {
-                // Scope the SHM face's lifetime to the requesting (client) face
-                // when known, so it tears down with the client.
-                let cancel = req
-                    .source_face
-                    .and_then(|sf| req.engine.face_token(sf))
-                    .map(|t| t.child_token())
-                    .unwrap_or_default();
                 req.engine.add_face(face, cancel);
                 Ok(ProvisionedFace {
                     face_id,
