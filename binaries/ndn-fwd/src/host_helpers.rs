@@ -128,9 +128,23 @@ impl ndn_discovery::RecordVerifier for DiscoveryVerifier {
             .and_then(|si| si.key_locator_name())
             .map(|n| (*n).clone());
         match poll_once(self.validator.validate(data)) {
-            Some(ndn_security::ValidationResult::Valid(_)) => VerifyVerdict::Verified {
-                identity: identity.unwrap_or_else(|| (*data.name).clone()),
-            },
+            Some(ndn_security::ValidationResult::Valid(_)) => {
+                // `authentic` is true only when the validated signature is asymmetric
+                // (keyed) — never a bare DigestSha256, which proves integrity, not
+                // authorship. Only an authentic verdict may drive FIB auto-population
+                // (ndn-discovery red-team SEC-11). A trust-anchor `Validator` won't
+                // return `Valid` for an unkeyed digest in practice, but we derive the
+                // flag from the signature type so the FIB gate can never be fed a
+                // non-authentic verdict regardless.
+                let authentic = data
+                    .sig_info()
+                    .map(|si| si.sig_type != ndn_packet::SignatureType::DigestSha256)
+                    .unwrap_or(false);
+                VerifyVerdict::Verified {
+                    identity: identity.unwrap_or_else(|| (*data.name).clone()),
+                    authentic,
+                }
+            }
             _ => VerifyVerdict::Untrusted,
         }
     }
@@ -208,9 +222,10 @@ mod discovery_verifier_tests {
         assert!(
             matches!(
                 verifier.verify(&data),
-                ndn_discovery::VerifyVerdict::Verified { .. }
+                ndn_discovery::VerifyVerdict::Verified { authentic: true, .. }
             ),
-            "record signed by an anchored key must verify"
+            "a record signed by an anchored key must verify AS AUTHENTIC \
+             (keyed signature → eligible to drive FIB; ndn-discovery SEC-11)"
         );
 
         // Signed by a different, un-anchored key → Untrusted.
