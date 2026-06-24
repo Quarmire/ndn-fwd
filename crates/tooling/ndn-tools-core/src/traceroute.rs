@@ -29,11 +29,11 @@ use ndn_packet::{Data, Name, NameComponent};
 use crate::common::{ConnectConfig, ToolData, ToolEvent};
 use crate::ping::format_rtt;
 
-/// Wire contract with `ndn-engine`'s traceroute responder (kept in sync by value, not a
-/// dependency): the `32=TRH` name marker requesting a hop-identity reply, and the magic
-/// prefix on that reply's Content carrying the responding node's name URI.
-const TRACEROUTE_KEYWORD: &[u8] = b"TRH";
-const HOP_IDENTITY_MAGIC: &[u8] = b"\xF0HOP";
+/// Wire contract with `ndn-engine`'s traceroute responder — the shared
+/// [`ndn_packet::traceroute_wire`] constants (single source of truth, G9.3): the `32=TRH`
+/// name marker requesting a hop-identity reply, and the magic prefix on that reply's
+/// Content carrying the responding node's name URI.
+use ndn_packet::traceroute_wire::{HOP_IDENTITY_MAGIC, TRACEROUTE_KEYWORD};
 
 #[derive(Debug, Clone)]
 pub struct TracerouteParams {
