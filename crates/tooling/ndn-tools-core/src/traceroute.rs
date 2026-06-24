@@ -19,14 +19,21 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use bytes::Bytes;
 use tokio::sync::mpsc;
 
 use ndn_app::{AppError, Consumer};
-use ndn_packet::Name;
 use ndn_packet::encode::InterestBuilder;
+use ndn_packet::{Data, Name, NameComponent};
 
 use crate::common::{ConnectConfig, ToolData, ToolEvent};
 use crate::ping::format_rtt;
+
+/// Wire contract with `ndn-engine`'s traceroute responder (kept in sync by value, not a
+/// dependency): the `32=TRH` name marker requesting a hop-identity reply, and the magic
+/// prefix on that reply's Content carrying the responding node's name URI.
+const TRACEROUTE_KEYWORD: &[u8] = b"TRH";
+const HOP_IDENTITY_MAGIC: &[u8] = b"\xF0HOP";
 
 #[derive(Debug, Clone)]
 pub struct TracerouteParams {
@@ -39,6 +46,18 @@ pub struct TracerouteParams {
     pub probes: u8,
     /// Per-probe Interest lifetime / timeout, in milliseconds.
     pub lifetime_ms: u64,
+    /// Mark probes so hops running a responder reply with their identity (per-hop names),
+    /// continuing the walk until the destination answers. Hops without a responder still
+    /// show as `*`.
+    pub identify: bool,
+}
+
+/// The recovered node name from a hop-identity reply, or `None` if the Content is the
+/// destination producer's own answer (no magic prefix).
+fn hop_identity(data: &Data) -> Option<Name> {
+    let content = data.content()?;
+    let rest = content.strip_prefix(HOP_IDENTITY_MAGIC)?;
+    std::str::from_utf8(rest).ok()?.parse().ok()
 }
 
 /// Ramp `HopLimit` from 1 until a response returns (the target's forwarder-hop distance)
@@ -57,6 +76,17 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
         )))
         .await;
 
+    // What a hop's probes resolved to.
+    enum Outcome {
+        Timeout,
+        Nack(String),
+        /// Destination answered → distance found.
+        Reached(u64),
+        /// An intermediate hop named itself (identify mode) → keep ramping.
+        Hop(Box<Name>, u64),
+    }
+
+    let trace_marker = NameComponent::keyword(Bytes::from_static(TRACEROUTE_KEYWORD));
     let mut seq: u64 = 0;
     let mut reached_at: Option<u8> = None;
 
@@ -64,13 +94,16 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
         if tx.is_closed() {
             break;
         }
-        let mut hop_rtt: Option<u64> = None;
-        let mut nack_reason: Option<String> = None;
+        let mut outcome = Outcome::Timeout;
 
         for _ in 0..probes {
             // Fresh name per probe: the CS can't alias a shorter hop's earlier answer,
-            // and the responder replies fresh.
-            let name = prefix.clone().append("ping").append(seq.to_string());
+            // and the responder replies fresh. In identify mode the `32=TRH` marker asks
+            // an expiring hop to name itself.
+            let mut name = prefix.clone().append("ping").append(seq.to_string());
+            if params.identify {
+                name = name.append_component(trace_marker.clone());
+            }
             seq += 1;
             let wire = InterestBuilder::new(name)
                 .hop_limit(hop)
@@ -80,12 +113,16 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
 
             let t0 = Instant::now();
             match consumer.fetch_wire(wire, lifetime).await {
-                Ok(_) => {
-                    hop_rtt = Some(t0.elapsed().as_micros() as u64);
+                Ok(data) => {
+                    let rtt = t0.elapsed().as_micros() as u64;
+                    outcome = match params.identify.then(|| hop_identity(&data)).flatten() {
+                        Some(node) => Outcome::Hop(Box::new(node), rtt), // an intermediate hop
+                        None => Outcome::Reached(rtt),         // the destination itself
+                    };
                     break;
                 }
                 Err(AppError::Nacked { reason }) => {
-                    nack_reason = Some(
+                    outcome = Outcome::Nack(
                         reason
                             .map(|r| format!("{r:?}"))
                             .unwrap_or_else(|| "Unspecified".to_string()),
@@ -101,8 +138,8 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
             }
         }
 
-        match hop_rtt {
-            Some(rtt) => {
+        match outcome {
+            Outcome::Reached(rtt) => {
                 let _ = tx
                     .send(
                         ToolEvent::info(format!("  hop {hop}: reached, rtt={}", format_rtt(rtt)))
@@ -110,28 +147,44 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
                                 hop,
                                 reached: true,
                                 rtt_us: Some(rtt),
+                                node: None,
                             }),
                     )
                     .await;
                 reached_at = Some(hop);
                 break;
             }
-            None => {
-                // A Nack means there is no route at all (not a distance) — surface it and
-                // stop, as a longer hop limit won't help.
-                if let Some(reason) = nack_reason {
-                    let _ = tx
-                        .send(
-                            ToolEvent::warn(format!("  hop {hop}: nack ({reason}) — no route"))
-                                .with_data(ToolData::TracerouteHop {
-                                    hop,
-                                    reached: false,
-                                    rtt_us: None,
-                                }),
-                        )
-                        .await;
-                    break;
-                }
+            Outcome::Hop(node, rtt) => {
+                let _ = tx
+                    .send(
+                        ToolEvent::info(format!("  hop {hop}: {node} rtt={}", format_rtt(rtt)))
+                            .with_data(ToolData::TracerouteHop {
+                                hop,
+                                reached: false,
+                                rtt_us: Some(rtt),
+                                node: Some(node.to_string()),
+                            }),
+                    )
+                    .await;
+                // Not the destination — keep ramping to the next hop.
+            }
+            Outcome::Nack(reason) => {
+                // A Nack means no route at all (not a distance) — a longer hop limit
+                // won't help, so stop.
+                let _ = tx
+                    .send(
+                        ToolEvent::warn(format!("  hop {hop}: nack ({reason}) — no route"))
+                            .with_data(ToolData::TracerouteHop {
+                                hop,
+                                reached: false,
+                                rtt_us: None,
+                                node: None,
+                            }),
+                    )
+                    .await;
+                break;
+            }
+            Outcome::Timeout => {
                 let _ = tx
                     .send(
                         ToolEvent::info(format!("  hop {hop}: {}", "* ".repeat(probes as usize)))
@@ -139,6 +192,7 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
                                 hop,
                                 reached: false,
                                 rtt_us: None,
+                                node: None,
                             }),
                     )
                     .await;

@@ -71,12 +71,14 @@ pub enum ToolData {
         bytes_done: u64,
         bytes_total: Option<u64>,
     },
-    /// One traceroute probe round at a given HopLimit. `reached` is true once a
-    /// response came back at this hop limit (so the target is `hop` forwarder-hops away).
+    /// One traceroute probe round at a given HopLimit. `reached` is true when the response
+    /// is from the destination (so it is `hop` forwarder-hops away). `node` is the
+    /// responding hop's name when `--identify` is on and that hop runs a responder.
     TracerouteHop {
         hop: u8,
         reached: bool,
         rtt_us: Option<u64>,
+        node: Option<String>,
     },
     TracerouteSummary {
         /// Forwarder-hop distance to the target (or `max_hops` if never reached).

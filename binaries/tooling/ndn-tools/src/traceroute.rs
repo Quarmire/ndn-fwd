@@ -37,6 +37,11 @@ struct Cli {
     /// Per-probe Interest lifetime in milliseconds.
     #[arg(long, default_value_t = 1000)]
     lifetime: u64,
+
+    /// Name each hop: mark probes so forwarders running a traceroute responder reply with
+    /// their identity (hops without one still show as `*`).
+    #[arg(long)]
+    identify: bool,
 }
 
 #[tokio::main]
@@ -65,6 +70,7 @@ async fn main() -> Result<()> {
             max_hops: cli.max_hops,
             probes: cli.probes,
             lifetime_ms: cli.lifetime,
+            identify: cli.identify,
         },
         tx,
     )
