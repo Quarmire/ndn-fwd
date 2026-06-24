@@ -33,6 +33,10 @@ name = "ndn-traffic"
 path = "src/traffic.rs"
 
 [[bin]]
+name = "ndn-traceroute"
+path = "src/traceroute.rs"
+
+[[bin]]
 name = "ndn-iperf"
 path = "src/iperf.rs"
 
@@ -53,7 +57,7 @@ name = "ndn-safebag-witness"
 path = "src/safebag_witness.rs"
 
 [dependencies]
-ndn-tools-core = { workspace = true, features = ["ping", "iperf", "peek", "put"] }
+ndn-tools-core = { workspace = true, features = ["ping", "traceroute", "iperf", "peek", "put"] }
 ndn-engine     = { workspace = true }
 ndn-app        = { workspace = true }
 ndn-ipc        = { workspace = true }

@@ -71,6 +71,18 @@ pub enum ToolData {
         bytes_done: u64,
         bytes_total: Option<u64>,
     },
+    /// One traceroute probe round at a given HopLimit. `reached` is true once a
+    /// response came back at this hop limit (so the target is `hop` forwarder-hops away).
+    TracerouteHop {
+        hop: u8,
+        reached: bool,
+        rtt_us: Option<u64>,
+    },
+    TracerouteSummary {
+        /// Forwarder-hop distance to the target (or `max_hops` if never reached).
+        hops: u8,
+        reached: bool,
+    },
 }
 
 impl ToolEvent {

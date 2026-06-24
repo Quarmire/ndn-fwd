@@ -11,6 +11,8 @@ classification = "tooling"
 [features]
 default = []
 ping    = []
+# Active hop-distance traceroute; probes a ping-style responder, so it pulls `ping`.
+traceroute = ["ping"]
 iperf   = []
 peek    = []
 put     = []

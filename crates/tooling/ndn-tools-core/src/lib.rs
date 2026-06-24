@@ -9,6 +9,9 @@ pub use common::{ConnectConfig, EventLevel, ToolData, ToolEvent};
 #[cfg(feature = "ping")]
 pub mod ping;
 
+#[cfg(feature = "traceroute")]
+pub mod traceroute;
+
 #[cfg(feature = "iperf")]
 pub mod iperf;
 
