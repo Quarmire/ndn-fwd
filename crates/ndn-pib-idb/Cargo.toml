@@ -52,3 +52,9 @@ thiserror   = { workspace = true }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+# Build with every feature so the full API surface renders, and pass --cfg
+# docsrs so any #[cfg_attr(docsrs, doc(cfg(...)))] items show their feature gate.
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

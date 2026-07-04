@@ -9,6 +9,9 @@
 //! single self-describing text string that carries the version out-of-band
 //! (the value `decode_content` needs).
 
+// Documentation ratchet: this crate's public API is fully documented; keep it so.
+#![deny(missing_docs)]
+
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
 use ndn_packet::{Data, Name};
@@ -18,14 +21,23 @@ use ndn_security::{Certificate, SchemaBlob, SignedTrustContext};
 /// `schema_lvs` is a python-lvs-compiled binary schema (validated on build).
 #[derive(Debug, Clone)]
 pub struct ContextSpec {
+    /// The name prefix this context governs; adopted anchors are trusted to
+    /// sign names under it.
     pub namespace: Name,
+    /// Monotonic context version — a higher version supersedes a lower one on
+    /// re-adoption.
     pub version: u64,
     /// `true` = any cert under an adopted anchor may sign any name in the
     /// namespace (`accept_all`); `false` = the hierarchical floor.
     pub accept_all: bool,
+    /// Trust anchors, each a raw certificate `Data` wire.
     pub anchor_wires: Vec<Vec<u8>>,
+    /// Optional python-lvs-compiled binary schema (validated on build); when
+    /// absent, the built-in hierarchical / accept-all default applies.
     pub schema_lvs: Option<Vec<u8>>,
+    /// CA endpoints participants may enroll against under this context.
     pub ca_endpoints: Vec<Name>,
+    /// Names of revoked certificates or keys to reject.
     pub revocations: Vec<Name>,
 }
 
