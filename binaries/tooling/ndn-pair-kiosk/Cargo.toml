@@ -15,3 +15,6 @@ futures = { workspace = true }
 # real forwarder, exercising the same NDN path the dashboard's transport uses.
 ndn-app = { workspace = true }
 tokio   = { workspace = true, features = ["rt", "macros", "time"] }
+
+[lints]
+workspace = true

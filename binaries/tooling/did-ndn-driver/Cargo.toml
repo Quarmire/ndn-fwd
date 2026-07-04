@@ -21,3 +21,6 @@ tokio        = { version = "1", features = ["rt-multi-thread", "macros", "net"] 
 axum         = { version = "0.8", features = [] }
 tracing      = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

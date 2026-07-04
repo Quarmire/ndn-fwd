@@ -55,6 +55,25 @@ struct Cli {
     service_name: String,
 }
 
+/// Block until a shutdown signal arrives: SIGINT (Ctrl-C) or, on Unix, SIGTERM
+/// (sent by systemd / `docker stop`). Without the SIGTERM arm a long-lived
+/// bridge would be SIGKILL'd after the stop timeout instead of flushing its
+/// pending batch.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => r,
+        _ = sigterm.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -91,7 +110,7 @@ async fn main() -> Result<()> {
     let flush_every: Duration = *cli.batch_timeout;
     let poll_every: Duration = *cli.poll_interval;
 
-    let shutdown = tokio::signal::ctrl_c();
+    let shutdown = wait_for_shutdown_signal();
     tokio::pin!(shutdown);
 
     loop {

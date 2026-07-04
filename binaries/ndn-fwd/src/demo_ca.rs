@@ -230,9 +230,9 @@ fn build_challenge(c: &ndn_config::ChallengeConfig) -> Result<Box<dyn ChallengeH
 }
 
 /// Pick the EmailSender for the `email` challenge. With `log_only`, no `host`,
-/// or the `smtp` feature disabled, falls back to [`LoggingEmailSender`] (the
-/// code is logged, not delivered). With a real relay configured and the `smtp`
-/// feature on, returns the SMTP sender.
+/// or the `smtp` feature disabled, falls back to [`ndn_identity::LoggingEmailSender`]
+/// (the code is logged, not delivered). With a real relay configured and the
+/// `smtp` feature on, returns the SMTP sender.
 fn make_email_sender(smtp: Option<&ndn_config::SmtpConfig>) -> Arc<dyn EmailSender> {
     let wants_real = smtp.is_some_and(|s| !s.log_only && !s.host.is_empty());
     if !wants_real {

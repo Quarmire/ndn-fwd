@@ -111,3 +111,6 @@ tempfile      = "3"
 # Capability-scoped shm:// face integration test (tests/shm_capability_face.rs).
 ndn-face-shm  = { workspace = true }
 bytes         = { workspace = true }
+
+[lints]
+workspace = true

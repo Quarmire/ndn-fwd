@@ -1,23 +1,43 @@
 name: CI — ndn-fwd
 
-# Depends on ndn-rs + ndn-ext via ../ path deps → checked out as siblings.
-# Switch to { git, tag } deps to drop the sibling checkouts.
+# PR gate: parallel, cache-backed jobs mirroring the ndn-rs A+ lane
+# (fmt+clippy, nextest, rustdoc, MSRV, wasm, cargo-deny, semver-checks).
+#
+# ndn-fwd depends on ndn-rs + ndn-ext via `../` path deps, so every build job
+# checks them out as siblings (ndn-rs/ + ndn-ext/ next to ndn-fwd/). When the
+# repos are released, switch those path deps to { git, tag } and drop the
+# sibling checkouts.
+#
+# Toolchain: rust-toolchain.toml (in ndn-fwd/) pins 1.96 + the wasm target;
+# rustup auto-installs it on first cargo invocation, so jobs need no explicit
+# toolchain action (the MSRV job overrides deliberately).
+#
+# Host compile jobs run the default-members set; the wasm-only `dioxus-demo`
+# crate is excluded there and covered by the wasm32 job instead.
 
 on:
   push:
     branches: [main]
-    paths: ["crates/**", "binaries/**", "Cargo.toml", ".github/workflows/ci.yml"]
   pull_request:
     branches: [main]
-    paths: ["crates/**", "binaries/**", "Cargo.toml", ".github/workflows/ci.yml"]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    working-directory: ndn-fwd
 
 env:
   CARGO_TERM_COLOR: always
+  # Escalate warnings — including the [workspace.lints] table — to errors.
+  RUSTFLAGS: -Dwarnings
 
 jobs:
-  core:
-    name: fwd (build / clippy / test) + dashboard guards
+  lint:
+    name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,29 +46,174 @@ jobs:
         with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
       - uses: actions/checkout@v4
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: rustfmt, clippy }
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ndn-fwd/target
-          key: ${{ runner.os }}-cargo-fwd-${{ hashFiles('ndn-fwd/**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-fwd-
-      # ndn-dashboard (Dioxus desktop) needs WebKit2GTK on Linux.
-      - name: Install system dependencies
+      - name: Install system dependencies (Dioxus/WebKit2GTK)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
-      - name: Format
-        working-directory: ndn-fwd
-        run: cargo fmt --all -- --check
-      - name: Lint
-        working-directory: ndn-fwd
-        run: cargo clippy -- -D warnings
-      - name: Test
-        working-directory: ndn-fwd
-        run: cargo test
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ndn-fwd
+          shared-key: lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Scope fmt to ndn-fwd's own members: `cargo fmt --all` also formats
+      # local path-based dependencies (the sibling ndn-rs/ndn-ext crates),
+      # which are not this repo's responsibility.
+      - name: rustfmt (ndn-fwd members)
+        run: |
+          PKGS=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys;print(' '.join('-p '+p['name'] for p in json.load(sys.stdin)['packages']))")
+          cargo fmt $PKGS -- --check
+      - name: clippy (default-members, all targets)
+        run: cargo clippy --all-targets
+
+  test:
+    name: tests (nextest + doctests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ndn-fwd }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+      - name: Install system dependencies (Dioxus/WebKit2GTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ndn-fwd
+          shared-key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: nextest (unit + integration)
+        run: cargo nextest run --profile ci
+      - name: doctests (nextest does not run these)
+        run: cargo test --doc
+
+  docs:
+    name: rustdoc (broken links are errors)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ndn-fwd }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+      - name: Install system dependencies (Dioxus/WebKit2GTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ndn-fwd
+          shared-key: docs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo doc --no-deps
+
+  msrv:
+    name: MSRV (1.90)
+    runs-on: ubuntu-latest
+    env:
+      # MSRV verifies "compiles on the oldest supported compiler", not
+      # "warning-free there" — older rustc emits warnings newer ones don't.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ndn-fwd }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+      - name: Install system dependencies (Dioxus/WebKit2GTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ndn-fwd
+          shared-key: msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo check on rust-version
+        run: |
+          MSRV=$(cargo metadata --no-deps --format-version 1 |
+                 python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['rust_version'])")
+          echo "MSRV from Cargo.toml: $MSRV"
+          rustup toolchain install "$MSRV" --profile minimal
+          cargo "+$MSRV" check
+
+  wasm32:
+    name: wasm32-unknown-unknown (dioxus-demo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ndn-fwd }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ndn-fwd
+          shared-key: wasm32
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: check the wasm browser demo
+        run: cargo check --target wasm32-unknown-unknown -p dioxus-demo
+
+  deny:
+    name: cargo-deny (advisories + licenses + sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ndn-fwd }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check
+        run: cargo deny check
+
+  semver:
+    name: semver-checks (ndn-fwd library crates)
+    runs-on: ubuntu-latest
+    # PRs only: compares the PR's public API against the merge-base. Skipped on
+    # push (no baseline to diff against).
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ndn-fwd
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ndn-fwd
+          shared-key: semver
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: cargo-semver-checks vs merge-base
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          cargo semver-checks \
+            --baseline-rev "$BASE" \
+            -p ndn-pib-idb -p ndn-acme -p ndn-tools-core -p ndn-trust-context

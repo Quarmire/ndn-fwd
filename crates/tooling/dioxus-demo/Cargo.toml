@@ -82,3 +82,6 @@ console_error_panic_hook  = { version = "0.1", optional = true }
 version = "0.3"
 optional = true
 features = ["Window", "console", "Location"]
+
+[lints]
+workspace = true

@@ -1,5 +1,9 @@
 //! WebRTC / WebTransport / WebSocket listener tasks for ndn-fwd.
 
+// Listener helpers and their imports are cfg-gated per transport feature
+// (`webrtc`, `webtransport`, `websocket`); which set is live depends on the
+// feature flags, so file-scoped suppression is intentional rather than a code
+// smell to chase per build.
 #![allow(dead_code, unused_imports)]
 
 use std::sync::Arc;

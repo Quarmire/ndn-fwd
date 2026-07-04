@@ -49,3 +49,6 @@ ndn-packet  = { workspace = true, features = ["std"] }
 ndn-security = { path = "../../../ndn-rs/crates/security/ndn-security", default-features = false }
 bytes       = { workspace = true, features = ["std"] }
 thiserror   = { workspace = true }
+
+[lints]
+workspace = true

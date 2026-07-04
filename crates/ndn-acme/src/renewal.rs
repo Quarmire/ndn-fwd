@@ -66,7 +66,7 @@ fn now_unix() -> i64 {
 }
 
 /// Loops until `cancel` fires; renews on the next tick when the cached cert
-/// is within [`RENEW_THRESHOLD_DAYS`].
+/// is within the renewal threshold (30 days) of expiry.
 pub async fn renewal_loop(
     cfg: AcmeConfig,
     provider: Arc<dyn DnsProvider>,

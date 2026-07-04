@@ -1,0 +1,10 @@
+# Pinned dev/CI toolchain — the version every contributor and CI job builds
+# with. MSRV (the oldest supported consumer toolchain) is declared separately as
+# `rust-version` in Cargo.toml and verified by the `msrv` CI job. Bump this
+# deliberately — it changes what rustfmt/clippy enforce.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]
+# wasm32 for the dioxus-demo browser crate. (No riscv/no_std target here — the
+# forwarder daemon and tooling are all std.)
+targets = ["wasm32-unknown-unknown"]

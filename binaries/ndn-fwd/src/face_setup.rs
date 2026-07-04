@@ -1,5 +1,8 @@
 //! Face listener, auto-multicast, and hotplug-watcher bootstrap.
 
+// Setup helpers and imports are cfg-gated per face-transport feature; the live
+// set varies by feature flags (file-scoped suppression is intentional). The
+// bootstrap fns legitimately thread many collaborators, hence too_many_arguments.
 #![allow(unused_imports, dead_code, clippy::too_many_arguments)]
 
 use std::sync::Arc;
@@ -181,9 +184,7 @@ async fn run_face_setup_inner(
                 let eng = engine.clone();
                 let c = cancel.child_token();
                 tokio::spawn(async move {
-                    match ndn_face::net::MulticastUdpFace::new(iface, port, group_addr, id)
-                        .await
-                    {
+                    match ndn_face::net::MulticastUdpFace::new(iface, port, group_addr, id).await {
                         Ok(face) => {
                             eng.add_face_with_persistency(
                                 face,
@@ -386,13 +387,9 @@ async fn run_face_setup_inner(
                         // A `bpf-object` path overrides the embedded default
                         // redirect program (`bpf/redirect.bpf.o`).
                         let opened = match bpf_object.clone() {
-                            Some(obj) => ndn_face_afxdp::AfXdpFace::new(
-                                id,
-                                interface,
-                                0,
-                                mac,
-                                obj.into(),
-                            ),
+                            Some(obj) => {
+                                ndn_face_afxdp::AfXdpFace::new(id, interface, 0, mac, obj.into())
+                            }
                             None => ndn_face_afxdp::AfXdpFace::new_with_embedded_redirect(
                                 id, interface, 0, mac,
                             ),

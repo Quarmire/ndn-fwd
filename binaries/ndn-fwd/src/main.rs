@@ -912,7 +912,7 @@ async fn main() -> Result<()> {
         mgmt_ndn::run_face_listener(&face_socket, listener_engine, listener_cancel).await;
     });
 
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await?;
 
     tracing::info!(target: "engine", "shutting down");
     cancel.cancel();
@@ -922,6 +922,25 @@ async fn main() -> Result<()> {
 
     shutdown.shutdown().await;
     Ok(())
+}
+
+/// Block until a shutdown signal arrives: SIGINT (Ctrl-C) or, on Unix, SIGTERM.
+/// systemd and `docker stop` send SIGTERM; without this arm the daemon would be
+/// SIGKILL'd after the stop timeout instead of tearing down its faces and PIT
+/// gracefully.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut sigterm = signal(SignalKind::terminate())?;
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => r,
+        _ = sigterm.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 #[cfg(test)]

@@ -971,6 +971,125 @@ fn flag_bit_labels(flags: u64) -> Vec<&'static str> {
     out
 }
 
+fn print_fib_list(entries: &[ndn_config::FibEntry]) {
+    // Compute column width for the prefix column.
+    let prefix_w = entries
+        .iter()
+        .flat_map(|e| {
+            let p = e.name.to_string();
+            std::iter::repeat_n(p.len(), e.nexthops.len().max(1))
+        })
+        .max()
+        .unwrap_or(0)
+        .max(6);
+
+    println!("{:<prefix_w$}  {:>6}  {:>6}", "Prefix", "FaceID", "Cost");
+    println!("{}", "\u{2500}".repeat(prefix_w + 16));
+
+    for entry in entries {
+        let prefix = entry.name.to_string();
+        for nh in &entry.nexthops {
+            println!("{:<prefix_w$}  {:>6}  {:>6}", prefix, nh.face_id, nh.cost);
+        }
+    }
+}
+
+fn print_rib_list(entries: &[ndn_config::RibEntry]) {
+    // Compute column width for the prefix column.
+    let prefix_w = entries
+        .iter()
+        .flat_map(|e| {
+            let p = e.name.to_string();
+            std::iter::repeat_n(p.len(), e.routes.len().max(1))
+        })
+        .max()
+        .unwrap_or(0)
+        .max(6);
+
+    println!(
+        "{:<prefix_w$}  {:>6}  {:>8}  {:>6}  Flags",
+        "Prefix", "FaceID", "Origin", "Cost"
+    );
+    println!("{}", "\u{2500}".repeat(prefix_w + 36));
+
+    for entry in entries {
+        let prefix = entry.name.to_string();
+        for route in &entry.routes {
+            let origin = origin_str(route.origin);
+            let flags = route_flags_str(route.flags);
+            let expiry = if let Some(ep) = route.expiration_period {
+                format!("  expiry={}s", ep / 1000)
+            } else {
+                String::new()
+            };
+            println!(
+                "{:<prefix_w$}  {:>6}  {:>8}  {:>6}  {}{}",
+                prefix, route.face_id, origin, route.cost, flags, expiry,
+            );
+        }
+    }
+}
+
+fn print_strategy_list(entries: &[ndn_config::StrategyChoice]) {
+    // Compute column width for the prefix column.
+    let prefix_w = entries
+        .iter()
+        .map(|e| e.name.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(6);
+
+    println!("{:<prefix_w$}  Strategy", "Prefix");
+    println!("{}", "\u{2500}".repeat(prefix_w + 2 + 32));
+
+    for entry in entries {
+        let prefix = entry.name.to_string();
+        println!("{:<prefix_w$}  {}", prefix, entry.strategy);
+    }
+}
+
+fn print_params(params: &ndn_config::ControlParameters) {
+    println!("\u{2713} 200 OK");
+    if let Some(ref name) = params.name {
+        println!("  name:      {name}");
+    }
+    if let Some(id) = params.face_id {
+        println!("  face-id:   {id}");
+    }
+    if let Some(ref uri) = params.uri {
+        println!("  uri:       {uri}");
+    }
+    if let Some(ref local_uri) = params.local_uri {
+        println!("  local-uri: {local_uri}");
+    }
+    if let Some(cost) = params.cost {
+        println!("  cost:      {cost}");
+    }
+    if let Some(origin) = params.origin {
+        println!("  origin:    {} ({origin})", origin_str(origin));
+    }
+    if let Some(flags) = params.flags {
+        println!("  flags:     {} ({flags:#x})", route_flags_str(flags));
+    }
+    if let Some(ref strategy) = params.strategy {
+        println!("  strategy:  {strategy}");
+    }
+    if let Some(capacity) = params.capacity {
+        println!("  capacity:  {}", fmt_bytes(capacity));
+    }
+    if let Some(count) = params.count {
+        println!("  count:     {count}");
+    }
+}
+
+fn print_control_response(resp: &ControlResponse) {
+    let symbol = if resp.is_ok() { "\u{2713}" } else { "\u{2717}" };
+    println!("{symbol} {} {}", resp.status_code, resp.status_text);
+    if let Some(ref body) = resp.body {
+        print_params(body);
+    }
+}
+
 #[cfg(test)]
 mod ctl_tests {
     use super::*;
@@ -1151,124 +1270,5 @@ mod ctl_tests {
             "spurious reliability line:\n{out}"
         );
         assert!(!out.contains("features:"), "spurious features line:\n{out}");
-    }
-}
-
-fn print_fib_list(entries: &[ndn_config::FibEntry]) {
-    // Compute column width for the prefix column.
-    let prefix_w = entries
-        .iter()
-        .flat_map(|e| {
-            let p = e.name.to_string();
-            std::iter::repeat_n(p.len(), e.nexthops.len().max(1))
-        })
-        .max()
-        .unwrap_or(0)
-        .max(6);
-
-    println!("{:<prefix_w$}  {:>6}  {:>6}", "Prefix", "FaceID", "Cost");
-    println!("{}", "\u{2500}".repeat(prefix_w + 16));
-
-    for entry in entries {
-        let prefix = entry.name.to_string();
-        for nh in &entry.nexthops {
-            println!("{:<prefix_w$}  {:>6}  {:>6}", prefix, nh.face_id, nh.cost);
-        }
-    }
-}
-
-fn print_rib_list(entries: &[ndn_config::RibEntry]) {
-    // Compute column width for the prefix column.
-    let prefix_w = entries
-        .iter()
-        .flat_map(|e| {
-            let p = e.name.to_string();
-            std::iter::repeat_n(p.len(), e.routes.len().max(1))
-        })
-        .max()
-        .unwrap_or(0)
-        .max(6);
-
-    println!(
-        "{:<prefix_w$}  {:>6}  {:>8}  {:>6}  Flags",
-        "Prefix", "FaceID", "Origin", "Cost"
-    );
-    println!("{}", "\u{2500}".repeat(prefix_w + 36));
-
-    for entry in entries {
-        let prefix = entry.name.to_string();
-        for route in &entry.routes {
-            let origin = origin_str(route.origin);
-            let flags = route_flags_str(route.flags);
-            let expiry = if let Some(ep) = route.expiration_period {
-                format!("  expiry={}s", ep / 1000)
-            } else {
-                String::new()
-            };
-            println!(
-                "{:<prefix_w$}  {:>6}  {:>8}  {:>6}  {}{}",
-                prefix, route.face_id, origin, route.cost, flags, expiry,
-            );
-        }
-    }
-}
-
-fn print_strategy_list(entries: &[ndn_config::StrategyChoice]) {
-    // Compute column width for the prefix column.
-    let prefix_w = entries
-        .iter()
-        .map(|e| e.name.to_string().len())
-        .max()
-        .unwrap_or(0)
-        .max(6);
-
-    println!("{:<prefix_w$}  Strategy", "Prefix");
-    println!("{}", "\u{2500}".repeat(prefix_w + 2 + 32));
-
-    for entry in entries {
-        let prefix = entry.name.to_string();
-        println!("{:<prefix_w$}  {}", prefix, entry.strategy);
-    }
-}
-
-fn print_params(params: &ndn_config::ControlParameters) {
-    println!("\u{2713} 200 OK");
-    if let Some(ref name) = params.name {
-        println!("  name:      {name}");
-    }
-    if let Some(id) = params.face_id {
-        println!("  face-id:   {id}");
-    }
-    if let Some(ref uri) = params.uri {
-        println!("  uri:       {uri}");
-    }
-    if let Some(ref local_uri) = params.local_uri {
-        println!("  local-uri: {local_uri}");
-    }
-    if let Some(cost) = params.cost {
-        println!("  cost:      {cost}");
-    }
-    if let Some(origin) = params.origin {
-        println!("  origin:    {} ({origin})", origin_str(origin));
-    }
-    if let Some(flags) = params.flags {
-        println!("  flags:     {} ({flags:#x})", route_flags_str(flags));
-    }
-    if let Some(ref strategy) = params.strategy {
-        println!("  strategy:  {strategy}");
-    }
-    if let Some(capacity) = params.capacity {
-        println!("  capacity:  {}", fmt_bytes(capacity));
-    }
-    if let Some(count) = params.count {
-        println!("  count:     {count}");
-    }
-}
-
-fn print_control_response(resp: &ControlResponse) {
-    let symbol = if resp.is_ok() { "\u{2713}" } else { "\u{2717}" };
-    println!("{symbol} {} {}", resp.status_code, resp.status_text);
-    if let Some(ref body) = resp.body {
-        print_params(body);
     }
 }

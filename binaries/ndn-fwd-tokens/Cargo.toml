@@ -16,3 +16,6 @@ path = "src/main.rs"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 clap   = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }
+
+[lints]
+workspace = true
