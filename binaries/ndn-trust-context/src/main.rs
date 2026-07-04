@@ -89,11 +89,15 @@ fn main() -> Result<()> {
                 accept_all,
                 anchor_wires: anchors
                     .iter()
-                    .map(|p| std::fs::read(p).with_context(|| format!("read anchor {}", p.display())))
+                    .map(|p| {
+                        std::fs::read(p).with_context(|| format!("read anchor {}", p.display()))
+                    })
                     .collect::<Result<_>>()?,
                 schema_lvs: schema_lvs
                     .as_ref()
-                    .map(|p| std::fs::read(p).with_context(|| format!("read schema {}", p.display())))
+                    .map(|p| {
+                        std::fs::read(p).with_context(|| format!("read schema {}", p.display()))
+                    })
                     .transpose()?,
                 ca_endpoints: ca_endpoints
                     .iter()

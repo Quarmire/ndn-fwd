@@ -13,9 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use ndn_security::custodian::{CustodianSigner, InPageCustodian, KeyId};
 use ndn_ipc::MgmtClient;
 use ndn_packet::{Data, Name, NameComponent};
+use ndn_security::custodian::{CustodianSigner, InPageCustodian, KeyId};
 use ndn_security::{Certificate, Ed25519Signer, FilePib, KeyChain, Signer, encode_cert_data};
 
 async fn wait_for_socket(path: &std::path::Path) -> bool {

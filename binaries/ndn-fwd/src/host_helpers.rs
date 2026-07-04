@@ -304,7 +304,10 @@ mod discovery_verifier_tests {
         assert!(
             matches!(
                 verifier.verify(&data),
-                ndn_discovery::VerifyVerdict::Verified { authentic: true, .. }
+                ndn_discovery::VerifyVerdict::Verified {
+                    authentic: true,
+                    ..
+                }
             ),
             "a record signed by an anchored key must verify AS AUTHENTIC \
              (keyed signature → eligible to drive FIB; ndn-discovery SEC-11)"
@@ -330,9 +333,10 @@ mod discovery_verifier_tests {
     fn discovery_auto_fib_gate_end_to_end() {
         use bytes::Bytes;
         use ndn_discovery::{
-            DiscoveryContext, DiscoveryProtocol, FaceLifecycleContext, InboundMeta, NeighborContext,
-            NeighborTable, NeighborTableView, NeighborUpdate, ProtocolId, RoutingTableContext,
-            ServiceDiscoveryConfig, ServiceDiscoveryProtocol, ServiceRecord, SignerAdapter,
+            DiscoveryContext, DiscoveryProtocol, FaceLifecycleContext, InboundMeta,
+            NeighborContext, NeighborTable, NeighborTableView, NeighborUpdate, ProtocolId,
+            RoutingTableContext, ServiceDiscoveryConfig, ServiceDiscoveryProtocol, ServiceRecord,
+            SignerAdapter,
         };
         use ndn_transport::FaceId;
         use std::sync::Mutex;
@@ -413,7 +417,11 @@ mod discovery_verifier_tests {
 
         // 1. Keyed + announced prefix under the signer's namespace → route installed.
         let added = installed(&build_sd(), "/ndn/fwd/peerA/svc", 1, true);
-        assert_eq!(added, vec![parse_name("/ndn/fwd/peerA/svc")], "authentic, name-bound record installs FIB");
+        assert_eq!(
+            added,
+            vec![parse_name("/ndn/fwd/peerA/svc")],
+            "authentic, name-bound record installs FIB"
+        );
 
         // 2. Digest-signed (integrity only, not authentic) → NO route (SEC-11).
         assert!(

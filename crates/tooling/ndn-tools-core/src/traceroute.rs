@@ -117,7 +117,7 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
                     let rtt = t0.elapsed().as_micros() as u64;
                     outcome = match params.identify.then(|| hop_identity(&data)).flatten() {
                         Some(node) => Outcome::Hop(Box::new(node), rtt), // an intermediate hop
-                        None => Outcome::Reached(rtt),         // the destination itself
+                        None => Outcome::Reached(rtt),                   // the destination itself
                     };
                     break;
                 }

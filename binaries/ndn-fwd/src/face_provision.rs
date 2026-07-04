@@ -230,7 +230,9 @@ impl FaceProvisioner for QuicProvisioner {
         };
         let params: Vec<&str> = query.map(|q| q.split('&').collect()).unwrap_or_default();
         let cert_hex = params.iter().find_map(|kv| kv.strip_prefix("cert="));
-        let webpki = params.iter().any(|kv| *kv == "webpki" || *kv == "webpki=true");
+        let webpki = params
+            .iter()
+            .any(|kv| *kv == "webpki" || *kv == "webpki=true");
 
         let tls = if let Some(hex) = cert_hex {
             match ndn_config::parse_cert_sha256_hex(hex) {

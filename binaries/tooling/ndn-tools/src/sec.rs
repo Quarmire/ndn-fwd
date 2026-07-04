@@ -335,7 +335,11 @@ fn cmd_export(
     } else {
         std::fs::write(&out, &payload)?;
         eprintln!("Exported {cert_name}");
-        eprintln!("  → {out} ({} bytes, {})", payload.len(), format_label(format));
+        eprintln!(
+            "  → {out} ({} bytes, {})",
+            payload.len(),
+            format_label(format)
+        );
         eprintln!("  Import elsewhere with `ndn-sec import {out}` or `ndnsec import {out}`.");
     }
     Ok(())
@@ -362,8 +366,8 @@ fn cmd_import(
     let bag = SafeBag::decode(&wire).map_err(|e| anyhow::anyhow!("SafeBag decode: {e}"))?;
     let cert_data = ndn_packet::Data::decode(Bytes::copy_from_slice(&bag.certificate))
         .map_err(|e| anyhow::anyhow!("certificate Data decode: {e:?}"))?;
-    let cert = Certificate::decode(&cert_data)
-        .map_err(|e| anyhow::anyhow!("Certificate decode: {e}"))?;
+    let cert =
+        Certificate::decode(&cert_data).map_err(|e| anyhow::anyhow!("Certificate decode: {e}"))?;
     let cert_name = (*cert.name).clone();
 
     let password = resolve_password(password, "Passphrase that decrypts the SafeBag: ", false)?;
@@ -371,7 +375,9 @@ fn cmd_import(
     let pib = FilePib::new(pib_path)?;
     let stored = pib
         .store_safebag(&cert_name, &wire, password.as_bytes())
-        .map_err(|e| anyhow::anyhow!("import failed (wrong passphrase or unsupported key?): {e}"))?;
+        .map_err(|e| {
+            anyhow::anyhow!("import failed (wrong passphrase or unsupported key?): {e}")
+        })?;
 
     println!("Imported identity into {}", pib_path.display());
     println!("  Cert name  : {}", stored.name);

@@ -64,9 +64,10 @@ async fn shm_capability_face_handshake_end_to_end() {
 
     // Receive the region + wakeup fds over the token-derived control socket.
     let path = ndn_face_shm::control_socket_path(&token);
-    let handle = tokio::task::spawn_blocking(move || ndn_face_shm::connect_fd_handoff(&path, &token))
-        .await
-        .expect("handoff task join");
+    let handle =
+        tokio::task::spawn_blocking(move || ndn_face_shm::connect_fd_handoff(&path, &token))
+            .await
+            .expect("handoff task join");
 
     // A WRONG token derives a different (never-bound) socket path → can't even
     // find the handoff, let alone obtain the fds.
