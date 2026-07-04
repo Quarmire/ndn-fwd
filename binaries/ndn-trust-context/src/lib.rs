@@ -228,4 +228,15 @@ mod tests {
         assert!(anchor.valid_until >= anchor.valid_from);
         assert!(!anchor.public_key.is_empty());
     }
+
+    proptest::proptest! {
+        /// Any `(version, content)` survives `encode_envelope` -> `parse_envelope`
+        /// unchanged — the join-payload text envelope is a lossless round-trip.
+        #[test]
+        fn envelope_round_trips(version: u64, content: Vec<u8>) {
+            let (v, c) = parse_envelope(&encode_envelope(version, &content)).unwrap();
+            proptest::prop_assert_eq!(v, version);
+            proptest::prop_assert_eq!(c, content);
+        }
+    }
 }
