@@ -1,10 +1,8 @@
 name: Docker — publish ndn-fwd
 
-# NOTE: the Docker build needs ndn-rs + ndn-ext available to the build context.
-# With the current `../` path deps that requires a multi-repo context; the clean
-# fix is to switch cross-repo deps to { git, tag } so cargo fetches them inside
-# the image. Until then this workflow is wired but will only succeed once those
-# deps resolve without sibling directories (e.g. git deps).
+# The Docker build needs ndn-rs + ndn-ext as siblings (ndn-fwd path-deps them),
+# so this job checks out all three next to each other and builds with that parent
+# directory as the context. The Dockerfile reproduces the layout under /workspace.
 
 on:
   push:
@@ -26,6 +24,11 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with: { path: ndn-fwd }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+      - uses: actions/checkout@v4
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -54,7 +57,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: binaries/ndn-fwd/Dockerfile
+          file: ndn-fwd/binaries/ndn-fwd/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}

@@ -1,12 +1,12 @@
 # Multi-stage Docker image for the ndn-fwd NDN forwarder.
 #
-# Uses cargo-chef for dependency layer caching.  The cacher stage compiles
-# all external crates once per Cargo.toml/Cargo.lock change.  A source-only
-# change skips dependency recompilation and only rebuilds workspace crates,
-# reducing incremental build time from ~10 min to ~2–3 min.
+# ndn-fwd depends on ndn-rs + ndn-ext via `../` path deps, so the build needs all
+# three repos laid out as siblings. The publish workflow checks them out next to
+# each other and builds with that parent directory as the context; this Dockerfile
+# reproduces the dev-workspace layout under /workspace so the path deps resolve.
 #
-# Build (from repo root):
-#   docker build -f binaries/ndn-fwd/Dockerfile -t ndn-fwd .
+# Build (from a directory containing ndn-fwd/, ndn-rs/, ndn-ext/ as siblings):
+#   docker build -f ndn-fwd/binaries/ndn-fwd/Dockerfile -t ndn-fwd .
 #
 # Run with default config:
 #   docker run --rm -p 6363:6363/udp -p 6363:6363/tcp ndn-fwd
@@ -20,46 +20,34 @@
 #   6363/udp  — NDN UDP face
 #   6363/tcp  — NDN TCP face
 #   9696/tcp  — WebSocket face (wss:// when websocket-tls feature is enabled)
+#
+# NOTE: this builds all dependencies from scratch each time. A cargo-chef caching
+# layer was removed because it does not compose cleanly with the cross-repo `../`
+# path deps; re-introduce it once the sibling layout is confirmed if build time
+# becomes a concern.
 
-# ── Stage 1: chef base ────────────────────────────────────────────────────────
-FROM rust:slim AS chef
+# ── Stage 1: builder ──────────────────────────────────────────────────────────
+FROM rust:slim AS builder
 
 ARG BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${BUILD_JOBS}
-
-RUN cargo install cargo-chef --locked
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libdbus-1-dev \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+# Reproduce the dev-workspace sibling layout: ndn-fwd's Cargo.toml path deps point
+# at ../ndn-rs and ../ndn-ext, so all three must sit next to each other.
+WORKDIR /workspace
+COPY ndn-rs  ndn-rs
+COPY ndn-ext ndn-ext
+COPY ndn-fwd ndn-fwd
 
-# ── Stage 2: planner ──────────────────────────────────────────────────────────
-# Scans workspace Cargo.toml files and produces recipe.json.  No compilation.
-# Runs on every source change but the output only changes when
-# Cargo.toml / Cargo.lock changes, so the cacher stage stays cached.
-FROM chef AS planner
-COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-# ── Stage 3: cacher ───────────────────────────────────────────────────────────
-# Compiles external dependencies only.  Cached as long as recipe.json is
-# unchanged (i.e. Cargo.toml / Cargo.lock are unchanged).
-FROM chef AS cacher
-COPY --from=planner /build/recipe.json recipe.json
-RUN cargo chef cook --release --bin ndn-fwd --recipe-path recipe.json
-
-# ── Stage 4: builder ──────────────────────────────────────────────────────────
-# Compiles workspace crates.  External deps are already compiled in /build/target
-# from the cacher stage, so only ndn-rs crates are recompiled here.
-FROM chef AS builder
-COPY . .
-COPY --from=cacher /build/target target
+WORKDIR /workspace/ndn-fwd
 RUN cargo build --release --bin ndn-fwd -j "${CARGO_BUILD_JOBS}"
 
-# ── Stage 5: runtime image ────────────────────────────────────────────────────
+# ── Stage 2: runtime image ────────────────────────────────────────────────────
 FROM debian:trixie-slim
 
 # `libdbus-1-3` is required at runtime because workspace feature unification
@@ -73,8 +61,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/ndn-fwd /usr/local/bin/ndn-fwd
-COPY binaries/ndn-fwd/ndn-fwd.default.toml /etc/ndn-fwd/config.toml
+COPY --from=builder /workspace/ndn-fwd/target/release/ndn-fwd /usr/local/bin/ndn-fwd
+COPY ndn-fwd/binaries/ndn-fwd/ndn-fwd.default.toml /etc/ndn-fwd/config.toml
 
 RUN mkdir -p /etc/ndn-fwd/certs /run/ndn-fwd
 
