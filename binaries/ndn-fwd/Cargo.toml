@@ -14,6 +14,14 @@ classification = "tooling"
 name = "ndn-fwd"
 path = "src/main.rs"
 
+# NAT / roaming quickstart: connect two nodes across NAT / Wi-Fi client
+# isolation via a WebRTC datachannel and a tiny HTTP signaling relay.
+# Needs the full webrtc stack, so it is gated behind the `webrtc` feature:
+#   cargo run -p ndn-fwd --features webrtc --example rtc_rendezvous -- <role> …
+[[example]]
+name = "rtc_rendezvous"
+required-features = ["webrtc"]
+
 [features]
 default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "quic", "fec", "rate-limit"]
 # Per-worker partitioned forwarding data plane (selected via `[engine]
