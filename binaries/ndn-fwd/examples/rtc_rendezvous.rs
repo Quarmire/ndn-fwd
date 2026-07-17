@@ -92,18 +92,17 @@
 //!
 //! ## Compile status
 //!
-//! This example is composed entirely from existing public API. The **dial**
-//! (offerer) side hand-rolls the offer→post→get-answer→finalize dance because
-//! only the *answerer* side is wrapped ([`WebRtcListener::accept_one`]); a
-//! symmetric `WebRtcDialer::connect_one` would collapse `run_dial`'s handshake
-//! block into a single call — noted as a future nicety, not needed here.
+//! This example is composed entirely from existing public API. Both halves of
+//! the signaling handshake are wrapped and symmetric: the **accept** (answerer)
+//! side via [`WebRtcListener::accept_one`], the **dial** (offerer) side via
+//! [`WebRtcDialer::connect_one`].
 
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use ndn_app::{EngineAppExt, EngineBuilder};
-use ndn_face_webrtc::{IceServers, WebRtcConnector, WebRtcFace};
-use ndn_rtc_signaling_relay::{RelayClient, RelayServer, WebRtcListener};
+use ndn_face_webrtc::IceServers;
+use ndn_rtc_signaling_relay::{RelayServer, WebRtcDialer, WebRtcListener};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -211,9 +210,10 @@ async fn run_accept(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-/// `dial` role (offerer): stand up an engine, hand-compose the offerer half of
-/// the signaling dance (no `WebRtcDialer` wrapper exists yet — see module docs),
-/// register the resulting face, route `--name` toward it, and fetch once.
+/// `dial` role (offerer): stand up an engine, complete the offerer half of the
+/// signaling dance via [`WebRtcDialer::connect_one`] (the symmetric twin of the
+/// answerer's `accept_one`), register the resulting face, route `--name` toward
+/// it, and fetch once.
 async fn run_dial(args: &[String]) -> anyhow::Result<()> {
     let relay = flag(args, "--relay").ok_or_else(|| anyhow::anyhow!("--relay <url> required"))?;
     let session = flag(args, "--session").ok_or_else(|| anyhow::anyhow!("--session <id> required"))?;
@@ -226,21 +226,11 @@ async fn run_dial(args: &[String]) -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
     let node = engine.app_node(cancel.child_token());
 
-    // --- offerer dance, open-coded from ndn-rtc-signaling-relay's
-    //     tests/native_via_relay.rs (the answerer half is wrapped as
-    //     WebRtcListener::accept_one; the offerer half is not). ------------------
+    // Offerer half, wrapped: post the offer, long-poll for the answer, and
+    // return the live face once SCTP is up — symmetric to accept_one.
     println!("dial: offering on session '{session}' via {relay}");
-    let client = RelayClient::new(relay, session);
-    let connector = WebRtcConnector::new(IceServers::default())?;
-    // 1. Build the peer connection + datachannel and generate an SDP offer.
-    let (offer, pending) = connector.create_offer().await?;
-    // 2. Post the offer to the relay; the answerer long-polls and picks it up.
-    client.post_offer(&offer).await?;
-    // 3. Wait for the answerer's SDP answer to land on the relay.
-    let answer = client.get_answer().await?;
-    // 4. Feed the answer in and await the SCTP datachannel `open` — the live face.
-    let mut face: WebRtcFace = connector.finalize_with_answer(pending, answer).await?;
-    // -------------------------------------------------------------------------
+    let dialer = WebRtcDialer::new(relay, IceServers::default());
+    let mut face = dialer.connect_one(&session, Duration::from_secs(60)).await?;
 
     // Plug the face into the engine and point `--name` at it so our Interest
     // egresses over the datachannel rather than looking for a local producer.
