@@ -48,6 +48,10 @@ mod face_setup;
 mod host_helpers;
 mod installs;
 mod onboard;
+// The named-radio medium face: `[[face]] kind="radio"` (one face over N radio
+// capabilities). Gated behind the `radio` feature.
+#[cfg(feature = "radio")]
+mod radio_face;
 mod security_init;
 #[cfg(feature = "smtp")]
 mod smtp_email;

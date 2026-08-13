@@ -441,6 +441,27 @@ async fn run_face_setup_inner(
                     tracing::warn!(target: "face.eth", "ether unicast face not supported on this platform");
                 }
             }
+            ndn_config::FaceConfig::Radio { radios } => {
+                // The wireless medium as one face: N radio capabilities, RX union +
+                // TX fan-out, driven by the cognitive control plane.
+                #[cfg(feature = "radio")]
+                {
+                    let id = id_for(face_idx);
+                    // Builds the bearers, mounts the medium face (engine pairs the
+                    // LpLinkService by kind: Wfb → LP framing on), and spawns the
+                    // cognition control loop over it.
+                    if let Err(e) =
+                        crate::radio_face::mount_radio_face(&engine, &cancel, id, radios)
+                    {
+                        tracing::error!(target: "face.radio", error = %e, "radio medium face not mounted");
+                    }
+                }
+                #[cfg(not(feature = "radio"))]
+                {
+                    let _ = radios;
+                    tracing::warn!(target: "face.radio", "radio face support not compiled in (build with --features radio)");
+                }
+            }
         }
     }
 

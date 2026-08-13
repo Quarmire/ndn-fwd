@@ -30,6 +30,12 @@ partitioned-fwd = ["ndn-engine/partitioned-fwd"]
 spsc-shm    = ["dep:ndn-face-shm"]
 websocket   = ["dep:ndn-face-websocket", "dep:tokio-tungstenite"]
 serial      = ["dep:ndn-face-serial"]
+# The named-radio **medium face**: one NDN face over N radio *capabilities* (RX
+# union + TX fan-out), driven by the cognitive control plane. `radio` brings the
+# `[[face]] kind="radio"` config path + portable (af-packet/HaLow, Linux) bearers;
+# `radio-libusb` adds the userspace USB Wi-Fi drivers (RTL8822E/8812AU, Linux).
+radio       = ["dep:ndn-face-monitor-wifi", "dep:ndn-radio-cognition"]
+radio-libusb = ["radio", "ndn-face-monitor-wifi/libusb-backend"]
 l2          = ["ndn-face/l2", "ndn-mgmt/l2"]
 # AF_XDP kernel-bypass backend for the Ethernet face (Linux). Selected via
 # `[[face]] kind="ether" io="afxdp" bpf-object="…"`.
@@ -75,6 +81,8 @@ ndn-discovery    = { workspace = true, features = ["udp-hello", "ether-nd", "mgm
 ndn-app          = { workspace = true }
 ndn-face        = { workspace = true }
 ndn-face-serial = { workspace = true, optional = true }
+ndn-face-monitor-wifi = { workspace = true, optional = true }
+ndn-radio-cognition   = { workspace = true, optional = true }
 ndn-face-websocket = { workspace = true, optional = true }
 ndn-face-shm    = { workspace = true, optional = true }
 ndn-face-bluetooth = { workspace = true, optional = true }

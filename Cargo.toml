@@ -80,6 +80,10 @@ ndn-face-webrtc       = { path = "../ndn-ext/crates/faces/ndn-face-webrtc" }
 ndn-face-shared-worker = { path = "../ndn-ext/crates/faces/ndn-face-shared-worker" }
 ndn-face-webble       = { path = "../ndn-ext/crates/faces/ndn-face-webble" }
 ndn-rtc-signaling-relay = { path = "../ndn-ext/crates/faces/ndn-rtc-signaling-relay" }
+# The named-radio medium face ("the medium is the face"): one face over N radio
+# capabilities, driven by the medium-shaped cognitive control plane.
+ndn-face-monitor-wifi = { path = "../ndn-ext/crates/faces/ndn-face-monitor-wifi" }
+ndn-radio-cognition   = { path = "../ndn-ext/crates/faces/ndn-radio-cognition" }
 ndn-acme              = { path = "crates/ndn-acme" }
 ndn-strategy  = { path = "../ndn-rs/crates/forwarding/ndn-strategy" }
 ndn-security  = { path = "../ndn-rs/crates/security/ndn-security" }
