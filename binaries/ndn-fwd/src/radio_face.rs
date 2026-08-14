@@ -21,6 +21,16 @@
 //! (Linux); `af-packet`/`halow` monitor bearers need Linux (rate-only cognition,
 //! channel tuned out of band). An unavailable driver is skipped with a warning; the
 //! face mounts if any capability came up.
+//!
+//! **How the TX rate is controlled, per backend.** The `NDN_RADIO_*` rate/knob env
+//! vars (`NDN_RADIO_TX_RATE`, `NDN_RADIO_TX_2T`, `NDN_RADIO_TX_RAW`, …) are read only
+//! by the **libusb** drivers — they do nothing on an `af-packet` bearer. An af-packet
+//! radio's transmit rate is **plan-only**: it comes solely from the cognition plan
+//! (DECIDE → the `MediumActuator`'s `set_rate`, applied as the injected frame's
+//! radiotap rate). So to bound an af-packet TX rate you either let the worst-receiver
+//! cap do it dynamically (a peer's advertised `max_rx_mcs`) or pin it statically with
+//! [`RadioDeviceConfig::max_mcs`]/[`max_nss`](RadioDeviceConfig::max_nss) — there is no
+//! env knob for it.
 
 use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::Arc;
@@ -417,7 +427,7 @@ fn build_rtl8812au(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<Built
     // plane. Share one backend as both the data-plane radio and the control knobs.
     let knobs: Arc<dyn RadioKnobs> = backend.clone();
     let radio: Arc<dyn FrameIo> = backend;
-    let cap = RadioCapability::wifi_monitor_2ghz(vec![ch]);
+    let cap = RadioCapability::wifi_monitor_2ghz(vec![ch]).with_wifi_caps(dev.max_mcs, dev.max_nss);
     // The 8812au RX decodes HT and VHT on 5 GHz (bisection 2026-07-24: it decoded 8812au HT
     // and a81a VHT cleanly). The earlier LEGACY_ONLY_RX marking was wrong — it blamed the
     // 8812au RX for what was actually the a81a's broken HT *TX* (now routed to VHT). Full RX.
@@ -455,12 +465,19 @@ fn build_rtl8822e(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltB
     }
     let radio: Arc<dyn FrameIo> = backend.clone();
     let knobs: Arc<dyn RadioKnobs> = backend;
-    let cap = RadioCapability::wifi_monitor_5ghz(vec![ch]);
+    let cap = RadioCapability::wifi_monitor_5ghz(vec![ch]).with_wifi_caps(dev.max_mcs, dev.max_nss);
     Ok(Some(BuiltBearer {
         bearer: RadioBearer::wifi(rid, radio, cap),
         knobs: Some(knobs),
         channel: Some(ch),
-        rx_mcs: ndn_face_monitor_wifi::FULL_RX_MCS, // a81a decodes full HT/VHT
+        // **Single RX chain, not full HT/VHT.** This userspace RTL8812EU (88xx backend) brings up one
+        // RX chain, so it decodes single-stream HT (MCS 0–7) + legacy but *no* 2-stream frame at any
+        // index (field-measured 2026-08-13: MCS 0–7 decode, 8–15 do not). Advertising `FULL_RX_MCS`
+        // here made a peer transmit 2-stream MCS 9 that this radio could never decode — a one-way link.
+        // The worst-receiver cap in `RadioPolicy` reads this and pins the peer's data rate to
+        // single-stream ≤ MCS 7. (Not `LEGACY_ONLY_RX`: MCS 0–7 *do* work, and legacy-6M would throw
+        // away ~10× the throughput.)
+        rx_mcs: ndn_face_monitor_wifi::SINGLE_STREAM_HT_RX_MCS,
     }))
 }
 
@@ -488,6 +505,10 @@ fn build_afpacket(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltB
             RadioCapability::wifi_monitor_5ghz(channels),
         )
     };
+    // Static per-radio rate ceilings (config `max-mcs`/`max-nss`) — the declarative way to cap an
+    // af-packet TX (which has no NDN_RADIO_* env knobs; its rate is plan-only). Cognition reads the
+    // clamped ceiling, so this bounds the transmit rate with no other plumbing.
+    let cap = cap.with_wifi_caps(dev.max_mcs, dev.max_nss);
     let backend = AfPacketBackend::new(iface, fmt)
         .map_err(|e| format!("{e:?}"))?
         .with_capability(cap.clone());
