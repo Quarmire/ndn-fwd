@@ -55,7 +55,7 @@ todo = "warn"
 unimplemented = "warn"
 
 [workspace.metadata.crane]
-name = "ndn-rs"
+name = "ndn-fwd"
 
 [workspace.dependencies]
 # NDN workspace crates — grouped by subdirectory layer
@@ -78,7 +78,6 @@ ndn-face-quic         = { path = "../ndn-ext/crates/faces/ndn-face-quic" }
 ndn-face-webtransport-wasm = { path = "../ndn-ext/crates/faces/ndn-face-webtransport-wasm" }
 ndn-face-webrtc       = { path = "../ndn-ext/crates/faces/ndn-face-webrtc" }
 ndn-face-shared-worker = { path = "../ndn-ext/crates/faces/ndn-face-shared-worker" }
-ndn-face-webble       = { path = "../ndn-ext/crates/faces/ndn-face-webble" }
 ndn-rtc-signaling-relay = { path = "../ndn-ext/crates/faces/ndn-rtc-signaling-relay" }
 # The named-radio medium face ("the medium is the face"): one face over N radio
 # capabilities, driven by the medium-shaped cognitive control plane.
