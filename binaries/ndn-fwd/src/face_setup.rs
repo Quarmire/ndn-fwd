@@ -16,7 +16,9 @@ use ndn_mgmt as mgmt_ndn;
 
 #[cfg(feature = "webrtc")]
 use crate::transport_listeners::run_webrtc_listener;
-use crate::transport_listeners::{run_ws_listener, run_wt_listener};
+use crate::transport_listeners::run_ws_listener;
+#[cfg(feature = "webtransport")]
+use crate::transport_listeners::run_wt_listener;
 
 pub struct FaceSetupState {
     /// FaceId assigned to each `[[face]]` config entry, indexed by its

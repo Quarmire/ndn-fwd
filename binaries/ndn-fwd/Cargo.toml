@@ -23,7 +23,10 @@ name = "rtc_rendezvous"
 required-features = ["webrtc"]
 
 [features]
-default = ["spsc-shm", "websocket", "serial", "l2", "webtransport", "quic", "fec", "rate-limit"]
+# Deployment baseline. webtransport and quic are opt-in (like bluetooth/webrtc):
+# webtransport drags ndn-acme -> instant-acme/reqwest/rustls and quic drags
+# quinn into every default build; enable with --features webtransport,quic.
+default = ["spsc-shm", "websocket", "serial", "l2", "fec", "rate-limit"]
 # Per-worker partitioned forwarding data plane (selected via `[engine]
 # data_plane = "partitioned"`). Without it, that config falls back to shared.
 partitioned-fwd = ["ndn-engine/partitioned-fwd"]
@@ -42,10 +45,10 @@ l2          = ["ndn-face/l2", "ndn-mgmt/l2"]
 af-xdp      = ["l2", "dep:ndn-face-afxdp"]
 # BLE faces: ble:// (central) and ble-peripheral:// (server). Opt-in, not
 # default — on Linux `bluer` needs libdbus dev headers at build time.
-bluetooth   = ["dep:ndn-face-bluetooth", "dep:async-trait"]
-webtransport = ["dep:ndn-face-webtransport", "dep:async-trait", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
+bluetooth   = ["dep:ndn-face-bluetooth"]
+webtransport = ["dep:ndn-face-webtransport", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
 # Raw-QUIC forwarder-to-forwarder backbone face (TLS 1.3, connection migration).
-quic        = ["dep:ndn-face-quic", "dep:async-trait"]
+quic        = ["dep:ndn-face-quic"]
 # Browser-as-peer WebRTC datachannel faces + signaling-relay listener.
 # Pulls in the full webrtc stack (DTLS/SCTP/ICE/SRTP), so it is opt-in.
 webrtc      = ["dep:ndn-face-webrtc", "dep:ndn-rtc-signaling-relay"]
@@ -117,7 +120,9 @@ tracing-appender     = "0.2"
 console-subscriber   = { workspace = true, optional = true }
 anyhow           = { workspace = true }
 libc             = { workspace = true }
-async-trait      = { workspace = true, optional = true }
+# Unconditional: face_provision.rs implements the ndn-mgmt provisioning trait
+# with #[async_trait] regardless of which face features are enabled.
+async-trait      = { workspace = true }
 
 [dev-dependencies]
 # Live custodian-signed mgmt-command integration test (tests/custodian_signed_mgmt.rs).
