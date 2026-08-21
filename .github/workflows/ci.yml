@@ -12,8 +12,8 @@ name: CI — ndn-fwd
 # rustup auto-installs it on first cargo invocation, so jobs need no explicit
 # toolchain action (the MSRV job overrides deliberately).
 #
-# Host compile jobs run the default-members set; the wasm-only `dioxus-demo`
-# crate is excluded there and covered by the wasm32 job instead.
+# Host compile jobs run the default-members set. (dioxus-demo moved to the
+# ndn-dashboard repo in P1, taking its wasm32 job and WebKitGTK deps with it.)
 
 on:
   push:
@@ -43,15 +43,15 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+        # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
-      - name: Install system dependencies (Dioxus/WebKit2GTK)
+        # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ndn-fwd
@@ -75,15 +75,15 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+        # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
-      - name: Install system dependencies (Dioxus/WebKit2GTK)
+        # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -106,15 +106,15 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+        # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
-      - name: Install system dependencies (Dioxus/WebKit2GTK)
+        # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ndn-fwd
@@ -133,15 +133,15 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+        # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
-      - name: Install system dependencies (Dioxus/WebKit2GTK)
+        # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev libxdo-dev libssl-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ndn-fwd
@@ -154,28 +154,6 @@ jobs:
           rustup toolchain install "$MSRV" --profile minimal
           cargo "+$MSRV" check
 
-  wasm32:
-    name: wasm32-unknown-unknown (dioxus-demo)
-    runs-on: ubuntu-latest
-    env:
-      # Compile-check only — don't let -Dwarnings on the wasm path-dep siblings
-      # (e.g. an unused import in ndn-ext's ndn-face-webrtc) fail the build.
-      RUSTFLAGS: ""
-    steps:
-      - uses: actions/checkout@v4
-        with: { path: ndn-fwd }
-      - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
-      - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ndn-fwd
-          shared-key: wasm32
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: check the wasm browser demo
-        run: cargo check --target wasm32-unknown-unknown -p dioxus-demo
-
   deny:
     name: cargo-deny (advisories + licenses + sources)
     runs-on: ubuntu-latest
@@ -183,9 +161,11 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+        # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+        # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -209,9 +189,11 @@ jobs:
           path: ndn-fwd
           fetch-depth: 0
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+        # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+        # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ndn-fwd

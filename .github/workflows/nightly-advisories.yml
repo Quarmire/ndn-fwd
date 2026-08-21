@@ -32,13 +32,17 @@ jobs:
       - uses: actions/checkout@v4
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: main, path: ndn-rs }
+        # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: main, path: ndn-ext }
+        # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: main, path: ndn-radio-drivers }
+        # pinned sibling; bump deliberately when adopting newer ndn-radio-drivers (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: bf394b56ae0b06cea2ee97ebf168100666c716a9, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
-        with: { repository: "${{ github.repository_owner }}/ndn-sim", ref: main, path: ndn-sim }
+        # pinned sibling; bump deliberately when adopting newer ndn-sim (see workspace STATE.md)
+        with: { repository: "${{ github.repository_owner }}/ndn-sim", ref: e6e9cbf12b532cf887e5ad8afbb6dc5d2c900a5b, path: ndn-sim }
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
