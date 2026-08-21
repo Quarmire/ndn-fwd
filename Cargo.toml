@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/ndn-pib-idb",
     "crates/ndn-acme",
-    "crates/tooling/dioxus-demo",
     "crates/tooling/ndn-tools-core",
     "binaries/tooling/did-ndn-driver",
     "binaries/ndn-fwd",
@@ -65,7 +64,6 @@ ndn-mgmt-wire = { path = "../ndn-rs/crates/core/ndn-mgmt-wire" }
 ndn-transport = { path = "../ndn-rs/crates/core/ndn-transport" }
 ndn-store     = { path = "../ndn-rs/crates/forwarding/ndn-store" }
 ndn-runtime   = { path = "../ndn-rs/crates/core/ndn-runtime" }
-ndn-pib-idb   = { path = "crates/ndn-pib-idb" }
 ndn-trust-envelope = { path = "../ndn-ext/crates/onboarding/ndn-trust-envelope" }
 ndn-face             = { path = "../ndn-rs/crates/faces/ndn-face" }
 ndn-face-serial      = { path = "../ndn-ext/crates/faces/ndn-face-serial" }
@@ -75,9 +73,7 @@ ndn-face-bluetooth   = { path = "../ndn-ext/crates/faces/ndn-face-bluetooth" }
 ndn-face-afxdp       = { path = "../ndn-ext/crates/faces/ndn-face-afxdp" }
 ndn-face-webtransport = { path = "../ndn-ext/crates/faces/ndn-face-webtransport" }
 ndn-face-quic         = { path = "../ndn-ext/crates/faces/ndn-face-quic" }
-ndn-face-webtransport-wasm = { path = "../ndn-ext/crates/faces/ndn-face-webtransport-wasm" }
 ndn-face-webrtc       = { path = "../ndn-ext/crates/faces/ndn-face-webrtc" }
-ndn-face-shared-worker = { path = "../ndn-ext/crates/faces/ndn-face-shared-worker" }
 ndn-rtc-signaling-relay = { path = "../ndn-ext/crates/faces/ndn-rtc-signaling-relay" }
 # The named-radio medium face ("the medium is the face"): one face over N radio
 # capabilities, driven by the medium-shaped cognitive control plane.
