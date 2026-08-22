@@ -1,8 +1,22 @@
 # ndn-tools
 
-Operator CLIs for working with an NDN forwarder. One crate, eight
-binaries: `ndn-peek`, `ndn-put`, `ndn-ping`, `ndn-sec`, `ndn-ctl`,
-`ndn-traffic`, `ndn-iperf`, `ndn-psync-consumer`.
+Operator CLIs for working with an NDN forwarder. One crate, twelve
+binaries:
+
+| Binary | Purpose |
+|---|---|
+| `ndn-ctl` | NFD-compatible management commands over the forwarder socket |
+| `ndn-peek` | Fetch one Data packet |
+| `ndn-put` | Segment, sign, and publish stdin under a prefix |
+| `ndn-ping` | Reachability + latency probes |
+| `ndn-traceroute` | Forwarder-hop distance via HopLimit ramping |
+| `ndn-sec` | Identity / key / cert management (incl. SafeBag export/import) |
+| `ndn-traffic` | Synthetic load through an embedded engine |
+| `ndn-iperf` | Sustained-throughput benchmark |
+| `ndn-psync-consumer` | Observe PSync FullProducer updates through a forwarder |
+| `ndn-mgmt-response-verify` | Check a mgmt control response is signed by a trust anchor |
+| `ndn-mgmt-notification-fetch` | Fetch one NFD-style mgmt notification Data |
+| `ndn-safebag-witness` | Testbed-only SafeBag interop witness vs `ndnsec` |
 
 ## Get started
 
@@ -17,9 +31,9 @@ Each binary takes `--help` for its full option set.
 ## Configure
 
 Every tool talks to the forwarder over its management socket. The
-default is `/run/ndn-fwd/mgmt.sock` (override with
-`--socket <path>`). `$NDN_SOCKET` sets the default for the current
-shell.
+built-in default is `/run/nfd/nfd.sock` on Unix (override with
+`--socket <path>`). `$NDN_SOCK` sets the default for the current
+shell; the Docker image's config uses `/run/ndn-fwd/ndn-fwd.sock`.
 
 `RUST_LOG=info` for status; `RUST_LOG=debug` for protocol-level
 detail.
@@ -30,14 +44,7 @@ detail.
 
 ```bash
 cargo build --release -p ndn-tools
-# Produces: ndn-peek, ndn-put, ndn-ping, ndn-sec, ndn-ctl, ndn-traffic, ndn-iperf, ndn-psync-consumer
-```
-
-### Nix
-
-```bash
-nix profile install github:Quarmire/ndn-rs#ndn-tools    # installs all seven
-nix run github:Quarmire/ndn-rs#ndn-ctl -- status        # one-shot
+# Produces all twelve binaries from the table above.
 ```
 
 ## Run
@@ -84,6 +91,15 @@ ndn-ping /ndn/example --count 10 --interval-ms 100
 
 Sends probe Interests every `--interval-ms` and reports per-Interest
 round-trip time plus loss rate.
+
+### `ndn-traceroute` — hop distance
+
+```bash
+ndn-traceroute /ndn/example
+```
+
+Ramps the Interest `HopLimit` toward a ping-style responder and
+reports the forwarder-hop distance.
 
 ### `ndn-sec` — identity / key / cert management
 
@@ -139,10 +155,24 @@ ndn-iperf --duration 5 --size 1024 --window 128
 
 Output: total bytes, Mbps, packet counts, RTT statistics.
 
+### Sync + testbed witnesses
+
+The remaining binaries back the `testbed/` harness; each takes
+`--help` for its full option set:
+
+- `ndn-psync-consumer` — subscribe to a PSync FullProducer through a
+  running forwarder and print observed update prefixes.
+- `ndn-mgmt-response-verify` — send one management command and verify
+  the control response is key-signed by a configured trust anchor.
+- `ndn-mgmt-notification-fetch` — fetch one NFD-style management
+  notification Data packet.
+- `ndn-safebag-witness` — testbed-only SafeBag interop witness against
+  ndn-cxx `ndnsec export`/`import`.
+
 ## License
 
-Licensed under either [MIT](../../../LICENSE-MIT) or
-[Apache-2.0](../../../LICENSE-APACHE) at your option.
+Licensed under either MIT or Apache-2.0 at your option
+(`license = "MIT OR Apache-2.0"` in the workspace manifest).
 
 ## Acknowledgements
 

@@ -8,7 +8,7 @@ runs the engine pipeline.
 
 ```bash
 cargo run --release -p ndn-fwd                          # built-in defaults
-cargo run --release -p ndn-fwd -- -c examples/ndn-fwd.example.toml
+cargo run --release -p ndn-fwd -- -c binaries/ndn-fwd/ndn-fwd.default.toml
 ```
 
 `RUST_LOG=info` for status output; `RUST_LOG=ndn_engine=trace` to
@@ -16,8 +16,8 @@ follow the pipeline stage-by-stage.
 
 ## Configure
 
-A TOML file. The shipped reference is [`examples/ndn-fwd.example.toml`](../../../examples/ndn-fwd.example.toml)
-— every option with its default in a comment.
+A TOML file. The shipped reference is [`ndn-fwd.default.toml`](./ndn-fwd.default.toml)
+(also baked into the Docker image as `/etc/ndn-fwd/config.toml`).
 
 | Section | Purpose |
 |---|---|
@@ -29,8 +29,8 @@ A TOML file. The shipped reference is [`examples/ndn-fwd.example.toml`](../../..
 | `[discovery.*]` | Neighbour discovery + service discovery. |
 | `[observability]` | Tracing target filter, log format, OpenTelemetry export. |
 
-The wiki's [Config reference](../../../docs/wiki/src/operations/config-reference.md)
-walks the option groups.
+The [config reference](https://github.com/Quarmire/ndn-rs/blob/main/docs/wiki/src/operations/config-reference.md)
+in the sibling **ndn-rs** repo's wiki walks the option groups.
 
 ## Build
 
@@ -41,18 +41,33 @@ cargo build --release -p ndn-fwd
 ./target/release/ndn-fwd --help
 ```
 
-### Nix
+#### Features
+
+The default build ships `spsc-shm`, `websocket`, `serial`, `l2`,
+`fec`, and `rate-limit`. Everything else is opt-in at compile time
+— since P1 that includes `webtransport` and `quic` (they drag
+ACME/rustls and quinn into every build otherwise), alongside
+`bluetooth`, `webrtc`, `radio`, `af-xdp`, `cclf`, `smtp`, `console`,
+`yubikey-piv`, and `partitioned-fwd`:
 
 ```bash
-nix build .#ndn-fwd                                     # local checkout
-nix run github:Quarmire/ndn-rs                          # remote
-nix profile install github:Quarmire/ndn-rs#ndn-fwd      # system install
+cargo build --release -p ndn-fwd --features webtransport,quic
 ```
+
+See `[features]` in [`Cargo.toml`](./Cargo.toml) for what each flag
+pulls in.
 
 ### Docker
 
+`ndn-fwd` depends on ndn-rs, ndn-ext, and ndn-radio-drivers via `../`
+path deps, so the build context is the **parent** directory with those
+repos checked out as siblings of `ndn-fwd/` (the layout the publish
+workflow reproduces — see the [`Dockerfile`](./Dockerfile) header):
+
 ```bash
-docker build -f binaries/ndn-fwd/Dockerfile -t ndn-fwd .
+# From the directory containing ndn-fwd/, ndn-rs/, ndn-ext/, ndn-radio-drivers/:
+docker build -f ndn-fwd/binaries/ndn-fwd/Dockerfile -t ndn-fwd .
+
 docker pull ghcr.io/quarmire/ndn-fwd:latest             # prebuilt
 ```
 
@@ -82,7 +97,7 @@ docker run --rm \
   -v /run/ndn-fwd:/run/ndn-fwd \
   ghcr.io/quarmire/ndn-fwd:latest
 
-ndn-ctl --socket /run/ndn-fwd/mgmt.sock status
+ndn-ctl --socket /run/ndn-fwd/ndn-fwd.sock status
 ```
 
 ### Docker — WebSocket-over-TLS
@@ -104,28 +119,6 @@ bind = "0.0.0.0:9696"
 tls_cert = "/etc/ndn-fwd/certs/fullchain.pem"
 tls_key  = "/etc/ndn-fwd/certs/privkey.pem"
 ```
-
-### NixOS system service
-
-The workspace [`flake.nix`](../../../flake.nix) exports a
-`nixosModules.default` that runs `ndn-fwd` under systemd with a
-hardened profile, auto-generated identity, and an optional firewall
-rule.
-
-```nix
-{
-  imports = [ inputs.ndn-rs.nixosModules.default ];
-  services.ndn-fwd = {
-    enable = true;
-    openFirewall = true;
-    identity = "/ndn/mysite/router1";
-    configFile = ./ndn-fwd.toml;
-  };
-}
-```
-
-See the main [README](../../../README.md#self-host) for the full
-flake snippet and module options.
 
 ## tokio-console build profile
 
@@ -150,8 +143,8 @@ builds unencumbered.
 
 ## License
 
-Licensed under either [MIT](../../../LICENSE-MIT) or
-[Apache-2.0](../../../LICENSE-APACHE) at your option.
+Licensed under either MIT or Apache-2.0 at your option
+(`license = "MIT OR Apache-2.0"` in the workspace manifest).
 
 ## Acknowledgements
 
