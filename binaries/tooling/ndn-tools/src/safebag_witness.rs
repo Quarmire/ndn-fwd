@@ -10,7 +10,7 @@ use anyhow::{Context, bail};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use ndn_packet::{Data, Name, NameComponent};
-use ndn_security::safe_bag::SafeBag;
+use ndn_security::safebag::SafeBag;
 use ndn_security::{Certificate, EcdsaP256Signer, Signer, encode_cert_data};
 
 #[derive(Parser)]
@@ -89,7 +89,7 @@ async fn export_ecdsa(identity: &str, password: &[u8], out: PathBuf) -> anyhow::
 fn import_verify(input: PathBuf, password: &[u8], identity: Option<&str>) -> anyhow::Result<()> {
     let wire = std::fs::read(&input).with_context(|| format!("read {}", input.display()))?;
     let bag = SafeBag::decode(&wire).context("SafeBag decode")?;
-    let pkcs8 = bag.decrypt_key(password).context("SafeBag decrypt")?;
+    let pkcs8 = bag.decrypt_pkcs8(password).context("SafeBag decrypt")?;
     let cert_data = Data::decode(Bytes::copy_from_slice(&bag.certificate))
         .context("certificate Data decode")?;
     let cert = Certificate::decode(&cert_data).context("CertificateV2 decode")?;

@@ -18,7 +18,7 @@ use ndn_packet::Name;
 use ndn_security::{
     cert_cache::Certificate,
     pib::{FilePib, name_to_uri},
-    safe_bag::SafeBag,
+    safebag::SafeBag,
     spki,
 };
 
