@@ -76,6 +76,49 @@ struct CliArgs {
     list_modules: bool,
 }
 
+/// `--help` text. The parser is deliberately hand-rolled (the daemon stays
+/// dependency-light; only the tooling siblings use clap), so keep this in
+/// sync with the options `parse_args` accepts and the `init`/`adopt`
+/// subcommands `onboard::maybe_run` intercepts.
+fn print_help() {
+    println!(
+        "\
+ndn-fwd {version} — standalone NDN forwarder daemon
+
+USAGE:
+  ndn-fwd [OPTIONS]                       run the forwarder
+  ndn-fwd init --profile hub --namespace <ndn-name>
+                                          stand up a network trust root, print
+                                          a bootstrap ticket, and exit
+  ndn-fwd adopt <ticket>                  inspect a bootstrap ticket (URL or
+                                          fragment), report the anchor
+                                          fingerprint it pins, and exit
+
+OPTIONS:
+  -c, --config <path>       TOML config file (default: built-in defaults;
+                            reference: binaries/ndn-fwd/ndn-fwd.default.toml)
+      --log-level <level>   override the [logging] level
+                            (trace|debug|info|warn|error)
+      --modules             list tracing/observability module targets and exit
+  -h, --help                print this help and exit
+  -V, --version             print the version and exit
+
+FACES:
+  Which `[[face]]` kinds exist is decided at compile time. Default builds ship
+  spsc-shm, websocket, serial, l2, fec, and rate-limit; webtransport, quic,
+  bluetooth, webrtc, radio, af-xdp, cclf, and smtp are opt-in
+  (`cargo build -p ndn-fwd --features webtransport,quic`).",
+        version = env!("CARGO_PKG_VERSION"),
+    );
+}
+
+/// Reject a malformed command line: message to stderr, hint, exit 2.
+fn die_usage(msg: &str) -> ! {
+    eprintln!("ndn-fwd: {msg}");
+    eprintln!("hint: run `ndn-fwd --help` for usage");
+    std::process::exit(2)
+}
+
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let mut config_path = None;
@@ -84,22 +127,34 @@ fn parse_args() -> CliArgs {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-h" | "--help" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("ndn-fwd {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "-c" | "--config" => {
                 i += 1;
-                if let Some(p) = args.get(i) {
-                    config_path = Some(PathBuf::from(p));
+                match args.get(i) {
+                    Some(p) => config_path = Some(PathBuf::from(p)),
+                    None => die_usage("`--config` needs a value: a TOML config file path"),
                 }
             }
             "--log-level" => {
                 i += 1;
-                if let Some(l) = args.get(i) {
-                    log_level = Some(l.clone());
+                match args.get(i) {
+                    Some(l) => log_level = Some(l.clone()),
+                    None => die_usage(
+                        "`--log-level` needs a value: trace, debug, info, warn, or error",
+                    ),
                 }
             }
             "--modules" => {
                 list_modules = true;
             }
-            _ => {}
+            other => die_usage(&format!("unrecognized argument `{other}`")),
         }
         i += 1;
     }
