@@ -27,10 +27,14 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: df454d6336bd729ee5b2649060e9ad29e4d5c06d, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 2f0d8cf5733fbcd5fcbecc66a38c4cbe9887e385, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: b5ea58d6fe6cae85e43633f2e76a2ed2d6420165, path: ndn-ext }
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: c3a26aa755a5fce10bad3c391b22cc59f1326ad1, path: ndn-ext }
+      - uses: actions/checkout@v4
+        # pinned sibling; needed since P2/D5 — ndn-ext's radio faces resolve
+        # ndn-frame-io/ndn-radio-hal/ndn-env from ndn-radio-drivers/crates/
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: bc638999df8c24d51dddcf63ed4110fd2195adc4, path: ndn-radio-drivers }
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
