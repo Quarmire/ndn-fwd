@@ -44,9 +44,9 @@ use ndn_transport::link_service::{LinkServiceFeature, LpLinkService};
 use ndn_transport::{Face, FaceId, FacePersistency, Transport};
 use tokio_util::sync::CancellationToken;
 
-use ndn_face_monitor_wifi::{
-    ContextSource, LinkSignalStore, LossMeter, MediumActuator, RadioBearer, RadioControl, RadioId,
-    RadioMediumFace, spawn_control_loop,
+use ndn_phy_wifi::{
+    ContextSource, LinkSignalStore, LossMeter, MediumActuator, RadioBearer, RadioCognitionSurface,
+    RadioControl, RadioId, RadioMediumFace, spawn_control_loop,
 };
 
 /// Link-FEC generation size on the medium face (`k` source frames per generation).
@@ -69,7 +69,7 @@ impl ContextSource for FibContextSource {
 }
 
 /// The engine-aware hook, ready to hand to
-/// [`RadioMediumFaceFactory::with_context_source`](ndn_face_monitor_wifi::RadioMediumFaceFactory::with_context_source):
+/// [`RadioMediumFaceFactory::with_context_source`](ndn_phy_wifi::RadioMediumFaceFactory::with_context_source):
 /// a builder that captures the FIB and yields a per-face [`FibContextSource`]. With
 /// this a *data-driven* `add_face_of_kind("wfb", …)` face gets FIB-derived contexts,
 /// exactly like [`mount_radio_face`].
@@ -93,7 +93,7 @@ const TICK: Duration = Duration::from_millis(500);
 struct BuiltBearer {
     bearer: RadioBearer,
     #[cfg_attr(not(feature = "radio-libusb"), allow(dead_code))]
-    knobs: Option<Arc<dyn ndn_face_monitor_wifi::RadioKnobs>>,
+    knobs: Option<Arc<dyn ndn_phy_wifi::RadioKnobs>>,
     #[cfg_attr(not(feature = "radio-libusb"), allow(dead_code))]
     channel: Option<u8>,
     /// The highest HT/VHT MCS this radio can *decode* (`LEGACY_ONLY_RX` = legacy OFDM
@@ -188,7 +188,7 @@ pub fn mount_radio_face(
         .iter()
         .map(|b| b.rx_mcs)
         .max()
-        .unwrap_or(ndn_face_monitor_wifi::FULL_RX_MCS);
+        .unwrap_or(ndn_phy_wifi::FULL_RX_MCS);
     control.set_self_rx_mcs(self_rx_mcs);
     // Active name-contexts are refreshed from the FIB in the loop below (every prefix
     // routed out this face), so cognition decides per name we actually transmit.
@@ -275,7 +275,7 @@ pub fn mount_radio_face(
             ticker.tick().await;
             let now = legacy_control.now_ms();
             let need_legacy =
-                legacy_control.worst_neighbor_rx_mcs(now) == Some(ndn_face_monitor_wifi::LEGACY_ONLY_RX);
+                legacy_control.worst_neighbor_rx_mcs(now) == Some(ndn_phy_wifi::LEGACY_ONLY_RX);
             let was = legacy_gate.swap(need_legacy, std::sync::atomic::Ordering::Relaxed);
             if was != need_legacy {
                 tracing::info!(
@@ -384,14 +384,14 @@ fn build_bearer(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBea
 /// identical Realtek dongles can pin the spare to the radio face and leave the kernel Wi-Fi mesh on
 /// the other. Unset ⇒ the first device found.
 #[cfg(feature = "radio-libusb")]
-fn device_select(dev: &RadioDeviceConfig) -> ndn_face_monitor_wifi::DeviceSelect {
-    use ndn_face_monitor_wifi::DeviceSelect;
+fn device_select(dev: &RadioDeviceConfig) -> ndn_phy_wifi::DeviceSelect {
+    use ndn_phy_wifi::DeviceSelect;
     dev.address.as_deref().map(DeviceSelect::parse).unwrap_or_default()
 }
 
 #[cfg(feature = "radio-libusb")]
 fn build_rtl8812au(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
-    use ndn_face_monitor_wifi::{
+    use ndn_phy_wifi::{
         FrameFormat, RadioCapability, FrameIo, RadioKnobs, Rtl8812auBackend,
     };
     let ch = dev
@@ -431,7 +431,7 @@ fn build_rtl8812au(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<Built
     // The 8812au RX decodes HT and VHT on 5 GHz (bisection 2026-07-24: it decoded 8812au HT
     // and a81a VHT cleanly). The earlier LEGACY_ONLY_RX marking was wrong — it blamed the
     // 8812au RX for what was actually the a81a's broken HT *TX* (now routed to VHT). Full RX.
-    let rx_mcs = ndn_face_monitor_wifi::FULL_RX_MCS;
+    let rx_mcs = ndn_phy_wifi::FULL_RX_MCS;
     Ok(Some(BuiltBearer {
         bearer: RadioBearer::wifi(rid, radio, cap),
         knobs: Some(knobs),
@@ -447,7 +447,7 @@ fn build_rtl8812au(_rid: RadioId, _dev: &RadioDeviceConfig) -> Result<Option<Bui
 
 #[cfg(feature = "radio-libusb")]
 fn build_rtl8822e(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
-    use ndn_face_monitor_wifi::{FrameIo, LibUsbRtl88xxBackend, RadioCapability, RadioKnobs};
+    use ndn_phy_wifi::{FrameIo, LibUsbRtl88xxBackend, RadioCapability, RadioKnobs};
     let ch = dev
         .channel
         .ok_or_else(|| "rtl8822e requires a channel".to_string())?;
@@ -477,7 +477,7 @@ fn build_rtl8822e(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltB
         // The worst-receiver cap in `RadioPolicy` reads this and pins the peer's data rate to
         // single-stream ≤ MCS 7. (Not `LEGACY_ONLY_RX`: MCS 0–7 *do* work, and legacy-6M would throw
         // away ~10× the throughput.)
-        rx_mcs: ndn_face_monitor_wifi::SINGLE_STREAM_HT_RX_MCS,
+        rx_mcs: ndn_phy_wifi::SINGLE_STREAM_HT_RX_MCS,
     }))
 }
 
@@ -488,7 +488,7 @@ fn build_rtl8822e(_rid: RadioId, _dev: &RadioDeviceConfig) -> Result<Option<Buil
 
 #[cfg(target_os = "linux")]
 fn build_afpacket(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
-    use ndn_face_monitor_wifi::{AfPacketBackend, FrameFormat, FrameIo, RadioCapability};
+    use ndn_phy_wifi::{AfPacketBackend, FrameFormat, FrameIo, RadioCapability};
     let iface = dev
         .interface
         .as_deref()
@@ -519,7 +519,7 @@ fn build_afpacket(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltB
         bearer: RadioBearer::wifi(rid, radio, cap),
         knobs: None,
         channel: dev.channel,
-        rx_mcs: ndn_face_monitor_wifi::FULL_RX_MCS, // kernel af-packet radios decode full HT
+        rx_mcs: ndn_phy_wifi::FULL_RX_MCS, // kernel af-packet radios decode full HT
     }))
 }
 

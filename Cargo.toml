@@ -77,8 +77,8 @@ ndn-face-webrtc       = { path = "../ndn-ext/crates/faces/ndn-face-webrtc" }
 ndn-rtc-signaling-relay = { path = "../ndn-ext/crates/faces/ndn-rtc-signaling-relay" }
 # The named-radio medium face ("the medium is the face"): one face over N radio
 # capabilities, driven by the medium-shaped cognitive control plane.
-ndn-face-monitor-wifi = { path = "../ndn-ext/crates/faces/ndn-face-monitor-wifi" }
-ndn-radio-cognition   = { path = "../ndn-ext/crates/faces/ndn-radio-cognition" }
+ndn-phy-wifi          = { path = "../ndn-radio/crates/faces/ndn-phy-wifi" }
+ndn-radio-cognition   = { path = "../ndn-radio/crates/faces/ndn-radio-cognition" }
 ndn-acme              = { path = "crates/ndn-acme" }
 ndn-strategy  = { path = "../ndn-rs/crates/forwarding/ndn-strategy" }
 ndn-security  = { path = "../ndn-rs/crates/security/ndn-security" }
@@ -94,7 +94,7 @@ ndn-cert     = { path = "../ndn-rs/crates/security/ndn-cert" }
 ndn-identity = { path = "../ndn-rs/crates/security/ndn-identity" }
 ndn-mgmt     = { path = "../ndn-rs/crates/forwarding/ndn-mgmt" }
 ndn-observability = { path = "../ndn-rs/crates/platform/ndn-observability" }
-ndn-coding    = { path = "../ndn-ext/crates/coding/ndn-coding" }
+ndn-coding    = { path = "../ndn-radio/crates/coding/ndn-coding" }
 ndn-strategy-cclf = { path = "../ndn-ext/crates/strategies/ndn-strategy-cclf", default-features = false }
 ndn-ratelimit = { path = "../ndn-ext/crates/ratelimit/ndn-ratelimit" }
 ndn-tools-core = { path = "crates/tooling/ndn-tools-core" }
