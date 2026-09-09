@@ -47,6 +47,7 @@ mod face_provision;
 mod face_setup;
 mod host_helpers;
 mod installs;
+mod monitors;
 mod onboard;
 // The named-radio medium face: `[[face]] kind="radio"` (one face over N radio
 // capabilities). Gated behind the `radio` feature.
@@ -774,7 +775,28 @@ async fn main() -> Result<()> {
     // Face setup returns any cognition/telemetry surfaces produced while mounting
     // faces (the radio medium face's read-only `ControlSurface`), which we hand to
     // the mgmt server below so `/localhost/nfd/ext/list` exposes them.
-    let radio_control_surfaces = run_face_setup(
+    //
+    // Node-level long-running watchers (uptime / forwarding-soak / per-radio link)
+    // feed the `[monitors]` surface the dashboard's Monitors view reads. The
+    // per-radio link probes are registered by face setup as radio faces mount.
+    let monitor_registry = Arc::new(crate::monitors::MonitorRegistry::new());
+    crate::monitors::spawn_polling(
+        monitor_registry.clone(),
+        "uptime",
+        "uptime",
+        std::time::Duration::from_secs(30),
+        cancel.clone(),
+        crate::monitors::uptime_probe(std::time::Instant::now()),
+    );
+    crate::monitors::spawn_polling(
+        monitor_registry.clone(),
+        "forwarding",
+        "soak",
+        std::time::Duration::from_secs(5),
+        cancel.clone(),
+        crate::monitors::forwarding_probe(engine.face_states()),
+    );
+    let mut control_surfaces = run_face_setup(
         &engine,
         &cancel,
         &fwd_config,
@@ -785,8 +807,13 @@ async fn main() -> Result<()> {
             auto_udp_ifaces,
             auto_ether_ifaces,
         },
+        monitor_registry.clone(),
     )
     .await;
+    control_surfaces.push(Arc::new(crate::monitors::MonitorsSurface::new(
+        monitor_registry,
+    )));
+    let radio_control_surfaces = control_surfaces;
 
     let face_socket = fwd_config.management.face_socket.clone();
     tracing::info!(target: "engine", socket = %face_socket, prefix = "/localhost/nfd", "NDN management active");

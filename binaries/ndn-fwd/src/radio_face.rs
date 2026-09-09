@@ -105,12 +105,22 @@ struct BuiltBearer {
 /// Build the `kind="radio"` medium face `id`, mount it on `engine`, and spawn its
 /// cognition control loop (cancelled with `cancel`). Errors only if no capability
 /// could be brought up.
+///
+/// Returns the read-only cognition telemetry surface **and** one per-radio
+/// link-quality probe (for the node-level `[monitors]` registry): the caller
+/// registers each as a `link-<id>` watcher.
 pub fn mount_radio_face(
     engine: &ForwarderEngine,
     cancel: &CancellationToken,
     id: FaceId,
     radios: &[RadioDeviceConfig],
-) -> Result<Arc<dyn ndn_mgmt_wire::ControlSurface>, String> {
+) -> Result<
+    (
+        Arc<dyn ndn_mgmt_wire::ControlSurface>,
+        Vec<crate::monitors::LinkProbe>,
+    ),
+    String,
+> {
     // 1. Bring up each capability.
     let mut built = Vec::new();
     for (i, dev) in radios.iter().enumerate() {
@@ -348,16 +358,62 @@ pub fn mount_radio_face(
     let surface: Arc<dyn ndn_mgmt_wire::ControlSurface> =
         Arc::new(RadioCognitionSurface::new(control.clone()));
 
-    let feature: Arc<dyn LinkServiceFeature> =control;
+    // Per-radio link-quality probes for the node-level monitors registry
+    // (`[monitors]` surface): weakest RSSI + spectrum occupancy per radio.
+    // Built before `control` moves into the link service below.
+    let link_probes: Vec<crate::monitors::LinkProbe> = built
+        .iter()
+        .map(|b| {
+            let rid = b.bearer.id;
+            let control = control.clone();
+            let probe: crate::monitors::Probe = Arc::new(move || link_tick(&control, rid));
+            (rid.0.to_string(), probe)
+        })
+        .collect();
+
+    let feature: Arc<dyn LinkServiceFeature> = control;
     let ls = LpLinkService::new().with_extra_feature(feature);
     let face = Face::from_parts(running, Arc::new(ls));
     engine.add_composed_face(face, cancel.child_token(), FacePersistency::OnDemand);
 
-    tracing::info!(target: "face.radio", face = %id, radios = built.len(), "radio medium face mounted with cognition loop");
-    Ok(surface)
+    tracing::info!(target: "face.radio", face = %id, radios = link_probes.len(), "radio medium face mounted with cognition loop");
+    Ok((surface, link_probes))
 }
 
-/// The cognition loop's active name-context, derived from the FIB: every prefix
+/// One tick of a per-radio link-quality probe: the weakest recently-heard RSSI
+/// plus spectrum occupancy on the radio's current operating channel. Fails a
+/// tick when the link degrades past the thresholds below — a tick, not a
+/// verdict: the registry keeps the ok/fail history the Monitors view renders.
+fn link_tick(control: &RadioControl, rid: RadioId) -> (bool, String) {
+    const RSSI_FAIL_DBM: i8 = -85;
+    const OCC_FAIL_PCT: u8 = 90;
+    let rssi = control
+        .radio_hardware()
+        .into_iter()
+        .find(|(id, _, _)| *id == rid)
+        .and_then(|(_, _, r)| r);
+    let mut occ: Option<u8> = None;
+    for plan in &control.telemetry().plans {
+        for a in &plan.allocations {
+            if a.radio == rid {
+                if let Some(ch) = a.channel {
+                    occ = control.busy_pct(rid, ch);
+                }
+            }
+        }
+    }
+    let fail = rssi.is_some_and(|r| r < RSSI_FAIL_DBM) || occ.is_some_and(|o| o > OCC_FAIL_PCT);
+    (
+        !fail,
+        format!(
+            "rssi={} occ={}",
+            rssi.map(|r| r.to_string()).unwrap_or_else(|| "-".into()),
+            occ.map(|o| o.to_string()).unwrap_or_else(|| "-".into()),
+        ),
+    )
+}
+
+/// The cognition loop's active name-contexts, derived from the FIB: every prefix
 /// currently routed **out this radio face** is a name the node transmits on the
 /// medium, so each becomes an origin [`NameContext`] the policy decides a plan for.
 /// Falls back to a single root context when no route points here yet, so the loop

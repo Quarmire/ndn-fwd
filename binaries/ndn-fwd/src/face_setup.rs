@@ -39,6 +39,7 @@ pub async fn run_face_setup(
     cancel: &CancellationToken,
     fwd_config: &ForwarderConfig,
     state: FaceSetupState,
+    monitors: Arc<crate::monitors::MonitorRegistry>,
 ) -> Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> {
     let FaceSetupState {
         face_ids_by_index,
@@ -62,6 +63,7 @@ pub async fn run_face_setup(
         auto_ether_pre_alloc,
         auto_udp_ifaces,
         auto_ether_ifaces,
+        monitors,
     )
     .await
 }
@@ -76,6 +78,7 @@ async fn run_face_setup_inner(
     auto_ether_pre_alloc: Vec<(FaceId, String)>,
     auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
     auto_ether_ifaces: Vec<ndn_face::iface::InterfaceInfo>,
+    monitors: Arc<crate::monitors::MonitorRegistry>,
 ) -> Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> {
     // Cognition/telemetry surfaces produced while mounting faces (currently the
     // radio medium face); handed to `MgmtHandles.control_surfaces` by the caller.
@@ -455,9 +458,22 @@ async fn run_face_setup_inner(
                     // Builds the bearers, mounts the medium face (engine pairs the
                     // LpLinkService by kind: Wfb → LP framing on), spawns the
                     // cognition control loop, and returns a read-only telemetry
-                    // surface for the mgmt `ext/list` dataset.
-                    match crate::radio_face::mount_radio_face(&engine, &cancel, id, radios) {
-                        Ok(surface) => control_surfaces.push(surface),
+                    // surface for the mgmt `ext/list` dataset plus one
+                    // link-quality probe per radio for the `[monitors]` registry.
+                    match crate::radio_face::mount_radio_face(&engine, cancel, id, radios) {
+                        Ok((surface, link_probes)) => {
+                            control_surfaces.push(surface);
+                            for (radio_id, probe) in link_probes {
+                                crate::monitors::spawn_polling(
+                                    monitors.clone(),
+                                    &format!("link-{radio_id}"),
+                                    "link",
+                                    std::time::Duration::from_secs(5),
+                                    cancel.clone(),
+                                    probe,
+                                );
+                            }
+                        }
                         Err(e) => {
                             tracing::error!(target: "face.radio", error = %e, "radio medium face not mounted")
                         }
