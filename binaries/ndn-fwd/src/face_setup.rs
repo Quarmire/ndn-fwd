@@ -39,7 +39,7 @@ pub async fn run_face_setup(
     cancel: &CancellationToken,
     fwd_config: &ForwarderConfig,
     state: FaceSetupState,
-) {
+) -> Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> {
     let FaceSetupState {
         face_ids_by_index,
         auto_udp_pre_alloc,
@@ -63,7 +63,7 @@ pub async fn run_face_setup(
         auto_udp_ifaces,
         auto_ether_ifaces,
     )
-    .await;
+    .await
 }
 
 #[allow(clippy::needless_pass_by_value, unused_variables)]
@@ -76,7 +76,10 @@ async fn run_face_setup_inner(
     auto_ether_pre_alloc: Vec<(FaceId, String)>,
     auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
     auto_ether_ifaces: Vec<ndn_face::iface::InterfaceInfo>,
-) {
+) -> Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> {
+    // Cognition/telemetry surfaces produced while mounting faces (currently the
+    // radio medium face); handed to `MgmtHandles.control_surfaces` by the caller.
+    let mut control_surfaces: Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> = Vec::new();
     // Resolve a config-face index to its pre-assigned FaceId; fall back to a
     // fresh id for the synthetic default listeners (empty `[[face]]`).
     let id_for = |idx: usize| {
@@ -450,12 +453,14 @@ async fn run_face_setup_inner(
                 {
                     let id = id_for(face_idx);
                     // Builds the bearers, mounts the medium face (engine pairs the
-                    // LpLinkService by kind: Wfb → LP framing on), and spawns the
-                    // cognition control loop over it.
-                    if let Err(e) =
-                        crate::radio_face::mount_radio_face(&engine, &cancel, id, radios)
-                    {
-                        tracing::error!(target: "face.radio", error = %e, "radio medium face not mounted");
+                    // LpLinkService by kind: Wfb → LP framing on), spawns the
+                    // cognition control loop, and returns a read-only telemetry
+                    // surface for the mgmt `ext/list` dataset.
+                    match crate::radio_face::mount_radio_face(&engine, &cancel, id, radios) {
+                        Ok(surface) => control_surfaces.push(surface),
+                        Err(e) => {
+                            tracing::error!(target: "face.radio", error = %e, "radio medium face not mounted")
+                        }
                     }
                 }
                 #[cfg(not(feature = "radio"))]
@@ -580,4 +585,5 @@ async fn run_face_setup_inner(
     }
 
     tracing::info!(target: "engine", "engine running");
+    control_surfaces
 }

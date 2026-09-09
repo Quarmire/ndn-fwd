@@ -22,6 +22,10 @@ path = "src/main.rs"
 name = "rtc_rendezvous"
 required-features = ["webrtc"]
 
+[[example]]
+name = "ws_e2e"
+required-features = ["websocket"]
+
 [features]
 # Deployment baseline. webtransport and quic are opt-in (like bluetooth/webrtc):
 # webtransport drags ndn-acme -> instant-acme/reqwest/rustls and quic drags
@@ -71,10 +75,15 @@ cclf        = ["dep:ndn-strategy-cclf", "ndn-strategy-cclf/native"]
 smtp        = ["dep:lettre"]
 
 [dependencies]
+portable-atomic = { workspace = true }
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname"], optional = true }
 base64           = { workspace = true }
 ndn-engine       = { workspace = true }
 ndn-mgmt         = { workspace = true }
+# The `ControlSurface` trait for MgmtHandles.control_surfaces — named
+# unconditionally so face setup can thread radio-cognition telemetry out
+# regardless of the `radio` feature.
+ndn-mgmt-wire    = { workspace = true }
 ndn-observability = { workspace = true }
 humantime        = "2"
 ndn-coding       = { workspace = true, optional = true }
@@ -132,6 +141,8 @@ tempfile      = "3"
 # Capability-scoped shm:// face integration test (tests/shm_capability_face.rs).
 ndn-face-shm  = { workspace = true }
 bytes         = { workspace = true }
+# ws_e2e example: Sink/Stream ext for the WebSocket client round-trip.
+futures       = { workspace = true }
 
 [lints]
 workspace = true

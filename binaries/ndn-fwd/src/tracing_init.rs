@@ -2,9 +2,10 @@
 //! `LOG_FILTER`, and `APPLY_FILTER` statics that the mgmt `log/*` verbs
 //! read via [`build_log_inspector`].
 
+use portable_atomic::AtomicU64;
 use std::collections::VecDeque;
 use std::io::Write as IoWrite;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing_subscriber::EnvFilter;

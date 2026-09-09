@@ -57,6 +57,7 @@ unimplemented = "warn"
 name = "ndn-fwd"
 
 [workspace.dependencies]
+portable-atomic = { version = "1.11", default-features = false, features = ["fallback", "std"] }
 # NDN workspace crates — grouped by subdirectory layer
 ndn-tlv       = { path = "../ndn-rs/crates/core/ndn-tlv", default-features = false }
 ndn-packet    = { path = "../ndn-rs/crates/core/ndn-packet", default-features = false }

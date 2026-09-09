@@ -2549,6 +2549,7 @@ dependencies = [
  "ndn-sync",
  "ndn-tlv",
  "ndn-transport",
+ "portable-atomic",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
@@ -2620,6 +2621,7 @@ dependencies = [
  "ndn-store",
  "ndn-tlv",
  "ndn-transport",
+ "portable-atomic",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -2637,6 +2639,7 @@ dependencies = [
  "ndn-packet",
  "ndn-tlv",
  "ndn-transport",
+ "portable-atomic",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2704,6 +2707,7 @@ dependencies = [
  "ndn-store",
  "ndn-strategy",
  "ndn-transport",
+ "portable-atomic",
  "smallvec",
  "thiserror 2.0.18",
  "tokio",
@@ -2730,6 +2734,7 @@ dependencies = [
  "ndn-tlv",
  "ndn-transport",
  "pcap",
+ "portable-atomic",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2778,34 +2783,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ndn-face-monitor-wifi"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "libc",
- "libusb1-sys",
- "ndn-coding",
- "ndn-env",
- "ndn-foundation-types",
- "ndn-frame-io",
- "ndn-fwd-core",
- "ndn-packet",
- "ndn-radio-cognition",
- "ndn-radio-drivers",
- "ndn-radio-hal",
- "ndn-signals-core",
- "ndn-store",
- "ndn-time",
- "ndn-tlv",
- "ndn-transport",
- "rusb",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "ndn-face-quic"
 version = "0.1.0"
 dependencies = [
@@ -2841,6 +2818,7 @@ dependencies = [
  "bytes",
  "libc",
  "ndn-transport",
+ "portable-atomic",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
@@ -2889,6 +2867,7 @@ dependencies = [
  "bytes",
  "ndn-packet",
  "ndn-transport",
+ "portable-atomic",
  "rustls-pemfile",
  "sha2 0.11.0",
  "thiserror 2.0.18",
@@ -2930,6 +2909,7 @@ dependencies = [
  "bytes",
  "console-subscriber",
  "dashmap 6.2.1",
+ "futures",
  "getrandom 0.2.17",
  "humantime",
  "lettre",
@@ -2944,7 +2924,6 @@ dependencies = [
  "ndn-face",
  "ndn-face-afxdp",
  "ndn-face-bluetooth",
- "ndn-face-monitor-wifi",
  "ndn-face-quic",
  "ndn-face-serial",
  "ndn-face-shm",
@@ -2954,8 +2933,10 @@ dependencies = [
  "ndn-identity",
  "ndn-ipc",
  "ndn-mgmt",
+ "ndn-mgmt-wire",
  "ndn-observability",
  "ndn-packet",
+ "ndn-phy-wifi",
  "ndn-radio-cognition",
  "ndn-ratelimit",
  "ndn-routing",
@@ -2966,6 +2947,7 @@ dependencies = [
  "ndn-strategy-cclf",
  "ndn-sync",
  "ndn-transport",
+ "portable-atomic",
  "rustls-pemfile",
  "serde_json",
  "sha2 0.10.9",
@@ -3009,6 +2991,7 @@ dependencies = [
  "ndn-security",
  "ndn-sync",
  "ndn-tlv",
+ "portable-atomic",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3069,6 +3052,7 @@ dependencies = [
  "ndn-strategy",
  "ndn-tlv",
  "ndn-transport",
+ "portable-atomic",
  "serde",
  "serde_json",
  "tokio",
@@ -3098,6 +3082,7 @@ dependencies = [
  "ndn-packet",
  "ndn-transport",
  "parking_lot",
+ "portable-atomic",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3157,6 +3142,35 @@ dependencies = [
  "bytes",
  "dashmap 6.2.1",
  "ndn-foundation-types",
+ "portable-atomic",
+]
+
+[[package]]
+name = "ndn-phy-wifi"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "libc",
+ "libusb1-sys",
+ "ndn-coding",
+ "ndn-env",
+ "ndn-frame-io",
+ "ndn-mgmt-wire",
+ "ndn-packet",
+ "ndn-radio",
+ "ndn-radio-cognition",
+ "ndn-radio-drivers",
+ "ndn-radio-hal",
+ "ndn-signals-core",
+ "ndn-time",
+ "ndn-tlv",
+ "ndn-transport",
+ "portable-atomic",
+ "rusb",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3175,14 +3189,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndn-radio"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "ndn-frame-io",
+ "ndn-packet",
+ "ndn-radio-hal",
+ "ndn-time",
+ "ndn-tlv",
+ "ndn-transport",
+ "smallvec",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ndn-radio-cognition"
 version = "0.1.0"
 dependencies = [
  "ndn-frame-io",
  "ndn-packet",
+ "ndn-radio",
  "ndn-radio-hal",
  "ndn-signals-core",
  "ndn-tlv",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3224,6 +3258,7 @@ dependencies = [
  "ndn-mgmt",
  "ndn-packet",
  "ndn-transport",
+ "portable-atomic",
  "serde",
  "thiserror 2.0.18",
  "toml",
@@ -3248,6 +3283,7 @@ dependencies = [
  "ndn-sync",
  "ndn-tlv",
  "ndn-transport",
+ "portable-atomic",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3275,6 +3311,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "gloo-timers",
+ "portable-atomic",
  "tokio",
  "wasm-bindgen-futures",
  "web-time",
@@ -3302,6 +3339,7 @@ dependencies = [
  "pkcs1",
  "pkcs5",
  "pkcs8",
+ "portable-atomic",
  "rand_core 0.6.4",
  "rsa",
  "rusqlite",
@@ -3330,6 +3368,7 @@ dependencies = [
  "lru",
  "ndn-fwd-core",
  "ndn-packet",
+ "portable-atomic",
  "ring",
  "sha2 0.11.0",
  "smallvec",
@@ -3349,6 +3388,7 @@ dependencies = [
  "ndn-signals-core",
  "ndn-store",
  "ndn-transport",
+ "portable-atomic",
  "smallvec",
  "tokio-util",
  "web-time",
@@ -3390,6 +3430,7 @@ dependencies = [
  "ndn-packet",
  "ndn-svs-core",
  "ndn-tlv",
+ "portable-atomic",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
@@ -3450,6 +3491,7 @@ dependencies = [
  "ndn-packet",
  "ndn-security",
  "ndn-transport",
+ "portable-atomic",
  "serde",
  "serde_json",
  "tokio",
@@ -3465,6 +3507,7 @@ dependencies = [
  "futures",
  "ndn-packet",
  "ndn-tlv",
+ "portable-atomic",
  "serde",
  "smallvec",
  "thiserror 2.0.18",

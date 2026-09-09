@@ -146,9 +146,9 @@ fn parse_args() -> CliArgs {
                 i += 1;
                 match args.get(i) {
                     Some(l) => log_level = Some(l.clone()),
-                    None => die_usage(
-                        "`--log-level` needs a value: trace, debug, info, warn, or error",
-                    ),
+                    None => {
+                        die_usage("`--log-level` needs a value: trace, debug, info, warn, or error")
+                    }
                 }
             }
             "--modules" => {
@@ -771,7 +771,10 @@ async fn main() -> Result<()> {
 
     // Face listeners, WT/WebRTC listeners, auto-multicast face creation,
     // and the interface hotplug watcher all live in `face_setup`.
-    run_face_setup(
+    // Face setup returns any cognition/telemetry surfaces produced while mounting
+    // faces (the radio medium face's read-only `ControlSurface`), which we hand to
+    // the mgmt server below so `/localhost/nfd/ext/list` exposes them.
+    let radio_control_surfaces = run_face_setup(
         &engine,
         &cancel,
         &fwd_config,
@@ -829,7 +832,7 @@ async fn main() -> Result<()> {
         mgmt_ndn::MgmtHandles {
             extra_modules: discovery_modules,
             face_provisioners: face_provision::face_provisioners(),
-            control_surfaces: Vec::new(),
+            control_surfaces: radio_control_surfaces,
             security_is_ephemeral,
             // None when [security.mgmt].trust_anchor_pib is unset. With
             // require_signed_commands=true and no validator, every command
@@ -914,7 +917,8 @@ async fn main() -> Result<()> {
             attrs.push(Attr::str("interest.name", ev.name_uri.clone()));
             attrs.push(Attr::int("face.id", ev.face_id as i64));
             let span_id_seed = {
-                use std::sync::atomic::{AtomicU64, Ordering};
+                use portable_atomic::AtomicU64;
+                use std::sync::atomic::Ordering;
                 static SEED: AtomicU64 = AtomicU64::new(1);
                 SEED.fetch_add(1, Ordering::Relaxed)
             };

@@ -162,7 +162,8 @@ async fn run_relay(args: &[String]) -> anyhow::Result<()> {
 /// own `transport_listeners::run_webrtc_listener`.
 async fn run_accept(args: &[String]) -> anyhow::Result<()> {
     let relay = flag(args, "--relay").ok_or_else(|| anyhow::anyhow!("--relay <url> required"))?;
-    let session = flag(args, "--session").ok_or_else(|| anyhow::anyhow!("--session <id> required"))?;
+    let session =
+        flag(args, "--session").ok_or_else(|| anyhow::anyhow!("--session <id> required"))?;
     let serve = flag(args, "--serve").unwrap_or_else(|| "/demo/roaming".to_string());
 
     // A default engine is a full forwarder: PIT, FIB, content store, strategies.
@@ -216,7 +217,8 @@ async fn run_accept(args: &[String]) -> anyhow::Result<()> {
 /// it, and fetch once.
 async fn run_dial(args: &[String]) -> anyhow::Result<()> {
     let relay = flag(args, "--relay").ok_or_else(|| anyhow::anyhow!("--relay <url> required"))?;
-    let session = flag(args, "--session").ok_or_else(|| anyhow::anyhow!("--session <id> required"))?;
+    let session =
+        flag(args, "--session").ok_or_else(|| anyhow::anyhow!("--session <id> required"))?;
     let name = flag(args, "--name").ok_or_else(|| anyhow::anyhow!("--name <ndn-name> required"))?;
     let ndn_name: ndn_packet::Name = name.parse()?;
 
@@ -230,7 +232,9 @@ async fn run_dial(args: &[String]) -> anyhow::Result<()> {
     // return the live face once SCTP is up — symmetric to accept_one.
     println!("dial: offering on session '{session}' via {relay}");
     let dialer = WebRtcDialer::new(relay, IceServers::default());
-    let mut face = dialer.connect_one(&session, Duration::from_secs(60)).await?;
+    let mut face = dialer
+        .connect_one(&session, Duration::from_secs(60))
+        .await?;
 
     // Plug the face into the engine and point `--name` at it so our Interest
     // egresses over the datachannel rather than looking for a local producer.
@@ -238,7 +242,10 @@ async fn run_dial(args: &[String]) -> anyhow::Result<()> {
     face.set_id(face_id);
     engine.add_face(face, cancel.child_token());
     engine.fib().add_nexthop(&ndn_name, face_id, 0);
-    println!("dial: WebRTC face {} up; routing {ndn_name} to it", face_id.0);
+    println!(
+        "dial: WebRTC face {} up; routing {ndn_name} to it",
+        face_id.0
+    );
 
     // Express one Interest across the link and print the Data.
     let data = node.fetch(ndn_name.clone()).await?;

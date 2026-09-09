@@ -32,8 +32,8 @@
 //! [`RadioDeviceConfig::max_mcs`]/[`max_nss`](RadioDeviceConfig::max_nss) — there is no
 //! env knob for it.
 
-use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -110,7 +110,7 @@ pub fn mount_radio_face(
     cancel: &CancellationToken,
     id: FaceId,
     radios: &[RadioDeviceConfig],
-) -> Result<(), String> {
+) -> Result<Arc<dyn ndn_mgmt_wire::ControlSurface>, String> {
     // 1. Bring up each capability.
     let mut built = Vec::new();
     for (i, dev) in radios.iter().enumerate() {
@@ -205,7 +205,12 @@ pub fn mount_radio_face(
         // loss into `loss` — the loss-recovery loop the cognition plane closes. The
         // tail-flush window is short so a lone frame (e.g. a ping Interest) doesn't wait
         // for a full generation.
-        .with_link_fec(FEC_K, Duration::from_millis(20), fec_redundancy, loss.clone())
+        .with_link_fec(
+            FEC_K,
+            Duration::from_millis(20),
+            fec_redundancy,
+            loss.clone(),
+        )
         // Worst-overheard-receiver rate cap: when a legacy-only-RX neighbour is heard, the
         // data plane drops to the basic legacy rate so it reaches that neighbour.
         .with_legacy_gate(force_legacy.clone())
@@ -337,16 +342,22 @@ pub fn mount_radio_face(
         });
     }
 
-    let feature: Arc<dyn LinkServiceFeature> = control;
+    // Read-only cognition telemetry surface over a *separate* handle to the same
+    // control plane — served at `/localhost/nfd/ext/list` so a dashboard observes
+    // the decided channel/rate/power/fec (the control plane still owns actuation).
+    let surface: Arc<dyn ndn_mgmt_wire::ControlSurface> =
+        Arc::new(RadioCognitionSurface::new(control.clone()));
+
+    let feature: Arc<dyn LinkServiceFeature> =control;
     let ls = LpLinkService::new().with_extra_feature(feature);
     let face = Face::from_parts(running, Arc::new(ls));
     engine.add_composed_face(face, cancel.child_token(), FacePersistency::OnDemand);
 
     tracing::info!(target: "face.radio", face = %id, radios = built.len(), "radio medium face mounted with cognition loop");
-    Ok(())
+    Ok(surface)
 }
 
-/// The cognition loop's active name-contexts, derived from the FIB: every prefix
+/// The cognition loop's active name-context, derived from the FIB: every prefix
 /// currently routed **out this radio face** is a name the node transmits on the
 /// medium, so each becomes an origin [`NameContext`] the policy decides a plan for.
 /// Falls back to a single root context when no route points here yet, so the loop
@@ -386,46 +397,74 @@ fn build_bearer(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBea
 #[cfg(feature = "radio-libusb")]
 fn device_select(dev: &RadioDeviceConfig) -> ndn_phy_wifi::DeviceSelect {
     use ndn_phy_wifi::DeviceSelect;
-    dev.address.as_deref().map(DeviceSelect::parse).unwrap_or_default()
+    dev.address
+        .as_deref()
+        .map(DeviceSelect::parse)
+        .unwrap_or_default()
 }
 
 #[cfg(feature = "radio-libusb")]
 fn build_rtl8812au(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
-    use ndn_phy_wifi::{
-        FrameFormat, RadioCapability, FrameIo, RadioKnobs, Rtl8812auBackend,
-    };
+    use ndn_phy_wifi::{BringUpRequest, FrameIo, PowerRequest, RadioCapability, RadioKnobs};
     let ch = dev
         .channel
         .ok_or_else(|| "rtl8812au requires a channel".to_string())?;
-    // The 8812au defaults to `Raw80211` (its NAN path); the NDN medium face needs the
-    // LLC/SNAP-wrapped `RawNdn` frame so injected packets decode as NDN on the peer.
-    // `usb-addr`/`usb-index` pin a specific dongle when several identical ones share the host.
-    let backend = Rtl8812auBackend::open_select(&device_select(dev))
-        .map_err(|e| format!("{e:?}"))?
-        .with_format(FrameFormat::RawNdn { ethertype: 0x8624 });
-    let backend = Arc::new(backend);
-    backend.bring_up_monitor(ch).map_err(|e| format!("{e:?}"))?;
+    // ★ **M8: ONE door.** This arm used to be `open_select` + `with_format` + `bring_up_monitor`
+    // + three separate post-hoc knob calls. It is now one `open_radio`, which means the shipped
+    // forwarder gains what it silently did without: the RX pump, `NDN_RADIO_BW`, `NDN_TX_PWR` and
+    // `NDN_CCA_OFF`. That is a real behaviour change on a deployed node — written out in
+    // `open_radio`'s doc comment and in the M8 report, not discovered on air.
+    //
+    // The 8812au defaults to `Raw80211` (its NAN path); `BringUpRequest`'s default format is the
+    // canonical `RawNdn { ethertype: 0x8624 }`, so injected packets decode as NDN on the peer.
+    // `address` pins a specific dongle when several identical ones share the host.
+    let mut req = BringUpRequest::from_env(ch);
     if let Some(p) = dev.tx_power {
-        let _ = backend.set_tx_power(p);
+        // ⚠ Precedence, preserved from the pre-M8 order: `NDN_RADIO_TX_RAW` (+ the authority
+        // `NDN_RF_UNRESTRICTED` mints) ran AFTER the config index and therefore beat it. Saying so
+        // out loud beats silently letting the config win and leaving an operator to wonder why the
+        // radio is 20 dB quieter than the last run.
+        if req.power.is_off_scale() {
+            tracing::warn!(
+                radio = rid.0,
+                requested = p,
+                "8812au: config tx_power is IGNORED — NDN_RADIO_TX_RAW put this radio on the RAW \
+                 chip axis, which overrides it (the pre-M8 order, kept)"
+            );
+        } else {
+            req.power = PowerRequest::index(p);
+        }
     }
-    // Operator opt-ins for the radio's full capability, beyond the regulatory-calibrated
-    // default (#38). NDN_RADIO_TX_2T=1 drives both antenna paths; NDN_RADIO_TX_RAW=<0-63>
-    // writes the raw TXAGC index (can exceed licensed EIRP — explicit opt-in only).
-    if std::env::var("NDN_RADIO_TX_2T").is_ok() {
-        let _ = backend.set_tx_2t(true);
-    }
-    if let Some(raw) = std::env::var("NDN_RADIO_TX_RAW")
-        .ok()
-        .and_then(|s| s.trim().parse::<u8>().ok())
-    {
-        let _ = backend.set_tx_power_raw(raw);
-        tracing::warn!(raw, "8812au: RAW TXAGC override active (may exceed licensed EIRP)");
-    }
+    // ★ The power request rides INTO `PLAN_8812AU_MONITOR`: its `set_tx_power` rung reads it back
+    // out of the plan context, so the resolved reference (`FusedBase` vs `ChipRaw`) and the index
+    // span actually written are in the report and in `plan_digest`. That is the pair the
+    // 2026-09-03 bisection was missing; with the fallthrough deleted, an unresolved calibration is
+    // a refusal rather than a silent ~20 dB step.
+    // `{e}` and not `{e:?}`: `BringUpFailure`'s Display is "failed at <rung>: <error>" followed by
+    // the PARTIAL report — which rung, in which stage, with everything established up to it. That
+    // is §3's whole point and it should reach the operator, not a Debug dump.
+    let open = ndn_phy_wifi::open_radio(ndn_phy_wifi::RTL8812AU_PID, &device_select(dev), &req)
+        .map_err(|e| format!("{e}"))?;
+    // ★ M2: the bring-up returns an account of itself, and the forwarder prints it. Dropping it
+    // here would leave the shipped node the one place with no answer to "which bring-up did you
+    // use?". `render()` names the plan, its digest, the resolved power reference and the index
+    // span written; `emit()` puts the same fields on the tracing span tree, so they reach OTLP
+    // beside the on-air numbers.
+    open.report().emit();
+    tracing::info!(target: "named_radio", radio = rid.0, "\n{}", open.report().render());
+    let backend = open.io.clone();
+    // `NDN_RADIO_TX_2T` is no longer read here: it is `PartOpts::rtl8812au_tx_2t`, filled by
+    // `BringUpRequest::from_env` and applied inside `open_radio`'s RTL8812AU arm, where it lands
+    // in the report as a warning naming the USB brownout it risks. LAW 1 — one reader.
+    //
     // The 8812au now exposes the `RadioKnobs` seam: its per-rate TXAGC index is a
     // validated dB power knob (#38), plus channel / EDCCA / frame-free occupancy. So
     // cognition drives this bearer's TX power (reciprocity backoff), not just its data
     // plane. Share one backend as both the data-plane radio and the control knobs.
-    let knobs: Arc<dyn RadioKnobs> = backend.clone();
+    let knobs: Arc<dyn RadioKnobs> = open
+        .knobs
+        .clone()
+        .ok_or_else(|| "rtl8812au opened without RadioKnobs".to_string())?;
     let radio: Arc<dyn FrameIo> = backend;
     let cap = RadioCapability::wifi_monitor_2ghz(vec![ch]).with_wifi_caps(dev.max_mcs, dev.max_nss);
     // The 8812au RX decodes HT and VHT on 5 GHz (bisection 2026-07-24: it decoded 8812au HT
@@ -447,24 +486,45 @@ fn build_rtl8812au(_rid: RadioId, _dev: &RadioDeviceConfig) -> Result<Option<Bui
 
 #[cfg(feature = "radio-libusb")]
 fn build_rtl8822e(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
-    use ndn_phy_wifi::{FrameIo, LibUsbRtl88xxBackend, RadioCapability, RadioKnobs};
+    use ndn_phy_wifi::{BringUpRequest, FrameIo, PowerRequest, RadioCapability, RadioKnobs};
     let ch = dev
         .channel
         .ok_or_else(|| "rtl8822e requires a channel".to_string())?;
-    // Target the `0bda:a81a` (RTL8812EU, driven by the 8822E halmac) *specifically*:
-    // an 8812AU (`0x8812`/`0x881a`) is also in `RTL88XX_PIDS`, so a plain `open()`
-    // can grab the wrong Realtek device (it reads chip id 0x04, not 0x17, and the
-    // 8822E power sequence then fails on it). `usb-addr`/`usb-index` pin *which* a81a when a node
-    // has two (e.g. one on the kernel mesh, one spare) — the multi-radio-note ask.
-    let backend = Arc::new(
-        LibUsbRtl88xxBackend::open_monitor_pid_select(0xa81a, &device_select(dev), ch)
-            .map_err(|e| format!("{e:?}"))?,
-    );
+    // ★ **M8: ONE door**, and the same behaviour change as the 8812au arm above — this path
+    // bypassed `open_named_radio` entirely, so it silently ran with no RX pump, no `NDN_RADIO_BW`,
+    // no `NDN_TX_PWR` and no `NDN_CCA_OFF`. It now gets all four, and a report on the record.
+    //
+    // Target the `0bda:a81a` (RTL8812EU, driven by the 8822E halmac) *specifically*: an 8812AU
+    // (`0x8812`/`0x881a`) is also in `RTL88XX_PIDS`, so a plain `open()` can grab the wrong
+    // Realtek device (it reads chip id 0x04, not 0x17, and the 8822E power sequence then fails on
+    // it). `address` pins *which* a81a when a node has two (one on the kernel mesh, one spare).
+    let mut req = BringUpRequest::from_env(ch);
     if let Some(p) = dev.tx_power {
-        let _ = backend.set_tx_power(p as u32);
+        // On this part the reference is a `DriverReference` (the 0x18e8 index) with a MEASURED
+        // 0.22 dB/step, and the driver clamps to 20..=63 because below 20 the gain chain inverts
+        // ~11 dB ABOVE the calibrated maximum — `AppliedPower::clamped` is how a caller finds that
+        // out, and it is now in the report rather than in a log line.
+        if req.power.is_off_scale() {
+            tracing::warn!(
+                radio = rid.0,
+                requested = p,
+                "rtl8822e: config tx_power is IGNORED — NDN_RADIO_TX_RAW put this radio on the RAW \
+                 chip axis, which overrides it"
+            );
+        } else {
+            req.power = PowerRequest::index(p);
+        }
     }
-    let radio: Arc<dyn FrameIo> = backend.clone();
-    let knobs: Arc<dyn RadioKnobs> = backend;
+    // `{e}`: `BringUpFailure`'s Display carries the PARTIAL report — see the 8812au arm.
+    let open =
+        ndn_phy_wifi::open_radio(0xa81a, &device_select(dev), &req).map_err(|e| format!("{e}"))?;
+    open.report().emit();
+    tracing::info!(target: "named_radio", radio = rid.0, "\n{}", open.report().render());
+    let radio: Arc<dyn FrameIo> = open.io.clone();
+    let knobs: Arc<dyn RadioKnobs> = open
+        .knobs
+        .clone()
+        .ok_or_else(|| "rtl8822e opened without RadioKnobs".to_string())?;
     let cap = RadioCapability::wifi_monitor_5ghz(vec![ch]).with_wifi_caps(dev.max_mcs, dev.max_nss);
     Ok(Some(BuiltBearer {
         bearer: RadioBearer::wifi(rid, radio, cap),
@@ -535,7 +595,10 @@ mod tests {
     use std::str::FromStr;
 
     fn to(face: FaceId, cost: u32) -> FibNexthop {
-        FibNexthop { face_id: face, cost }
+        FibNexthop {
+            face_id: face,
+            cost,
+        }
     }
 
     #[test]
@@ -545,23 +608,35 @@ mod tests {
         let entries = vec![
             (
                 Name::from_str("/a/b").unwrap(),
-                Arc::new(FibEntry { nexthops: vec![to(radio, 0)] }),
+                Arc::new(FibEntry {
+                    nexthops: vec![to(radio, 0)],
+                }),
             ),
             (
                 Name::from_str("/c").unwrap(),
-                Arc::new(FibEntry { nexthops: vec![to(other, 0)] }),
+                Arc::new(FibEntry {
+                    nexthops: vec![to(other, 0)],
+                }),
             ),
             (
                 Name::from_str("/d").unwrap(),
-                Arc::new(FibEntry { nexthops: vec![to(other, 5), to(radio, 10)] }),
+                Arc::new(FibEntry {
+                    nexthops: vec![to(other, 5), to(radio, 10)],
+                }),
             ),
         ];
 
         let ctxs = active_contexts(&entries, radio);
         assert_eq!(ctxs.len(), 2, "only /a/b and /d route out the radio face");
         let want_ab = name_prefix_hash(&Name::from_str("/a/b").unwrap());
-        assert!(ctxs.iter().any(|c| c.prefix_hash == want_ab), "keys are the canonical prefix hash");
-        assert!(ctxs.iter().all(|c| c.is_origin), "FIB-routed prefixes are origin contexts");
+        assert!(
+            ctxs.iter().any(|c| c.prefix_hash == want_ab),
+            "keys are the canonical prefix hash"
+        );
+        assert!(
+            ctxs.iter().all(|c| c.is_origin),
+            "FIB-routed prefixes are origin contexts"
+        );
     }
 
     #[test]
