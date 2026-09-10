@@ -9,9 +9,14 @@ use crate::cache::CertCache;
 use crate::client::{AcmeClient, AcmeError};
 use crate::dns::DnsProvider;
 
+/// A resolved certificate: the PEM chain plus its private key.
+///
+/// Produced by [`CertSource::resolve`] regardless of the source shape.
 #[derive(Clone)]
 pub struct CertMaterial {
+    /// PEM-encoded certificate chain, leaf first.
     pub cert_chain_pem: Vec<u8>,
+    /// PEM-encoded private key for the leaf certificate.
     pub private_key_pem: Vec<u8>,
 }
 
@@ -57,6 +62,7 @@ pub enum SelfSignedProfile {
 /// Localhost-only dev cert; never for production.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SelfSignedDev {
+    /// Subject-alternative-name hostnames to embed (defaults to `localhost`).
     #[serde(default = "default_hostnames")]
     pub hostnames: Vec<String>,
 }
@@ -65,26 +71,42 @@ fn default_hostnames() -> Vec<String> {
     vec!["localhost".into()]
 }
 
+/// Operator config for the ACME arm of [`CertSource`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AcmeConfig {
-    /// e.g. `https://acme-v02.api.letsencrypt.org/directory`.
+    /// ACME directory URL, e.g. `https://acme-v02.api.letsencrypt.org/directory`.
     pub directory_url: String,
-    /// `mailto:` is implied if the scheme is omitted.
+    /// Account contact address; `mailto:` is implied if the scheme is omitted.
     pub email: String,
+    /// Fully-qualified domain the certificate is issued for.
     pub domain: String,
     /// Selects a registered `DnsProvider` impl (e.g. `"cloudflare"`).
     pub dns_provider: String,
     /// Provider-specific (API token, zone id, ...).
     #[serde(default)]
     pub params: serde_json::Value,
+    /// Directory where issued certs are cached (see [`CertCache`]).
     pub cache_dir: PathBuf,
 }
 
+/// One operator-facing config shape for every cert-bearing face transport.
+///
+/// Tagged by a `type` field when (de)serialized: `pem`, `acme`, or
+/// `self_signed_dev`. [`resolve`](Self::resolve) turns any variant into
+/// [`CertMaterial`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CertSource {
-    Pem { cert_pem: PathBuf, key_pem: PathBuf },
+    /// Load a fixed cert chain and key from PEM files on disk.
+    Pem {
+        /// Path to the PEM certificate chain (leaf first).
+        cert_pem: PathBuf,
+        /// Path to the PEM private key.
+        key_pem: PathBuf,
+    },
+    /// Provision (and cache) a real cert via an ACME CA over DNS-01.
     Acme(AcmeConfig),
+    /// Mint a localhost-only self-signed cert; never for production.
     SelfSignedDev(SelfSignedDev),
 }
 

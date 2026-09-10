@@ -12,26 +12,38 @@ use tracing::{debug, info, warn};
 use crate::cert_source::{AcmeConfig, CertMaterial};
 use crate::dns::{DnsProvider, DnsRecord};
 
+/// Everything that can go wrong resolving a [`CertSource`](crate::CertSource):
+/// running an ACME order, reading PEM files, or minting a self-signed cert.
 #[derive(Debug, Error)]
 pub enum AcmeError {
+    /// The `instant-acme` client failed (protocol or transport error).
     #[error("acme: {0}")]
     Acme(#[from] instant_acme::Error),
+    /// Reading a cached or `Pem`-source file failed.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Generating the CSR key pair or self-signed cert failed.
     #[error("rcgen: {0}")]
     Rcgen(#[from] rcgen::Error),
+    /// The [`DnsProvider`] rejected the challenge record upsert/delete.
     #[error("dns provider: {0}")]
     Dns(String),
+    /// An `Acme` source was selected without a registered DNS provider.
     #[error("no DNS provider configured but ACME source selected")]
     NoDnsProvider,
+    /// The ACME server offered no DNS-01 challenge for the identifier.
     #[error("no DNS-01 challenge offered by ACME server")]
     NoDns01,
+    /// The order reached a terminal `Invalid` status.
     #[error("order failed: {0}")]
     OrderFailed(String),
+    /// Anything else, carried as a human-readable message.
     #[error("{0}")]
     Other(String),
 }
 
+/// A registered ACME account bound to one [`AcmeConfig`] and DNS provider,
+/// ready to [`issue`](Self::issue) a certificate.
 pub struct AcmeClient {
     cfg: AcmeConfig,
     account: Account,
@@ -39,6 +51,8 @@ pub struct AcmeClient {
 }
 
 impl AcmeClient {
+    /// Registers (or reuses) an ACME account at `cfg.directory_url` and binds
+    /// it to `provider` for the DNS-01 challenge.
     pub async fn new(cfg: &AcmeConfig, provider: Arc<dyn DnsProvider>) -> Result<Self, AcmeError> {
         let (account, _credentials) = Account::create(
             &NewAccount {

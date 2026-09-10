@@ -3,17 +3,27 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
+/// A single DNS-01 challenge TXT record to publish.
 #[derive(Debug, Clone)]
 pub struct DnsRecord {
+    /// Record name, e.g. `_acme-challenge.example.com`.
     pub name: String,
+    /// TXT value (the challenge key authorization digest).
     pub value: String,
+    /// Time-to-live in seconds.
     pub ttl: u32,
 }
 
+/// Publishes and removes DNS-01 challenge TXT records for [`AcmeClient`].
+///
 /// `params` carries provider-specific config (API tokens, zone IDs).
+///
+/// [`AcmeClient`]: crate::AcmeClient
 #[async_trait]
 pub trait DnsProvider: Send + Sync + 'static {
+    /// Creates or updates the challenge TXT `record`.
     async fn upsert_txt(&self, params: &Value, record: &DnsRecord) -> Result<(), String>;
+    /// Removes the challenge TXT `record` after validation.
     async fn delete_txt(&self, params: &Value, record: &DnsRecord) -> Result<(), String>;
 }
 
@@ -44,6 +54,7 @@ impl Default for CloudflareDnsProvider {
 }
 
 impl CloudflareDnsProvider {
+    /// Builds a provider with a fresh HTTP client.
     pub fn new() -> Self {
         Self::default()
     }
