@@ -441,6 +441,7 @@ fn build_bearer(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBea
     match dev.driver.as_str() {
         "rtl8822e" => build_rtl8822e(rid, dev),
         "rtl8812au" => build_rtl8812au(rid, dev),
+        "mt7612u" => build_mt7612u(rid, dev),
         "af-packet" | "halow" => build_afpacket(rid, dev),
         _ => Ok(None),
     }
@@ -599,6 +600,51 @@ fn build_rtl8822e(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltB
 
 #[cfg(not(feature = "radio-libusb"))]
 fn build_rtl8822e(_rid: RadioId, _dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
+    Ok(None) // needs the `radio-libusb` feature (Linux userspace USB driver)
+}
+
+/// The MediaTek MT7612U (mt76) as a **userspace** named-data-radio bearer — the GCS radio. This
+/// replaces the af-packet monitor path (which cannot honour a hardware TX gate and has no in-band
+/// channel/power knobs); the userspace mt76 driver claims + tunes the dongle in-band and exposes
+/// the `RadioKnobs` seam (channel + power, no width). `open_radio` claims the FIRST MT7612U on the
+/// bus — this part has no `DeviceSelect` sibling, so `address` is not honoured (a host with one
+/// MT7612U, which the GCS is).
+#[cfg(feature = "radio-libusb")]
+fn build_mt7612u(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
+    use ndn_phy_wifi::{BringUpRequest, FrameIo, PowerRequest, RadioCapability, RadioKnobs};
+    let ch = dev
+        .channel
+        .ok_or_else(|| "mt7612u requires a channel".to_string())?;
+    let mut req = BringUpRequest::from_env(ch);
+    if let Some(p) = dev.tx_power {
+        if !req.power.is_off_scale() {
+            req.power = PowerRequest::index(p);
+        }
+    }
+    // 0x7612 selects the MT7612U arm; `open_radio` there ignores DeviceSelect and claims the first.
+    let open = ndn_phy_wifi::open_radio(0x7612, &device_select(dev), &req)
+        .map_err(|e| format!("{e}"))?;
+    open.report().emit();
+    tracing::info!(target: "named_radio", radio = rid.0, "
+{}", open.report().render());
+    let radio: Arc<dyn FrameIo> = open.io.clone();
+    let knobs: Arc<dyn RadioKnobs> = open
+        .knobs
+        .clone()
+        .ok_or_else(|| "mt7612u opened without RadioKnobs".to_string())?;
+    let cap = RadioCapability::wifi_monitor_5ghz(vec![ch]).with_wifi_caps(dev.max_mcs, dev.max_nss);
+    Ok(Some(BuiltBearer {
+        bearer: RadioBearer::wifi(rid, radio, cap),
+        knobs: Some(knobs),
+        channel: Some(ch),
+        // The MT7612U (mt76, 2x2) decodes full HT/VHT RX; the worst-receiver cap in RadioPolicy
+        // still pins the peer's TX to the DRONE's single-stream ceiling.
+        rx_mcs: ndn_phy_wifi::FULL_RX_MCS,
+    }))
+}
+
+#[cfg(not(feature = "radio-libusb"))]
+fn build_mt7612u(_rid: RadioId, _dev: &RadioDeviceConfig) -> Result<Option<BuiltBearer>, String> {
     Ok(None) // needs the `radio-libusb` feature (Linux userspace USB driver)
 }
 
