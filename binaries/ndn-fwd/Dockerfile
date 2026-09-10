@@ -1,11 +1,13 @@
 # Multi-stage Docker image for the ndn-fwd NDN forwarder.
 #
-# ndn-fwd depends on ndn-rs + ndn-ext via `../` path deps, so the build needs all
-# three repos laid out as siblings. The publish workflow checks them out next to
-# each other and builds with that parent directory as the context; this Dockerfile
-# reproduces the dev-workspace layout under /workspace so the path deps resolve.
+# ndn-fwd depends on ndn-rs, ndn-ext, ndn-radio, and ndn-radio-drivers via `../`
+# path deps, so the build needs all of them laid out as siblings. The publish
+# workflow checks them out next to each other and builds with that parent
+# directory as the context; this Dockerfile reproduces the dev-workspace layout
+# under /workspace so the path deps resolve.
 #
-# Build (from a directory containing ndn-fwd/, ndn-rs/, ndn-ext/ as siblings):
+# Build (from a directory containing ndn-fwd/, ndn-rs/, ndn-ext/, ndn-radio/,
+# ndn-radio-drivers/ as siblings):
 #   docker build -f ndn-fwd/binaries/ndn-fwd/Dockerfile -t ndn-fwd .
 #
 # Run with default config:
@@ -38,11 +40,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Reproduce the dev-workspace sibling layout: ndn-fwd's Cargo.toml path deps point
-# at ../ndn-rs and ../ndn-ext, so all three must sit next to each other.
+# at ../ndn-rs, ../ndn-ext, ../ndn-radio, and ../ndn-radio-drivers, so all must
+# sit next to each other.
 WORKDIR /workspace
-COPY ndn-rs  ndn-rs
-COPY ndn-ext ndn-ext
-COPY ndn-fwd ndn-fwd
+COPY ndn-rs             ndn-rs
+COPY ndn-ext            ndn-ext
+COPY ndn-radio          ndn-radio
+COPY ndn-radio-drivers  ndn-radio-drivers
+COPY ndn-fwd            ndn-fwd
 
 WORKDIR /workspace/ndn-fwd
 RUN cargo build --release --bin ndn-fwd -j "${CARGO_BUILD_JOBS}"
