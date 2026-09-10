@@ -1,17 +1,29 @@
 //! Shared types for streaming tool output to callers.
 
+/// One line of tool output streamed to the caller.
+///
+/// Carries human-readable `text`, a severity `level`, and an optional
+/// [`ToolData`] payload so UIs can drive live widgets without parsing `text`.
 #[derive(Debug, Clone)]
 pub struct ToolEvent {
+    /// Human-readable message.
     pub text: String,
+    /// Severity / role of this event.
     pub level: EventLevel,
+    /// Optional machine-readable payload accompanying the text.
     pub structured: Option<ToolData>,
 }
 
+/// Severity/role of a [`ToolEvent`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventLevel {
+    /// Normal progress output.
     Info,
+    /// Recoverable/degraded condition.
     Warn,
+    /// Failure the caller should surface.
     Error,
+    /// Final result line for the run.
     Summary,
 }
 
@@ -19,10 +31,12 @@ pub enum EventLevel {
 /// widgets without parsing the text line.
 #[derive(Debug, Clone)]
 pub enum ToolData {
+    /// One ping reply: sequence number and round-trip time.
     PingResult {
         seq: u64,
         rtt_us: u64,
     },
+    /// Aggregate ping statistics at end of run.
     PingSummary {
         sent: u64,
         received: u64,
@@ -36,11 +50,13 @@ pub enum ToolData {
         rtt_p99_us: u64,
         rtt_stddev: f64,
     },
+    /// One iperf reporting interval.
     IperfInterval {
         bytes: u64,
         throughput_bps: f64,
         rtt_avg_us: u64,
     },
+    /// Aggregate iperf throughput/loss statistics.
     IperfSummary {
         duration_secs: f64,
         transferred_bytes: u64,
@@ -51,6 +67,7 @@ pub enum ToolData {
         rtt_avg_us: u64,
         rtt_p99_us: u64,
     },
+    /// Handshake details when an iperf client connects.
     IperfClientConnected {
         flow_id: String,
         duration_secs: u64,
@@ -58,15 +75,18 @@ pub enum ToolData {
         payload_size: usize,
         reverse: bool,
     },
+    /// Result of a single Data fetch (peek).
     PeekResult {
         name: String,
         bytes_received: u64,
         saved_to: Option<String>,
     },
+    /// Segment-fetch progress (`received`/`total` segments).
     FetchProgress {
         received: usize,
         total: usize,
     },
+    /// Byte-transfer progress (`bytes_total` is `None` if unknown).
     TransferProgress {
         bytes_done: u64,
         bytes_total: Option<u64>,
@@ -88,6 +108,7 @@ pub enum ToolData {
 }
 
 impl ToolEvent {
+    /// Builds an [`EventLevel::Info`] event.
     pub fn info(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -95,6 +116,7 @@ impl ToolEvent {
             structured: None,
         }
     }
+    /// Builds an [`EventLevel::Warn`] event.
     pub fn warn(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -102,6 +124,7 @@ impl ToolEvent {
             structured: None,
         }
     }
+    /// Builds an [`EventLevel::Error`] event.
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -109,6 +132,7 @@ impl ToolEvent {
             structured: None,
         }
     }
+    /// Builds an [`EventLevel::Summary`] event.
     pub fn summary(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -116,6 +140,7 @@ impl ToolEvent {
             structured: None,
         }
     }
+    /// Attaches a structured [`ToolData`] payload to this event.
     pub fn with_data(mut self, data: ToolData) -> Self {
         self.structured = Some(data);
         self
@@ -125,7 +150,9 @@ impl ToolEvent {
 /// Connection parameters for tools that connect to an external router.
 #[derive(Debug, Clone)]
 pub struct ConnectConfig {
+    /// Router IPC socket / named pipe to connect to.
     pub face_socket: String,
+    /// Whether to negotiate a shared-memory ring for the face.
     pub use_shm: bool,
     /// Maximum Data content body the tool expects to send or receive, in
     /// bytes. Sizes the SHM ring slot via `faces/create`'s `mtu`
