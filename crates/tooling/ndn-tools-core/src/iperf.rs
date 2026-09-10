@@ -3,10 +3,10 @@
 //! Client is a sliding-window consumer with AIMD/CUBIC/Fixed congestion
 //! control.
 
+use portable_atomic::AtomicU64;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use portable_atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;

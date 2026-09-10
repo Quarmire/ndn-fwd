@@ -39,7 +39,7 @@ jobs:
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 6de852365eb73c0c5007bf4e26069d0afb8751a6, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-radio-drivers (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 0315a7ed2f9d11363715cd9edf2e1da4f7d25896, path: ndn-radio-drivers }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 59375bb27c235f98a9de86d175a4e774cf3c03a9, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
         # pinned sibling; ndn-fwd path-deps ndn-radio's named-radio medium face
         # (ndn-phy-wifi / ndn-radio-cognition / ndn-coding)

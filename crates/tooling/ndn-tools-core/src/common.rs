@@ -32,10 +32,7 @@ pub enum EventLevel {
 #[derive(Debug, Clone)]
 pub enum ToolData {
     /// One ping reply: sequence number and round-trip time.
-    PingResult {
-        seq: u64,
-        rtt_us: u64,
-    },
+    PingResult { seq: u64, rtt_us: u64 },
     /// Aggregate ping statistics at end of run.
     PingSummary {
         sent: u64,
@@ -82,10 +79,7 @@ pub enum ToolData {
         saved_to: Option<String>,
     },
     /// Segment-fetch progress (`received`/`total` segments).
-    FetchProgress {
-        received: usize,
-        total: usize,
-    },
+    FetchProgress { received: usize, total: usize },
     /// Byte-transfer progress (`bytes_total` is `None` if unknown).
     TransferProgress {
         bytes_done: u64,
