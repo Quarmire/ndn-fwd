@@ -54,8 +54,7 @@ async fn fetch(ws: &mut Ws, name: Name) -> Result<Bytes> {
             .map_err(|_| anyhow!("timeout waiting for Data"))?;
         match msg {
             Some(Ok(Message::Binary(d))) => {
-                let data = Data::decode(strip_lp(Bytes::from(d)))
-                    .map_err(|e| anyhow!("Data decode: {e:?}"))?;
+                let data = Data::decode(strip_lp(d)).map_err(|e| anyhow!("Data decode: {e:?}"))?;
                 return Ok(data.content().cloned().unwrap_or_default());
             }
             Some(Ok(_)) => continue, // ping/pong/text — keep waiting
@@ -107,23 +106,23 @@ async fn main() -> Result<()> {
             let text = String::from_utf8_lossy(&c);
             let pairs: Vec<&str> = text.lines().filter(|l| l.contains('/')).collect();
             println!("\n✓ observability/recent → {} span refs", pairs.len());
-            if let Some(first) = pairs.first() {
-                if let Some((t, s)) = first.split_once('/') {
-                    let span = fetch(
-                        &mut ws,
-                        nfd(&[
-                            b"observability",
-                            b"traces",
-                            t.as_bytes(),
-                            b"spans",
-                            s.as_bytes(),
-                        ]),
-                    )
-                    .await;
-                    match span {
-                        Ok(sp) => println!("  ✓ fetched span {t}/{s} → {} bytes OTLP", sp.len()),
-                        Err(e) => println!("  ✗ span fetch: {e}"),
-                    }
+            if let Some(first) = pairs.first()
+                && let Some((t, s)) = first.split_once('/')
+            {
+                let span = fetch(
+                    &mut ws,
+                    nfd(&[
+                        b"observability",
+                        b"traces",
+                        t.as_bytes(),
+                        b"spans",
+                        s.as_bytes(),
+                    ]),
+                )
+                .await;
+                match span {
+                    Ok(sp) => println!("  ✓ fetched span {t}/{s} → {} bytes OTLP", sp.len()),
+                    Err(e) => println!("  ✗ span fetch: {e}"),
                 }
             }
         }

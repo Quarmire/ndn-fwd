@@ -82,6 +82,8 @@ async fn run_face_setup_inner(
 ) -> Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> {
     // Cognition/telemetry surfaces produced while mounting faces (currently the
     // radio medium face); handed to `MgmtHandles.control_surfaces` by the caller.
+    // Only the `radio` arm pushes into this, so it is not mutated without it.
+    #[cfg_attr(not(feature = "radio"), allow(unused_mut))]
     let mut control_surfaces: Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> = Vec::new();
     // Resolve a config-face index to its pre-assigned FaceId; fall back to a
     // fresh id for the synthetic default listeners (empty `[[face]]`).

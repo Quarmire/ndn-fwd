@@ -118,6 +118,10 @@ impl MonitorRegistry {
 pub type Probe = Arc<dyn Fn() -> (bool, String) + Send + Sync>;
 
 /// A per-radio link-quality probe paired with the radio id it probes.
+///
+/// Only the `radio` feature builds the medium face that emits these, so the
+/// alias is gated to match and stays dead-code-free without it.
+#[cfg(feature = "radio")]
 pub type LinkProbe = (String, Probe);
 
 /// Spawn a polling task that ticks `id` every `interval` until cancelled.
