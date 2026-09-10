@@ -477,7 +477,18 @@ async fn run_face_setup_inner(
                             }
                         }
                         Err(e) => {
-                            tracing::error!(target: "face.radio", error = %e, "radio medium face not mounted")
+                            // A configured radio face that cannot come up is a DEPLOYMENT FAILURE,
+                            // not something to log and run past: `mount_radio_face` only errors when
+                            // NONE of the configured radios came up, so the cell's entire purpose is
+                            // dead. Continuing would leave a forwarder with the `/muas` route but no
+                            // radio — which the fabric's process+routes health check reads as `ok`,
+                            // defeating its auto-rollback (field 2026-09-10). Exit non-zero so the
+                            // backend unit fails and the fabric reverts to the last good cell.
+                            tracing::error!(
+                                target: "face.radio", error = %e,
+                                "configured radio face could not be brought up — exiting so the                                  fabric health gate trips and rolls back (not running radio-less)",
+                            );
+                            std::process::exit(1);
                         }
                     }
                 }

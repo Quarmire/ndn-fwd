@@ -622,8 +622,8 @@ fn build_mt7612u(rid: RadioId, dev: &RadioDeviceConfig) -> Result<Option<BuiltBe
         }
     }
     // 0x7612 selects the MT7612U arm; `open_radio` there ignores DeviceSelect and claims the first.
-    let open = ndn_phy_wifi::open_radio(0x7612, &device_select(dev), &req)
-        .map_err(|e| format!("{e}"))?;
+    let open =
+        ndn_phy_wifi::open_radio(0x7612, &device_select(dev), &req).map_err(|e| format!("{e}"))?;
     open.report().emit();
     tracing::info!(target: "named_radio", radio = rid.0, "
 {}", open.report().render());
