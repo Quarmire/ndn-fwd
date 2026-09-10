@@ -23,18 +23,26 @@ const STORE_PASSPHRASES: &str = "passphrases";
 const STORE_ANCHORS: &str = "anchors";
 const SCHEMA_VERSION: u32 = 1;
 
+/// Failure modes of the IndexedDB-backed [`IdbPib`].
 #[derive(Debug, Error)]
 pub enum IdbPibError {
+    /// No IndexedDB factory in scope (not a browser/Worker context).
     #[error("no IndexedDB factory available (not running in a browser/Worker scope)")]
     NoFactory,
+    /// An IndexedDB request rejected or errored.
     #[error("IndexedDB request failed: {0}")]
     Request(String),
+    /// The open was blocked because another tab holds an older schema.
     #[error("IndexedDB blocked open: another tab holds an older schema")]
     Blocked,
+    /// A stored value could not be decoded into its typed form.
     #[error("invalid stored value: {0}")]
     Decode(String),
 }
 
+/// IndexedDB-backed PIB: SafeBags, passphrases, and trust anchors keyed by NDN
+/// name URI, isolated per origin by IndexedDB's own scoping.
+///
 /// `IdbDatabase` is `!Send` (web-sys); the wasm32 JS runtime is
 /// single-threaded so this is moot in practice.
 pub struct IdbPib {
@@ -42,6 +50,7 @@ pub struct IdbPib {
 }
 
 impl IdbPib {
+    /// Opens (and migrates) the IndexedDB database named `db_name`.
     pub async fn open(db_name: &str) -> Result<Self, IdbPibError> {
         let factory = idb_factory()?;
         let req: IdbOpenDbRequest = factory
@@ -82,12 +91,14 @@ impl IdbPib {
     }
 
     /// Wire is `ndnsec export`-compatible.
+    /// Stores `bag` under `name`, replacing any existing SafeBag.
     pub async fn put_safebag(&self, name: &Name, bag: &SafeBag) -> Result<(), IdbPibError> {
         let wire = bag.encode();
         self.put_bytes(STORE_SAFEBAGS, &name.to_string(), &wire)
             .await
     }
 
+    /// Loads the SafeBag stored under `name`, if any.
     pub async fn get_safebag(&self, name: &Name) -> Result<Option<SafeBag>, IdbPibError> {
         let v = self.get_bytes(STORE_SAFEBAGS, &name.to_string()).await?;
         match v {
@@ -101,20 +112,24 @@ impl IdbPib {
     /// Origin-scope compromise loses the identity (passphrase
     /// stored next to the bag). Wire shape is unaffected if a
     /// future revision sources the passphrase elsewhere.
+    /// Stores the private-key passphrase `pw` for `name`.
     pub async fn put_passphrase(&self, name: &Name, pw: &[u8]) -> Result<(), IdbPibError> {
         self.put_bytes(STORE_PASSPHRASES, &name.to_string(), pw)
             .await
     }
 
+    /// Loads the passphrase stored for `name`, if any.
     pub async fn get_passphrase(&self, name: &Name) -> Result<Option<Vec<u8>>, IdbPibError> {
         self.get_bytes(STORE_PASSPHRASES, &name.to_string()).await
     }
 
+    /// Stores trust-anchor `wire` bytes under `name`.
     pub async fn put_anchor(&self, name: &Name, wire: Bytes) -> Result<(), IdbPibError> {
         self.put_bytes(STORE_ANCHORS, &name.to_string(), &wire)
             .await
     }
 
+    /// Loads the trust-anchor wire bytes for `name`, if any.
     pub async fn get_anchor(&self, name: &Name) -> Result<Option<Bytes>, IdbPibError> {
         Ok(self
             .get_bytes(STORE_ANCHORS, &name.to_string())
@@ -122,6 +137,7 @@ impl IdbPib {
             .map(Bytes::from))
     }
 
+    /// Lists the names of all stored trust anchors.
     pub async fn list_anchors(&self) -> Result<Vec<Name>, IdbPibError> {
         list_store_keys(&self.db, STORE_ANCHORS).await
     }
@@ -131,6 +147,7 @@ impl IdbPib {
     /// (1.3.101.112) is ndn-rs only, ECDSA-P256 (1.2.840.10045.2.1)
     /// interops with ndn-cxx / NFD. Any other OID errors instead of
     /// silently falling back. Returns `Ok(None)` when no SafeBag exists.
+    /// Builds a [`Signer`] from the stored SafeBags, if a key is available.
     pub async fn build_signer(&self) -> Result<Option<std::sync::Arc<dyn Signer>>, IdbPibError> {
         use std::sync::Arc;
         let names = self.list_safebags().await?;
@@ -176,6 +193,7 @@ impl IdbPib {
 
     /// Validator starts with an empty [`TrustSchema`] — only Data
     /// signed directly by an anchor validates until callers add rules.
+    /// Builds a [`Validator`] seeded from the stored trust anchors.
     pub async fn build_validator(&self) -> Result<Option<Validator>, IdbPibError> {
         let names = self.list_anchors().await?;
         if names.is_empty() {
@@ -198,10 +216,12 @@ impl IdbPib {
         Ok(Some(validator))
     }
 
+    /// Lists the names of all stored SafeBags.
     pub async fn list_safebags(&self) -> Result<Vec<Name>, IdbPibError> {
         list_store_keys(&self.db, STORE_SAFEBAGS).await
     }
 
+    /// Deletes every stored SafeBag, passphrase, and anchor.
     pub async fn clear(&self) -> Result<(), IdbPibError> {
         for store in [STORE_SAFEBAGS, STORE_PASSPHRASES, STORE_ANCHORS] {
             let tx = self
