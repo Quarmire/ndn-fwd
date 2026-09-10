@@ -121,19 +121,34 @@ pub fn mount_radio_face(
     ),
     String,
 > {
-    // 1. Bring up each capability.
+    // 1. Bring up each capability — TIME-BOUNDED. A wedged mt76 re-claim can block in the libusb
+    //    `claim_interface` (the part is replug-hazardous; a warm re-open after a prior claim/release
+    //    can hang), and an unbounded bring-up hangs until systemd's start timeout — long enough that
+    //    the fabric's health gate churns and the dongle is hammered. Run each bring-up on a thread
+    //    and cap it, so a stuck claim fails FAST and the "no radio → exit → fabric rollback" path
+    //    below trips promptly (field 2026-09-10).
+    const BRINGUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
     let mut built = Vec::new();
     for (i, dev) in radios.iter().enumerate() {
         let rid = RadioId(i as u16);
-        match build_bearer(rid, dev) {
-            Ok(Some(b)) => built.push(b),
-            Ok(None) => tracing::warn!(
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dev_c = dev.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(build_bearer(rid, &dev_c));
+        });
+        match rx.recv_timeout(BRINGUP_TIMEOUT) {
+            Ok(Ok(Some(b))) => built.push(b),
+            Ok(Ok(None)) => tracing::warn!(
                 target: "face.radio", driver = %dev.driver,
                 "radio driver not available on this build/platform; capability skipped",
             ),
-            Err(e) => tracing::error!(
+            Ok(Err(e)) => tracing::error!(
                 target: "face.radio", driver = %dev.driver, error = %e,
                 "radio capability failed to come up; skipped",
+            ),
+            Err(_) => tracing::error!(
+                target: "face.radio", driver = %dev.driver, timeout_s = BRINGUP_TIMEOUT.as_secs(),
+                "radio bring-up timed out — likely a wedged USB claim (mt76 re-claim hazard);                  skipped (the leaked thread dies with the process on the exit below)",
             ),
         }
     }
