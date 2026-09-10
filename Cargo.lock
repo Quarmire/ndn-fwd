@@ -2618,7 +2618,6 @@ dependencies = [
  "ndn-frame-io",
  "ndn-mgmt",
  "ndn-packet",
- "ndn-store",
  "ndn-tlv",
  "ndn-transport",
  "portable-atomic",
@@ -3210,11 +3209,9 @@ name = "ndn-radio-cognition"
 version = "0.1.0"
 dependencies = [
  "ndn-frame-io",
- "ndn-packet",
  "ndn-radio",
  "ndn-radio-hal",
  "ndn-signals-core",
- "ndn-tlv",
  "tokio",
  "tracing",
 ]
