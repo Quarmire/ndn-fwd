@@ -389,7 +389,11 @@ pub fn mount_radio_face(
     let feature: Arc<dyn LinkServiceFeature> = control;
     let ls = LpLinkService::new().with_extra_feature(feature);
     let face = Face::from_parts(running, Arc::new(ls));
-    engine.add_composed_face(face, cancel.child_token(), FacePersistency::OnDemand);
+    // PERSISTENT, not OnDemand: the radio medium is this node's own transport, not an on-demand peer
+    // face. As OnDemand it was reaped from the face table whenever no traffic was forwarded THROUGH it
+    // (e.g. when /muas rides a coexisting mesh-UDP path), leaving it invisible to `ndn-ctl face list`
+    // and unreadable for in/out counters — even though its TX pump kept injecting (field 2026-09-11).
+    engine.add_composed_face(face, cancel.child_token(), FacePersistency::Persistent);
 
     tracing::info!(target: "face.radio", face = %id, radios = link_probes.len(), "radio medium face mounted with cognition loop");
     Ok((surface, link_probes))
