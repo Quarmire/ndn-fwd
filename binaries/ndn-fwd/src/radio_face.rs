@@ -235,6 +235,17 @@ pub fn mount_radio_face(
     //    the transport so it dies with the face. Same `spawn_control_loop` the factory
     //    drives with static contexts — only the source differs.
     let bearers: Vec<RadioBearer> = built.iter().map(|b| b.bearer.clone()).collect();
+    // FEC eligibility (appropriate-traffic-only, #radio-fec-eligibility): FEC ONLY bulk data
+    // (large frames, e.g. video segments), NOT the small SVS sync / NDNSF control frames. Blanket
+    // FEC (eligible=None) coded the multicast sync group too, and on a fire-once multicast path
+    // (no NDN retransmit backstop) the generation buffering/partial-generation timing broke the
+    // NDNSF service-call delivery (video/control never reached the drone handler) while polled
+    // data survived via best-route retx (field 2026-09-11). Size split: control/sync are small,
+    // media segments are ~1 KB. Tunable via NDN_RADIO_FEC_MIN_BYTES.
+    let fec_min_bytes: usize = std::env::var("NDN_RADIO_FEC_MIN_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
     let mut running = RadioMediumFace::new(id, bearers)
         .with_signal_sink(signals)
         // Link-FEC: outbound generations carry `k + R` coded frames (R from the shared
@@ -248,6 +259,9 @@ pub fn mount_radio_face(
             fec_redundancy,
             loss.clone(),
         )
+        // Only bulk frames are FEC-eligible; small sync/control frames are sent raw so the
+        // fire-once multicast NDNSF sync path is never gated behind a FEC generation.
+        .with_fec_eligibility(Arc::new(move |wire: &Bytes| wire.len() >= fec_min_bytes))
         // Worst-overheard-receiver rate cap: when a legacy-only-RX neighbour is heard, the
         // data plane drops to the basic legacy rate so it reaches that neighbour.
         .with_legacy_gate(force_legacy.clone())
