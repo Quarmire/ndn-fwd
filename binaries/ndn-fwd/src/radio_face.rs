@@ -302,6 +302,19 @@ pub fn mount_radio_face(
         face: id,
     });
 
+    // OBSERVABILITY: periodic cognition SENSE->DECIDE snapshot at INFO, so the loop is visible in
+    // `journalctl` (target named_radio::cognition). Without it the cognition is a black box on a
+    // live node — you cannot see the sensed RSSI/SNR/busy/PHY-PER beside the decided MCS/NSS/BW/
+    // power/link-FEC R, i.e. cannot see WHY (or whether) FEC is engaging (field 2026-09-11).
+    let cog_control = control.clone();
+    running.attach_task(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            ticker.tick().await;
+            cog_control.log_cognition();
+        }
+    }));
+
     // Loss feedback: every ~2 s fold the measured residual loss into each radio's
     // per-layer residual (`observe_phy_per`) — the signal `RadioPolicy::fec_redundancy`
     // sizes the parity budget from. This closes the loop: residual loss → higher R →
