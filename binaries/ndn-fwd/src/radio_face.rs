@@ -200,10 +200,15 @@ pub fn mount_radio_face(
         // ACT: rate as driver state (`FrameIo::set_rate`); on a libusb radio the same
         // actuator retunes channel/power via knobs; and it writes the decided link-FEC
         // redundancy into the shared cell the medium face's coder reads.
-        control.add_actuator(Arc::new(
-            MediumActuator::new(b.bearer.id, b.bearer.radio.clone(), b.knobs.clone())
-                .with_fec_redundancy(fec_redundancy.clone(), fec_floor),
-        ));
+        // Seed the actuator with what bring-up tuned (channel + the channel's width) so a radio
+        // already on the right channel is not re-tuned on tick 1 — decisive on the coupled-width
+        // MT7612U whose re-tune is the storm-prone blob replay (field 2026-09-11).
+        let mut actuator = MediumActuator::new(b.bearer.id, b.bearer.radio.clone(), b.knobs.clone())
+            .with_fec_redundancy(fec_redundancy.clone(), fec_floor);
+        if let Some(ch) = b.channel {
+            actuator = actuator.with_applied_channel(ch, b.bearer.cap.max_bw());
+        }
+        control.add_actuator(Arc::new(actuator));
     }
     // Advertise this node's RX capability = the best (max) over its radios: it is
     // reachable if *any* radio decodes, so a node with an a81a + a legacy-only 8812au is
