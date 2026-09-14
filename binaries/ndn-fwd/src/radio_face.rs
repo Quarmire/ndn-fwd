@@ -261,6 +261,18 @@ pub fn mount_radio_face(
                 .collect()
         })
         .collect();
+    // ★ FEC SIZE GATE RESTORED (field 2026-09-14, prong-B regression fix). Prong B dropped the
+    // size split and FEC-protected ALL non-sync-group frames. But the FEC coder batches FEC_K=4
+    // source frames per generation (20ms tail-flush); on a near-idle link a lone small fire-once
+    // NDNSF control/telemetry frame (e.g. /muas/v2/<node>/video/control REQUEST/response) waits on
+    // a partial generation whose receiver-side reassembly + any coded-frame loss BREAKS delivery —
+    // exactly the "video/control never reached the drone handler" failure 2076c2d fixed. Keep the
+    // known-good split: FEC only BULK media (~1 KB segments), small control/sync stay RAW.
+    // Tunable via NDN_RADIO_FEC_MIN_BYTES (default 512).
+    let fec_min_bytes: usize = std::env::var("NDN_RADIO_FEC_MIN_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
     let mut running = RadioMediumFace::new(id, bearers)
         .with_signal_sink(signals)
         // Link-FEC: outbound generations carry `k + R` coded frames (R from the shared
@@ -274,9 +286,13 @@ pub fn mount_radio_face(
             fec_redundancy,
             loss.clone(),
         )
-        // Reliable-delivery data is FEC-eligible; only the fire-once multicast SYNC groups are
-        // excluded (name-prefix, not size), so small telemetry/control get forward recovery too.
+        // FEC-eligible IFF (bulk-sized) AND (not a fire-once multicast SYNC/control group).
+        // Size gate keeps small fire-once control/sync frames RAW (no partial-generation stall);
+        // name exclude is belt-and-suspenders for the SVS sync groups even if a segment is bulky.
         .with_fec_eligibility(Arc::new(move |wire: &Bytes| {
+            if wire.len() < fec_min_bytes {
+                return false; // small control/sync/telemetry: send raw, no FEC generation
+            }
             match ndn_packet::lp::peek_lp_name(wire) {
                 Some(pk) => !fec_exclude.iter().any(|pre| {
                     pk.components.len() >= pre.len()
