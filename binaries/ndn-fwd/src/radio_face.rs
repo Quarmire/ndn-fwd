@@ -242,10 +242,25 @@ pub fn mount_radio_face(
     // NDNSF service-call delivery (video/control never reached the drone handler) while polled
     // data survived via best-route retx (field 2026-09-11). Size split: control/sync are small,
     // media segments are ~1 KB. Tunable via NDN_RADIO_FEC_MIN_BYTES.
-    let fec_min_bytes: usize = std::env::var("NDN_RADIO_FEC_MIN_BYTES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(512);
+    // ★ FEC eligibility by NAME PREFIX, not size (field 2026-09-14). The size split mis-classified
+    // small reliable-delivery control/telemetry as ineligible, leaving them to eat the full raw
+    // link loss (~13-18%/direction measured). Classify by name: FEC-protect all reliable-delivery
+    // data (telemetry/control/video/journal — best-route, forward-recovered by the K=1 repetition
+    // coder, no retransmit), and EXCLUDE only the fire-once MULTICAST SYNC groups, where a buffered/
+    // partial FEC generation broke delivery. Excluded prefixes are operator-tunable
+    // (NDN_RADIO_FEC_EXCLUDE, comma-separated slash-paths; default the SVS-PubSub + svsgen groups).
+    let fec_exclude: Vec<Vec<Vec<u8>>> = std::env::var("NDN_RADIO_FEC_EXCLUDE")
+        .unwrap_or_else(|_| "/muas/v2/group,/muas/v2/sysgen".into())
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|p| {
+            p.trim_start_matches('/')
+                .split('/')
+                .map(|c| c.as_bytes().to_vec())
+                .collect()
+        })
+        .collect();
     let mut running = RadioMediumFace::new(id, bearers)
         .with_signal_sink(signals)
         // Link-FEC: outbound generations carry `k + R` coded frames (R from the shared
@@ -259,9 +274,20 @@ pub fn mount_radio_face(
             fec_redundancy,
             loss.clone(),
         )
-        // Only bulk frames are FEC-eligible; small sync/control frames are sent raw so the
-        // fire-once multicast NDNSF sync path is never gated behind a FEC generation.
-        .with_fec_eligibility(Arc::new(move |wire: &Bytes| wire.len() >= fec_min_bytes))
+        // Reliable-delivery data is FEC-eligible; only the fire-once multicast SYNC groups are
+        // excluded (name-prefix, not size), so small telemetry/control get forward recovery too.
+        .with_fec_eligibility(Arc::new(move |wire: &Bytes| {
+            match ndn_packet::lp::peek_lp_name(wire) {
+                Some(pk) => !fec_exclude.iter().any(|pre| {
+                    pk.components.len() >= pre.len()
+                        && pre
+                            .iter()
+                            .zip(pk.components.iter())
+                            .all(|(a, b)| a.as_slice() == *b)
+                }),
+                None => false, // unparseable → not eligible (conservative)
+            }
+        }))
         // Worst-overheard-receiver rate cap: when a legacy-only-RX neighbour is heard, the
         // data plane drops to the basic legacy rate so it reaches that neighbour.
         .with_legacy_gate(force_legacy.clone())
