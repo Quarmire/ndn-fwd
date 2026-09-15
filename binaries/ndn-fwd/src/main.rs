@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
+use ndn_config::control_parameters::origin;
 use ndn_config::ForwarderConfig;
+use ndn_engine::rib::RibRoute;
 use ndn_engine::{EngineBuilder, EngineConfig};
 use ndn_security::FilePib;
 
@@ -742,7 +744,30 @@ async fn main() -> Result<()> {
             continue;
         };
         let name = parse_name(&route.prefix);
-        engine.fib().add_nexthop(&name, face_id, route.cost);
+        // Install as a RIB route with origin STATIC, not a bare FIB nexthop.
+        //
+        // The RIB computes each FIB entry from the routes it tracks and writes
+        // the result with `Fib::set_nexthops`, which REPLACES the entry. A
+        // nexthop added straight to the FIB here is invisible to the RIB, so
+        // the first recompute for this prefix — which happens as soon as a
+        // local app registers the same prefix — silently drops every config
+        // route. Observed on a 3-drone fleet: a `[[route]] prefix="/muas"` per
+        // peer produced three FIB nexthops at startup and exactly ONE after
+        // the application registered /muas, so per-node service Interests
+        // could only ever reach whichever peer survived.
+        //
+        // Going through the RIB is also what `nfdc route add` does (origin
+        // static = 255), so a config route and an operator-added route now
+        // behave identically and merge instead of racing.
+        let route_entry = RibRoute {
+            face_id,
+            origin: origin::STATIC,
+            cost: route.cost,
+            flags: 0,
+            expires_at: None,
+        };
+        engine.rib().add(&name, route_entry);
+        engine.rib().apply_to_fib(&name, &engine.fib());
         tracing::info!(target: "engine", prefix = %route.prefix, face_index = route.face, face = face_id.0, cost = route.cost, "route added");
     }
 
