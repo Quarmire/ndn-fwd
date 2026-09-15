@@ -273,6 +273,23 @@ pub fn mount_radio_face(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(512);
+    // ★ FEC INCLUDE (field 2026-09-15): force FEC eligibility for named CONTINUOUS streams that are
+    // small (below the size gate) but POLLED/latest-wins, not fire-once — e.g. the 1 Hz
+    // /muas/v2/<node>/telemetry/live sample the dashboard link-tag polls. Link-FEC repetition
+    // protects these against raw link loss (they retry, so no partial-generation stall). Overrides
+    // the size gate; still subject to the exclude. NDN_RADIO_FEC_INCLUDE, comma-separated slash-paths.
+    let fec_include: Vec<Vec<Vec<u8>>> = std::env::var("NDN_RADIO_FEC_INCLUDE")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|p| {
+            p.trim_start_matches('/')
+                .split('/')
+                .map(|c| c.as_bytes().to_vec())
+                .collect()
+        })
+        .collect();
     let mut running = RadioMediumFace::new(id, bearers)
         .with_signal_sink(signals)
         // Link-FEC: outbound generations carry `k + R` coded frames (R from the shared
@@ -290,17 +307,24 @@ pub fn mount_radio_face(
         // Size gate keeps small fire-once control/sync frames RAW (no partial-generation stall);
         // name exclude is belt-and-suspenders for the SVS sync groups even if a segment is bulky.
         .with_fec_eligibility(Arc::new(move |wire: &Bytes| {
-            if wire.len() < fec_min_bytes {
-                return false; // small control/sync/telemetry: send raw, no FEC generation
-            }
             match ndn_packet::lp::peek_lp_name(wire) {
-                Some(pk) => !fec_exclude.iter().any(|pre| {
-                    pk.components.len() >= pre.len()
-                        && pre
-                            .iter()
-                            .zip(pk.components.iter())
-                            .all(|(a, b)| a.as_slice() == *b)
-                }),
+                Some(pk) => {
+                    let matches = |set: &Vec<Vec<Vec<u8>>>| {
+                        set.iter().any(|pre| {
+                            pk.components.len() >= pre.len()
+                                && pre
+                                    .iter()
+                                    .zip(pk.components.iter())
+                                    .all(|(a, b)| a.as_slice() == *b)
+                        })
+                    };
+                    // Never FEC the fire-once multicast SYNC/control groups.
+                    if matches(&fec_exclude) {
+                        return false;
+                    }
+                    // Bulk media (size gate) OR an explicitly-included small CONTINUOUS stream.
+                    wire.len() >= fec_min_bytes || matches(&fec_include)
+                }
                 None => false, // unparseable → not eligible (conservative)
             }
         }))
