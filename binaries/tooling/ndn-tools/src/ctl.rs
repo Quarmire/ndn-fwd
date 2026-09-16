@@ -895,6 +895,15 @@ pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus])
                 format!("timed-out={timed_out}"),
                 format!("fragments-wasted={wasted}"),
             ];
+            // Both mean the link layer Acked a fragment the reassembler then
+            // threw away: the sender believes it arrived and will never
+            // retransmit, so the whole group is unrecoverable.
+            if let Some(n) = f.n_reasm_fragments_rejected {
+                parts.push(format!("rejected={n}"));
+            }
+            if let Some(n) = f.n_reasm_groups_evicted {
+                parts.push(format!("evicted-groups={n}"));
+            }
             if groups > 0 {
                 parts.push(format!(
                     "complete={:.1}%",
@@ -1201,6 +1210,8 @@ mod ctl_tests {
             n_reasm_timed_out: Some(10),
             n_reasm_fragments_wasted: Some(35),
             n_lp_unacked_evictions: Some(7),
+            n_reasm_fragments_rejected: Some(4),
+            n_reasm_groups_evicted: Some(1),
         };
         let mut out = String::new();
         render_face_list_into(&mut out, &[fs]);
@@ -1234,6 +1245,8 @@ mod ctl_tests {
         assert!(out.contains("complete=90.0%"), "{out}");
         assert!(out.contains("gave-up=13"), "{out}");
         assert!(out.contains("evicted=7"), "{out}");
+        assert!(out.contains("rejected=4"), "{out}");
+        assert!(out.contains("evicted-groups=1"), "{out}");
     }
 
     fn make(uri: &str, local_uri: &str) -> ndn_config::FaceStatus {
