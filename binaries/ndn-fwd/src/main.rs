@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use ndn_config::control_parameters::origin;
+use ndn_config::control_parameters::{origin, route_flags};
 use ndn_config::ForwarderConfig;
 use ndn_engine::rib::RibRoute;
 use ndn_engine::{EngineBuilder, EngineConfig};
@@ -759,11 +759,19 @@ async fn main() -> Result<()> {
         // Going through the RIB is also what `nfdc route add` does (origin
         // static = 255), so a config route and an operator-added route now
         // behave identically and merge instead of racing.
+        // CHILD_INHERIT, matching `nfdc route add`'s default. Without it the
+        // RIB does not propagate this nexthop to a descendant prefix that has
+        // its own RIB entry — so as soon as an application registers, say,
+        // /muas/v2/group, LPM stops there, the config route's peer nexthop is
+        // invisible, and the Interest is dropped `reason=NoRoute`. Measured in
+        // a two-node netns reproducer: SVS sync Interests on /muas/v2/group
+        // NoRoute'd on BOTH nodes, so every NDNSF service call (which rides
+        // SVS pub/sub) timed out even though /muas itself had a nexthop.
         let route_entry = RibRoute {
             face_id,
             origin: origin::STATIC,
             cost: route.cost,
-            flags: 0,
+            flags: route_flags::CHILD_INHERIT,
             expires_at: None,
         };
         engine.rib().add(&name, route_entry);
