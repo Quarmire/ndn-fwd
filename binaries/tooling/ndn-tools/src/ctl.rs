@@ -864,6 +864,17 @@ pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus])
             if let Some(n) = resent {
                 parts.push(format!("resent={n}"));
             }
+            // `gave-up` and `evicted` are the counters that explain an
+            // unrecoverable loss: the first means retries were exhausted, the
+            // second that the frame fell out of the retransmit buffer. Either
+            // way no retransmission will ever repair it, and if the frame was
+            // a fragment its whole group is dead.
+            if let Some(n) = f.n_lp_rto_expirations {
+                parts.push(format!("gave-up={n}"));
+            }
+            if let Some(n) = f.n_lp_unacked_evictions {
+                parts.push(format!("evicted={n}"));
+            }
             writeln!(out, "  reliability: {}", parts.join("  ")).unwrap();
         }
         // NDNLPv2 reassembly. A packet needing N fragments completes only when
@@ -1172,7 +1183,7 @@ mod ctl_tests {
             flags: 0b011, // local-fields + lp-reliability
             n_lp_acks_received: Some(12489),
             n_lp_resent_packets: Some(14),
-            n_lp_rto_expirations: Some(0),
+            n_lp_rto_expirations: Some(13),
             n_congestion_marks_sent: Some(3),
             n_congestion_marks_received: Some(0),
             effective_mtu: Some(8500),
@@ -1189,6 +1200,7 @@ mod ctl_tests {
             n_reasm_completed: Some(90),
             n_reasm_timed_out: Some(10),
             n_reasm_fragments_wasted: Some(35),
+            n_lp_unacked_evictions: Some(7),
         };
         let mut out = String::new();
         render_face_list_into(&mut out, &[fs]);
@@ -1220,6 +1232,8 @@ mod ctl_tests {
         assert!(out.contains("timed-out=10"), "{out}");
         assert!(out.contains("fragments-wasted=35"), "{out}");
         assert!(out.contains("complete=90.0%"), "{out}");
+        assert!(out.contains("gave-up=13"), "{out}");
+        assert!(out.contains("evicted=7"), "{out}");
     }
 
     fn make(uri: &str, local_uri: &str) -> ndn_config::FaceStatus {
