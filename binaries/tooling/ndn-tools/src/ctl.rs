@@ -866,6 +866,32 @@ pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus])
             }
             writeln!(out, "  reliability: {}", parts.join("  ")).unwrap();
         }
+        // NDNLPv2 reassembly. A packet needing N fragments completes only when
+        // every index arrives, so on a lossy link completion falls as (1-p)^N
+        // while single-fragment traffic is barely touched -- an asymmetry the
+        // byte/packet counters above cannot show. `complete=` is the number
+        // that matters; `wasted=` is airtime spent on fragments of groups that
+        // never completed.
+        if f.n_reasm_fragments_in.is_some() || f.n_reasm_completed.is_some() {
+            let fin = f.n_reasm_fragments_in.unwrap_or(0);
+            let done = f.n_reasm_completed.unwrap_or(0);
+            let timed_out = f.n_reasm_timed_out.unwrap_or(0);
+            let wasted = f.n_reasm_fragments_wasted.unwrap_or(0);
+            let groups = done + timed_out;
+            let mut parts = vec![
+                format!("fragments-in={fin}"),
+                format!("completed={done}"),
+                format!("timed-out={timed_out}"),
+                format!("fragments-wasted={wasted}"),
+            ];
+            if groups > 0 {
+                parts.push(format!(
+                    "complete={:.1}%",
+                    100.0 * done as f64 / groups as f64
+                ));
+            }
+            writeln!(out, "  reassembly: {}", parts.join("  ")).unwrap();
+        }
         if !f.feature_set.is_empty() {
             writeln!(out, "  features: {}", f.feature_set.join(" ")).unwrap();
         }
@@ -1159,6 +1185,10 @@ mod ctl_tests {
                 "trace-context".to_owned(),
             ],
             rto_micros: Some(420),
+            n_reasm_fragments_in: Some(600),
+            n_reasm_completed: Some(90),
+            n_reasm_timed_out: Some(10),
+            n_reasm_fragments_wasted: Some(35),
         };
         let mut out = String::new();
         render_face_list_into(&mut out, &[fs]);
@@ -1180,6 +1210,16 @@ mod ctl_tests {
             out.contains("features: fragmentation reassembly local-fields reliability congestion-marking trace-context"),
             "missing features line in:\n{out}",
         );
+        // complete% = completed / (completed + timed-out) -- the number that
+        // actually says whether multi-fragment delivery is working.
+        assert!(
+            out.contains("reassembly:"),
+            "face list must surface reassembly counters:\n{out}"
+        );
+        assert!(out.contains("completed=90"), "{out}");
+        assert!(out.contains("timed-out=10"), "{out}");
+        assert!(out.contains("fragments-wasted=35"), "{out}");
+        assert!(out.contains("complete=90.0%"), "{out}");
     }
 
     fn make(uri: &str, local_uri: &str) -> ndn_config::FaceStatus {
@@ -1270,5 +1310,9 @@ mod ctl_tests {
             "spurious reliability line:\n{out}"
         );
         assert!(!out.contains("features:"), "spurious features line:\n{out}");
+        assert!(
+            !out.contains("reassembly:"),
+            "spurious reassembly line:\n{out}"
+        );
     }
 }
