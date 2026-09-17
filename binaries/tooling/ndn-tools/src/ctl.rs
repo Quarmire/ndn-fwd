@@ -869,6 +869,13 @@ pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus])
             // second that the frame fell out of the retransmit buffer. Either
             // way no retransmission will ever repair it, and if the frame was
             // a fragment its whole group is dead.
+            // Split the repair paths. `resent` alone cannot say whether
+            // ack-ordering repair fires at all, and on a link whose RTO sits at
+            // the 200 ms RFC 6298 floor that is the difference between a repair
+            // costing an RTT and costing most of a second.
+            if let Some(n) = f.n_lp_fast_retx {
+                parts.push(format!("fast-retx={n}"));
+            }
             if let Some(n) = f.n_lp_rto_expirations {
                 parts.push(format!("gave-up={n}"));
             }
@@ -1210,6 +1217,7 @@ mod ctl_tests {
             n_reasm_timed_out: Some(10),
             n_reasm_fragments_wasted: Some(35),
             n_lp_unacked_evictions: Some(7),
+            n_lp_fast_retx: Some(5),
             n_reasm_fragments_rejected: Some(4),
             n_reasm_groups_evicted: Some(1),
         };
@@ -1228,6 +1236,7 @@ mod ctl_tests {
         // Reliability line covers RTO + resent counter.
         assert!(out.contains("rto=420µs"), "{out}");
         assert!(out.contains("resent=14"), "{out}");
+        assert!(out.contains("fast-retx=5"), "{out}");
         // Features line covers the full pipeline names.
         assert!(
             out.contains("features: fragmentation reassembly local-fields reliability congestion-marking trace-context"),
