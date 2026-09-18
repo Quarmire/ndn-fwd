@@ -116,43 +116,10 @@ async fn run_face_setup_inner(
         std::borrow::Cow::Borrowed(&fwd_config.faces)
     };
 
-    // A configured UDP peer shares the UDP listener's socket rather than
-    // binding one of its own. A private socket binds an ephemeral local port,
-    // so the peer sees datagrams from `<ip>:<ephemeral>`, has no face for that
-    // source, and mints a second on-demand face for the same neighbour. With
-    // the neighbour split across two faces, `nexthops_excluding(in_face)`
-    // cannot exclude the other one and Interests are forwarded back to their
-    // origin — 12 wire copies per Interest against NFD's 9 on a 4-node mesh.
-    //
-    // Only valid when this config actually starts a UDP listener; without one
-    // there is no socket to share, so those peers keep their own (below).
-    let udp_listener_present = face_configs
-        .iter()
-        .any(|f| matches!(f, ndn_config::FaceConfig::Udp { remote: None, .. }));
-    let shared_udp_peers: Vec<(ndn_transport::FaceId, std::net::SocketAddr)> = if udp_listener_present
-    {
-        face_configs
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, f)| match f {
-                ndn_config::FaceConfig::Udp {
-                    remote: Some(addr), ..
-                } => addr.parse().ok().map(|peer| (id_for(idx), peer)),
-                _ => None,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
     for (face_idx, face_cfg) in face_configs.iter().enumerate() {
         match face_cfg {
             ndn_config::FaceConfig::Udp { bind, remote } => {
                 if let Some(remote_addr) = remote {
-                    // Owned by the UDP listener (shared socket) when one exists.
-                    if udp_listener_present {
-                        continue;
-                    }
                     let peer: std::net::SocketAddr = match remote_addr.parse() {
                         Ok(a) => a,
                         Err(e) => {
@@ -189,9 +156,8 @@ async fn run_face_setup_inner(
                     let eng = engine.clone();
                     let c = cancel.clone();
                     let rx_sockets = fwd_config.face_system.udp.rx_sockets;
-                    let pre = shared_udp_peers.clone();
                     tokio::spawn(async move {
-                        mgmt_ndn::run_udp_listener(addr, eng, c, rx_sockets, pre).await;
+                        mgmt_ndn::run_udp_listener(addr, eng, c, rx_sockets).await;
                     });
                 }
             }
