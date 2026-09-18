@@ -252,6 +252,7 @@ async fn main() -> Result<()> {
 
     let engine_config = EngineConfig {
         cs_capacity_bytes: cs_cap_mb * 1024 * 1024,
+        cs_admit_unverified: fwd_config.cs.admit_unverified,
         pipeline_channel_cap: fwd_config.engine.pipeline_channel_cap,
         pipeline_threads: fwd_config.engine.pipeline_threads,
         reflexive: ndn_engine::ReflexiveConfig {
