@@ -747,6 +747,23 @@ fn render_status_into(out: &mut String, s: &ndn_mgmt_wire::GeneralStatus) {
         s.n_measurements_entries,
     )
     .unwrap();
+    // Cache hit RATE, not just occupancy. Occupancy answers "how much is
+    // cached"; the rate answers "how much of the demand is REPEAT demand" --
+    // which is the question when a workload looks slow on one forwarder and
+    // fast on another that caches more aggressively.
+    let cs_lookups = s.n_cs_hits + s.n_cs_misses;
+    if cs_lookups > 0 {
+        writeln!(
+            out,
+            "cs: hits={} misses={} hit-rate={:.1}%",
+            s.n_cs_hits,
+            s.n_cs_misses,
+            (s.n_cs_hits as f64 * 100.0) / cs_lookups as f64,
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "cs: hits=0 misses=0 hit-rate=n/a (no lookups yet)").unwrap();
+    }
     writeln!(
         out,
         "in:  interests={} data={} nacks={}",
