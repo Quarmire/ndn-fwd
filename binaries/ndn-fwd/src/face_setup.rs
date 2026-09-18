@@ -128,14 +128,28 @@ async fn run_face_setup_inner(
                         }
                     };
                     let face_id = id_for(face_idx);
-                    let local: std::net::SocketAddr = if peer.is_ipv4() {
-                        "0.0.0.0:0".parse().unwrap()
-                    } else {
-                        "[::]:0".parse().unwrap()
-                    };
+                    // Bind the SAME port we listen on, and connect to the peer.
+                    //
+                    // An ephemeral local port (the previous `0.0.0.0:0`) made
+                    // our datagrams arrive at the neighbour from a source it
+                    // had no face for, so it minted a second, on-demand face
+                    // for us. Split across two faces, a neighbour survives
+                    // `nexthops_excluding(in_face)` and Interests are
+                    // forwarded back to their origin: 12 wire copies per
+                    // Interest against NFD's 9, ~35% more packets on a shared
+                    // medium.
+                    //
+                    // Binding the listener's port keeps the source symmetric;
+                    // connecting makes the kernel deliver this peer's
+                    // datagrams here rather than to the wildcard listener.
+                    let local_port = bind
+                        .as_deref()
+                        .and_then(|b| b.parse::<std::net::SocketAddr>().ok())
+                        .map(|a| a.port())
+                        .unwrap_or(6363);
                     let eng = engine.clone();
                     tokio::spawn(async move {
-                        match ndn_face::net::UdpFace::bind(local, peer, face_id).await {
+                        match ndn_face::net::UdpFace::bind_connected(local_port, peer, face_id).await {
                             Ok(face) => {
                                 let c = CancellationToken::new();
                                 tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, "udp pre-connected face created");
