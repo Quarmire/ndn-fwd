@@ -780,6 +780,42 @@ async fn main() -> Result<()> {
         tracing::info!(target: "engine", prefix = %route.prefix, face_index = route.face, face = face_id.0, cost = route.cost, "route added");
     }
 
+    // Boot-time strategy choices, applied through the same resolver the
+    // `strategy-choice/set` management verb uses so a TOML `[[strategy]]`
+    // entry and an `ndn-ctl strategy set` accept exactly the same names.
+    //
+    // Without this the strategy table is reachable ONLY over the management
+    // socket, so it lives purely in memory: a choice applied by a post-start
+    // script is lost on the next forwarder restart, silently, while the
+    // `[[route]]` entries above survive because they are config. Measured on a
+    // 3-airframe fleet (2026-09-18): `strategy list` showed only
+    // `/ -> best-route` on all four nodes, so `/muas` had reverted to
+    // best-route and each node's SVS sync Interest reached exactly ONE peer
+    // instead of all three. That partitions the sync group -- every NDNSF
+    // service call timed out at 15s with ackCount=0, while plain fetches still
+    // worked because best-route retries other nexthops on nack/timeout and
+    // group fan-out cannot.
+    for choice in &fwd_config.strategies {
+        let prefix = parse_name(&choice.prefix);
+        let strategy_name = parse_name(&choice.strategy);
+        let Some(strategy) = ndn_mgmt::create_strategy_by_name(&strategy_name) else {
+            tracing::error!(
+                target: "engine",
+                prefix = %choice.prefix,
+                strategy = %choice.strategy,
+                "unknown strategy in [[strategy]]; leaving prefix on the default strategy",
+            );
+            continue;
+        };
+        engine.strategy_table().insert(&prefix, strategy);
+        tracing::info!(
+            target: "engine",
+            prefix = %choice.prefix,
+            strategy = %choice.strategy,
+            "strategy choice installed",
+        );
+    }
+
     // `/localhost/nfd` + `/localhop/nfd` FIB entries are installed by
     // `ndn_mgmt::mount_management` below.
 
