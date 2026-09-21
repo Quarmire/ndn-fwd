@@ -893,6 +893,14 @@ pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus])
             if let Some(n) = f.n_lp_fast_retx {
                 parts.push(format!("fast-retx={n}"));
             }
+            // Duplicates received are how SPURIOUS retransmission becomes
+            // visible. `fast-retx` alone cannot separate a lossy link from a
+            // loss detector that fires too eagerly: a resend whose original had
+            // already arrived repaired nothing and only spent airtime, which on
+            // a contended medium makes the congestion it was reacting to worse.
+            if let Some(n) = f.n_lp_duplicate_frames {
+                parts.push(format!("dup-rx={n}"));
+            }
             if let Some(n) = f.n_lp_rto_expirations {
                 parts.push(format!("gave-up={n}"));
             }
