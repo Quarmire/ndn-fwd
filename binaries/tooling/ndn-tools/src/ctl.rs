@@ -901,6 +901,17 @@ pub fn render_face_list_into(out: &mut String, faces: &[ndn_config::FaceStatus])
             if let Some(n) = f.n_lp_duplicate_frames {
                 parts.push(format!("dup-rx={n}"));
             }
+            // acks-tx here vs acks-rx on the PEER's face for this link. A
+            // shortfall means ack-bearing frames are being lost, and each one
+            // takes up to MAX_PIGGYBACKED_ACKS acks with it, so the sender
+            // sees only a later batch and condemns every frame below it --
+            // which presents as a high fast-retx with a clean link.
+            if let Some(n) = f.n_lp_acks_sent {
+                parts.push(format!("acks-tx={n}"));
+            }
+            if let Some(n) = f.n_lp_acks_received {
+                parts.push(format!("acks-rx={n}"));
+            }
             if let Some(n) = f.n_lp_rto_expirations {
                 parts.push(format!("gave-up={n}"));
             }
