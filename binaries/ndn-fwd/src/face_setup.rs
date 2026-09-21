@@ -153,10 +153,31 @@ async fn run_face_setup_inner(
                             Ok(face) => {
                                 let c = CancellationToken::new();
                                 tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, "udp pre-connected face created");
+                                // PERMANENT, not Persistent. This is a
+                                // statically CONFIGURED peer endpoint, so it
+                                // must outlive I/O errors: a Persistent face is
+                                // destroyed on the first recv/send error, and
+                                // nothing recreates it, while the RIB routes
+                                // that named its face id survive and now point
+                                // at a face that no longer exists. The node is
+                                // then silently ONE-WAY -- it still answers
+                                // Interests arriving on a fresh on-demand face
+                                // but can never send any of its own.
+                                //
+                                // Observed on the fleet: a GCS forwarder
+                                // restart destroyed this face on BOTH ends of
+                                // the same link. iuas-01 kept `out:
+                                // interests=0` toward the GCS for hours while
+                                // its routes still said face 3, so its SVS sync
+                                // never reached the GCS and every NDNSF service
+                                // call to it timed out, with telemetry degraded
+                                // but not dead. Every other configured face in
+                                // this file is already Permanent; this one was
+                                // the outlier.
                                 eng.add_face_with_persistency(
                                     face,
                                     c,
-                                    ndn_transport::FacePersistency::Persistent,
+                                    ndn_transport::FacePersistency::Permanent,
                                 );
                             }
                             Err(e) => {
