@@ -128,56 +128,38 @@ async fn run_face_setup_inner(
                         }
                     };
                     let face_id = id_for(face_idx);
-                    // Bind the SAME port we listen on, and connect to the peer.
-                    //
-                    // An ephemeral local port (the previous `0.0.0.0:0`) made
-                    // our datagrams arrive at the neighbour from a source it
-                    // had no face for, so it minted a second, on-demand face
-                    // for us. Split across two faces, a neighbour survives
-                    // `nexthops_excluding(in_face)` and Interests are
-                    // forwarded back to their origin: 12 wire copies per
-                    // Interest against NFD's 9, ~35% more packets on a shared
-                    // medium.
-                    //
-                    // Binding the listener's port keeps the source symmetric;
-                    // connecting makes the kernel deliver this peer's
-                    // datagrams here rather than to the wildcard listener.
-                    let local_port = bind
-                        .as_deref()
-                        .and_then(|b| b.parse::<std::net::SocketAddr>().ok())
-                        .map(|a| a.port())
-                        .unwrap_or(6363);
+                    // One face per neighbour needs a symmetric source port and
+                    // a connected socket; `udp_peer_binding` says why, and
+                    // ndn-sim simulates the same decision.
+                    let binding = ndn_config::boot::udp_peer_binding(bind.as_deref());
                     let eng = engine.clone();
                     tokio::spawn(async move {
-                        match ndn_face::net::UdpFace::bind_connected(local_port, peer, face_id).await {
+                        let face = if binding.connected {
+                            ndn_face::net::UdpFace::bind_connected(
+                                binding.local_port,
+                                peer,
+                                face_id,
+                            )
+                            .await
+                        } else {
+                            let any: std::net::IpAddr = if peer.is_ipv4() {
+                                std::net::Ipv4Addr::UNSPECIFIED.into()
+                            } else {
+                                std::net::Ipv6Addr::UNSPECIFIED.into()
+                            };
+                            let local = std::net::SocketAddr::new(any, binding.local_port);
+                            ndn_face::net::UdpFace::bind(local, peer, face_id).await
+                        };
+                        match face {
                             Ok(face) => {
                                 let c = CancellationToken::new();
                                 tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, "udp pre-connected face created");
-                                // PERMANENT, not Persistent. This is a
-                                // statically CONFIGURED peer endpoint, so it
-                                // must outlive I/O errors: a Persistent face is
-                                // destroyed on the first recv/send error, and
-                                // nothing recreates it, while the RIB routes
-                                // that named its face id survive and now point
-                                // at a face that no longer exists. The node is
-                                // then silently ONE-WAY -- it still answers
-                                // Interests arriving on a fresh on-demand face
-                                // but can never send any of its own.
-                                //
-                                // Observed on the fleet: a GCS forwarder
-                                // restart destroyed this face on BOTH ends of
-                                // the same link. iuas-01 kept `out:
-                                // interests=0` toward the GCS for hours while
-                                // its routes still said face 3, so its SVS sync
-                                // never reached the GCS and every NDNSF service
-                                // call to it timed out, with telemetry degraded
-                                // but not dead. Every other configured face in
-                                // this file is already Permanent; this one was
-                                // the outlier.
+                                // Permanent: a configured peer must survive the
+                                // peer's restart (see the constant's fleet evidence).
                                 eng.add_face_with_persistency(
                                     face,
                                     c,
-                                    ndn_transport::FacePersistency::Permanent,
+                                    ndn_config::boot::CONFIGURED_FACE_PERSISTENCY,
                                 );
                             }
                             Err(e) => {
@@ -234,7 +216,7 @@ async fn run_face_setup_inner(
                             eng.add_face_with_persistency(
                                 face,
                                 c,
-                                ndn_transport::FacePersistency::Permanent,
+                                ndn_config::boot::CONFIGURED_FACE_PERSISTENCY,
                             );
                             tracing::info!(target: "face.udp", group=%group_addr, port=%port, iface=%iface, face=%id, "multicast UDP face created");
                         }
@@ -387,7 +369,7 @@ async fn run_face_setup_inner(
                             engine.add_face_with_persistency(
                                 face,
                                 c,
-                                ndn_transport::FacePersistency::Permanent,
+                                ndn_config::boot::CONFIGURED_FACE_PERSISTENCY,
                             );
                             tracing::info!(target: "face.eth", iface=%interface, face=%id, "multicast ethernet face opened");
                         }
@@ -444,7 +426,7 @@ async fn run_face_setup_inner(
                                 engine.add_face_with_persistency(
                                     face,
                                     cancel.child_token(),
-                                    ndn_transport::FacePersistency::Permanent,
+                                    ndn_config::boot::CONFIGURED_FACE_PERSISTENCY,
                                 );
                                 tracing::info!(target: "face.eth", iface=%interface, peer=%peer_mac, face=%id, "af_xdp ethernet face opened");
                             }
@@ -471,7 +453,7 @@ async fn run_face_setup_inner(
                             engine.add_face_with_persistency(
                                 face,
                                 c,
-                                ndn_transport::FacePersistency::Permanent,
+                                ndn_config::boot::CONFIGURED_FACE_PERSISTENCY,
                             );
                             tracing::info!(target: "face.eth", iface=%interface, peer=%peer_mac, face=%id, "unicast ethernet face opened");
                         }

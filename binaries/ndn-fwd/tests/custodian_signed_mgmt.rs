@@ -115,13 +115,13 @@ async fn custodian_signed_command_authorized_by_strict_ndn_fwd() {
 
 /// Regression: a SafeBag-style identity has a versioned *certificate* name
 /// (`…/KEY/<id>/self/v=0`) distinct from its bare *key* name (`…/KEY/<id>`).
-/// The forwarder keys its trust anchor by the cert name, so the signed
-/// command's KeyLocator must name the cert — otherwise the validator returns
-/// "signing certificate not yet resolved" (Pending → 403). This mirrors the
-/// dashboard's `ndn-sec`-exported operator key, which the original test's
-/// `KeyChain` (cert name == key name) didn't exercise.
+/// The forwarder keys its trust anchor by the cert name. A signed command must
+/// be authorized whether its KeyLocator names the cert or only the key — the
+/// latter is what ndn-cxx tools and the dashboard's `ndn-sec`-exported operator
+/// key emit, and ndn-cxx resolves a KEY-name locator to the anchor the same
+/// way. Either form still has to verify against the anchor's own public key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn custodian_command_keylocator_must_name_the_cert() {
+async fn custodian_command_authorized_whether_keylocator_names_key_or_cert() {
     let dir = tempfile::tempdir().expect("tempdir");
     let anchor_pib = dir.path().join("anchor-pib");
     let sock = dir.path().join("fwd.sock");
@@ -181,7 +181,7 @@ async fn custodian_command_keylocator_must_name_the_cert() {
         panic!("ndn-fwd never bound its mgmt socket");
     }
 
-    // KeyLocator = bare KEY name → can't resolve to the cert-keyed anchor.
+    // KeyLocator = bare KEY name → resolves to the cert-keyed anchor by key name.
     let without_cert = {
         let cs: Arc<dyn Signer> = Arc::new(CustodianSigner::new(
             custodian.clone(),
@@ -230,8 +230,8 @@ async fn custodian_command_keylocator_must_name_the_cert() {
     let _ = child.wait();
 
     assert!(
-        without_cert.is_err(),
-        "KeyLocator naming only the bare key must NOT resolve to the cert anchor, got {without_cert:?}"
+        without_cert.is_ok(),
+        "KeyLocator naming the anchor's key must be authorized, got {without_cert:?}"
     );
     assert!(
         with_cert.is_ok(),

@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use ndn_config::control_parameters::{origin, route_flags};
 use ndn_config::ForwarderConfig;
-use ndn_engine::rib::RibRoute;
-use ndn_engine::{EngineBuilder, EngineConfig};
+use ndn_config::boot;
+use ndn_engine::EngineBuilder;
 use ndn_security::FilePib;
 
 use ndn_mgmt as mgmt_ndn;
@@ -243,39 +242,7 @@ async fn main() -> Result<()> {
         tracing::info!(target: "engine", path = %file, "logging to file");
     }
 
-    // Prefer [cs].capacity_mb, fall back to engine.cs_capacity_mb.
-    let cs_cap_mb = if fwd_config.cs.capacity_mb != 0 {
-        fwd_config.cs.capacity_mb
-    } else {
-        fwd_config.engine.cs_capacity_mb
-    };
-
-    let engine_config = EngineConfig {
-        cs_capacity_bytes: cs_cap_mb * 1024 * 1024,
-        cs_admit_unverified: fwd_config.cs.admit_unverified,
-        pipeline_channel_cap: fwd_config.engine.pipeline_channel_cap,
-        pipeline_threads: fwd_config.engine.pipeline_threads,
-        reflexive: ndn_engine::ReflexiveConfig {
-            enabled: fwd_config.reflexive.enabled,
-            max_per_face: fwd_config.reflexive.max_per_face,
-            max_lifetime: std::time::Duration::from_millis(fwd_config.reflexive.max_lifetime_ms),
-        },
-        data_plane: match fwd_config.engine.data_plane.as_str() {
-            "partitioned" => {
-                let workers = if fwd_config.engine.workers == 0 {
-                    std::thread::available_parallelism()
-                        .map(|n| n.get())
-                        .unwrap_or(1)
-                } else {
-                    fwd_config.engine.workers
-                };
-                ndn_engine::DataPlane::Partitioned { workers }
-            }
-            _ => ndn_engine::DataPlane::Shared,
-        },
-        require_local_validation: fwd_config.engine.require_local_validation,
-        ..EngineConfig::default()
-    };
+    let engine_config = boot::engine_config(&fwd_config);
 
     let security_init = load_security(&fwd_config);
     // Capture the identity signer before `security_init.mgr` moves into the
@@ -306,21 +273,6 @@ async fn main() -> Result<()> {
     let security_is_ephemeral = security_init.is_ephemeral;
 
     let cs = build_cs(&fwd_config.cs);
-    let admission: Arc<dyn ndn_store::CsAdmissionPolicy> =
-        match fwd_config.cs.admission_policy.as_str() {
-            "admit-all" => Arc::new(ndn_store::AdmitAllPolicy),
-            _ => Arc::new(ndn_store::DefaultAdmissionPolicy),
-        };
-
-    let security_profile = if !fwd_config.security.validator_enabled {
-        ndn_security::SecurityProfile::Disabled
-    } else {
-        match fwd_config.security.profile.as_str() {
-            "disabled" => ndn_security::SecurityProfile::Disabled,
-            "accept-signed" => ndn_security::SecurityProfile::AcceptSigned,
-            _ => ndn_security::SecurityProfile::Default,
-        }
-    };
 
     // Parse [coding] and [rate-limit] from the same raw TOML.
     #[cfg(feature = "fec")]
@@ -337,10 +289,8 @@ async fn main() -> Result<()> {
         None => (None, None),
     };
 
-    let mut builder = EngineBuilder::new(engine_config)
+    let mut builder = boot::configure_data_path(EngineBuilder::new(engine_config), &fwd_config)
         .content_store(cs)
-        .admission_policy(admission)
-        .security_profile(security_profile)
         .security(security_init.mgr);
 
     #[cfg(feature = "rate-limit")]
@@ -355,24 +305,6 @@ async fn main() -> Result<()> {
         }
         None => None,
     };
-
-    for rule_cfg in &fwd_config.security.rules {
-        let rule_text = format!("{} => {}", rule_cfg.data, rule_cfg.key);
-        match ndn_security::SchemaRule::parse(&rule_text) {
-            Ok(rule) => {
-                builder = builder.schema_rule(rule);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "security",
-                    data = %rule_cfg.data,
-                    key = %rule_cfg.key,
-                    error = %e,
-                    "ignoring invalid [[security.rule]] in config"
-                );
-            }
-        }
-    }
 
     // Multicast and auto-enumerated face IDs are allocated before `build`
     // so discovery protocols can reference them; the actual face sockets
@@ -706,22 +638,10 @@ async fn main() -> Result<()> {
     // reachable over NDN (e.g. fetched from the CA that issued it). Without this,
     // only certs already in the validator's cache validate; with it, any operator
     // whose cert is fetchable *and* chains to a trusted localhop anchor can
-    // self-register a prefix via `/localhop/nfd/rib/register`. One pooled app
-    // consumer (cert fetches are rare and the CertFetcher dedups them).
-    if let Some(ref validator) = localhop_validator {
-        use ndn_app::EngineAppExt;
-        let consumer = std::sync::Arc::new(tokio::sync::Mutex::new(
-            engine.app_consumer(cancel.child_token()),
-        ));
-        let fetch_fn: ndn_security::FetchFn = std::sync::Arc::new(move |name: ndn_packet::Name| {
-            let consumer = std::sync::Arc::clone(&consumer);
-            Box::pin(async move { consumer.lock().await.fetch(name).await.ok() })
-        });
-        let fetcher = std::sync::Arc::new(ndn_security::CertFetcher::new(
-            validator.cert_cache_arc(),
-            fetch_fn,
-            std::time::Duration::from_secs(4),
-        ));
+    // self-register a prefix via `/localhop/nfd/rib/register`. The same fetcher
+    // implementation the engine gives its own Data path.
+    if let Some(validator) = &localhop_validator {
+        let fetcher = engine.cert_fetcher(validator.cert_cache_arc(), cancel.child_token());
         let _ = validator.set_cert_fetcher(fetcher);
         tracing::info!(
             target: "security",
@@ -731,90 +651,8 @@ async fn main() -> Result<()> {
 
     post_build.apply(&engine, &cancel);
 
-    for route in &fwd_config.routes {
-        // `route.face` is a zero-based index into `[[face]]` (see RouteConfig);
-        // resolve it to the FaceId that entry was assigned.
-        let Some(&face_id) = face_ids_by_index.get(route.face) else {
-            tracing::error!(
-                target: "engine",
-                prefix = %route.prefix,
-                face_index = route.face,
-                faces = face_ids_by_index.len(),
-                "route references a [[face]] index out of range; skipping",
-            );
-            continue;
-        };
-        let name = parse_name(&route.prefix);
-        // Install as a RIB route with origin STATIC, not a bare FIB nexthop.
-        //
-        // The RIB computes each FIB entry from the routes it tracks and writes
-        // the result with `Fib::set_nexthops`, which REPLACES the entry. A
-        // nexthop added straight to the FIB here is invisible to the RIB, so
-        // the first recompute for this prefix — which happens as soon as a
-        // local app registers the same prefix — silently drops every config
-        // route. Observed on a 3-drone fleet: a `[[route]] prefix="/muas"` per
-        // peer produced three FIB nexthops at startup and exactly ONE after
-        // the application registered /muas, so per-node service Interests
-        // could only ever reach whichever peer survived.
-        //
-        // Going through the RIB is also what `nfdc route add` does (origin
-        // static = 255), so a config route and an operator-added route now
-        // behave identically and merge instead of racing.
-        // CHILD_INHERIT, matching `nfdc route add`'s default. Without it the
-        // RIB does not propagate this nexthop to a descendant prefix that has
-        // its own RIB entry — so as soon as an application registers, say,
-        // /muas/v2/group, LPM stops there, the config route's peer nexthop is
-        // invisible, and the Interest is dropped `reason=NoRoute`. Measured in
-        // a two-node netns reproducer: SVS sync Interests on /muas/v2/group
-        // NoRoute'd on BOTH nodes, so every NDNSF service call (which rides
-        // SVS pub/sub) timed out even though /muas itself had a nexthop.
-        let route_entry = RibRoute {
-            face_id,
-            origin: origin::STATIC,
-            cost: route.cost,
-            flags: route_flags::CHILD_INHERIT,
-            expires_at: None,
-        };
-        engine.rib().add(&name, route_entry);
-        engine.rib().apply_to_fib(&name, &engine.fib());
-        tracing::info!(target: "engine", prefix = %route.prefix, face_index = route.face, face = face_id.0, cost = route.cost, "route added");
-    }
-
-    // Boot-time strategy choices, applied through the same resolver the
-    // `strategy-choice/set` management verb uses so a TOML `[[strategy]]`
-    // entry and an `ndn-ctl strategy set` accept exactly the same names.
-    //
-    // Without this the strategy table is reachable ONLY over the management
-    // socket, so it lives purely in memory: a choice applied by a post-start
-    // script is lost on the next forwarder restart, silently, while the
-    // `[[route]]` entries above survive because they are config. Measured on a
-    // 3-airframe fleet (2026-09-18): `strategy list` showed only
-    // `/ -> best-route` on all four nodes, so `/muas` had reverted to
-    // best-route and each node's SVS sync Interest reached exactly ONE peer
-    // instead of all three. That partitions the sync group -- every NDNSF
-    // service call timed out at 15s with ackCount=0, while plain fetches still
-    // worked because best-route retries other nexthops on nack/timeout and
-    // group fan-out cannot.
-    for choice in &fwd_config.strategies {
-        let prefix = parse_name(&choice.prefix);
-        let strategy_name = parse_name(&choice.strategy);
-        let Some(strategy) = ndn_mgmt::create_strategy_by_name(&strategy_name) else {
-            tracing::error!(
-                target: "engine",
-                prefix = %choice.prefix,
-                strategy = %choice.strategy,
-                "unknown strategy in [[strategy]]; leaving prefix on the default strategy",
-            );
-            continue;
-        };
-        engine.strategy_table().insert(&prefix, strategy);
-        tracing::info!(
-            target: "engine",
-            prefix = %choice.prefix,
-            strategy = %choice.strategy,
-            "strategy choice installed",
-        );
-    }
+    boot::install_routes(&engine, &fwd_config.routes, &face_ids_by_index);
+    boot::install_strategies(&engine, &fwd_config.strategies);
 
     // `/localhost/nfd` + `/localhop/nfd` FIB entries are installed by
     // `ndn_mgmt::mount_management` below.
