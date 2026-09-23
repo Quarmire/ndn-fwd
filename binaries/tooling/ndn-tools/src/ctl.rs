@@ -1254,6 +1254,8 @@ mod ctl_tests {
             n_reasm_fragments_wasted: Some(35),
             n_lp_unacked_evictions: Some(7),
             n_lp_fast_retx: Some(5),
+            n_lp_duplicate_frames: Some(6),
+            n_lp_acks_sent: Some(12500),
             n_reasm_fragments_rejected: Some(4),
             n_reasm_groups_evicted: Some(1),
         };
@@ -1273,6 +1275,11 @@ mod ctl_tests {
         assert!(out.contains("rto=420µs"), "{out}");
         assert!(out.contains("resent=14"), "{out}");
         assert!(out.contains("fast-retx=5"), "{out}");
+        // dup-rx says whether retransmission repaired loss; acks-tx vs the
+        // peer's acks-rx gives the ack delivery ratio.
+        assert!(out.contains("dup-rx=6"), "{out}");
+        assert!(out.contains("acks-tx=12500"), "{out}");
+        assert!(out.contains("acks-rx=12489"), "{out}");
         // Features line covers the full pipeline names.
         assert!(
             out.contains("features: fragmentation reassembly local-fields reliability congestion-marking trace-context"),
