@@ -44,18 +44,18 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: de09ff6ae8a77ae0f3ddf14d20c4ac4c6f169df8, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 2a5840be79098017965517e6c975874602d7f22a, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 27646a78bb0fd91a7f1fba1f295d5a9ad220fef6, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; needed since P2/D5 — ndn-ext's radio faces resolve
         # ndn-frame-io/ndn-radio-hal/ndn-env from ndn-radio-drivers/crates/
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 05862c948e33f7e2ad8091d8729a5cee6fdfcba0, path: ndn-radio-drivers }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 985cd9d70ce0664c6b622da29545c6aa2cd0448c, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
         # pinned sibling; ndn-fwd path-deps ndn-radio's named-radio medium face
         # (ndn-phy-wifi / ndn-radio-cognition / ndn-coding)
-        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: b4c3d96817ea4c8e50aaeeedca47462c5ac4054e, path: ndn-radio }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: f03f96242b459b82f326d3ed23803a75afcfcc16, path: ndn-radio }
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -84,18 +84,18 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: de09ff6ae8a77ae0f3ddf14d20c4ac4c6f169df8, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 2a5840be79098017965517e6c975874602d7f22a, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 27646a78bb0fd91a7f1fba1f295d5a9ad220fef6, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; needed since P2/D5 — ndn-ext's radio faces resolve
         # ndn-frame-io/ndn-radio-hal/ndn-env from ndn-radio-drivers/crates/
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 05862c948e33f7e2ad8091d8729a5cee6fdfcba0, path: ndn-radio-drivers }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 985cd9d70ce0664c6b622da29545c6aa2cd0448c, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
         # pinned sibling; ndn-fwd path-deps ndn-radio's named-radio medium face
         # (ndn-phy-wifi / ndn-radio-cognition / ndn-coding)
-        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: b4c3d96817ea4c8e50aaeeedca47462c5ac4054e, path: ndn-radio }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: f03f96242b459b82f326d3ed23803a75afcfcc16, path: ndn-radio }
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -123,18 +123,18 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: de09ff6ae8a77ae0f3ddf14d20c4ac4c6f169df8, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 2a5840be79098017965517e6c975874602d7f22a, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 27646a78bb0fd91a7f1fba1f295d5a9ad220fef6, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; needed since P2/D5 — ndn-ext's radio faces resolve
         # ndn-frame-io/ndn-radio-hal/ndn-env from ndn-radio-drivers/crates/
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 05862c948e33f7e2ad8091d8729a5cee6fdfcba0, path: ndn-radio-drivers }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 985cd9d70ce0664c6b622da29545c6aa2cd0448c, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
         # pinned sibling; ndn-fwd path-deps ndn-radio's named-radio medium face
         # (ndn-phy-wifi / ndn-radio-cognition / ndn-coding)
-        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: b4c3d96817ea4c8e50aaeeedca47462c5ac4054e, path: ndn-radio }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: f03f96242b459b82f326d3ed23803a75afcfcc16, path: ndn-radio }
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -158,18 +158,18 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: de09ff6ae8a77ae0f3ddf14d20c4ac4c6f169df8, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 2a5840be79098017965517e6c975874602d7f22a, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 27646a78bb0fd91a7f1fba1f295d5a9ad220fef6, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; needed since P2/D5 — ndn-ext's radio faces resolve
         # ndn-frame-io/ndn-radio-hal/ndn-env from ndn-radio-drivers/crates/
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 05862c948e33f7e2ad8091d8729a5cee6fdfcba0, path: ndn-radio-drivers }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 985cd9d70ce0664c6b622da29545c6aa2cd0448c, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
         # pinned sibling; ndn-fwd path-deps ndn-radio's named-radio medium face
         # (ndn-phy-wifi / ndn-radio-cognition / ndn-coding)
-        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: b4c3d96817ea4c8e50aaeeedca47462c5ac4054e, path: ndn-radio }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: f03f96242b459b82f326d3ed23803a75afcfcc16, path: ndn-radio }
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -194,18 +194,18 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: de09ff6ae8a77ae0f3ddf14d20c4ac4c6f169df8, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 2a5840be79098017965517e6c975874602d7f22a, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 27646a78bb0fd91a7f1fba1f295d5a9ad220fef6, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; needed since P2/D5 — ndn-ext's radio faces resolve
         # ndn-frame-io/ndn-radio-hal/ndn-env from ndn-radio-drivers/crates/
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 05862c948e33f7e2ad8091d8729a5cee6fdfcba0, path: ndn-radio-drivers }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 985cd9d70ce0664c6b622da29545c6aa2cd0448c, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
         # pinned sibling; ndn-fwd path-deps ndn-radio's named-radio medium face
         # (ndn-phy-wifi / ndn-radio-cognition / ndn-coding)
-        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: b4c3d96817ea4c8e50aaeeedca47462c5ac4054e, path: ndn-radio }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: f03f96242b459b82f326d3ed23803a75afcfcc16, path: ndn-radio }
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -230,18 +230,18 @@ jobs:
           fetch-depth: 0
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: de09ff6ae8a77ae0f3ddf14d20c4ac4c6f169df8, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 2a5840be79098017965517e6c975874602d7f22a, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 27646a78bb0fd91a7f1fba1f295d5a9ad220fef6, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; needed since P2/D5 — ndn-ext's radio faces resolve
         # ndn-frame-io/ndn-radio-hal/ndn-env from ndn-radio-drivers/crates/
-        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 05862c948e33f7e2ad8091d8729a5cee6fdfcba0, path: ndn-radio-drivers }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 985cd9d70ce0664c6b622da29545c6aa2cd0448c, path: ndn-radio-drivers }
       - uses: actions/checkout@v4
         # pinned sibling; ndn-fwd path-deps ndn-radio's named-radio medium face
         # (ndn-phy-wifi / ndn-radio-cognition / ndn-coding)
-        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: b4c3d96817ea4c8e50aaeeedca47462c5ac4054e, path: ndn-radio }
+        with: { repository: "${{ github.repository_owner }}/ndn-radio", ref: f03f96242b459b82f326d3ed23803a75afcfcc16, path: ndn-radio }
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ndn-fwd
