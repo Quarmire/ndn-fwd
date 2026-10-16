@@ -2,7 +2,7 @@
 //!
 //! Implements `ndn_cert::EmailSender` over `lettre` (rustls TLS). The
 //! dependency-free fallback is `ndn_identity::LoggingEmailSender`; see
-//! `demo_ca::make_email_sender`.
+//! `ca::make_email_sender`.
 
 use std::future::Future;
 use std::pin::Pin;

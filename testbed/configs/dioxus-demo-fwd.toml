@@ -30,13 +30,13 @@ require_signed_commands = false
 # `ephemeral = true`: the CA mints a throwaway self-signed key at boot (no PIB
 # needed) and installs it as a /localhop trust anchor — certs do not survive a
 # restart. The `nop` challenge auto-approves every request; demo only.
-[demo_ca]
+[ca]
 enabled   = true
 prefix    = "/demo"
 identity  = "/demo/CA"
 ephemeral = true
 
-[[demo_ca.challenge]]
+[[ca.challenge]]
 kind = "nop"
 
 [[face]]

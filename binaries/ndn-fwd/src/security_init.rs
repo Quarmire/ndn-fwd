@@ -260,9 +260,9 @@ mod tests {
     fn load_security_resolves_configured_identity_key() {
         let dir = tempfile::tempdir().unwrap();
         let pib_path = dir.path().join("pib");
-        let hub: Name = "/home/bob/hub".parse().unwrap();
+        let ident: Name = "/home/bob/laptop".parse().unwrap();
         let node: Name = "/home/bob/node".parse().unwrap();
-        SecurityManager::auto_init(&hub, &pib_path).unwrap();
+        SecurityManager::auto_init(&ident, &pib_path).unwrap();
         let (created, _) = SecurityManager::auto_init(&node, &pib_path).unwrap();
         let node_key = created.identity_key_name(&node).unwrap();
 
@@ -281,9 +281,9 @@ mod tests {
     fn pib_default_identity_is_used_unless_config_names_one() {
         let dir = tempfile::tempdir().unwrap();
         let pib_path = dir.path().join("pib");
-        let hub: Name = "/home/bob/hub".parse().unwrap();
+        let ident: Name = "/home/bob/laptop".parse().unwrap();
         let node: Name = "/home/bob/node".parse().unwrap();
-        let (hub_mgr, _) = SecurityManager::auto_init(&hub, &pib_path).unwrap();
+        let (root_mgr, _) = SecurityManager::auto_init(&ident, &pib_path).unwrap();
         let (node_mgr, _) = SecurityManager::auto_init(&node, &pib_path).unwrap();
         FilePib::open(&pib_path)
             .unwrap()
@@ -299,11 +299,11 @@ mod tests {
             &node_mgr.identity_key_name(&node).unwrap()
         );
 
-        cfg.security.identity = Some(hub.to_string());
+        cfg.security.identity = Some(ident.to_string());
         let init = load_security(&cfg);
         assert_eq!(
             init.mgr.any_signer().unwrap().key_name(),
-            &hub_mgr.identity_key_name(&hub).unwrap()
+            &root_mgr.identity_key_name(&ident).unwrap()
         );
     }
 }

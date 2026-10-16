@@ -283,7 +283,7 @@ pub(crate) async fn enroll(
 mod tests {
     use std::path::Path;
 
-    use ndn_config::{ChallengeConfig, DemoCaConfig};
+    use ndn_config::{ChallengeConfig, CaTomlConfig};
     use ndn_engine::{EngineBuilder, EngineConfig, ShutdownHandle};
     use ndn_security::{Ed25519Signer, Keyring, SecurityManager};
     use ndn_trust_envelope::TrustEnvelope;
@@ -298,14 +298,14 @@ mod tests {
         shutdown: ShutdownHandle,
     }
 
-    /// One engine carrying the hub's CA (PIB `hub`, tokens `tokens`) and the
-    /// enrolling node's trust-admin backend (PIB `device`, holding the hub's
+    /// One engine carrying the root device's CA (PIB `root_dev`, tokens `tokens`) and
+    /// the enrolling node's trust-admin backend (PIB `device`, holding the root device's
     /// trust context already, signing with an ephemeral key).
-    async fn node(hub: &Path, device: &Path, tokens: &[&str]) -> Node {
+    async fn node(root_dev: &Path, device: &Path, tokens: &[&str]) -> Node {
         let ns: Name = "/home/bob".parse().unwrap();
-        let pib = FilePib::new(hub).unwrap();
-        let persisted = ndn_cert::init_hub_in_pib(&pib, &ns, "desk", false).unwrap();
-        let cfg = DemoCaConfig {
+        let pib = FilePib::new(root_dev).unwrap();
+        let persisted = ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false).unwrap();
+        let cfg = CaTomlConfig {
             enabled: true,
             prefix: "/home/bob".into(),
             identity: "/home/bob/CA".into(),
@@ -317,9 +317,9 @@ mod tests {
                 ttl_secs: None,
                 smtp: None,
             }],
-            ..DemoCaConfig::default()
+            ..CaTomlConfig::default()
         };
-        let (faces, ca) = crate::demo_ca::prepare(&cfg, hub).await.unwrap();
+        let (faces, ca) = crate::ca::prepare(&cfg, root_dev).await.unwrap();
         let mut builder = EngineBuilder::new(EngineConfig::default())
             .security_profile(ndn_security::SecurityProfile::Disabled)
             .security(Arc::new(SecurityManager::new()));
@@ -328,11 +328,11 @@ mod tests {
         }
         let (engine, shutdown) = builder.build().await.unwrap();
         engine.fib().add_nexthop(&ca.prefix, ca.face_id, 0);
-        crate::demo_ca::spawn(ca, &cfg, &engine).unwrap();
+        crate::ca::spawn(ca, &cfg, &engine).unwrap();
 
         let keyring = Arc::new(Keyring::new());
-        let fingerprint = ndn_cert::anchor_fingerprint(&persisted.hub.anchor);
-        ndn_cert::adopt_with_tofu(&keyring, &persisted.hub.context_data, &ns, &fingerprint)
+        let fingerprint = ndn_cert::anchor_fingerprint(&persisted.init.anchor);
+        ndn_cert::adopt_with_tofu(&keyring, &persisted.init.context_data, &ns, &fingerprint)
             .unwrap();
         let startup: Arc<dyn Signer> = Arc::new(Ed25519Signer::from_seed(
             &[1; 32],
@@ -381,8 +381,8 @@ mod tests {
     /// certificate, selects the identity and switches the node's signer.
     #[tokio::test]
     async fn enrolled_key_stays_in_the_pib_and_is_selected() {
-        let (hub, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let node = node(hub.path(), device.path(), &["member-m1"]).await;
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-m1"]).await;
         assert_eq!(state(&node), (vec![], None, node.startup_key.clone()));
 
         let EnrollOutcome::Enrolled(info) =
@@ -411,8 +411,8 @@ mod tests {
     /// identity and the node's signer exactly as they were.
     #[tokio::test]
     async fn refused_enrollment_leaves_the_previous_identity_selected() {
-        let (hub, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let node = node(hub.path(), device.path(), &["member-m1", "member-m2", "guest-g1"]).await;
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-m1", "member-m2", "guest-g1"]).await;
         enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
             .await
             .expect("first enrollment");

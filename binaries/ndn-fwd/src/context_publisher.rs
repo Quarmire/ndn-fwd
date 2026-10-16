@@ -2,7 +2,7 @@
 //! convention, so a device holding only an anchor fingerprint can fetch a
 //! context (`ndn_cert::fetch_context`) and pin it (`ndn_cert::adopt_with_tofu`).
 //!
-//! For every context in `<pib>/contexts/` (`ndn-fwd init` stores the hub's
+//! For every context in `<pib>/contexts/` (`ndn-fwd init` stores the root device's
 //! own there, `ndn-fwd adopt` the adopted ones), re-verified on read — a file
 //! that fails is not published:
 //!
@@ -17,7 +17,7 @@
 //!   this node does not hold fails at once instead of timing out.
 //!
 //! One in-process face carries all of it, with one FIB entry
-//! `/<ns>/32=trust-context` per context — more specific than a `[demo_ca]`
+//! `/<ns>/32=trust-context` per context — more specific than a `[ca]`
 //! entry `/<ns>`, so longest-prefix match routes here. The store holds one file
 //! (the newest adopted version) per namespace, so "newest stored version" is
 //! that file's. The store is read at startup; a context the running daemon
@@ -132,7 +132,7 @@ pub(crate) fn prepare(pib_root: &Path) -> (InProcFace, ContextPublisher) {
 /// versioned Name only (no segment fields: the context is one Data).
 ///
 /// Signed with DigestSha256, not the node key. The metadata is an
-/// unauthenticated pointer by design: a joiner holds only the anchor
+/// unauthenticated pointer by design: an adopter holds only the anchor
 /// fingerprint and cannot check a node signature, and `fetch_context` confines
 /// the pointer to `<ns>/32=trust-context/v=<N>` before the pinned context
 /// signature decides trust. A node-key signature would also be *rejected*:
@@ -272,10 +272,10 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn stored(dir: &Path, ns: &str) -> ndn_cert::HubInit {
-        let hub = ndn_cert::init_hub(&ndn_security::SecurityManager::new(), &n(ns)).unwrap();
-        ndn_cert::persist_context(dir, &hub.context, &hub.context_data).unwrap();
-        hub
+    fn stored(dir: &Path, ns: &str) -> ndn_cert::NamespaceInit {
+        let root_dev = ndn_cert::init_namespace(&ndn_security::SecurityManager::new(), &n(ns)).unwrap();
+        ndn_cert::persist_context(dir, &root_dev.context, &root_dev.context_data).unwrap();
+        root_dev
     }
 
     #[test]
@@ -285,13 +285,13 @@ mod tests {
         let alice = stored(dir.path(), "/home/alice");
         let contexts = published(dir.path());
 
-        for hub in [&bob, &alice] {
-            let ns = hub.context.namespace();
-            let versioned = hub.context.rdr_name();
+        for root_dev in [&bob, &alice] {
+            let ns = root_dev.context.namespace();
+            let versioned = root_dev.context.rdr_name();
             // Exact versioned name → the stored signed Data, byte-identical.
             assert_eq!(
                 answer(&contexts, &versioned),
-                Some(hub.context_data.raw())
+                Some(root_dev.context_data.raw())
             );
             // Metadata → RDR Name-only content pointing at exactly that name,
             // under this namespace (what `fetch_context` accepts).
@@ -339,10 +339,10 @@ mod tests {
     fn adopted_context_replaces_its_namespace_entry() {
         let dir = tempfile::tempdir().unwrap();
         let bob = stored(dir.path(), "/home/bob");
-        let alice = ndn_cert::init_hub(&ndn_security::SecurityManager::new(), &n("/home/alice"))
+        let alice = ndn_cert::init_namespace(&ndn_security::SecurityManager::new(), &n("/home/alice"))
             .unwrap();
         let other_bob =
-            ndn_cert::init_hub(&ndn_security::SecurityManager::new(), &n("/home/bob")).unwrap();
+            ndn_cert::init_namespace(&ndn_security::SecurityManager::new(), &n("/home/bob")).unwrap();
         let start = published(dir.path());
         let added = with_context(&start, Published::new(&alice.context, &alice.context_data));
         assert_eq!(added.len(), 2);

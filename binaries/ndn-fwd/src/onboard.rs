@@ -1,27 +1,30 @@
-//! `ndn-fwd init --profile hub`, `ndn-fwd adopt <envelope>` and `ndn-fwd
-//! enroll <invite>` — the onboarding UX over the [`ndn_cert::hub`] /
+//! `ndn-fwd init --namespace <ns>`, `ndn-fwd adopt <envelope>` and `ndn-fwd
+//! enroll <invite>` — the onboarding UX over the [`ndn_cert::namespace`] /
 //! [`ndn_cert::onboarding`] / [`ndn_cert::invite`] primitives. A node does not
-//! "join"; it *adopts* a trust context and *enrolls* a key with a CA.
+//! "join" anything: it *adopts* a namespace's trust context and *enrolls* a key
+//! with the namespace's CA. Neither forms a link; links and routes toward other
+//! forwarders are configured separately.
 //!
 //! These are early-exit subcommands: when `args[1]` is `init`, `adopt`,
 //! `enroll` or `schema` ([`crate::schema_cmd`]), the daemon does not start.
 //! They act on the node's PIB directory (`--pib <dir>`, else
 //! `[security].pib_path` from `-c/--config`, else `~/.ndn/pib`):
 //!
-//! - `init` mints the network root `<ns>/KEY/root`, the CA signing identity
-//!   `<ns>/CA` (certified by the root) and this primary device's admin
+//! - `init` (run on the root device) mints the namespace root `<ns>/KEY/root`,
+//!   the CA signing identity `<ns>/CA` (certified by the root) and this primary
+//!   device's admin
 //!   identity `<ns>/admin/<device>` (`--device`, default derived from the
 //!   host name; certified by the CA) into the PIB, signs the trust context —
-//!   carrying the generated personal-network schema — with the root, stores
+//!   carrying the generated namespace schema — with the root, stores
 //!   it in `<pib>/contexts/`, and prints the `ndn-trust://anchor` envelope
 //!   plus the `[security]` lines that make the daemon load the device
 //!   identity. Config files are never edited. An existing root is never
 //!   replaced unless `--force` is given.
-//! - `adopt` adopts the network an anchor link (`ndn-trust://anchor/…`)
+//! - `adopt` adopts the namespace an anchor link (`ndn-trust://anchor/…`)
 //!   names. With the daemon running (its management socket from `-c`, else
 //!   the default), the daemon does it: a link with the context inline is
 //!   verified against the expected fingerprint; a fingerprint-only link makes
-//!   the daemon fetch the context by name from the network. Either way the
+//!   the daemon fetch the context by name over its routes. Either way the
 //!   daemon trusts, stores and publishes it at once. With no daemon, a link
 //!   with the context inline is verified and stored in `<pib>/contexts/`,
 //!   loaded at the next start; a fingerprint-only link needs the daemon.
@@ -38,7 +41,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use ndn_cert::roles::sanitize_device_name;
 use ndn_cert::{
-    AnchorLink, InviteLink, adopt_envelope_into_store, anchor_fingerprint, init_hub_in_pib,
+    AnchorLink, InviteLink, adopt_envelope_into_store, anchor_fingerprint, init_namespace_in_pib,
 };
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
@@ -60,7 +63,6 @@ pub async fn maybe_run() -> Option<Result<()>> {
 
 /// Options that take a value (so their value is not mistaken for a positional).
 pub(crate) const VALUE_FLAGS: &[&str] = &[
-    "--profile",
     "--namespace",
     "--device",
     "--pib",
@@ -128,9 +130,18 @@ fn default_device() -> Result<String> {
 }
 
 fn run_init(args: &[String]) -> Result<()> {
-    let profile = flag(args, &["--profile"]).unwrap_or("hub");
-    if profile != "hub" {
-        bail!("only --profile hub is supported (got {profile:?})");
+    if let Some(profile) = flag(args, &["--profile"]) {
+        bail!(
+            "`ndn-fwd init --profile {profile}` was removed: init has a single form. Run \
+             `ndn-fwd init --namespace <ndn-name> [--device <name>]` on the device that \
+             creates the namespace (its root device)"
+        );
+    }
+    if args.iter().any(|a| a == "--profile") {
+        bail!(
+            "`ndn-fwd init --profile` was removed: run `ndn-fwd init --namespace <ndn-name> \
+             [--device <name>]` on the device that creates the namespace (its root device)"
+        );
     }
     let namespace: Name = flag(args, &["--namespace"])
         .context("init requires --namespace <ndn-name>, e.g. /home/bob")?
@@ -145,16 +156,16 @@ fn run_init(args: &[String]) -> Result<()> {
     let pib =
         FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
 
-    let out = init_hub_in_pib(&pib, &namespace, &device, force)?;
-    let hub = &out.hub;
+    let out = init_namespace_in_pib(&pib, &namespace, &device, force)?;
+    let root_dev = &out.init;
     // The daemon may run from another directory: print an absolute path.
     let pib_abs = std::fs::canonicalize(&pib_dir).unwrap_or_else(|_| pib_dir.clone());
-    let anchor_fp = hex_lower(&anchor_fingerprint(&hub.anchor));
+    let anchor_fp = hex_lower(&anchor_fingerprint(&root_dev.anchor));
 
-    println!("# ndn-fwd hub initialized");
+    println!("# ndn-fwd namespace initialized on this root device");
     println!("namespace      = {namespace}");
     println!("pib            = {}", pib_dir.display());
-    println!("anchor_key     = {}", hub.anchor_key);
+    println!("anchor_key     = {}", root_dev.anchor_key);
     println!("anchor_fp      = {anchor_fp}");
     println!("ca_key         = {}", out.ca_key);
     println!("ca_cert        = {}", out.ca_cert_path.display());
@@ -164,20 +175,20 @@ fn run_init(args: &[String]) -> Result<()> {
     println!(
         "context        = {} (v{})",
         out.context_path.display(),
-        hub.context.version()
+        root_dev.context.version()
     );
-    println!("schema         = generated personal-network schema (see `ndn-fwd schema show`)");
+    println!("schema         = generated namespace schema (see `ndn-fwd schema show`)");
     println!("enrollment     = token AND device-approval");
-    println!("anchor_uri     = {}", hub.envelope.to_uri());
+    println!("anchor_uri     = {}", root_dev.envelope.to_uri());
     println!(
         "anchor_url     = {}",
-        hub.envelope.to_https_url("ndn.local")
+        root_dev.envelope.to_https_url("ndn.local")
     );
-    // The same link without the context: a short QR, fetched over the network.
+    // The same link without the context: a short QR; the context is fetched by name.
     let fingerprint_only = TrustEnvelope::Anchor {
         namespace: Some(namespace.to_string()),
-        fingerprint: Some(anchor_fingerprint(&hub.anchor)),
-        version: Some(hub.context.version()),
+        fingerprint: Some(anchor_fingerprint(&root_dev.anchor)),
+        version: Some(root_dev.context.version()),
         context_data: None,
         context_content: None,
     };
@@ -185,13 +196,13 @@ fn run_init(args: &[String]) -> Result<()> {
     println!();
     println!("# Scan anchor_uri as a QR, or share anchor_url. anchor_uri_fp is the short");
     println!("# form (namespace + expected fingerprint + version): the adopting device's");
-    println!("# daemon fetches the context by name, so it needs a route to this node.");
+    println!("# daemon fetches the context by name, so it needs a link and a route to this node.");
     println!("# Adopting lets a peer VERIFY this namespace; producing still needs enrollment as");
     println!("# {namespace}/<role>/<device>: members and guests by invite token");
     println!(
         "# (ndn-fwd-tokens new --ca {namespace} --namespace {namespace} --anchor-fp {anchor_fp}"
     );
-    println!("#  --role member|guest), admins and super nodes by device approval.");
+    println!("#  --role member|guest), admins and relays by device approval.");
     println!("# The root key now lives in the PIB: keep a recovery copy offline.");
     println!("#");
     println!("# Put these lines in ndn-fwd.toml so the daemon signs as this device's");
@@ -283,7 +294,7 @@ async fn adopt_via_daemon(client: &ndn_ipc::MgmtClient, uri: &str, socket: &str)
     println!(
         "source               = {}",
         if info.fetched {
-            "fetched from the network"
+            "fetched by name"
         } else {
             "inline in the link"
         }

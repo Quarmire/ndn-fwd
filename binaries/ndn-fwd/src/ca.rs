@@ -1,18 +1,18 @@
-//! Embedded NDNCERT CA (`[demo_ca]`). Serves `/<prefix>/CA/{INFO,NEW,
+//! Embedded NDNCERT CA (`[ca]`). Serves `/<prefix>/CA/{INFO,NEW,
 //! CHALLENGE/<id>}` and cert-fetch for the certs it issued through an
 //! in-process face.
 //!
-//! By default the CA signs with the identity `[demo_ca].identity` loaded from
+//! By default the CA signs with the identity `[ca].identity` loaded from
 //! the node's PIB: the `/<ns>/CA` key plus its certificate
-//! `<pib_path>/ca/ca-cert.data` (issued by the hub root), both written by
-//! `ndn-fwd init --profile hub`. Issued certs therefore chain to the same root
+//! `<pib_path>/ca/ca-cert.data` (issued by the namespace root), both written by
+//! `ndn-fwd init --namespace <ns>`. Issued certs therefore chain to the same root
 //! across restarts, and the issued certs, revocations and redeemed one-time
 //! tokens (as hashes) persist under `<pib_path>/ca/` ([`FileCaStore`]), so an
 //! invite token redeemed before a restart stays spent. `ephemeral = true`
 //! mints a throwaway self-signed key at every start instead (demo only,
 //! warned; nothing persists).
 //!
-//! A PIB-backed CA identity `/<ns>/CA` serves the personal network `/<ns>`:
+//! A PIB-backed CA identity `/<ns>/CA` serves the namespace `/<ns>`:
 //! issuance follows the role layout ([`RolePolicy`]) — device keys
 //! `/<ns>/<role>/<device>/KEY/…` only; `admin` and `node` certs need a device
 //! approval, tokens admit members and (guest-scoped) guests. An invite token
@@ -31,14 +31,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use ndn_app::{Consumer, Producer};
 use ndn_cert::challenge::device_approval::{DeviceApprovalChallenge, PendingApprovalStore};
-use ndn_cert::hub::{ANCHOR_CERT_FILE, CA_CERT_FILE, CA_DIR};
+use ndn_cert::namespace::{ANCHOR_CERT_FILE, CA_CERT_FILE, CA_DIR};
 use ndn_cert::roles::{Role, role_prefix, token_role};
 use ndn_cert::{
     CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore, IssuanceContext,
     IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge, RequireAttestationKind,
     RolePolicy, SingleKeyIdentity, TokenChallenge, TokenStore,
 };
-use ndn_config::DemoCaConfig;
+use ndn_config::CaTomlConfig;
 use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_identity::{ApprovalFeed, NdncertCa};
@@ -46,13 +46,13 @@ use ndn_packet::Name;
 use ndn_security::{Certificate, FilePib, KeyChain, SecurityManager, Validator};
 use ndn_transport::FaceId;
 
-pub(crate) const DEMO_CA_FACE_ID: u64 = 0xFFFF_0002;
+pub(crate) const CA_FACE_ID: u64 = 0xFFFF_0002;
 const APPROVE_FEED_FACE_ID: u64 = 0xFFFF_0003;
 const APPROVE_SIDE_FACE_ID: u64 = 0xFFFF_0004;
 
 /// Artefacts retained until post-build: the in-process faces' handles, the
 /// CA prefix, the signing keychain and the challenge set.
-pub(crate) struct DemoCaSpawn {
+pub(crate) struct CaSpawn {
     pub handle: InProcHandle,
     pub face_id: FaceId,
     /// CA namespace; NDNCERT names are `/<prefix>/CA/...` and issued certs
@@ -62,13 +62,13 @@ pub(crate) struct DemoCaSpawn {
     /// challenge.
     pub feed: Option<ApproveFeedFaces>,
     keychain: KeyChain,
-    /// `/localhop` trust anchor: the hub root (PIB mode) or the CA's own
+    /// `/localhop` trust anchor: the namespace root (PIB mode) or the CA's own
     /// self-signed cert (ephemeral mode).
     anchor: Certificate,
-    /// The personal network this CA serves (`/<ns>` of a PIB-backed
+    /// The namespace this CA serves (`/<ns>` of a PIB-backed
     /// `/<ns>/CA` identity): issuance follows its role layout. `None` for an
     /// ephemeral demo CA, which keeps accepting any challenge-passing name.
-    network: Option<Name>,
+    namespace: Option<Name>,
     challenges: Vec<Box<dyn ChallengeHandler>>,
     approvals: Option<PendingApprovalStore>,
     store: Option<Arc<FileCaStore>>,
@@ -81,44 +81,44 @@ pub(crate) struct ApproveFeedFaces {
     side: InProcHandle,
 }
 
-/// Validate `[demo_ca]`, load (or, with `ephemeral`, mint) the CA identity and
+/// Validate `[ca]`, load (or, with `ephemeral`, mint) the CA identity and
 /// build the challenge set. Returns the faces to attach to the builder and
-/// the [`DemoCaSpawn`] retained for post-build FIB wiring and the task spawn.
+/// the [`CaSpawn`] retained for post-build FIB wiring and the task spawn.
 /// Fails — so the forwarder refuses to start — on a CA with no challenge, a
 /// prefix ending in `/CA`, or a missing / inconsistent PIB identity.
 /// `pib_path` is the configured `[security] pib_path` (unused when
 /// `ephemeral`).
 pub(crate) async fn prepare(
-    cfg: &DemoCaConfig,
+    cfg: &CaTomlConfig,
     pib_path: &Path,
-) -> Result<(Vec<InProcFace>, DemoCaSpawn)> {
+) -> Result<(Vec<InProcFace>, CaSpawn)> {
     let prefix = parse_prefix(&cfg.prefix)?;
     if cfg.cert_validity_days == 0 {
         bail!(
-            "[demo_ca] cert_validity_days = 0 would issue certificates that are already \
+            "[ca] cert_validity_days = 0 would issue certificates that are already \
              expired; set it to the lifetime of issued certificates in days (default {})",
-            DemoCaConfig::DEFAULT_CERT_VALIDITY_DAYS
+            CaTomlConfig::DEFAULT_CERT_VALIDITY_DAYS
         );
     }
     let identity: Name = cfg
         .identity
         .parse()
-        .with_context(|| format!("[demo_ca] invalid identity '{}'", cfg.identity))?;
+        .with_context(|| format!("[ca] invalid identity '{}'", cfg.identity))?;
 
-    let (keychain, anchor, store, network) = if cfg.ephemeral {
+    let (keychain, anchor, store, namespace) = if cfg.ephemeral {
         tracing::warn!(
-            target: "demo_ca",
+            target: "ca",
             identity = %cfg.identity,
-            "[demo_ca] ephemeral = true: the CA signs with a throwaway self-signed key minted \
+            "[ca] ephemeral = true: the CA signs with a throwaway self-signed key minted \
              at startup; every restart creates a new anchor and the certs issued before it \
              stop verifying. Demo only.",
         );
         let keychain = KeyChain::ephemeral(&cfg.identity)
-            .with_context(|| format!("[demo_ca] keychain init failed for '{}'", cfg.identity))?;
+            .with_context(|| format!("[ca] keychain init failed for '{}'", cfg.identity))?;
         let anchor = keychain
             .manager_arc()
             .trust_anchor(keychain.key_name())
-            .ok_or_else(|| anyhow::anyhow!("[demo_ca] keychain produced no self-signed anchor"))?;
+            .ok_or_else(|| anyhow::anyhow!("[ca] keychain produced no self-signed anchor"))?;
         (keychain, anchor, None, None)
     } else {
         // The configured PIB, even if the node identity itself fell back to
@@ -126,27 +126,27 @@ pub(crate) async fn prepare(
         let (keychain, anchor) = load_pib_identity(&identity, pib_path).await?;
         let ca_dir = pib_path.join(CA_DIR);
         let store = FileCaStore::open(&ca_dir)
-            .map_err(|e| anyhow::anyhow!("[demo_ca] CA state dir {}: {e}", ca_dir.display()))?;
-        // A hub CA: identity `/<ns>/CA` certified by the hub root `/<ns>/KEY/…`.
-        let network = network_of(&identity)
+            .map_err(|e| anyhow::anyhow!("[ca] CA state dir {}: {e}", ca_dir.display()))?;
+        // A namespace CA: identity `/<ns>/CA` certified by the namespace root `/<ns>/KEY/…`.
+        let namespace = namespace_of(&identity)
             .filter(|ns| anchor.name.has_prefix(&ns.clone().append("KEY")));
         tracing::info!(
-            target: "demo_ca",
+            target: "ca",
             key = %keychain.key_name(),
             root = %anchor.name,
             state = %ca_dir.display(),
-            network = ?network.as_ref().map(Name::to_string),
+            namespace = ?namespace.as_ref().map(Name::to_string),
             "CA identity loaded from PIB",
         );
-        (keychain, anchor, Some(Arc::new(store)), network)
+        (keychain, anchor, Some(Arc::new(store)), namespace)
     };
-    // Role-carrying invite tokens are scoped under the network (the CA
-    // prefix for an ephemeral demo CA); on a hub CA every token is.
-    let token_ns = network.clone().unwrap_or_else(|| prefix.clone());
+    // Role-carrying invite tokens are scoped under the namespace (the CA
+    // prefix for an ephemeral demo CA); on a namespace CA every token is.
+    let token_ns = namespace.clone().unwrap_or_else(|| prefix.clone());
     let (challenges, approvals) =
-        build_challenges(cfg, store.as_ref(), &token_ns, network.is_some())?;
+        build_challenges(cfg, store.as_ref(), &token_ns, namespace.is_some())?;
 
-    let face_id = FaceId(DEMO_CA_FACE_ID);
+    let face_id = FaceId(CA_FACE_ID);
     let (face, handle) = InProcFace::new(face_id, 64);
     let mut faces = vec![face];
 
@@ -168,14 +168,14 @@ pub(crate) async fn prepare(
 
     Ok((
         faces,
-        DemoCaSpawn {
+        CaSpawn {
             handle,
             face_id,
             prefix,
             feed,
             keychain,
             anchor,
-            network,
+            namespace,
             challenges,
             approvals,
             store,
@@ -183,17 +183,17 @@ pub(crate) async fn prepare(
     ))
 }
 
-/// `[demo_ca].prefix` is the CA namespace; `NdncertCa` appends `/CA` itself
+/// `[ca].prefix` is the CA namespace; `NdncertCa` appends `/CA` itself
 /// (as do clients), so a prefix ending in `CA` would serve `/x/CA/CA/INFO`.
 fn parse_prefix(raw: &str) -> Result<Name> {
     let prefix: Name = raw
         .parse()
-        .with_context(|| format!("[demo_ca] invalid prefix '{raw}'"))?;
+        .with_context(|| format!("[ca] invalid prefix '{raw}'"))?;
     let comps = prefix.components();
     if comps.last().is_some_and(|c| c.value.as_ref() == b"CA") {
         let parent = Name::from_components(comps[..comps.len() - 1].iter().cloned());
         bail!(
-            "[demo_ca] prefix '{raw}' ends in /CA, but the CA appends /CA itself and would \
+            "[ca] prefix '{raw}' ends in /CA, but the CA appends /CA itself and would \
              serve '{raw}/CA/INFO'; set prefix = \"{parent}\" (the CA identity stays \
              identity = \"{raw}\")"
         );
@@ -201,8 +201,8 @@ fn parse_prefix(raw: &str) -> Result<Name> {
     Ok(prefix)
 }
 
-/// The personal network a CA identity `/<ns>/CA` serves: `/<ns>`.
-fn network_of(identity: &Name) -> Option<Name> {
+/// The namespace a CA identity `/<ns>/CA` serves: `/<ns>`.
+fn namespace_of(identity: &Name) -> Option<Name> {
     let comps = identity.components();
     let (last, parent) = comps.split_last()?;
     (last.value.as_ref() == b"CA" && !parent.is_empty())
@@ -233,11 +233,11 @@ impl IssuancePolicy for AllIssuance {
 /// Load the CA signing identity from the PIB: the certificate at
 /// `<pib>/ca/ca-cert.data` names the key (`<identity>/KEY/<id>`), whose
 /// private half must be in the PIB; the certificate must be signed by the
-/// hub root anchor.
+/// namespace root anchor.
 async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain, Certificate)> {
     let pib = FilePib::open(pib_path).map_err(|e| {
         anyhow::anyhow!(
-            "[demo_ca] cannot open PIB {}: {e}; run `ndn-fwd init --profile hub` or set \
+            "[ca] cannot open PIB {}: {e}; run `ndn-fwd init --namespace <ns>` or set \
              `ephemeral = true` for a throwaway demo CA",
             pib_path.display()
         )
@@ -246,7 +246,7 @@ async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain
     let cert_path = ca_dir.join(CA_CERT_FILE);
     let ca_cert = read_cert_wire(&cert_path)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "[demo_ca] no CA certificate at {}: run `ndn-fwd init --profile hub` to create \
+            "[ca] no CA certificate at {}: run `ndn-fwd init --namespace <ns>` to create \
              the CA identity '{identity}', or set `ephemeral = true` for a throwaway demo CA",
             cert_path.display()
         )
@@ -255,36 +255,36 @@ async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain
     let key_name = (*ca_cert.name).clone();
     if !key_name.has_prefix(&identity.clone().append("KEY")) {
         bail!(
-            "[demo_ca] {} certifies {key_name}, which is not a key of identity '{identity}'",
+            "[ca] {} certifies {key_name}, which is not a key of identity '{identity}'",
             cert_path.display()
         );
     }
     if !ca_cert.is_valid_now() {
-        bail!("[demo_ca] CA certificate {key_name} is expired or not yet valid");
+        bail!("[ca] CA certificate {key_name} is expired or not yet valid");
     }
     let signer = pib.get_signer(&key_name).map_err(|e| {
-        anyhow::anyhow!("[demo_ca] CA key {key_name} not in PIB {}: {e}", pib_path.display())
+        anyhow::anyhow!("[ca] CA key {key_name} not in PIB {}: {e}", pib_path.display())
     })?;
     if signer.public_key().as_deref() != Some(ca_cert.public_key.as_ref()) {
         bail!(
-            "[demo_ca] PIB key {key_name} does not match the public key in {}",
+            "[ca] PIB key {key_name} does not match the public key in {}",
             cert_path.display()
         );
     }
 
     let issuer = ca_cert.issuer.clone().ok_or_else(|| {
-        anyhow::anyhow!("[demo_ca] CA certificate {key_name} has no issuer KeyLocator")
+        anyhow::anyhow!("[ca] CA certificate {key_name} has no issuer KeyLocator")
     })?;
     let anchor = match read_cert_wire(&ca_dir.join(ANCHOR_CERT_FILE))? {
         Some(anchor) => anchor,
         None => pib
             .trust_anchors()
-            .map_err(|e| anyhow::anyhow!("[demo_ca] reading PIB trust anchors: {e}"))?
+            .map_err(|e| anyhow::anyhow!("[ca] reading PIB trust anchors: {e}"))?
             .into_iter()
             .find(|a| a.name == issuer)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "[demo_ca] CA certificate {key_name} is issued by {issuer}, which is not a \
+                    "[ca] CA certificate {key_name} is issued by {issuer}, which is not a \
                      trust anchor in PIB {}",
                     pib_path.display()
                 )
@@ -292,25 +292,25 @@ async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain
     };
     if anchor.name != issuer {
         bail!(
-            "[demo_ca] CA certificate {key_name} is issued by {issuer}, not by the anchor {}",
+            "[ca] CA certificate {key_name} is issued by {issuer}, not by the anchor {}",
             anchor.name
         );
     }
     let (Some(region), Some(sig)) = (&ca_cert.signed_region, &ca_cert.sig_value) else {
-        bail!("[demo_ca] CA certificate {key_name} carries no signature");
+        bail!("[ca] CA certificate {key_name} carries no signature");
     };
     let verdict =
         ndn_security::verifier::verify_by_sig_type(ca_cert.sig_type, region, sig, &anchor.public_key)
             .await;
     if !matches!(verdict, Ok(ndn_security::VerifyOutcome::Valid)) {
-        bail!("[demo_ca] CA certificate {key_name} is not validly signed by anchor {issuer}");
+        bail!("[ca] CA certificate {key_name} is not validly signed by anchor {issuer}");
     }
 
     let mgr = SecurityManager::new();
     mgr.register_signer(key_name.clone(), signer);
     mgr.cert_cache().insert(ca_cert);
     if !mgr.add_trust_anchor(anchor.clone()) {
-        bail!("[demo_ca] root anchor {issuer} is expired or not yet valid");
+        bail!("[ca] root anchor {issuer} is expired or not yet valid");
     }
     Ok((
         KeyChain::from_parts(Arc::new(mgr), identity.clone(), key_name),
@@ -323,20 +323,20 @@ fn read_cert_wire(path: &Path) -> Result<Option<Certificate>> {
     let wire = match std::fs::read(path) {
         Ok(w) => w,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(anyhow::anyhow!("[demo_ca] reading {}: {e}", path.display())),
+        Err(e) => return Err(anyhow::anyhow!("[ca] reading {}: {e}", path.display())),
     };
     ndn_cert::ca::deserialize_cert(&wire)
         .map(Some)
-        .ok_or_else(|| anyhow::anyhow!("[demo_ca] {} is not a certificate Data", path.display()))
+        .ok_or_else(|| anyhow::anyhow!("[ca] {} is not a certificate Data", path.display()))
 }
 
-/// Add the CA's trust anchor (hub root, or the ephemeral CA's self-signed
+/// Add the CA's trust anchor (namespace root, or the ephemeral CA's self-signed
 /// cert) as a `/localhop` trust anchor and, for in-process operation, share
 /// the CA's `Arc<CertCache>` with the validator so newly-issued certs are
-/// visible without a network fetch. When `existing` is `Some`, its cache is
+/// visible without a fetch over NDN. When `existing` is `Some`, its cache is
 /// preserved; the anchor and the CA cert (the chain's middle link) are added.
 pub(crate) fn install_localhop_anchor(
-    spawn: &DemoCaSpawn,
+    spawn: &CaSpawn,
     existing: Option<Arc<Validator>>,
 ) -> Result<Arc<Validator>> {
     let manager = spawn.keychain.manager_arc();
@@ -359,10 +359,10 @@ pub(crate) fn install_localhop_anchor(
         )),
     };
     if !validator.add_trust_anchor(spawn.anchor.clone()) {
-        bail!("[demo_ca] anchor {} is expired or not yet valid", spawn.anchor.name);
+        bail!("[ca] anchor {} is expired or not yet valid", spawn.anchor.name);
     }
     tracing::info!(
-        target: "demo_ca",
+        target: "ca",
         anchor = %spawn.anchor.name,
         "installed CA trust anchor as /localhop trust anchor"
     );
@@ -373,14 +373,14 @@ pub(crate) fn install_localhop_anchor(
 /// are in place. Returns the device-approval store, if any, for the mgmt
 /// `ca` backend.
 pub(crate) fn spawn(
-    prep: DemoCaSpawn,
-    cfg: &DemoCaConfig,
+    prep: CaSpawn,
+    cfg: &CaTomlConfig,
     engine: &ForwarderEngine,
 ) -> Result<Option<PendingApprovalStore>> {
     let identity = ndn_identity::Identity::from_keychain_public(prep.keychain);
 
     tracing::info!(
-        target: "demo_ca",
+        target: "ca",
         challenges = ?prep.challenges.iter().map(|c| c.challenge_type()).collect::<Vec<_>>(),
         "NDNCERT challenge set",
     );
@@ -390,7 +390,7 @@ pub(crate) fn spawn(
     let lifetime = std::time::Duration::from_secs(u64::from(cfg.cert_validity_days) * 86_400);
     let mut builder = NdncertCa::builder()
         .name(prep.prefix.to_string())
-        .map_err(|e| anyhow::anyhow!("[demo_ca] invalid prefix: {e}"))?
+        .map_err(|e| anyhow::anyhow!("[ca] invalid prefix: {e}"))?
         .info("ndn-fwd NDNCERT CA")
         .signing_identity(&identity)
         .emit_attestations(cfg.emit_attestations)
@@ -404,19 +404,19 @@ pub(crate) fn spawn(
     }
 
     let mut issuance: Vec<Box<dyn IssuancePolicy>> = Vec::new();
-    if let Some(network) = prep.network {
+    if let Some(namespace) = prep.namespace {
         tracing::info!(
-            target: "demo_ca",
-            network = %network,
-            "issuance follows the role layout: <network>/<role>/<device>/KEY/...; admin and \
+            target: "ca",
+            namespace = %namespace,
+            "issuance follows the role layout: <namespace>/<role>/<device>/KEY/...; admin and \
              node certs need a device approval",
         );
-        issuance.push(Box::new(RolePolicy::new(network)));
+        issuance.push(Box::new(RolePolicy::new(namespace)));
     }
     if let Some(ra) = &cfg.require_attestation {
         let prefix: Name = ra.prefix.parse().with_context(|| {
             format!(
-                "[demo_ca] invalid require_attestation prefix '{}'",
+                "[ca] invalid require_attestation prefix '{}'",
                 ra.prefix
             )
         })?;
@@ -424,7 +424,7 @@ pub(crate) fn spawn(
             RequireAttestationKind::new(prefix, ra.kind.clone()).require_signed(ra.require_signed),
         ));
         tracing::info!(
-            target: "demo_ca",
+            target: "ca",
             prefix = %ra.prefix, kind = %ra.kind, signed = ra.require_signed,
             "issuance gated on challenge attestation",
         );
@@ -437,7 +437,7 @@ pub(crate) fn spawn(
 
     let ca = builder
         .build()
-        .map_err(|e| anyhow::anyhow!("[demo_ca] CA build failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("[ca] CA build failed: {e}"))?;
 
     let producer = Producer::from_handle(prep.handle, prep.prefix.clone());
     let prefix_str = prep.prefix.to_string();
@@ -451,22 +451,22 @@ pub(crate) fn spawn(
             let side = Consumer::from_handle(feed.side);
             tokio::spawn(async move {
                 tracing::info!(
-                    target: "demo_ca", prefix = %prefix_str, feed = %feed_prefix,
+                    target: "ca", prefix = %prefix_str, feed = %feed_prefix,
                     "NDNCERT CA serving (with device-approval feed)"
                 );
                 if let Err(e) = ca
                     .serve_with_feed(producer, approval_feed, feed_producer, side)
                     .await
                 {
-                    tracing::error!(target: "demo_ca", error = %e, "NDNCERT CA exited");
+                    tracing::error!(target: "ca", error = %e, "NDNCERT CA exited");
                 }
             });
         }
         _ => {
             tokio::spawn(async move {
-                tracing::info!(target: "demo_ca", prefix = %prefix_str, "NDNCERT CA serving");
+                tracing::info!(target: "ca", prefix = %prefix_str, "NDNCERT CA serving");
                 if let Err(e) = ca.serve(producer).await {
-                    tracing::error!(target: "demo_ca", error = %e, "NDNCERT CA exited");
+                    tracing::error!(target: "ca", error = %e, "NDNCERT CA exited");
                 }
             });
         }
@@ -485,7 +485,7 @@ fn approval_validator(engine: &ForwarderEngine) -> Result<Arc<Validator>> {
     }
     let mgr = engine.security().ok_or_else(|| {
         anyhow::anyhow!(
-            "[demo_ca] device-approval needs the node's trust contexts to validate approvals, \
+            "[ca] device-approval needs the node's trust contexts to validate approvals, \
              but the engine has no security manager"
         )
     })?;
@@ -497,7 +497,7 @@ fn approval_validator(engine: &ForwarderEngine) -> Result<Arc<Validator>> {
     )))
 }
 
-/// Build the CA's challenge set from config: the `[[demo_ca.challenge]]` list
+/// Build the CA's challenge set from config: the `[[ca.challenge]]` list
 /// when set, else a `token` challenge from the legacy `tokens`. A CA with
 /// neither has no way to authenticate requesters and is refused; `nop`
 /// (auto-approve) is only offered when listed explicitly. All
@@ -505,29 +505,29 @@ fn approval_validator(engine: &ForwarderEngine) -> Result<Arc<Validator>> {
 /// the mgmt backend and the APPROVE-FEED. With a CA `store` (PIB mode), token
 /// redemptions persist in it so a redeemed token is refused after a restart.
 /// Role-carrying tokens are scoped under `token_ns` ([`token_challenge`]);
-/// `hub` marks a hub CA, whose tokens are all bounded by role.
+/// `namespace_ca` marks a namespace CA, whose tokens are all bounded by role.
 fn build_challenges(
-    cfg: &DemoCaConfig,
+    cfg: &CaTomlConfig,
     store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
-    hub: bool,
+    namespace_ca: bool,
 ) -> Result<(Vec<Box<dyn ChallengeHandler>>, Option<PendingApprovalStore>)> {
     if !cfg.challenges.is_empty() {
         let mut approvals = None;
         let handlers = cfg
             .challenges
             .iter()
-            .map(|c| build_challenge(c, store, token_ns, hub, &mut approvals))
+            .map(|c| build_challenge(c, store, token_ns, namespace_ca, &mut approvals))
             .collect::<Result<Vec<_>>>()?;
         return Ok((handlers, approvals));
     }
     if !cfg.tokens.is_empty() {
-        let challenge = token_challenge(&cfg.tokens, store, token_ns, hub)?;
+        let challenge = token_challenge(&cfg.tokens, store, token_ns, namespace_ca)?;
         return Ok((vec![challenge], None));
     }
     bail!(
-        "[demo_ca] no challenge configured, so the CA could not authenticate requesters; \
-         add `[[demo_ca.challenge]]` entries (kind = \"token\" | \"device-approval\" | \
+        "[ca] no challenge configured, so the CA could not authenticate requesters; \
+         add `[[ca.challenge]]` entries (kind = \"token\" | \"device-approval\" | \
          \"pin\" | \"email\", or \"nop\" to auto-approve every request in a demo) or \
          `tokens = [...]`"
     )
@@ -537,9 +537,9 @@ fn build_challenges(
 /// when one is given. A token naming a role (`member-…`, `guest-…`, as
 /// `ndn-fwd-tokens new --role` mints them) is scoped to `<token_ns>/<role>`:
 /// it certifies only names under that prefix. Other tokens are unscoped,
-/// except on a hub CA (`hub`).
+/// except on a namespace CA (`namespace_ca`).
 ///
-/// On a hub CA the issuance policy admits a token only for a member or a
+/// On a namespace CA the issuance policy admits a token only for a member or a
 /// guest, after the challenge has consumed it. So every token is scoped
 /// there: the scope check refuses a request the policy would refuse
 /// *before* the token is spent. Unscoped tokens are scoped to
@@ -549,21 +549,21 @@ fn token_challenge(
     tokens: &[String],
     store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
-    hub: bool,
+    namespace_ca: bool,
 ) -> Result<Box<dyn ChallengeHandler>> {
     let tokens_store = match store {
         Some(store) => TokenStore::with_store(Arc::clone(store) as Arc<dyn CaStore>)
-            .map_err(|e| anyhow::anyhow!("[demo_ca] loading redeemed tokens: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("[ca] loading redeemed tokens: {e}"))?,
         None => TokenStore::new(),
     };
     for token in tokens {
         let role = match token_role(token) {
-            Some(role @ (Role::Admin | Role::Node)) if hub => bail!(
-                "[demo_ca] token '{token}' names the {role} role, but a hub CA never issues \
+            Some(role @ (Role::Admin | Role::Node)) if namespace_ca => bail!(
+                "[ca] token '{token}' names the {role} role, but a namespace_ca CA never issues \
                  {role} certificates on a token alone; remove it from the config and enroll \
                  the device with the device-approval challenge (an admin approves it)"
             ),
-            None if hub => Some(Role::Member),
+            None if namespace_ca => Some(Role::Member),
             role => role,
         };
         match role {
@@ -580,24 +580,24 @@ fn build_challenge(
     c: &ndn_config::ChallengeConfig,
     store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
-    hub: bool,
+    namespace_ca: bool,
     approvals: &mut Option<PendingApprovalStore>,
 ) -> Result<Box<dyn ChallengeHandler>> {
     match c.kind.as_str() {
         "nop" => {
             tracing::warn!(
-                target: "demo_ca",
-                "[demo_ca] `nop` challenge configured: every enrollment request is approved \
+                target: "ca",
+                "[ca] `nop` challenge configured: every enrollment request is approved \
                  without authentication. Demo only.",
             );
             Ok(Box::new(NopChallenge::new()))
         }
-        "token" => token_challenge(&c.tokens, store, token_ns, hub),
+        "token" => token_challenge(&c.tokens, store, token_ns, namespace_ca),
         "pin" => {
             let pin = c
                 .pin
                 .as_deref()
-                .with_context(|| "[demo_ca] pin challenge requires `pin`")?;
+                .with_context(|| "[ca] pin challenge requires `pin`")?;
             let handler = match c.max_tries {
                 Some(m) => PinChallenge::new_with_max_tries(pin, m),
                 None => PinChallenge::new(pin),
@@ -620,7 +620,7 @@ fn build_challenge(
             Ok(Box::new(DeviceApprovalChallenge::new(store)))
         }
         other => Err(anyhow::anyhow!(
-            "[demo_ca] unsupported challenge kind '{other}' \
+            "[ca] unsupported challenge kind '{other}' \
              (nop|token|pin|email|device-approval; possession/yubikey are wired in code)"
         )),
     }
@@ -644,7 +644,7 @@ fn make_email_sender(smtp: Option<&ndn_config::SmtpConfig>) -> Arc<dyn EmailSend
     #[cfg(not(feature = "smtp"))]
     {
         tracing::warn!(
-            target: "demo_ca",
+            target: "ca",
             "email challenge configured with a real SMTP relay but the `smtp` feature is off; \
              logging codes instead. Rebuild ndn-fwd with --features smtp to deliver email.",
         );
@@ -682,23 +682,23 @@ mod tests {
         }
     }
 
-    fn hub_cfg(challenges: Vec<ChallengeConfig>) -> DemoCaConfig {
-        DemoCaConfig {
+    fn namespace_cfg(challenges: Vec<ChallengeConfig>) -> CaTomlConfig {
+        CaTomlConfig {
             enabled: true,
             prefix: "/home/bob".to_string(),
             identity: "/home/bob/CA".to_string(),
             challenges,
-            ..DemoCaConfig::default()
+            ..CaTomlConfig::default()
         }
     }
 
-    /// Provision the PIB exactly as `ndn-fwd init --profile hub` does (root
+    /// Provision the PIB exactly as `ndn-fwd init` does (root
     /// key + anchor, `/home/bob/CA` key, CA cert issued by the root under
     /// `ca/`, admin device `/home/bob/admin/desk`). Returns the root anchor.
-    fn write_hub_pib(dir: &Path) -> Certificate {
+    fn write_namespace_pib(dir: &Path) -> Certificate {
         let pib = FilePib::new(dir).unwrap();
-        ndn_cert::init_hub_in_pib(&pib, &"/home/bob".parse().unwrap(), "desk", false)
-            .expect("hub init");
+        ndn_cert::init_namespace_in_pib(&pib, &"/home/bob".parse().unwrap(), "desk", false)
+            .expect("namespace_ca init");
         read_cert_wire(&dir.join(CA_DIR).join(ANCHOR_CERT_FILE))
             .unwrap()
             .expect("init writes the root anchor cert")
@@ -722,7 +722,7 @@ mod tests {
     /// Boot an engine with the CA wired exactly as `main` does, plus one
     /// client face. The content store is off so every fetch reaches the CA
     /// (a revoked cert would otherwise still be answered from the cache).
-    async fn run_ca(cfg: &DemoCaConfig, pib: &Path) -> RunningCa {
+    async fn run_ca(cfg: &CaTomlConfig, pib: &Path) -> RunningCa {
         let (faces, spawn_state) = prepare(cfg, pib).await.expect("CA prepares");
         let (client_face, client_handle) = InProcFace::new(FaceId(CLIENT_FACE), 64);
         let mut builder = EngineBuilder::new(EngineConfig::default())
@@ -813,8 +813,8 @@ mod tests {
     #[tokio::test]
     async fn redeemed_token_is_refused_after_restart() {
         let dir = tempfile::tempdir().unwrap();
-        write_hub_pib(dir.path());
-        let cfg = hub_cfg(vec![challenge("token", &["invite-1", "invite-2"])]);
+        write_namespace_pib(dir.path());
+        let cfg = namespace_cfg(vec![challenge("token", &["invite-1", "invite-2"])]);
 
         let mut ca = run_ca(&cfg, dir.path()).await;
         enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
@@ -846,8 +846,8 @@ mod tests {
     #[tokio::test]
     async fn revoke_over_ndn_by_holder_or_ca_only() {
         let dir = tempfile::tempdir().unwrap();
-        write_hub_pib(dir.path());
-        let cfg = hub_cfg(vec![challenge("token", &["invite-1", "invite-2", "invite-3"])]);
+        write_namespace_pib(dir.path());
+        let cfg = namespace_cfg(vec![challenge("token", &["invite-1", "invite-2", "invite-3"])]);
 
         let mut ca = run_ca(&cfg, dir.path()).await;
         let laptop = enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
@@ -914,10 +914,10 @@ mod tests {
 
     #[tokio::test]
     async fn ca_without_challenges_refuses_to_start() {
-        let cfg = DemoCaConfig {
+        let cfg = CaTomlConfig {
             enabled: true,
             ephemeral: true,
-            ..DemoCaConfig::default()
+            ..CaTomlConfig::default()
         };
         let err = prepare(&cfg, no_pib())
             .await
@@ -931,7 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn nop_is_only_offered_when_listed() {
-        let mut cfg = hub_cfg(vec![challenge("nop", &[])]);
+        let mut cfg = namespace_cfg(vec![challenge("nop", &[])]);
         cfg.ephemeral = true;
         let (_, spawn_state) = prepare(&cfg, no_pib()).await.expect("explicit nop is allowed");
         let kinds: Vec<_> = spawn_state
@@ -944,7 +944,7 @@ mod tests {
 
     #[tokio::test]
     async fn prefix_ending_in_ca_is_rejected() {
-        let mut cfg = hub_cfg(vec![challenge("nop", &[])]);
+        let mut cfg = namespace_cfg(vec![challenge("nop", &[])]);
         cfg.ephemeral = true;
         cfg.prefix = "/home/bob/CA".to_string();
         let err = prepare(&cfg, no_pib()).await.err().expect("/CA prefix rejected");
@@ -952,10 +952,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pib_ca_without_hub_identity_refuses_to_start() {
+    async fn pib_ca_without_namespace_identity_refuses_to_start() {
         let dir = tempfile::tempdir().unwrap();
         FilePib::new(dir.path()).unwrap();
-        let cfg = hub_cfg(vec![challenge("token", &["t"])]);
+        let cfg = namespace_cfg(vec![challenge("token", &["t"])]);
         let err = prepare(&cfg, dir.path())
             .await
             .err()
@@ -974,8 +974,8 @@ mod tests {
     #[tokio::test]
     async fn pib_backed_ca_survives_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let root = write_hub_pib(dir.path());
-        let cfg = hub_cfg(vec![challenge("token", &["invite-1", "invite-2"])]);
+        let root = write_namespace_pib(dir.path());
+        let cfg = namespace_cfg(vec![challenge("token", &["invite-1", "invite-2"])]);
         let ca_cert = read_cert_wire(&dir.path().join(CA_DIR).join(CA_CERT_FILE))
             .unwrap()
             .unwrap();
@@ -1011,8 +1011,8 @@ mod tests {
         ca.stop().await;
     }
 
-    fn ephemeral_approval_cfg() -> DemoCaConfig {
-        let mut cfg = hub_cfg(vec![challenge("device-approval", &[])]);
+    fn ephemeral_approval_cfg() -> CaTomlConfig {
+        let mut cfg = namespace_cfg(vec![challenge("device-approval", &[])]);
         cfg.ephemeral = true;
         cfg
     }
@@ -1081,16 +1081,16 @@ mod tests {
         ca.stop().await;
     }
 
-    /// A hub CA (PIB-backed `/home/bob/CA`) issues only role-layout names, and
+    /// A namespace CA (PIB-backed `/home/bob/CA`) issues only role-layout names, and
     /// an invite token's role bounds what it can certify: a member token never
     /// yields an admin cert, an unscoped one never a guest cert. A request the
     /// CA refuses does not spend the token: it still enrolls a member after.
     #[tokio::test]
-    async fn hub_ca_tokens_are_bounded_by_role() {
+    async fn namespace_ca_tokens_are_bounded_by_role() {
         let dir = tempfile::tempdir().unwrap();
-        write_hub_pib(dir.path());
+        write_namespace_pib(dir.path());
         let tokens = ["member-m1", "member-m2", "guest-g1", "guest-g2", "invite-1"];
-        let cfg = hub_cfg(vec![challenge("token", &tokens)]);
+        let cfg = namespace_cfg(vec![challenge("token", &tokens)]);
         let mut ca = run_ca(&cfg, dir.path()).await;
 
         // A member token is scoped to /home/bob/member: no admin cert.
@@ -1122,13 +1122,13 @@ mod tests {
         ca.stop().await;
     }
 
-    /// On a hub CA an admin cert needs an admin's device approval: the token
+    /// On a namespace CA an admin cert needs an admin's device approval: the token
     /// path is refused, the approved device-approval path issues it.
     #[tokio::test]
-    async fn hub_ca_admin_cert_needs_device_approval() {
+    async fn namespace_ca_admin_cert_needs_device_approval() {
         let dir = tempfile::tempdir().unwrap();
-        write_hub_pib(dir.path());
-        let cfg = hub_cfg(vec![
+        write_namespace_pib(dir.path());
+        let cfg = namespace_cfg(vec![
             challenge("token", &["invite-1"]),
             challenge("device-approval", &[]),
         ]);
@@ -1151,10 +1151,10 @@ mod tests {
         ca.stop().await;
     }
 
-    /// On a hub CA an admin or node token could never issue anything, so the
+    /// On a namespace CA an admin or node token could never issue anything, so the
     /// CA refuses to start with one instead of letting requests spend it.
     #[test]
-    fn hub_ca_refuses_admin_and_node_tokens() {
+    fn namespace_ca_refuses_admin_and_node_tokens() {
         let ns: Name = "/home/bob".parse().unwrap();
         for t in ["admin-a1", "node-n1"] {
             assert!(token_challenge(&[t.to_string()], None, &ns, true).is_err(), "{t}");

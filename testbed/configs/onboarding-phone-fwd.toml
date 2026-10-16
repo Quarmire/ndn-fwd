@@ -1,10 +1,10 @@
 # Onboarding loop — embedded NDNCERT CA reachable from a phone browser.
 #
 # Stands up ndn-fwd with:
-#   - an embedded NDNCERT CA (`[demo_ca]`) gated by a TOKEN challenge, and
+#   - an embedded NDNCERT CA (`[ca]`) gated by a TOKEN challenge, and
 #   - a WebTransport listener the phone's browser dials over QUIC.
 #
-# The phone runs the wasm `JoinClient`: it opens a WebTransport face to
+# The phone runs the wasm `EnrollClient`: it opens a WebTransport face to
 # `https://<this-host>:4433/ndn?cert=<spki-hash>`, requests a cert from
 # `/demo/CA/{INFO,NEW,CHALLENGE}` presenting the token, and persists the
 # issued cert as a SafeBag in IndexedDB. The CA runs with `ephemeral = true`:
@@ -38,7 +38,7 @@ require_signed_commands = false
 # serves `/demo/CA/{INFO,NEW,CHALLENGE}` (the client appends `/CA/NEW` too).
 # `identity` is the CA's signing identity, `/demo/CA`. A prefix ending in `/CA`
 # is rejected at startup. Replace the token before exposing this.
-[demo_ca]
+[ca]
 enabled   = true
 prefix    = "/demo"
 identity  = "/demo/CA"

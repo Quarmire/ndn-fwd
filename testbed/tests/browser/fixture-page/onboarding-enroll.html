@@ -2,27 +2,27 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Critical-path #4 onboarding-join fixture</title>
+  <title>Critical-path #4 onboarding-enroll fixture</title>
 </head>
 <body>
-  <p>Critical-path #4 onboarding-join fixture — drives `JoinClient` from Playwright.</p>
+  <p>Critical-path #4 onboarding-enroll fixture — drives `EnrollClient` from Playwright.</p>
   <pre id="log"></pre>
   <script src="/sw-pkg/shared_engine.js"></script>
   <script>
     function log(msg) {
       const el = document.getElementById('log');
       el.textContent += msg + '\n';
-      console.log('[join-tab]', msg);
+      console.log('[enroll-tab]', msg);
     }
     (async () => {
       await wasm_bindgen('/sw-pkg/shared_engine_bg.wasm');
-      const { JoinClient } = wasm_bindgen;
-      window.__join = await JoinClient.open();
-      log('JoinClient ready');
-      window.__joinReady = true;
+      const { EnrollClient } = wasm_bindgen;
+      window.__enroll = await EnrollClient.open();
+      log('EnrollClient ready');
+      window.__enrollReady = true;
     })().catch((e) => {
       log('FATAL: ' + (e?.message ?? String(e)));
-      window.__joinReadyError = String(e);
+      window.__enrollReadyError = String(e);
     });
   </script>
 </body>

@@ -44,7 +44,7 @@ fn load(pib: &Path) -> Result<Keyring> {
     }
     if keyring.is_empty() {
         bail!(
-            "no adopted trust context in {}/contexts (run `ndn-fwd init --profile hub` or \
+            "no adopted trust context in {}/contexts (run `ndn-fwd init --namespace <ns>` or \
              `ndn-fwd adopt <envelope>`)",
             pib.display()
         );

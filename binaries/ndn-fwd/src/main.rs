@@ -47,7 +47,7 @@ fn build_obs_retention(
 mod active_identity;
 mod context_adopt;
 mod context_publisher;
-mod demo_ca;
+mod ca;
 mod enroll;
 mod face_provision;
 mod face_setup;
@@ -95,10 +95,10 @@ ndn-fwd {version} — standalone NDN forwarder daemon
 
 USAGE:
   ndn-fwd [OPTIONS]                       run the forwarder
-  ndn-fwd init --profile hub --namespace <ndn-name> [--device <name>]
-               [--pib <dir>] [--force]
-                                          stand up a network trust root in the
-                                          PIB (root key, CA identity <ns>/CA,
+  ndn-fwd init --namespace <ndn-name> [--device <name>] [--pib <dir>]
+               [--force]
+                                          create a namespace on this root
+                                          device: write to the PIB its root key, CA identity <ns>/CA,
                                           this primary device's admin identity
                                           <ns>/admin/<device> certified by the
                                           CA — device name default: the host
@@ -109,7 +109,7 @@ USAGE:
                                           [security] lines for ndn-fwd.toml,
                                           and exit
   ndn-fwd adopt <anchor-link> [-c <config>] [--pib <dir>]
-                                          adopt the network an ndn-trust://anchor
+                                          adopt the namespace an ndn-trust://anchor
                                           link names: the running daemon checks
                                           the context against the link's expected
                                           fingerprint (fetching it by name when
@@ -389,12 +389,12 @@ async fn main() -> Result<()> {
     // or a throwaway key with `ephemeral = true`) before build so the faces
     // can be attached, and splice its trust anchor into the localhop
     // validator so certs it issues authorise localhop commands.
-    let demo_ca_artifacts = if fwd_config.demo_ca.enabled {
+    let ca_artifacts = if fwd_config.ca.enabled {
         // The configured PIB even when the node identity fell back to an
         // ephemeral key: the CA identity is its own key in that PIB.
         let ca_pib = pib_root(&fwd_config);
-        let (faces, spawn) = demo_ca::prepare(&fwd_config.demo_ca, &ca_pib).await?;
-        localhop_validator = Some(demo_ca::install_localhop_anchor(
+        let (faces, spawn) = ca::prepare(&fwd_config.ca, &ca_pib).await?;
+        localhop_validator = Some(ca::install_localhop_anchor(
             &spawn,
             localhop_validator,
         )?);
@@ -462,7 +462,7 @@ async fn main() -> Result<()> {
         builder = builder.with_rate_limit_hook(rate_limit_hook.clone());
     }
 
-    let demo_ca_spawn = match demo_ca_artifacts {
+    let ca_spawn = match ca_artifacts {
         Some((faces, spawn)) => {
             for face in faces {
                 builder = builder.face(face);
@@ -962,13 +962,13 @@ async fn main() -> Result<()> {
 
     // The CA's device-approval store (if it offers that challenge), shared
     // with the mgmt `ca` module below.
-    let ca_approvals = match demo_ca_spawn {
+    let ca_approvals = match ca_spawn {
         Some(spawn) => {
             // `/<prefix>` covers `/<prefix>/CA/*` and cert-fetch for the
             // certs issued under it; more-specific registrations still win LPM.
             engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
             tracing::info!(
-                target: "demo_ca",
+                target: "ca",
                 prefix = %spawn.prefix,
                 face = spawn.face_id.0,
                 "CA FIB entry installed"
@@ -976,13 +976,13 @@ async fn main() -> Result<()> {
             if let Some(feed) = &spawn.feed {
                 engine.fib().add_nexthop(&feed.prefix, feed.face_id, 0);
                 tracing::info!(
-                    target: "demo_ca",
+                    target: "ca",
                     prefix = %feed.prefix,
                     face = feed.face_id.0,
                     "CA approval-feed FIB entry installed"
                 );
             }
-            demo_ca::spawn(spawn, &fwd_config.demo_ca, &engine)?
+            ca::spawn(spawn, &fwd_config.ca, &engine)?
         }
         None => None,
     };
@@ -1276,7 +1276,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let pib = FilePib::new(dir.path()).expect("pib");
         let ns: ndn_packet::Name = "/home/bob".parse().expect("name");
-        ndn_cert::init_hub_in_pib(&pib, &ns, "laptop", false).expect("init hub");
+        ndn_cert::init_namespace_in_pib(&pib, &ns, "laptop", false).expect("init namespace");
 
         let mut cfg = ForwarderConfig::default();
         cfg.security.pib_path = Some(dir.path().display().to_string());

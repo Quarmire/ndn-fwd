@@ -16,11 +16,11 @@ Every token carries the role it admits — `member-<hex>` (default) or
 `<namespace>/<role>`, so a member invite can never certify an admin or a
 guest, and the invite names `<namespace>/<role>` as the invitee's identity
 namespace. `--role admin` and `--role node` are refused: admin devices and
-super nodes enroll with the `device-approval` challenge and an admin
+relays (`node` role) enroll with the `device-approval` challenge and an admin
 approves them.
 
 The CLI does **not** talk to a running `ndn-fwd` — tokens go into
-`[demo_ca].tokens` in the TOML config, and the forwarder picks them
+`[ca].tokens` in the TOML config, and the forwarder picks them
 up on restart. Live token management against a running CA is a
 future `ndn-fwd-mgmt` subcommand.
 
@@ -34,7 +34,7 @@ cargo run --release -p ndn-fwd-tokens -- new \
 Output:
 
 ```
-token  = "member-8f3a4c19..."  # member only: scoped to /home/bob/member   (paste into [demo_ca].tokens)
+token  = "member-8f3a4c19..."  # member only: scoped to /home/bob/member   (paste into [ca].tokens)
 invite = https://ndn.example.com/t/invite#cARx...                         (give to requester)
 ```
 
@@ -51,10 +51,10 @@ CLI flags only.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--ca` | required | NDNCERT CA prefix the invitee enrolls against (`[demo_ca].prefix`). |
-| `--namespace` | required | The network namespace (`ndn-fwd init --namespace`); the invite names `<namespace>/<role>` (the token's role) as the identity namespace. |
+| `--ca` | required | NDNCERT CA prefix the invitee enrolls against (`[ca].prefix`). |
+| `--namespace` | required | The namespace (`ndn-fwd init --namespace`); the invite names `<namespace>/<role>` (the token's role) as the identity namespace. |
 | `--anchor-fp` | none | 64-hex SHA-256 of the CA's root anchor public key; lets the invitee pin the CA. |
-| `--domain` | none | DNS domain serving the `JoinClient` page. Set → `https://<d>/t/invite#…`; unset → `ndn-trust://invite/…`. |
+| `--domain` | none | DNS domain serving the `EnrollClient` page. Set → `https://<d>/t/invite#…`; unset → `ndn-trust://invite/…`. |
 
 ### `new` flags
 
@@ -88,7 +88,7 @@ nix profile install github:Quarmire/ndn-rs#ndn-fwd-tokens
 
 ```bash
 ndn-fwd-tokens new --ca /home/bob --namespace /home/bob --domain ndn.example.com
-# Paste the token line into ndn-fwd.toml under [demo_ca].tokens, restart ndn-fwd.
+# Paste the token line into ndn-fwd.toml under [ca].tokens, restart ndn-fwd.
 ```
 
 ### Mint guest invites for a party
@@ -98,7 +98,7 @@ ndn-fwd-tokens new --ca /home/bob --namespace /home/bob --role guest --count 20 
 ```
 
 Each entry is `token = "<…>"` + `invite = <…>`; bulk-paste the token
-half into `[demo_ca].tokens`.
+half into `[ca].tokens`.
 
 ### Token + QR
 

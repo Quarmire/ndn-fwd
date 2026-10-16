@@ -1,13 +1,13 @@
 /**
  * Critical-path #4 — onboarding-link witness.
  *
- * Proves the token-join loop end to end against a real embedded NDNCERT CA:
+ * Proves the token-enrollment loop end to end against a real embedded NDNCERT CA:
  *
- *   1. **Token claim** — a tab loads the wasm `JoinClient` and calls
- *      `join(host, ca, idp, token)` where `token` is in the spawned
- *      ndn-fwd's `[demo_ca].tokens`. It opens a WebTransport face to the
+ *   1. **Token claim** — a tab loads the wasm `EnrollClient` and calls
+ *      `enroll_via(host, ca, idp, token)` where `token` is in the spawned
+ *      ndn-fwd's `[ca].tokens`. It opens a WebTransport face to the
  *      forwarder, runs NDNCERT NEW + CHALLENGE(token) + cert-fetch, and
- *      resolves to a `JoinedIdentityInfo { restored:false }` with a cert
+ *      resolves to a `EnrolledIdentityInfo { restored:false }` with a cert
  *      name under the requested identity prefix.
  *   2. **Reload restore** — the same browser context reloads the page with
  *      no token; `try_restore()` resolves to
@@ -37,7 +37,7 @@ const NDN_FWD_BIN =
 const WASM_BUNDLE = path.join(__dirname, 'fixture-page', 'sw-pkg', 'shared_engine_bg.wasm');
 
 const WT_PORT = 4443;
-// The CA namespace. `[demo_ca].prefix` is the namespace; NdncertCa appends
+// The CA namespace. `[ca].prefix` is the namespace; NdncertCa appends
 // `/CA` itself and serves `/demo/CA/{INFO,NEW,CHALLENGE}`. The enroll client
 // likewise appends `/CA/NEW`, so both sides land on `/demo/CA/NEW`. (A prefix
 // ending in `/CA` is rejected at forwarder startup.)
@@ -58,7 +58,7 @@ enabled = true
 listen = "127.0.0.1:${WT_PORT}"
 cert_source = { type = "self_signed_dev", hostnames = ["localhost", "127.0.0.1"] }
 
-[demo_ca]
+[ca]
 enabled = true
 prefix = "${CA_PREFIX}"
 identity = "${CA_PREFIX}/CA"
@@ -71,7 +71,7 @@ level = "info"
 
 let fwdProc: ChildProcess | null = null;
 let certHashHex = '';
-const fwdConfigPath = path.join(os.tmpdir(), 'ndn-fwd-onboarding-join-test.toml');
+const fwdConfigPath = path.join(os.tmpdir(), 'ndn-fwd-onboarding-enroll-test.toml');
 
 /** Wait for the forwarder to log its leaf cert SHA-256 (hex). */
 function waitForCertHash(proc: ChildProcess): Promise<string> {
@@ -123,7 +123,7 @@ test.afterAll(async () => {
 //   - `FaceTable` id allocator collided with the fixed-id upstream face.
 // Runs when ndn-fwd (release) and the wasm bundle are built; skips cleanly
 // otherwise (CI brings ndn-fwd up out-of-band, per the dioxus_demo convention).
-test.describe('Critical-path #4 — onboarding-link join + reload-restore', () => {
+test.describe('Critical-path #4 — onboarding-link enrollment + reload-restore', () => {
   test('tab claims invite token, then reload restores from IdbPib', async ({ browser }) => {
     test.skip(!fs.existsSync(NDN_FWD_BIN), `ndn-fwd binary not found at ${NDN_FWD_BIN}`);
     test.skip(!fs.existsSync(WASM_BUNDLE), 'wasm bundle not built — run ./build-shared-engine.sh');
@@ -137,15 +137,15 @@ test.describe('Critical-path #4 — onboarding-link join + reload-restore', () =
 
     try {
       // ── First visit: claim the token. ───────────────────────────────
-      await page.goto('/onboarding-join.html');
-      await page.waitForFunction(() => (window as any).__joinReady === true, null, {
+      await page.goto('/onboarding-enroll.html');
+      await page.waitForFunction(() => (window as any).__enrollReady === true, null, {
         timeout: 15_000,
       });
 
       const firstResult = await page.evaluate(
         async (env: { host: string; ca: string; idp: string; token: string }) => {
-          const j = (window as any).__join;
-          const info = await j.join(env.host, env.ca, env.idp, env.token);
+          const j = (window as any).__enroll;
+          const info = await j.enroll_via(env.host, env.ca, env.idp, env.token);
           return { cert_name: info.cert_name, restored: info.restored };
         },
         { host: HOST_URL, ca: CA_PREFIX, idp: IDENTITY_PREFIX, token: TOKEN },
@@ -156,13 +156,13 @@ test.describe('Critical-path #4 — onboarding-link join + reload-restore', () =
       expect(firstResult.cert_name.startsWith(IDENTITY_PREFIX)).toBe(true);
 
       // ── Second visit: same context (IndexedDB persists). ────────────
-      await page.goto('/onboarding-join.html');
-      await page.waitForFunction(() => (window as any).__joinReady === true, null, {
+      await page.goto('/onboarding-enroll.html');
+      await page.waitForFunction(() => (window as any).__enrollReady === true, null, {
         timeout: 15_000,
       });
 
       const second = await page.evaluate(async () => {
-        const j = (window as any).__join;
+        const j = (window as any).__enroll;
         const info = await j.try_restore();
         return info ? { cert_name: info.cert_name, restored: info.restored } : null;
       });

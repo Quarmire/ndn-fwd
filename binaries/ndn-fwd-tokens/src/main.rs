@@ -1,13 +1,13 @@
 //! `ndn-fwd-tokens` — mint invite tokens for the onboarding-link flow and
 //! render them as `ndn-trust://invite` envelopes (or their
 //! `https://<domain>/t/invite#…` universal-link mirror) and QR codes (ASCII or
-//! SVG). Tokens go into `[demo_ca].tokens` in `ndn-fwd.toml`; the running CA
+//! SVG). Tokens go into `[ca].tokens` in `ndn-fwd.toml`; the running CA
 //! picks them up on restart.
 //!
 //! Every minted token carries its role (`member-<hex>`, `guest-<hex>`): the CA
 //! scopes it to `<namespace>/<role>`, so it can only certify a device of that
 //! role, and the invite names that prefix as the invitee's identity
-//! namespace. Admin and super-node certificates are never issued on a token —
+//! namespace. Admin and relay (`node` role) certificates are never issued on a token —
 //! they need an admin's device approval.
 
 use anyhow::{Context, Result, bail};
@@ -41,7 +41,7 @@ struct InviteArgs {
     /// by that root; without it the invitee must adopt the context first.
     #[arg(long)]
     anchor_fp: Option<String>,
-    /// Public domain serving the host's `JoinClient` page. When set, emit the
+    /// Public domain serving the host's `EnrollClient` page. When set, emit the
     /// `https://<domain>/t/invite#…` mirror; otherwise `ndn-trust://invite/…`.
     #[arg(long)]
     domain: Option<String>,
@@ -54,11 +54,11 @@ enum InviteRole {
     Guest,
     /// Refused: admin certificates need an admin's device approval.
     Admin,
-    /// Refused: super-node certificates need an admin's device approval.
+    /// Refused: relay (`node` role) certificates need an admin's device approval.
     Node,
 }
 
-/// The role a token may carry; admins and super nodes are refused.
+/// The role a token may carry; admins and relays are refused.
 fn invite_role(role: InviteRole) -> Result<Role> {
     match role {
         InviteRole::Member => Ok(Role::Member),
@@ -70,8 +70,8 @@ fn invite_role(role: InviteRole) -> Result<Role> {
              approve it on an admin device (`ca approve` on the CA host)"
         ),
         InviteRole::Node => bail!(
-            "--role node: an invite token never admits a super node — the CA issues node \
-             certificates only on an admin's device approval: have the node enroll as \
+            "--role node: an invite token never admits a relay — the CA issues node-role \
+             certificates only on an admin's device approval: have the relay enroll as \
              <namespace>/node/<name> with the device-approval challenge and approve it on \
              an admin device (`ca approve` on the CA host)"
         ),
@@ -93,7 +93,7 @@ fn invite_namespace(namespace: &str, role: Option<Role>) -> Result<String> {
 #[derive(Subcommand)]
 enum Cmd {
     /// Generate one or more random tokens + their matching invite envelopes.
-    /// The token strings go into `[demo_ca].tokens` in `ndn-fwd.toml`;
+    /// The token strings go into `[ca].tokens` in `ndn-fwd.toml`;
     /// the invites go to your users.
     New {
         #[command(flatten)]

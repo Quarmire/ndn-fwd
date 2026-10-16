@@ -1,6 +1,6 @@
 //! Author a [`SignedTrustContext`] and pack it as an `ndn-trust://anchor`
 //! QR/NFC payload — what a participant scans to adopt a context
-//! (`ndn-fwd adopt`, `NdnEngine::join_context` over FFI, or
+//! (`ndn-fwd adopt`, `NdnEngine::adopt_context` over FFI, or
 //! `ndn_cert::adopt_anchor_envelope` natively).
 //!
 //! A context binds a `namespace` to a set of trust anchors and a schema
@@ -147,7 +147,7 @@ mod tests {
     use super::*;
 
     /// Author → `ndn-trust://` URI → parse (what a scanner does), returning the
-    /// `(version, content)` pair `decode_content` / `join_context` take.
+    /// `(version, content)` pair `decode_content` / `adopt_context` take.
     fn scan(spec: &ContextSpec) -> (u64, bytes::Bytes) {
         let uri = build_anchor_envelope(spec).unwrap().to_uri();
         assert!(uri.starts_with("ndn-trust://anchor/"));
@@ -173,7 +173,7 @@ mod tests {
             revocations: vec!["/home/bob/KEY/old".parse().unwrap()],
         };
 
-        // Author → envelope → parse → decode_content (what join_context does).
+        // Author → envelope → parse → decode_content (what adopt_context does).
         let (version, content) = scan(&spec);
         assert_eq!(version, 3);
 
