@@ -1026,7 +1026,7 @@ async fn main() -> Result<()> {
         },
         monitor_registry.clone(),
     )
-    .await;
+    .await?;
     control_surfaces.push(Arc::new(crate::monitors::MonitorsSurface::new(
         monitor_registry,
     )));

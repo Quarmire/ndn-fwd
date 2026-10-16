@@ -33,7 +33,10 @@ async fn shm_capability_face_handshake_end_to_end() {
     std::fs::write(
         &conf,
         format!(
+            // Ephemeral UDP listener: the default 0.0.0.0:6363 can be held by
+            // only one process, and test daemons run concurrently.
             "[management]\nface_socket = \"{sock}\"\n\n\
+             [[face]]\nkind = \"udp\"\nbind = \"127.0.0.1:0\"\n\n\
              [security.mgmt]\nrequire_signed_commands = false\n",
             sock = sock.display(),
         ),

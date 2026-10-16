@@ -34,13 +34,16 @@ pub struct FaceSetupState {
 /// Spawn every face listener, WebTransport / WebRTC listener, auto-
 /// enumerated multicast face creator, and the interface hotplug watcher.
 /// Returns once spawns are issued; tasks run until `cancel` fires.
+///
+/// Fails when a UDP listener's port is held by another process (see
+/// [`udp_listener_in_use`]).
 pub async fn run_face_setup(
     engine: &ForwarderEngine,
     cancel: &CancellationToken,
     fwd_config: &ForwarderConfig,
     state: FaceSetupState,
     monitors: Arc<crate::monitors::MonitorRegistry>,
-) -> Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> {
+) -> anyhow::Result<Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>>> {
     let FaceSetupState {
         face_ids_by_index,
         auto_udp_pre_alloc,
@@ -79,7 +82,7 @@ async fn run_face_setup_inner(
     auto_udp_ifaces: Vec<(String, std::net::Ipv4Addr)>,
     auto_ether_ifaces: Vec<ndn_face::iface::InterfaceInfo>,
     monitors: Arc<crate::monitors::MonitorRegistry>,
-) -> Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>> {
+) -> anyhow::Result<Vec<Arc<dyn ndn_mgmt_wire::ControlSurface>>> {
     // Cognition/telemetry surfaces produced while mounting faces (currently the
     // radio medium face); handed to `MgmtHandles.control_surfaces` by the caller.
     // Only the `radio` arm pushes into this, so it is not mutated without it.
@@ -116,6 +119,31 @@ async fn run_face_setup_inner(
         std::borrow::Cow::Borrowed(&fwd_config.faces)
     };
 
+    let udp_listeners = udp_listener_addrs(&face_configs);
+
+    // Bind every UDP listener before any peer face is created: a peer face
+    // joins its listener's port (`ConnectedPort::Listener`), so the listener
+    // must claim the port first. A port another process holds is fatal.
+    let mut bound_udp_listeners = std::collections::HashMap::new();
+    for (face_idx, face_cfg) in face_configs.iter().enumerate() {
+        if let ndn_config::FaceConfig::Udp { bind, remote: None } = face_cfg
+            && let Some(addr) =
+                parse_bind_addr(bind.as_deref().unwrap_or("0.0.0.0:6363"), "UDP")
+        {
+            match mgmt_ndn::bind_udp_listener(addr, fwd_config.face_system.udp.rx_sockets) {
+                Ok(listener) => {
+                    bound_udp_listeners.insert(face_idx, listener);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    return Err(udp_listener_in_use(addr));
+                }
+                Err(e) => {
+                    tracing::error!(target: "face.udp", addr=%addr, error=%e, "udp-listener: bind failed");
+                }
+            }
+        }
+    }
+
     for (face_idx, face_cfg) in face_configs.iter().enumerate() {
         match face_cfg {
             ndn_config::FaceConfig::Udp { bind, remote } => {
@@ -128,31 +156,15 @@ async fn run_face_setup_inner(
                         }
                     };
                     let face_id = id_for(face_idx);
-                    // Bind the SAME port we listen on, and connect to the peer.
-                    //
-                    // An ephemeral local port (the previous `0.0.0.0:0`) made
-                    // our datagrams arrive at the neighbour from a source it
-                    // had no face for, so it minted a second, on-demand face
-                    // for us. Split across two faces, a neighbour survives
-                    // `nexthops_excluding(in_face)` and Interests are
-                    // forwarded back to their origin: 12 wire copies per
-                    // Interest against NFD's 9, ~35% more packets on a shared
-                    // medium.
-                    //
-                    // Binding the listener's port keeps the source symmetric;
-                    // connecting makes the kernel deliver this peer's
-                    // datagrams here rather than to the wildcard listener.
-                    let local_port = bind
-                        .as_deref()
-                        .and_then(|b| b.parse::<std::net::SocketAddr>().ok())
-                        .map(|a| a.port())
-                        .unwrap_or(6363);
+                    let local_port = peer_face_port(bind.as_deref(), &udp_listeners);
                     let eng = engine.clone();
                     tokio::spawn(async move {
-                        match ndn_face::net::UdpFace::bind_connected(local_port, peer, face_id).await {
+                        match ndn_face::net::UdpFace::bind_connected(local_port, peer, face_id)
+                            .await
+                        {
                             Ok(face) => {
                                 let c = CancellationToken::new();
-                                tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, "udp pre-connected face created");
+                                tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, port = ?local_port, "udp pre-connected face created");
                                 // PERMANENT, not Persistent. This is a
                                 // statically CONFIGURED peer endpoint, so it
                                 // must outlive I/O errors: a Persistent face is
@@ -181,18 +193,15 @@ async fn run_face_setup_inner(
                                 );
                             }
                             Err(e) => {
-                                tracing::error!(target: "face.udp", remote = %peer, error = %e, "failed to create UDP face");
+                                tracing::error!(target: "face.udp", remote = %peer, port = ?local_port, error = %e, "failed to create UDP face");
                             }
                         }
                     });
-                } else if let Some(addr) =
-                    parse_bind_addr(bind.as_deref().unwrap_or("0.0.0.0:6363"), "UDP")
-                {
+                } else if let Some(listener) = bound_udp_listeners.remove(&face_idx) {
                     let eng = engine.clone();
                     let c = cancel.clone();
-                    let rx_sockets = fwd_config.face_system.udp.rx_sockets;
                     tokio::spawn(async move {
-                        mgmt_ndn::run_udp_listener(addr, eng, c, rx_sockets).await;
+                        mgmt_ndn::run_udp_listener(listener, eng, c).await;
                     });
                 }
             }
@@ -649,5 +658,167 @@ async fn run_face_setup_inner(
     }
 
     tracing::info!(target: "engine", "engine running");
-    control_surfaces
+    Ok(control_surfaces)
+}
+
+/// The error for a UDP listener whose port another process holds.
+///
+/// The listener refuses to share it: `SO_REUSEPORT` admits any socket of the
+/// same user, so two forwarders on one port would land in one reuse group and
+/// the kernel would split inbound datagrams between them, each seeing only
+/// part of its neighbours' traffic, with no error anywhere. The claim itself
+/// is in `ndn_face::net::sockopt::bind_listener_udp`.
+fn udp_listener_in_use(addr: std::net::SocketAddr) -> anyhow::Error {
+    anyhow::anyhow!(
+        "UDP port {port} is already in use by another process (another ndn-fwd on this \
+         host?), so the UDP listener on {addr} cannot start: two forwarders on one port \
+         would silently split its traffic. Give this forwarder another port in its UDP \
+         listener ([[face]] kind = \"udp\", bind = \"{ip}:<port>\"; no [[face]] means \
+         0.0.0.0:6363), or stop the process holding port {port}.",
+        port = addr.port(),
+        ip = addr.ip(),
+    )
+}
+
+/// The addresses of this config's UDP listeners (`[[face]] kind = "udp"`
+/// without `remote`): the only sockets a configured peer face shares its port
+/// with.
+fn udp_listener_addrs(faces: &[ndn_config::FaceConfig]) -> Vec<std::net::SocketAddr> {
+    faces
+        .iter()
+        .filter_map(|f| match f {
+            ndn_config::FaceConfig::Udp { bind, remote: None } => {
+                bind.as_deref().unwrap_or("0.0.0.0:6363").parse().ok()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The local port of a configured UDP peer face (`[[face]] kind = "udp"` with
+/// `remote`, optional `bind`), given this forwarder's UDP listeners.
+///
+/// With a listener, the face binds the listener's port beside it and
+/// connects to the peer. An ephemeral port (the previous `0.0.0.0:0`) made our
+/// datagrams arrive at the neighbour from a source it had no face for, so it
+/// minted a second, on-demand face for us; split across two faces, a
+/// neighbour survives `nexthops_excluding(in_face)` and Interests are
+/// forwarded back to their origin (12 wire copies per Interest against NFD's
+/// 9, ~35% more packets on a shared medium). The listener's port keeps the
+/// source symmetric; connecting makes the kernel deliver this peer's datagrams
+/// to the face rather than to the wildcard listener.
+///
+/// Without a listener there is no port to be symmetric with, and the face
+/// takes an ephemeral port of its own. Binding the well-known 6363 shared
+/// (`SO_REUSEPORT`) let every such forwarder on one host bind the same address
+/// and connect to the same hub: one 4-tuple for all of them, one face on the
+/// hub, and every reply delivered to one of them while the others' Interests
+/// went unanswered. A `bind` port no listener of ours holds is bound
+/// exclusively, so a clash with another process fails loudly instead.
+fn peer_face_port(
+    bind: Option<&str>,
+    listeners: &[std::net::SocketAddr],
+) -> ndn_face::net::ConnectedPort {
+    use ndn_face::net::ConnectedPort;
+    match bind.and_then(|b| b.parse::<std::net::SocketAddr>().ok()) {
+        Some(b) if listeners.iter().any(|l| l.port() == b.port()) => {
+            ConnectedPort::Listener(b.port())
+        }
+        Some(b) => ConnectedPort::Exclusive(b.port()),
+        None => listeners.first().map_or(ConnectedPort::Exclusive(0), |l| {
+            ConnectedPort::Listener(l.port())
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use bytes::Bytes;
+    use ndn_config::{FaceConfig, ForwarderConfig};
+    use ndn_face::net::{ConnectedPort, UdpFace};
+    use ndn_transport::{FaceId, Transport};
+
+    use super::{peer_face_port, udp_listener_addrs};
+
+    /// The port each `[[face]] kind = "udp"` entry with `remote` binds.
+    fn peer_face_ports(toml: &str) -> Vec<ConnectedPort> {
+        let cfg: ForwarderConfig = toml.parse().unwrap();
+        let listeners = udp_listener_addrs(&cfg.faces);
+        cfg.faces
+            .iter()
+            .filter_map(|f| match f {
+                FaceConfig::Udp {
+                    bind,
+                    remote: Some(_),
+                } => Some(peer_face_port(bind.as_deref(), &listeners)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_peer_face_shares_a_port_only_with_its_own_listener() {
+        let device = "[[face]]\nkind = \"udp\"\nremote = \"127.0.0.1:16363\"\n";
+        assert_eq!(peer_face_ports(device), [ConnectedPort::Exclusive(0)]);
+
+        let node = "[[face]]\nkind = \"udp\"\n\n\
+                    [[face]]\nkind = \"udp\"\nremote = \"10.0.0.2:6363\"\n";
+        assert_eq!(peer_face_ports(node), [ConnectedPort::Listener(6363)]);
+
+        let hub = "[[face]]\nkind = \"udp\"\nbind = \"127.0.0.1:16363\"\n\n\
+                   [[face]]\nkind = \"udp\"\nremote = \"10.0.0.2:6363\"\n\n\
+                   [[face]]\nkind = \"udp\"\nremote = \"10.0.0.3:6363\"\nbind = \"0.0.0.0:16363\"\n\n\
+                   [[face]]\nkind = \"udp\"\nremote = \"10.0.0.4:6363\"\nbind = \"0.0.0.0:7000\"\n";
+        assert_eq!(
+            peer_face_ports(hub),
+            [
+                ConnectedPort::Listener(16363),
+                ConnectedPort::Listener(16363),
+                ConnectedPort::Exclusive(7000),
+            ]
+        );
+    }
+
+    /// The live failure: two forwarders on 127.0.0.1, each configured with
+    /// only a UDP face toward one hub, must be two sources to the hub, and
+    /// each must get the replies sent to it.
+    #[tokio::test]
+    async fn two_forwarders_on_one_ip_each_get_their_replies() {
+        let hub = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let hub_addr = hub.local_addr().unwrap();
+        let device = format!("[[face]]\nkind = \"udp\"\nremote = \"{hub_addr}\"\n");
+        let port = peer_face_ports(&device)[0];
+        let a = UdpFace::bind_connected(port, hub_addr, FaceId(1))
+            .await
+            .unwrap();
+        let b = UdpFace::bind_connected(port, hub_addr, FaceId(1))
+            .await
+            .unwrap();
+
+        a.send_bytes(Bytes::from_static(b"from a")).await.unwrap();
+        b.send_bytes(Bytes::from_static(b"from b")).await.unwrap();
+        let mut buf = [0u8; 64];
+        let mut sources = Vec::new();
+        for _ in 0..2 {
+            let (n, src) = hub.recv_from(&mut buf).await.unwrap();
+            // Answer each source with what it sent, as the hub's face for
+            // that source does.
+            hub.send_to(&buf[..n], src).await.unwrap();
+            sources.push(src);
+        }
+        assert_ne!(
+            sources[0], sources[1],
+            "the hub saw one source for two forwarders"
+        );
+
+        for (name, face, sent) in [("a", &a, &b"from a"[..]), ("b", &b, &b"from b"[..])] {
+            let got = tokio::time::timeout(Duration::from_secs(2), face.recv_bytes())
+                .await
+                .unwrap_or_else(|_| panic!("forwarder {name} got no reply"))
+                .unwrap();
+            assert_eq!(&got[..], sent, "forwarder {name} got another's reply");
+        }
+    }
 }

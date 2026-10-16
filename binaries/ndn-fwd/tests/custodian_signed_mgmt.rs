@@ -54,7 +54,10 @@ async fn custodian_signed_command_authorized_by_strict_ndn_fwd() {
     std::fs::write(
         &conf,
         format!(
-            "[management]\nface_socket = \"{sock}\"\n\n[security.mgmt]\n\
+            // An ephemeral UDP listener: test daemons run concurrently, and the
+            // default listener (0.0.0.0:6363) can be held by only one process.
+            "[management]\nface_socket = \"{sock}\"\n\n\
+             [[face]]\nkind = \"udp\"\nbind = \"127.0.0.1:0\"\n\n[security.mgmt]\n\
              require_signed_commands = true\ntrust_anchor_pib = \"{pib}\"\n",
             sock = sock.display(),
             pib = anchor_pib.display(),
@@ -163,7 +166,8 @@ async fn custodian_command_keylocator_must_name_the_cert() {
     std::fs::write(
         &conf,
         format!(
-            "[management]\nface_socket = \"{sock}\"\n\n[security.mgmt]\n\
+            "[management]\nface_socket = \"{sock}\"\n\n\
+             [[face]]\nkind = \"udp\"\nbind = \"127.0.0.1:0\"\n\n[security.mgmt]\n\
              require_signed_commands = true\ntrust_anchor_pib = \"{pib}\"\n",
             sock = sock.display(),
             pib = anchor_pib.display(),
