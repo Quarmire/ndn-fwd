@@ -44,6 +44,7 @@ fn build_obs_retention(
     }
 }
 
+mod context_publisher;
 mod demo_ca;
 mod face_provision;
 mod face_setup;
@@ -188,19 +189,24 @@ fn parse_args() -> CliArgs {
     }
 }
 
+/// The node's PIB directory: `[security] pib_path`, else the default. The
+/// trust-context store sits beside it even when the node runs an ephemeral
+/// identity.
+fn pib_root(cfg: &ForwarderConfig) -> PathBuf {
+    cfg.security
+        .pib_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(security_init::default_pib_path)
+}
+
 /// Load the trust contexts this node adopted (`ndn-fwd adopt`, or its own
 /// context from `ndn-fwd init`) from `<pib_path>/contexts/` into `mgr`'s
 /// keyring — the one the engine's validator uses. Each stored context's
 /// signature is re-verified against its own anchors; a file that fails is
-/// logged and skipped, never trusted. The store sits beside the PIB even when
-/// the node runs an ephemeral identity.
+/// logged and skipped, never trusted.
 fn load_adopted_contexts(cfg: &ForwarderConfig, mgr: &ndn_security::SecurityManager) {
-    let pib_root = cfg
-        .security
-        .pib_path
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(security_init::default_pib_path);
+    let pib_root = pib_root(cfg);
     let loaded = match ndn_cert::load_persisted_contexts(&pib_root, mgr.keyring()) {
         Ok(loaded) => loaded,
         Err(e) => {
@@ -352,12 +358,7 @@ async fn main() -> Result<()> {
     let demo_ca_artifacts = if fwd_config.demo_ca.enabled {
         // The configured PIB even when the node identity fell back to an
         // ephemeral key: the CA identity is its own key in that PIB.
-        let ca_pib = fwd_config
-            .security
-            .pib_path
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(security_init::default_pib_path);
+        let ca_pib = pib_root(&fwd_config);
         let (faces, spawn) = demo_ca::prepare(&fwd_config.demo_ca, &ca_pib).await?;
         localhop_validator = Some(demo_ca::install_localhop_anchor(
             &spawn,
@@ -365,6 +366,17 @@ async fn main() -> Result<()> {
         )?);
         Some((faces, spawn))
     } else {
+        None
+    };
+    // Publish the stored trust contexts by name (RDR) so a device holding only
+    // an anchor fingerprint can fetch one; its face is attached before build.
+    let context_publication = if fwd_config.security.serve_contexts {
+        context_publisher::prepare(&pib_root(&fwd_config))
+    } else {
+        tracing::info!(
+            target: "security",
+            "[security] serve_contexts = false: stored trust contexts are not published"
+        );
         None
     };
     let pib: Option<Arc<FilePib>> = security_init
@@ -422,6 +434,13 @@ async fn main() -> Result<()> {
                 builder = builder.face(face);
             }
             Some(spawn)
+        }
+        None => None,
+    };
+    let context_publisher = match context_publication {
+        Some((face, publisher)) => {
+            builder = builder.face(face);
+            Some(publisher)
         }
         None => None,
     };
@@ -886,6 +905,10 @@ async fn main() -> Result<()> {
 
     // `/localhost/nfd` + `/localhop/nfd` FIB entries are installed by
     // `ndn_mgmt::mount_management` below.
+
+    if let Some(publisher) = context_publisher {
+        publisher.spawn(&engine);
+    }
 
     // The CA's device-approval store (if it offers that challenge), shared
     // with the mgmt `ca` module below.

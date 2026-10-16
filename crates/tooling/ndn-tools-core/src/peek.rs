@@ -12,7 +12,8 @@ use tokio::sync::mpsc;
 
 use ndn_ipc::ForwarderClient;
 use ndn_packet::encode::InterestBuilder;
-use ndn_packet::{Data, Name};
+use ndn_packet::lp::is_lp_packet;
+use ndn_packet::{Data, Interest, LpPacket, Name};
 
 use crate::common::{ConnectConfig, ToolData, ToolEvent};
 
@@ -48,7 +49,34 @@ async fn fetch_one(
         .await
         .map_err(|_| anyhow::anyhow!("timeout waiting for {name}"))?
         .ok_or_else(|| anyhow::anyhow!("connection closed"))?;
-    Data::decode(raw).map_err(|e| anyhow::anyhow!("decode: {e}"))
+    decode_reply(raw)
+}
+
+/// Decode a forwarder reply. A bare Data decodes directly; an NDNLPv2
+/// LpPacket is unwrapped via `LpPacket::decode`: a Nack header becomes an
+/// error naming the reason and the nacked Interest, an unfragmented payload
+/// is decoded as Data. Malformed input is an error, never a panic.
+fn decode_reply(raw: Bytes) -> Result<Data> {
+    if !is_lp_packet(&raw) {
+        return Data::decode(raw).map_err(|e| anyhow::anyhow!("decode: {e}"));
+    }
+    let lp = LpPacket::decode(raw).map_err(|e| anyhow::anyhow!("decode LpPacket: {e}"))?;
+    let fragment = lp
+        .fragment
+        .ok_or_else(|| anyhow::anyhow!("decode: LpPacket carries no fragment"))?;
+    if let Some(header) = lp.nack {
+        let reason = header
+            .reason
+            .map_or_else(|| "unspecified".to_string(), |r| format!("{r:?}"));
+        return match Interest::decode(fragment) {
+            Ok(interest) => Err(anyhow::anyhow!("nack: {reason} for {}", interest.name)),
+            Err(e) => Err(anyhow::anyhow!("nack: {reason} (nacked Interest malformed: {e})")),
+        };
+    }
+    if lp.frag_count.is_some_and(|c| c > 1) {
+        anyhow::bail!("decode: fragmented LpPacket reply is not supported");
+    }
+    Data::decode(fragment).map_err(|e| anyhow::anyhow!("decode: {e}"))
 }
 
 async fn fetch_segmented(
@@ -70,7 +98,7 @@ async fn fetch_segmented(
         .await
         .map_err(|_| anyhow::anyhow!("timeout: no response from {prefix}"))?
         .ok_or_else(|| anyhow::anyhow!("connection closed"))?;
-    let first = Data::decode(raw).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+    let first = decode_reply(raw)?;
 
     if verbose {
         let _ = tx
@@ -166,7 +194,7 @@ async fn fetch_segmented(
         let drain = lifetime + Duration::from_millis(500);
         match tokio::time::timeout(drain, client.recv()).await {
             Ok(Some(raw)) => {
-                if let Ok(data) = Data::decode(raw) {
+                if let Ok(data) = decode_reply(raw) {
                     let seg_idx = data
                         .name
                         .components()
@@ -399,5 +427,26 @@ async fn emit_meta(data: &Data, tx: &mpsc::Sender<ToolEvent>) {
         if let Some(ref kl) = si.key_locator {
             let _ = tx.send(ToolEvent::info(format!("  key:      {kl}"))).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndn_packet::NackReason;
+    use ndn_packet::encode::encode_interest;
+    use ndn_packet::lp::encode_lp_nack;
+
+    /// An LP-wrapped Nack is reported by reason and name, not as a decode
+    /// error; a malformed LpPacket is an error, never a panic.
+    #[test]
+    fn lp_nack_reports_reason_and_malformed_lp_errors() {
+        let name: Name = "/home/nobody/x".parse().unwrap();
+        let wire = encode_lp_nack(NackReason::NoRoute, &encode_interest(&name, None));
+        let msg = decode_reply(wire).unwrap_err().to_string();
+        assert_eq!(msg, "nack: NoRoute for /home/nobody/x");
+
+        let err = decode_reply(Bytes::from_static(&[0x64, 0x05, 0x50, 0xff])).unwrap_err();
+        assert!(err.to_string().starts_with("decode LpPacket:"), "{err}");
     }
 }

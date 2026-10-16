@@ -14,7 +14,8 @@ ping    = []
 # Active hop-distance traceroute; probes a ping-style responder, so it pulls `ping`.
 traceroute = ["ping"]
 iperf   = []
-peek    = []
+# Writes fetched objects to disk (`tokio::fs`).
+peek    = ["tokio/fs"]
 put     = []
 send    = []
 recv    = []
