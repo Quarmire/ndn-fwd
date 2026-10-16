@@ -10,7 +10,7 @@
 //!
 //! With `--pib` + `--sign-key` (a key of one of the context's anchors) the
 //! payload carries the **signed** context Data, which adopters verify against
-//! the pinned anchor. Without them it carries the unsigned legacy content,
+//! the expected fingerprint. Without them it carries the unsigned legacy content,
 //! which adopters refuse by default.
 
 use std::path::PathBuf;
@@ -165,7 +165,7 @@ fn main() -> Result<()> {
             };
             if let Some(fp) = fingerprint {
                 let hex: String = fp.iter().map(|b| format!("{b:02x}")).collect();
-                println!("anchor_fp:    {hex}");
+                println!("expected_fingerprint: {hex}");
             }
             let ctx = match (context_data, context_content) {
                 (Some(wire), _) => {
@@ -176,8 +176,10 @@ fn main() -> Result<()> {
                     let signer_fp = ndn_cert::anchor_fingerprint(&signer);
                     println!("signed_by:    {}", signer.name);
                     println!(
-                        "pin_matches:  {}",
-                        fingerprint.map_or("no pin".to_string(), |fp| (fp == signer_fp).to_string())
+                        "fingerprint_matches: {}",
+                        fingerprint.map_or("no expected fingerprint".to_string(), |fp| {
+                            (fp == signer_fp).to_string()
+                        })
                     );
                     ctx
                 }

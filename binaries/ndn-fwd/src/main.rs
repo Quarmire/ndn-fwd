@@ -44,6 +44,7 @@ fn build_obs_retention(
     }
 }
 
+mod context_adopt;
 mod context_publisher;
 mod demo_ca;
 mod face_provision;
@@ -105,10 +106,15 @@ USAGE:
                                           ndn-trust://anchor envelope and the
                                           [security] lines for ndn-fwd.toml,
                                           and exit
-  ndn-fwd adopt <envelope> [--pib <dir>]  TOFU-verify an anchor envelope's
-                                          signed context against its pinned
-                                          fingerprint, store it in
-                                          <pib>/contexts/, and exit
+  ndn-fwd adopt <anchor-link> [-c <config>] [--pib <dir>]
+                                          adopt the network an ndn-trust://anchor
+                                          link names: the running daemon checks
+                                          the context against the link's expected
+                                          fingerprint (fetching it by name when
+                                          the link carries only the fingerprint),
+                                          then trusts, stores and publishes it;
+                                          without a daemon an inline context is
+                                          verified and stored in <pib>/contexts/
   ndn-fwd schema show [--pib <dir>] [--namespace <ns>]
                                           print an adopted context's trust
                                           schema as readable rules
@@ -237,7 +243,7 @@ fn load_adopted_contexts(cfg: &ForwarderConfig, mgr: &ndn_security::SecurityMana
 async fn main() -> Result<()> {
     // Onboarding subcommands (`init` / `adopt`) run and exit before the daemon
     // starts; everything else falls through to the forwarder.
-    if let Some(result) = onboard::maybe_run() {
+    if let Some(result) = onboard::maybe_run().await {
         return result;
     }
 
@@ -348,6 +354,9 @@ async fn main() -> Result<()> {
     // EngineBuilder; DV's `DvStaticKeys`/`DvLvs` modes consume it.
     let identity_signer: Option<std::sync::Arc<dyn ndn_security::Signer>> =
         security_init.mgr.any_signer();
+    // The keyring the engine's validator uses; a network adopted at runtime
+    // (`security/context-adopt`) lands here.
+    let trust_keyring = Arc::clone(security_init.mgr.keyring());
     let mgmt_validator = load_mgmt_validator(&fwd_config.security.mgmt)?;
     let mut localhop_validator = load_localhop_validator(&fwd_config.security.mgmt)?;
 
@@ -371,7 +380,7 @@ async fn main() -> Result<()> {
     // Publish the stored trust contexts by name (RDR) so a device holding only
     // an anchor fingerprint can fetch one; its face is attached before build.
     let context_publication = if fwd_config.security.serve_contexts {
-        context_publisher::prepare(&pib_root(&fwd_config))
+        Some(context_publisher::prepare(&pib_root(&fwd_config)))
     } else {
         tracing::info!(
             target: "security",
@@ -906,9 +915,16 @@ async fn main() -> Result<()> {
     // `/localhost/nfd` + `/localhop/nfd` FIB entries are installed by
     // `ndn_mgmt::mount_management` below.
 
-    if let Some(publisher) = context_publisher {
-        publisher.spawn(&engine);
-    }
+    let published_contexts = context_publisher.map(|publisher| publisher.spawn(&engine));
+    // `security/context-adopt`: adopt a network at runtime, store it beside
+    // the PIB and publish it by name.
+    let trust_context_handler: Arc<dyn mgmt_ndn::TrustContextMgmtBackend> =
+        Arc::new(context_adopt::ContextAdopter {
+            engine: engine.clone(),
+            keyring: trust_keyring,
+            pib_root: pib_root(&fwd_config),
+            publisher: published_contexts,
+        });
 
     // The CA's device-approval store (if it offers that challenge), shared
     // with the mgmt `ca` module below.
@@ -1069,6 +1085,7 @@ async fn main() -> Result<()> {
             // on live requests. None when the CA offers no device-approval.
             approval_handler: ca_approvals
                 .map(|s| Arc::new(s) as Arc<dyn mgmt_ndn::ApprovalMgmtBackend>),
+            trust_context_handler: Some(trust_context_handler),
             // Runtime-mutable mgmt-access policy. `policy-set` hot-flips
             // booleans; validator-anchor changes are `pending_restart`
             // until a Validator rebuild path exists.

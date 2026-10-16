@@ -20,11 +20,13 @@
 //! `/<ns>/32=trust-context` per context — more specific than a `[demo_ca]`
 //! entry `/<ns>`, so longest-prefix match routes here. The store holds one file
 //! (the newest adopted version) per namespace, so "newest stored version" is
-//! that file's. The store is read once at startup; a context adopted later is
-//! served after the daemon restarts.
+//! that file's. The store is read at startup; a context the running daemon
+//! adopts (`security/context-adopt`) is added with
+//! [`PublishedContexts::publish`], replacing any older version of the same
+//! namespace, and served at once.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -33,7 +35,8 @@ use ndn_app::rdr::MetaData;
 use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_packet::encode::DataBuilder;
-use ndn_packet::{NackReason, Name};
+use ndn_packet::{Data, NackReason, Name};
+use ndn_security::SignedTrustContext;
 use ndn_transport::FaceId;
 
 pub(crate) const CONTEXT_FACE_ID: u64 = 0xFFFF_0005;
@@ -56,6 +59,23 @@ struct Published {
     metadata: Bytes,
 }
 
+impl Published {
+    fn new(ctx: &SignedTrustContext, data: &Data) -> Self {
+        let versioned = ctx.rdr_name();
+        Self {
+            prefix: ndn_cert::rdr_prefix(ctx.namespace()),
+            metadata_name: ndn_cert::rdr_metadata_name(ctx.namespace()),
+            metadata: metadata_data(ctx.namespace(), &versioned, ctx.version()),
+            versioned,
+            context: data.raw().clone(),
+        }
+    }
+}
+
+/// The published set: swapped whole on change, so the serve loop reads a
+/// consistent snapshot without holding a lock across a reply.
+type Snapshot = Arc<Vec<Published>>;
+
 /// The publisher between engine build (its face is attached) and spawn (its
 /// FIB entries are installed and the serve loop starts).
 pub(crate) struct ContextPublisher {
@@ -65,29 +85,21 @@ pub(crate) struct ContextPublisher {
 }
 
 /// Read the context store under `pib_root` and build the replies. Returns the
-/// face to attach before build, or `None` when there is nothing to publish
-/// (an unreadable store is logged, like the keyring load beside it).
-pub(crate) fn prepare(pib_root: &Path) -> Option<(InProcFace, ContextPublisher)> {
+/// face to attach before build. The face exists even when nothing is stored
+/// yet, so a context adopted at runtime can be published (an unreadable
+/// store is logged, like the keyring load beside it).
+pub(crate) fn prepare(pib_root: &Path) -> (InProcFace, ContextPublisher) {
     let stored = match ndn_cert::read_stored_contexts(pib_root) {
         Ok(stored) => stored,
         Err(e) => {
             tracing::warn!(target: "security", error = %e, "cannot read trust contexts to publish");
-            return None;
+            Vec::new()
         }
     };
     let mut contexts = Vec::with_capacity(stored.len());
     for (path, result) in stored {
         match result {
-            Ok((ctx, data)) => {
-                let versioned = ctx.rdr_name();
-                contexts.push(Published {
-                    prefix: ndn_cert::rdr_prefix(ctx.namespace()),
-                    metadata_name: ndn_cert::rdr_metadata_name(ctx.namespace()),
-                    metadata: metadata_data(ctx.namespace(), &versioned, ctx.version()),
-                    versioned,
-                    context: data.raw().clone(),
-                });
-            }
+            Ok((ctx, data)) => contexts.push(Published::new(&ctx, &data)),
             Err(e) => tracing::warn!(
                 target: "security",
                 path = %path.display(),
@@ -100,20 +112,19 @@ pub(crate) fn prepare(pib_root: &Path) -> Option<(InProcFace, ContextPublisher)>
         tracing::info!(
             target: "security",
             store = %pib_root.join(ndn_cert::context_store::CONTEXTS_DIR).display(),
-            "no stored trust context to publish"
+            "no stored trust context to publish yet"
         );
-        return None;
     }
     let face_id = FaceId(CONTEXT_FACE_ID);
     let (face, handle) = InProcFace::new(face_id, 64);
-    Some((
+    (
         face,
         ContextPublisher {
             face_id,
             handle,
             contexts,
         },
-    ))
+    )
 }
 
 /// The RDR metadata Data for the context `versioned` of `namespace`:
@@ -157,27 +168,45 @@ fn answer<'a>(contexts: &'a [Published], name: &Name) -> Option<&'a Bytes> {
     })
 }
 
+/// `current` with `added` in place of any entry for the same namespace.
+fn with_context(current: &[Published], added: Published) -> Vec<Published> {
+    let mut next: Vec<Published> = current
+        .iter()
+        .filter(|c| c.prefix != added.prefix)
+        .map(|c| Published {
+            prefix: c.prefix.clone(),
+            metadata_name: c.metadata_name.clone(),
+            versioned: c.versioned.clone(),
+            context: c.context.clone(),
+            metadata: c.metadata.clone(),
+        })
+        .collect();
+    next.push(added);
+    next
+}
+
 impl ContextPublisher {
     /// Install one FIB entry per published context and start serving.
-    pub(crate) fn spawn(self, engine: &ForwarderEngine) {
+    /// Returns the handle that publishes contexts adopted later.
+    pub(crate) fn spawn(self, engine: &ForwarderEngine) -> PublishedContexts {
         for c in &self.contexts {
-            engine.fib().add_nexthop(&c.prefix, self.face_id, 0);
-            tracing::info!(
-                target: "security",
-                prefix = %c.prefix,
-                context = %c.versioned,
-                face = self.face_id.0,
-                "publishing trust context (RDR)"
-            );
+            log_published(engine, c, self.face_id);
         }
-        let contexts = Arc::new(self.contexts);
+        let published = PublishedContexts {
+            engine: engine.clone(),
+            face_id: self.face_id,
+            list: Arc::new(RwLock::new(Arc::new(self.contexts))),
+        };
+        let list = Arc::clone(&published.list);
         let producer = Producer::from_handle(self.handle, Name::root());
         tokio::spawn(async move {
             let served = producer
                 .serve(|interest, responder| {
-                    let contexts = Arc::clone(&contexts);
+                    let snapshot: Snapshot = Arc::clone(
+                        &list.read().unwrap_or_else(|poisoned| poisoned.into_inner()),
+                    );
                     async move {
-                        let sent = match answer(&contexts, &interest.name) {
+                        let sent = match answer(&snapshot, &interest.name) {
                             Some(wire) => responder.respond_bytes(wire.clone()).await,
                             None => responder.nack(NackReason::NoRoute).await,
                         };
@@ -196,6 +225,37 @@ impl ContextPublisher {
                 tracing::error!(target: "security", error = %e, "trust-context publisher exited");
             }
         });
+        published
+    }
+}
+
+fn log_published(engine: &ForwarderEngine, c: &Published, face_id: FaceId) {
+    engine.fib().add_nexthop(&c.prefix, face_id, 0);
+    tracing::info!(
+        target: "security",
+        prefix = %c.prefix,
+        context = %c.versioned,
+        face = face_id.0,
+        "publishing trust context (RDR)"
+    );
+}
+
+/// The running publisher's set of contexts, shared with the adoption backend.
+#[derive(Clone)]
+pub(crate) struct PublishedContexts {
+    engine: ForwarderEngine,
+    face_id: FaceId,
+    list: Arc<RwLock<Snapshot>>,
+}
+
+impl PublishedContexts {
+    /// Serve `ctx` (signed Data `data`) from now on, replacing an earlier
+    /// version of the same namespace.
+    pub(crate) fn publish(&self, ctx: &SignedTrustContext, data: &Data) {
+        let added = Published::new(ctx, data);
+        log_published(&self.engine, &added, self.face_id);
+        let mut list = self.list.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *list = Arc::new(with_context(&list, added));
     }
 }
 
@@ -203,6 +263,10 @@ impl ContextPublisher {
 mod tests {
     use super::*;
     use ndn_packet::Data;
+
+    fn published(dir: &Path) -> Vec<Published> {
+        prepare(dir).1.contexts
+    }
 
     fn n(s: &str) -> Name {
         s.parse().unwrap()
@@ -219,19 +283,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bob = stored(dir.path(), "/home/bob");
         let alice = stored(dir.path(), "/home/alice");
-        let (_face, publisher) = prepare(dir.path()).expect("two contexts stored");
+        let contexts = published(dir.path());
 
         for hub in [&bob, &alice] {
             let ns = hub.context.namespace();
             let versioned = hub.context.rdr_name();
             // Exact versioned name → the stored signed Data, byte-identical.
             assert_eq!(
-                answer(&publisher.contexts, &versioned),
+                answer(&contexts, &versioned),
                 Some(hub.context_data.raw())
             );
             // Metadata → RDR Name-only content pointing at exactly that name,
             // under this namespace (what `fetch_context` accepts).
-            let wire = answer(&publisher.contexts, &ndn_cert::rdr_metadata_name(ns))
+            let wire = answer(&contexts, &ndn_cert::rdr_metadata_name(ns))
                 .expect("metadata served");
             let meta = Data::decode(wire.clone()).unwrap();
             assert!(meta.name.has_prefix(&ndn_cert::rdr_metadata_name(ns)));
@@ -250,7 +314,7 @@ mod tests {
             "/home/bob/32=trust-context/32=metadata/v=1/seg=0",
             "/home/eve/32=trust-context/32=metadata",
         ] {
-            assert_eq!(answer(&publisher.contexts, &n(other)), None, "{other}");
+            assert_eq!(answer(&contexts, &n(other)), None, "{other}");
         }
     }
 
@@ -260,12 +324,44 @@ mod tests {
         stored(dir.path(), "/home/bob");
         let path = ndn_cert::context_file_path(dir.path(), &n("/home/bob"));
         std::fs::write(&path, b"not a Data packet").unwrap();
-        assert!(prepare(dir.path()).is_none());
+        assert!(published(dir.path()).is_empty());
     }
 
     #[test]
     fn empty_store_publishes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(prepare(dir.path()).is_none());
+        assert!(published(dir.path()).is_empty());
+    }
+
+    /// A context adopted at runtime is served at once and replaces the entry
+    /// of its namespace (one per namespace), leaving others alone.
+    #[test]
+    fn adopted_context_replaces_its_namespace_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bob = stored(dir.path(), "/home/bob");
+        let alice = ndn_cert::init_hub(&ndn_security::SecurityManager::new(), &n("/home/alice"))
+            .unwrap();
+        let other_bob =
+            ndn_cert::init_hub(&ndn_security::SecurityManager::new(), &n("/home/bob")).unwrap();
+        let start = published(dir.path());
+        let added = with_context(&start, Published::new(&alice.context, &alice.context_data));
+        assert_eq!(added.len(), 2);
+        assert_eq!(
+            answer(&added, &alice.context.rdr_name()),
+            Some(alice.context_data.raw())
+        );
+        assert_eq!(
+            answer(&added, &bob.context.rdr_name()),
+            Some(bob.context_data.raw())
+        );
+        let replaced = with_context(
+            &added,
+            Published::new(&other_bob.context, &other_bob.context_data),
+        );
+        assert_eq!(replaced.len(), 2);
+        assert_eq!(
+            answer(&replaced, &other_bob.context.rdr_name()),
+            Some(other_bob.context_data.raw())
+        );
     }
 }

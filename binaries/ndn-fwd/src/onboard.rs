@@ -16,15 +16,20 @@
 //!   plus the `[security]` lines that make the daemon load the device
 //!   identity. Config files are never edited. An existing root is never
 //!   replaced unless `--force` is given.
-//! - `adopt` verifies an anchor envelope's inline signed context against the
-//!   anchor fingerprint it pins (TOFU) and stores it in `<pib>/contexts/`; the
-//!   daemon loads that store into its keyring at startup.
+//! - `adopt` adopts the network an anchor link (`ndn-trust://anchor/…`)
+//!   names. With the daemon running (its management socket from `-c`, else
+//!   the default), the daemon does it: a link with the context inline is
+//!   verified against the expected fingerprint; a fingerprint-only link makes
+//!   the daemon fetch the context by name from the network. Either way the
+//!   daemon trusts, stores and publishes it at once. With no daemon, a link
+//!   with the context inline is verified and stored in `<pib>/contexts/`,
+//!   loaded at the next start; a fingerprint-only link needs the daemon.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use ndn_cert::roles::sanitize_device_name;
-use ndn_cert::{adopt_envelope_into_store, anchor_fingerprint, init_hub_in_pib};
+use ndn_cert::{AnchorLink, adopt_envelope_into_store, anchor_fingerprint, init_hub_in_pib};
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
 use ndn_security::FilePib;
@@ -32,11 +37,11 @@ use ndn_trust_envelope::TrustEnvelope;
 
 /// Inspect `argv`; if it names an onboarding subcommand, run it and return
 /// `Some(result)`. Returns `None` for the normal daemon path.
-pub fn maybe_run() -> Option<Result<()>> {
+pub async fn maybe_run() -> Option<Result<()>> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("init") => Some(run_init(&args[2..])),
-        Some("adopt") => Some(run_adopt(&args[2..])),
+        Some("adopt") => Some(run_adopt(&args[2..]).await),
         Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
         _ => None,
     }
@@ -154,9 +159,20 @@ fn run_init(args: &[String]) -> Result<()> {
         "anchor_url     = {}",
         hub.envelope.to_https_url("ndn.local")
     );
+    // The same link without the context: a short QR, fetched over the network.
+    let fingerprint_only = TrustEnvelope::Anchor {
+        namespace: Some(namespace.to_string()),
+        fingerprint: Some(anchor_fingerprint(&hub.anchor)),
+        version: Some(hub.context.version()),
+        context_data: None,
+        context_content: None,
+    };
+    println!("anchor_uri_fp  = {}", fingerprint_only.to_uri());
     println!();
-    println!("# Scan anchor_uri as a QR, or share anchor_url. Adopting it lets a");
-    println!("# peer VERIFY this namespace; producing still needs enrollment as");
+    println!("# Scan anchor_uri as a QR, or share anchor_url. anchor_uri_fp is the short");
+    println!("# form (namespace + expected fingerprint + version): the adopting device's");
+    println!("# daemon fetches the context by name, so it needs a route to this node.");
+    println!("# Adopting lets a peer VERIFY this namespace; producing still needs enrollment as");
     println!("# {namespace}/<role>/<device>: members and guests by invite token");
     println!(
         "# (ndn-fwd-tokens new --ca {namespace} --namespace {namespace} --anchor-fp {anchor_fp}"
@@ -195,18 +211,91 @@ fn toml_basic_string(s: &str) -> String {
     out
 }
 
-fn run_adopt(args: &[String]) -> Result<()> {
-    // The envelope is the first argument that is neither a flag nor a flag's value.
+/// How long the CLI waits for the daemon to adopt (it may fetch the context
+/// over the network: two Interests of at most ~4.5 s each).
+const DAEMON_ADOPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The daemon's management socket: `[management] face_socket` from
+/// `-c/--config`, else the default.
+fn face_socket(args: &[String]) -> Result<String> {
+    let cfg = match flag(args, &["-c", "--config"]) {
+        Some(path) => {
+            let toml =
+                std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
+            toml.parse::<ForwarderConfig>()
+                .with_context(|| format!("parse config {path}"))?
+        }
+        None => ForwarderConfig::default(),
+    };
+    Ok(cfg.management.face_socket)
+}
+
+async fn run_adopt(args: &[String]) -> Result<()> {
+    // The link is the first argument that is neither a flag nor a flag's value.
     let uri = *positionals(args)
         .first()
-        .context("adopt requires an <envelope> (an ndn-trust://anchor URI or its https mirror)")?;
-    let envelope =
-        TrustEnvelope::from_uri(uri).map_err(|e| anyhow::anyhow!("parse trust envelope: {e}"))?;
-    let pib_dir = pib_dir(args)?;
+        .context("adopt requires an <anchor link> (an ndn-trust://anchor URI or its https mirror)")?;
+    // Read it here first so a malformed link is reported without a daemon.
+    let link = AnchorLink::from_uri(uri).map_err(|e| anyhow::anyhow!("adopt refused: {e}"))?;
+    let socket = face_socket(args)?;
 
+    match ndn_ipc::MgmtClient::connect(&socket).await {
+        Ok(client) => adopt_via_daemon(&client, uri, &socket).await,
+        Err(e) if link.context_data.is_some() => adopt_offline(args, uri, &socket, &e),
+        Err(e) => bail!(
+            "adopt refused: the daemon is not reachable at {socket} ({e}). This link carries \
+             only the expected fingerprint, so the network's context has to be fetched, which \
+             needs the running daemon with a route toward the network: start ndn-fwd (with \
+             `-c <config>` if it uses another socket) and retry, or ask for an anchor link with \
+             the context inline (`ndn-fwd init` prints one as anchor_uri)"
+        ),
+    }
+}
+
+async fn adopt_via_daemon(client: &ndn_ipc::MgmtClient, uri: &str, socket: &str) -> Result<()> {
+    let resp = client
+        .security_context_adopt(uri, DAEMON_ADOPT_TIMEOUT)
+        .await
+        .with_context(|| format!("ask the daemon at {socket} to adopt"))?;
+    if !resp.is_ok() {
+        bail!("adopt refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+    }
+    let info: ndn_mgmt::AdoptedContextInfo = serde_json::from_str(&resp.status_text)
+        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
+    println!("# ndn-fwd adopt (by the running daemon at {socket})");
+    println!("namespace            = {}", info.namespace);
+    println!("version              = {}", info.version);
+    println!("expected_fingerprint = {}", info.expected_fingerprint);
+    println!(
+        "source               = {}",
+        if info.fetched {
+            "fetched from the network"
+        } else {
+            "inline in the link"
+        }
+    );
+    println!("anchors              = {}", info.anchors);
+    println!("ca_endpoints         = {}", info.ca_endpoints);
+    println!("stored               = {}", info.stored);
+    println!("published            = {}", info.published);
+    println!();
+    println!("# Signed by the anchor with the expected fingerprint. The daemon trusts it");
+    println!("# now and loads it again at every start; producing still needs enrollment.");
+    Ok(())
+}
+
+fn adopt_offline(
+    args: &[String],
+    uri: &str,
+    socket: &str,
+    unreachable: &ndn_ipc::ForwarderError,
+) -> Result<()> {
+    let envelope =
+        TrustEnvelope::from_uri(uri).map_err(|e| anyhow::anyhow!("parse trust link: {e}"))?;
+    let pib_dir = pib_dir(args)?;
     let (ctx, path) = adopt_envelope_into_store(&pib_dir, &envelope)
         .map_err(|e| anyhow::anyhow!("adopt refused: {e}"))?;
-    let pinned_fp = match &envelope {
+    let expected_fingerprint = match &envelope {
         TrustEnvelope::Anchor {
             fingerprint: Some(fp),
             ..
@@ -214,16 +303,17 @@ fn run_adopt(args: &[String]) -> Result<()> {
         _ => String::new(),
     };
 
-    println!("# ndn-fwd adopt");
-    println!("namespace      = {}", ctx.namespace());
-    println!("version        = {}", ctx.version());
-    println!("pinned_fp      = {pinned_fp}");
-    println!("anchors        = {}", ctx.anchors().len());
-    println!("ca_endpoints   = {}", ctx.ca_endpoints().len());
-    println!("stored         = {}", path.display());
+    println!("# ndn-fwd adopt (offline: no daemon at {socket}: {unreachable})");
+    println!("namespace            = {}", ctx.namespace());
+    println!("version              = {}", ctx.version());
+    println!("expected_fingerprint = {expected_fingerprint}");
+    println!("source               = inline in the link");
+    println!("anchors              = {}", ctx.anchors().len());
+    println!("ca_endpoints         = {}", ctx.ca_endpoints().len());
+    println!("stored               = {}", path.display());
     println!();
-    println!("# Signature verified under the pinned anchor. The daemon loads this");
-    println!("# context at startup (same pib_path); producing still needs enrollment.");
+    println!("# Signed by the anchor with the expected fingerprint. The daemon loads this");
+    println!("# context at its next start (same pib_path); producing still needs enrollment.");
     Ok(())
 }
 

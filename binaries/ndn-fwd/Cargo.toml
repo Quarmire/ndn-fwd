@@ -132,10 +132,10 @@ libc             = { workspace = true }
 # Unconditional: face_provision.rs implements the ndn-mgmt provisioning trait
 # with #[async_trait] regardless of which face features are enabled.
 async-trait      = { workspace = true }
+# `ndn-fwd adopt` asks the running daemon over its management socket.
+ndn-ipc          = { workspace = true }
 
 [dev-dependencies]
-# Live custodian-signed mgmt-command integration test (tests/custodian_signed_mgmt.rs).
-ndn-ipc       = { workspace = true }
 ndn-strategy  = { workspace = true }
 tempfile      = "3"
 # Capability-scoped shm:// face integration test (tests/shm_capability_face.rs).
