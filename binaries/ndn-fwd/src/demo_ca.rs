@@ -12,6 +12,13 @@
 //! mints a throwaway self-signed key at every start instead (demo only,
 //! warned; nothing persists).
 //!
+//! A PIB-backed CA identity `/<ns>/CA` serves the personal network `/<ns>`:
+//! issuance follows the role layout ([`RolePolicy`]) — device keys
+//! `/<ns>/<role>/<device>/KEY/…` only; `admin` and `node` certs need a device
+//! approval, tokens admit members and (guest-scoped) guests. An invite token
+//! minted with a role (`ndn-fwd-tokens new --role guest` → `guest-<hex>`) is
+//! scoped to `/<ns>/<role>`, so it cannot certify any other role.
+//!
 //! A `device-approval` challenge holds each request in ONE
 //! [`PendingApprovalStore`], shared by the challenge, the mgmt
 //! `ca list-approvals / approve / deny` backend, and the validated
@@ -25,9 +32,11 @@ use anyhow::{Context, Result, bail};
 use ndn_app::{Consumer, Producer};
 use ndn_cert::challenge::device_approval::{DeviceApprovalChallenge, PendingApprovalStore};
 use ndn_cert::hub::{ANCHOR_CERT_FILE, CA_CERT_FILE, CA_DIR};
+use ndn_cert::roles::{role_prefix, token_role};
 use ndn_cert::{
-    CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore, NopChallenge,
-    PinChallenge, RequireAttestationKind, TokenChallenge, TokenStore,
+    CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore, IssuanceContext,
+    IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge, RequireAttestationKind,
+    RolePolicy, TokenChallenge, TokenStore,
 };
 use ndn_config::DemoCaConfig;
 use ndn_engine::ForwarderEngine;
@@ -56,6 +65,10 @@ pub(crate) struct DemoCaSpawn {
     /// `/localhop` trust anchor: the hub root (PIB mode) or the CA's own
     /// self-signed cert (ephemeral mode).
     anchor: Certificate,
+    /// The personal network this CA serves (`/<ns>` of a PIB-backed
+    /// `/<ns>/CA` identity): issuance follows its role layout. `None` for an
+    /// ephemeral demo CA, which keeps accepting any challenge-passing name.
+    network: Option<Name>,
     challenges: Vec<Box<dyn ChallengeHandler>>,
     approvals: Option<PendingApprovalStore>,
     store: Option<Arc<FileCaStore>>,
@@ -85,7 +98,7 @@ pub(crate) async fn prepare(
         .parse()
         .with_context(|| format!("[demo_ca] invalid identity '{}'", cfg.identity))?;
 
-    let (keychain, anchor, store) = if cfg.ephemeral {
+    let (keychain, anchor, store, network) = if cfg.ephemeral {
         tracing::warn!(
             target: "demo_ca",
             identity = %cfg.identity,
@@ -99,7 +112,7 @@ pub(crate) async fn prepare(
             .manager_arc()
             .trust_anchor(keychain.key_name())
             .ok_or_else(|| anyhow::anyhow!("[demo_ca] keychain produced no self-signed anchor"))?;
-        (keychain, anchor, None)
+        (keychain, anchor, None, None)
     } else {
         // The configured PIB, even if the node identity itself fell back to
         // an ephemeral key: the CA identity is a separate key in it.
@@ -107,16 +120,23 @@ pub(crate) async fn prepare(
         let ca_dir = pib_path.join(CA_DIR);
         let store = FileCaStore::open(&ca_dir)
             .map_err(|e| anyhow::anyhow!("[demo_ca] CA state dir {}: {e}", ca_dir.display()))?;
+        // A hub CA: identity `/<ns>/CA` certified by the hub root `/<ns>/KEY/…`.
+        let network = network_of(&identity)
+            .filter(|ns| anchor.name.has_prefix(&ns.clone().append("KEY")));
         tracing::info!(
             target: "demo_ca",
             key = %keychain.key_name(),
             root = %anchor.name,
             state = %ca_dir.display(),
+            network = ?network.as_ref().map(Name::to_string),
             "CA identity loaded from PIB",
         );
-        (keychain, anchor, Some(Arc::new(store)))
+        (keychain, anchor, Some(Arc::new(store)), network)
     };
-    let (challenges, approvals) = build_challenges(cfg, store.as_ref())?;
+    // Role-carrying invite tokens are scoped under the network (the CA
+    // prefix for an ephemeral demo CA).
+    let token_ns = network.clone().unwrap_or_else(|| prefix.clone());
+    let (challenges, approvals) = build_challenges(cfg, store.as_ref(), &token_ns)?;
 
     let face_id = FaceId(DEMO_CA_FACE_ID);
     let (face, handle) = InProcFace::new(face_id, 64);
@@ -147,6 +167,7 @@ pub(crate) async fn prepare(
             feed,
             keychain,
             anchor,
+            network,
             challenges,
             approvals,
             store,
@@ -170,6 +191,30 @@ fn parse_prefix(raw: &str) -> Result<Name> {
         );
     }
     Ok(prefix)
+}
+
+/// The personal network a CA identity `/<ns>/CA` serves: `/<ns>`.
+fn network_of(identity: &Name) -> Option<Name> {
+    let comps = identity.components();
+    let (last, parent) = comps.split_last()?;
+    (last.value.as_ref() == b"CA" && !parent.is_empty())
+        .then(|| Name::from_components(parent.iter().cloned()))
+}
+
+/// Issues only when every policy issues, at the shortest validity offered.
+struct AllIssuance(Vec<Box<dyn IssuancePolicy>>);
+
+impl IssuancePolicy for AllIssuance {
+    fn decide(&self, ctx: &IssuanceContext<'_>) -> IssuanceDecision {
+        let mut validity = ctx.max_validity;
+        for policy in &self.0 {
+            match policy.decide(ctx) {
+                IssuanceDecision::Issue { validity: v } => validity = validity.min(v),
+                deny @ IssuanceDecision::Deny(_) => return deny,
+            }
+        }
+        IssuanceDecision::Issue { validity }
+    }
 }
 
 /// Load the CA signing identity from the PIB: the certificate at
@@ -340,6 +385,16 @@ pub(crate) fn spawn(
         builder = builder.challenge_box(challenge);
     }
 
+    let mut issuance: Vec<Box<dyn IssuancePolicy>> = Vec::new();
+    if let Some(network) = prep.network {
+        tracing::info!(
+            target: "demo_ca",
+            network = %network,
+            "issuance follows the role layout: <network>/<role>/<device>/KEY/...; admin and \
+             node certs need a device approval",
+        );
+        issuance.push(Box::new(RolePolicy::new(network)));
+    }
     if let Some(ra) = &cfg.require_attestation {
         let prefix: Name = ra.prefix.parse().with_context(|| {
             format!(
@@ -347,14 +402,19 @@ pub(crate) fn spawn(
                 ra.prefix
             )
         })?;
-        let policy =
-            RequireAttestationKind::new(prefix, ra.kind.clone()).require_signed(ra.require_signed);
-        builder = builder.issuance(Box::new(policy));
+        issuance.push(Box::new(
+            RequireAttestationKind::new(prefix, ra.kind.clone()).require_signed(ra.require_signed),
+        ));
         tracing::info!(
             target: "demo_ca",
             prefix = %ra.prefix, kind = %ra.kind, signed = ra.require_signed,
             "issuance gated on challenge attestation",
         );
+    }
+    match issuance.len() {
+        0 => {}
+        1 => builder = builder.issuance(issuance.remove(0)),
+        _ => builder = builder.issuance(Box::new(AllIssuance(issuance))),
     }
 
     let ca = builder
@@ -426,21 +486,23 @@ fn approval_validator(engine: &ForwarderEngine) -> Result<Arc<Validator>> {
 /// `device-approval` entries share one [`PendingApprovalStore`], returned for
 /// the mgmt backend and the APPROVE-FEED. With a CA `store` (PIB mode), token
 /// redemptions persist in it so a redeemed token is refused after a restart.
+/// Role-carrying tokens are scoped under `token_ns` ([`token_challenge`]).
 fn build_challenges(
     cfg: &DemoCaConfig,
     store: Option<&Arc<FileCaStore>>,
+    token_ns: &Name,
 ) -> Result<(Vec<Box<dyn ChallengeHandler>>, Option<PendingApprovalStore>)> {
     if !cfg.challenges.is_empty() {
         let mut approvals = None;
         let handlers = cfg
             .challenges
             .iter()
-            .map(|c| build_challenge(c, store, &mut approvals))
+            .map(|c| build_challenge(c, store, token_ns, &mut approvals))
             .collect::<Result<Vec<_>>>()?;
         return Ok((handlers, approvals));
     }
     if !cfg.tokens.is_empty() {
-        let challenge = token_challenge(&cfg.tokens, store)?;
+        let challenge = token_challenge(&cfg.tokens, store, token_ns)?;
         return Ok((vec![challenge], None));
     }
     bail!(
@@ -452,23 +514,34 @@ fn build_challenges(
 }
 
 /// A `token` challenge over `tokens`, its redemptions persisted in `store`
-/// when one is given.
+/// when one is given. A token naming a role (`member-…`, `guest-…`, as
+/// `ndn-fwd-tokens new --role` mints them) is scoped to `<token_ns>/<role>`:
+/// it certifies only names under that prefix. Other tokens are unscoped.
 fn token_challenge(
     tokens: &[String],
     store: Option<&Arc<FileCaStore>>,
+    token_ns: &Name,
 ) -> Result<Box<dyn ChallengeHandler>> {
     let tokens_store = match store {
         Some(store) => TokenStore::with_store(Arc::clone(store) as Arc<dyn CaStore>)
             .map_err(|e| anyhow::anyhow!("[demo_ca] loading redeemed tokens: {e}"))?,
         None => TokenStore::new(),
     };
-    tokens_store.add_many(tokens.iter().cloned());
+    for token in tokens {
+        match token_role(token) {
+            Some(role) => {
+                tokens_store.add_scoped(token.clone(), None, Some(role_prefix(token_ns, role)))
+            }
+            None => tokens_store.add(token.clone()),
+        }
+    }
     Ok(Box::new(TokenChallenge::new(tokens_store)))
 }
 
 fn build_challenge(
     c: &ndn_config::ChallengeConfig,
     store: Option<&Arc<FileCaStore>>,
+    token_ns: &Name,
     approvals: &mut Option<PendingApprovalStore>,
 ) -> Result<Box<dyn ChallengeHandler>> {
     match c.kind.as_str() {
@@ -480,7 +553,7 @@ fn build_challenge(
             );
             Ok(Box::new(NopChallenge::new()))
         }
-        "token" => token_challenge(&c.tokens, store),
+        "token" => token_challenge(&c.tokens, store, token_ns),
         "pin" => {
             let pin = c
                 .pin
@@ -582,16 +655,11 @@ mod tests {
 
     /// Provision the PIB exactly as `ndn-fwd init --profile hub` does (root
     /// key + anchor, `/home/bob/CA` key, CA cert issued by the root under
-    /// `ca/`). Returns the root anchor.
+    /// `ca/`, admin device `/home/bob/admin/desk`). Returns the root anchor.
     fn write_hub_pib(dir: &Path) -> Certificate {
         let pib = FilePib::new(dir).unwrap();
-        ndn_cert::init_hub_in_pib(
-            &pib,
-            &"/home/bob".parse().unwrap(),
-            ndn_cert::hub::DEFAULT_NODE_NAME,
-            false,
-        )
-        .expect("hub init");
+        ndn_cert::init_hub_in_pib(&pib, &"/home/bob".parse().unwrap(), "desk", false)
+            .expect("hub init");
         read_cert_wire(&dir.join(CA_DIR).join(ANCHOR_CERT_FILE))
             .unwrap()
             .expect("init writes the root anchor cert")
@@ -644,8 +712,8 @@ mod tests {
         }
     }
 
-    /// Enroll `/home/bob/<who>` over the CA's NDN face, re-polling pending
-    /// CHALLENGE rounds (device-approval) every 20 ms.
+    /// Enroll `/home/bob/<who>` (e.g. `member/laptop`) over the CA's NDN face,
+    /// re-polling pending CHALLENGE rounds (device-approval) every 20 ms.
     async fn enroll(
         client: &mut NdncertClient,
         who: &str,
@@ -710,15 +778,15 @@ mod tests {
         let cfg = hub_cfg(vec![challenge("token", &["invite-1", "invite-2"])]);
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        enroll(&mut ca.client, "laptop", "token", token("invite-1"))
+        enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
             .await
             .expect("first redemption enrolls");
         ca.stop().await;
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let replay = enroll(&mut ca.client, "phone", "token", token("invite-1")).await;
+        let replay = enroll(&mut ca.client, "member/phone", "token", token("invite-1")).await;
         assert!(replay.is_err(), "redeemed token must be refused after restart: {replay:?}");
-        enroll(&mut ca.client, "phone", "token", token("invite-2"))
+        enroll(&mut ca.client, "member/phone", "token", token("invite-2"))
             .await
             .expect("an unredeemed token still works");
         ca.stop().await;
@@ -743,11 +811,11 @@ mod tests {
         let cfg = hub_cfg(vec![challenge("token", &["invite-1", "invite-2", "invite-3"])]);
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let laptop = enroll(&mut ca.client, "laptop", "token", token("invite-1"))
+        let laptop = enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
             .await
             .expect("laptop enrolls");
         let laptop = (*laptop.name).clone();
-        let phone = enroll(&mut ca.client, "phone", "token", token("invite-2"))
+        let phone = enroll(&mut ca.client, "member/phone", "token", token("invite-2"))
             .await
             .expect("phone enrolls");
         let phone = (*phone.name).clone();
@@ -763,7 +831,7 @@ mod tests {
         assert!(ca_serves(&mut ca.client, &laptop).await, "refused REVOKE changes nothing");
 
         assert_eq!(
-            revoke_as(&mut ca.client, &laptop, device_signer("laptop")).await,
+            revoke_as(&mut ca.client, &laptop, device_signer("member/laptop")).await,
             ndn_cert::RevokeStatus::Revoked
         );
         assert!(!ca_serves(&mut ca.client, &laptop).await, "revoked cert is not served");
@@ -786,7 +854,7 @@ mod tests {
         let mut ca = run_ca(&cfg, dir.path()).await;
         assert!(!ca_serves(&mut ca.client, &laptop).await, "still revoked after restart");
         assert!(!ca_serves(&mut ca.client, &phone).await, "still revoked after restart");
-        let again = enroll(&mut ca.client, "laptop", "token", token("invite-3")).await;
+        let again = enroll(&mut ca.client, "member/laptop", "token", token("invite-3")).await;
         assert!(again.is_err(), "a revoked key is not re-certified: {again:?}");
         ca.stop().await;
     }
@@ -874,7 +942,7 @@ mod tests {
             .unwrap();
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let first = enroll(&mut ca.client, "laptop", "token", token("invite-1"))
+        let first = enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
             .await
             .expect("first enrollment");
         ca.stop().await;
@@ -887,7 +955,7 @@ mod tests {
             .expect("cert issued before the restart is still served");
         assert_eq!(refetched.raw(), first.raw());
 
-        let second = enroll(&mut ca.client, "phone", "token", token("invite-2"))
+        let second = enroll(&mut ca.client, "member/phone", "token", token("invite-2"))
             .await
             .expect("enrollment after restart");
         for issued in [&first, &second] {
@@ -910,14 +978,18 @@ mod tests {
         cfg
     }
 
-    /// Resolve the first pending request through the mgmt backend the
-    /// forwarder registers (`approval_handler`).
-    fn resolve_via_mgmt(store: PendingApprovalStore, approve: bool) -> tokio::task::JoinHandle<()> {
+    /// Resolve the first pending request (for a name under `/home/bob/<who>`)
+    /// through the mgmt backend the forwarder registers (`approval_handler`).
+    fn resolve_via_mgmt(
+        store: PendingApprovalStore,
+        who: &'static str,
+        approve: bool,
+    ) -> tokio::task::JoinHandle<()> {
         let mgmt: Arc<dyn ApprovalMgmtBackend> = Arc::new(store);
         tokio::spawn(async move {
             loop {
                 if let Some(req) = mgmt.pending().into_iter().next() {
-                    assert!(req.cert_name.starts_with("/home/bob/tablet"));
+                    assert!(req.cert_name.starts_with(&format!("/home/bob/{who}/")));
                     let done = if approve {
                         mgmt.approve(&req.id, "approved-via-mgmt")
                     } else {
@@ -936,7 +1008,7 @@ mod tests {
         let cfg = ephemeral_approval_cfg();
         let mut ca = run_ca(&cfg, no_pib()).await;
         let store = ca.approvals.clone().expect("device-approval store is exposed");
-        let approver = resolve_via_mgmt(store.clone(), true);
+        let approver = resolve_via_mgmt(store.clone(), "tablet", true);
 
         let issued = enroll(
             &mut ca.client,
@@ -956,7 +1028,7 @@ mod tests {
     async fn device_approval_denied_via_mgmt_fails_enrollment() {
         let cfg = ephemeral_approval_cfg();
         let mut ca = run_ca(&cfg, no_pib()).await;
-        let approver = resolve_via_mgmt(ca.approvals.clone().unwrap(), false);
+        let approver = resolve_via_mgmt(ca.approvals.clone().unwrap(), "tablet", false);
 
         let result = enroll(
             &mut ca.client,
@@ -967,6 +1039,76 @@ mod tests {
         .await;
         approver.await.unwrap();
         assert!(result.is_err(), "denied request must not enroll: {result:?}");
+        ca.stop().await;
+    }
+
+    /// A hub CA (PIB-backed `/home/bob/CA`) issues only role-layout names, and
+    /// an invite token's role bounds what it can certify: a member token never
+    /// yields an admin cert, an unscoped one never a guest cert.
+    #[tokio::test]
+    async fn hub_ca_tokens_are_bounded_by_role() {
+        let dir = tempfile::tempdir().unwrap();
+        write_hub_pib(dir.path());
+        let tokens = [
+            "member-m1", "member-m2", "guest-g1", "guest-g2", "invite-1", "invite-2", "invite-3",
+        ];
+        let cfg = hub_cfg(vec![challenge("token", &tokens)]);
+        let mut ca = run_ca(&cfg, dir.path()).await;
+
+        // A member token is scoped to /home/bob/member: no admin cert.
+        let admin = enroll(&mut ca.client, "admin/evil", "token", token("member-m1")).await;
+        assert!(admin.is_err(), "member token must not certify an admin: {admin:?}");
+        // Nor does an unscoped token (admins need a device approval).
+        let admin = enroll(&mut ca.client, "admin/evil", "token", token("invite-1")).await;
+        assert!(admin.is_err(), "a token alone must not certify an admin: {admin:?}");
+        let node = enroll(&mut ca.client, "node/vps", "token", token("invite-2")).await;
+        assert!(node.is_err(), "a token alone must not certify a super node: {node:?}");
+        // Names outside the role layout are refused.
+        let flat = enroll(&mut ca.client, "laptop", "token", token("invite-3")).await;
+        assert!(flat.is_err(), "non-role names must not be certified: {flat:?}");
+
+        // Members by member (or unscoped) tokens; guests only by guest tokens.
+        // (m1 was not consumed: its scope refused the admin request up front.)
+        let phone = enroll(&mut ca.client, "member/phone", "token", token("member-m1"))
+            .await
+            .expect("member token certifies a member");
+        assert_eq!(phone.name.to_string(), "/home/bob/member/phone/KEY/k1");
+        let guest = enroll(&mut ca.client, "guest/alice", "token", token("member-m2")).await;
+        assert!(guest.is_err(), "member token must not certify a guest: {guest:?}");
+        let member = enroll(&mut ca.client, "member/tv", "token", token("guest-g1")).await;
+        assert!(member.is_err(), "guest token must not certify a member: {member:?}");
+        enroll(&mut ca.client, "guest/alice", "token", token("guest-g2"))
+            .await
+            .expect("guest token certifies a guest");
+        ca.stop().await;
+    }
+
+    /// On a hub CA an admin cert needs an admin's device approval: the token
+    /// path is refused, the approved device-approval path issues it.
+    #[tokio::test]
+    async fn hub_ca_admin_cert_needs_device_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        write_hub_pib(dir.path());
+        let cfg = hub_cfg(vec![
+            challenge("token", &["invite-1"]),
+            challenge("device-approval", &[]),
+        ]);
+        let mut ca = run_ca(&cfg, dir.path()).await;
+        let by_token = enroll(&mut ca.client, "admin/tablet", "token", token("invite-1")).await;
+        assert!(by_token.is_err(), "admin by token must be refused: {by_token:?}");
+
+        let store = ca.approvals.clone().expect("device-approval store is exposed");
+        let approver = resolve_via_mgmt(store, "admin/tablet", true);
+        let issued = enroll(
+            &mut ca.client,
+            "admin/tablet",
+            "device-approval",
+            serde_json::Map::new(),
+        )
+        .await
+        .expect("an approved admin request enrolls");
+        approver.await.unwrap();
+        assert_eq!(issued.name.to_string(), "/home/bob/admin/tablet/KEY/k1");
         ca.stop().await;
     }
 }

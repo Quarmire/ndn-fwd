@@ -55,6 +55,7 @@ mod onboard;
 // capabilities). Gated behind the `radio` feature.
 #[cfg(feature = "radio")]
 mod radio_face;
+mod schema_cmd;
 mod security_init;
 #[cfg(feature = "smtp")]
 mod smtp_email;
@@ -81,7 +82,7 @@ struct CliArgs {
 
 /// `--help` text. The parser is deliberately hand-rolled (the daemon stays
 /// dependency-light; only the tooling siblings use clap), so keep this in
-/// sync with the options `parse_args` accepts and the `init`/`adopt`
+/// sync with the options `parse_args` accepts and the `init`/`adopt`/`schema`
 /// subcommands `onboard::maybe_run` intercepts.
 fn print_help() {
     println!(
@@ -90,20 +91,31 @@ ndn-fwd {version} — standalone NDN forwarder daemon
 
 USAGE:
   ndn-fwd [OPTIONS]                       run the forwarder
-  ndn-fwd init --profile hub --namespace <ndn-name> [--node-name <name>]
+  ndn-fwd init --profile hub --namespace <ndn-name> [--device <name>]
                [--pib <dir>] [--force]
                                           stand up a network trust root in the
                                           PIB (root key, CA identity <ns>/CA,
-                                          this node's identity <ns>/<name>
-                                          (default hub), root-signed trust
-                                          context), print its ndn-trust://anchor
-                                          envelope and the [security] lines for
-                                          ndn-fwd.toml, and exit
+                                          this primary device's admin identity
+                                          <ns>/admin/<device> certified by the
+                                          CA — device name default: the host
+                                          name, sanitized — and a root-signed
+                                          trust context carrying the generated
+                                          role schema), print its
+                                          ndn-trust://anchor envelope and the
+                                          [security] lines for ndn-fwd.toml,
+                                          and exit
   ndn-fwd adopt <envelope> [--pib <dir>]  TOFU-verify an anchor envelope's
                                           signed context against its pinned
                                           fingerprint, store it in
                                           <pib>/contexts/, and exit
-  (both take -c/--config to find [security].pib_path; default ~/.ndn/pib)
+  ndn-fwd schema show [--pib <dir>] [--namespace <ns>]
+                                          print an adopted context's trust
+                                          schema as readable rules
+  ndn-fwd schema explain <data-name> <key-name> [--pib <dir>] [--namespace <ns>]
+                                          say whether <key-name> may sign
+                                          <data-name> and which rule decides
+                                          (exit status 1 on deny)
+  (all take -c/--config to find [security].pib_path; default ~/.ndn/pib)
 
 OPTIONS:
   -c, --config <path>       TOML config file (default: built-in defaults;
@@ -1187,8 +1199,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let pib = FilePib::new(dir.path()).expect("pib");
         let ns: ndn_packet::Name = "/home/bob".parse().expect("name");
-        ndn_cert::init_hub_in_pib(&pib, &ns, ndn_cert::hub::DEFAULT_NODE_NAME, false)
-            .expect("init hub");
+        ndn_cert::init_hub_in_pib(&pib, &ns, "laptop", false).expect("init hub");
 
         let mut cfg = ForwarderConfig::default();
         cfg.security.pib_path = Some(dir.path().display().to_string());

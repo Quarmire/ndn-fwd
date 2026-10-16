@@ -3,9 +3,17 @@
 //! `https://<domain>/t/invite#…` universal-link mirror) and QR codes (ASCII or
 //! SVG). Tokens go into `[demo_ca].tokens` in `ndn-fwd.toml`; the running CA
 //! picks them up on restart.
+//!
+//! Every minted token carries its role (`member-<hex>`, `guest-<hex>`): the CA
+//! scopes it to `<namespace>/<role>`, so it can only certify a device of that
+//! role, and the invite names that prefix as the invitee's identity
+//! namespace. Admin and super-node certificates are never issued on a token —
+//! they need an admin's device approval.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use ndn_cert::roles::{Role, role_prefix, role_token, token_role};
+use ndn_packet::Name;
 use ndn_trust_envelope::{ANCHOR_FINGERPRINT_LEN, TrustEnvelope};
 use qrcode::QrCode;
 
@@ -19,10 +27,12 @@ struct Cli {
 /// What every invite envelope carries besides the token itself.
 #[derive(Args)]
 struct InviteArgs {
-    /// NDNCERT CA prefix the invitee enrolls against (e.g. `/demo`).
+    /// NDNCERT CA prefix the invitee enrolls against (e.g. `/home/bob`).
     #[arg(long)]
     ca: String,
-    /// Identity namespace the invitee is certified under (e.g. `/demo/users`).
+    /// The network namespace (`ndn-fwd init --namespace`, e.g. `/home/bob`).
+    /// The invite names `<namespace>/<role>` as the invitee's identity
+    /// namespace.
     #[arg(long)]
     namespace: String,
     /// Optional lowercase-hex SHA-256 of the CA's root anchor public key, so
@@ -35,6 +45,49 @@ struct InviteArgs {
     domain: Option<String>,
 }
 
+/// The role an invite admits.
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum InviteRole {
+    Member,
+    Guest,
+    /// Refused: admin certificates need an admin's device approval.
+    Admin,
+    /// Refused: super-node certificates need an admin's device approval.
+    Node,
+}
+
+/// The role a token may carry; admins and super nodes are refused.
+fn invite_role(role: InviteRole) -> Result<Role> {
+    match role {
+        InviteRole::Member => Ok(Role::Member),
+        InviteRole::Guest => Ok(Role::Guest),
+        InviteRole::Admin => bail!(
+            "--role admin: an invite token never admits an admin device — the CA issues \
+             admin certificates only on an admin's device approval: have the new device \
+             enroll as <namespace>/admin/<device> with the device-approval challenge and \
+             approve it on an admin device (`ca approve` on the CA host)"
+        ),
+        InviteRole::Node => bail!(
+            "--role node: an invite token never admits a super node — the CA issues node \
+             certificates only on an admin's device approval: have the node enroll as \
+             <namespace>/node/<name> with the device-approval challenge and approve it on \
+             an admin device (`ca approve` on the CA host)"
+        ),
+    }
+}
+
+/// The invitee's identity namespace: `<namespace>/<role>` for a role token,
+/// `<namespace>` for a legacy unscoped one.
+fn invite_namespace(namespace: &str, role: Option<Role>) -> Result<String> {
+    let ns: Name = namespace
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--namespace {namespace:?} is not an NDN name: {e}"))?;
+    Ok(match role {
+        Some(role) => role_prefix(&ns, role).to_string(),
+        None => ns.to_string(),
+    })
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Generate one or more random tokens + their matching invite envelopes.
@@ -43,6 +96,10 @@ enum Cmd {
     New {
         #[command(flatten)]
         invite: InviteArgs,
+        /// Role the invite admits: `member` (default) or `guest`. `admin` and
+        /// `node` are refused — they need an admin's device approval.
+        #[arg(long, value_enum, default_value_t = InviteRole::Member)]
+        role: InviteRole,
         /// Number of tokens to mint (default 1).
         #[arg(long, default_value_t = 1)]
         count: usize,
@@ -79,15 +136,18 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::New {
             invite,
+            role,
             count,
             bytes,
             qr,
             qr_format,
         } => {
+            let role = invite_role(role)?;
+            let identity_namespace = invite_namespace(&invite.namespace, Some(role))?;
             for _ in 0..count {
-                let token = mint_token(bytes)?;
-                let url = invite_url(&invite, &token)?;
-                println!("token  = \"{token}\"");
+                let token = role_token(role, &mint_token(bytes)?);
+                let url = invite_url(&invite, &identity_namespace, &token)?;
+                println!("token  = \"{token}\"  # {role} only: scoped to {identity_namespace}");
                 println!("invite = {url}");
                 if qr {
                     render_qr(&url, qr_format, &token)?;
@@ -100,7 +160,8 @@ fn main() -> Result<()> {
             token,
             format,
         } => {
-            let url = invite_url(&invite, &token)?;
+            let identity_namespace = invite_namespace(&invite.namespace, token_role(&token))?;
+            let url = invite_url(&invite, &identity_namespace, &token)?;
             render_qr(&url, format, &token)?;
         }
     }
@@ -110,11 +171,11 @@ fn main() -> Result<()> {
 /// The invite envelope for `token`. The https mirror keeps the payload in the
 /// URL fragment, not the query: fragments don't traverse the HTTP request line,
 /// so the token stays out of intermediary access logs.
-fn invite_url(args: &InviteArgs, token: &str) -> Result<String> {
+fn invite_url(args: &InviteArgs, identity_namespace: &str, token: &str) -> Result<String> {
     let anchor_fingerprint = args.anchor_fp.as_deref().map(parse_fp).transpose()?;
     let envelope = TrustEnvelope::Invite {
         ca_prefix: args.ca.clone(),
-        identity_namespace: args.namespace.clone(),
+        identity_namespace: identity_namespace.to_owned(),
         token: token.to_owned(),
         ttl_secs: None,
         anchor_fingerprint,
@@ -175,4 +236,31 @@ fn render_qr(url: &str, format: QrFormat, token: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_and_node_invites_are_refused_with_a_pointer_to_approval() {
+        assert_eq!(invite_role(InviteRole::Member).unwrap(), Role::Member);
+        assert_eq!(invite_role(InviteRole::Guest).unwrap(), Role::Guest);
+        for refused in [InviteRole::Admin, InviteRole::Node] {
+            let err = invite_role(refused).unwrap_err().to_string();
+            assert!(err.contains("device approval"), "{err}");
+        }
+    }
+
+    #[test]
+    fn role_tokens_name_their_scope() {
+        let token = role_token(Role::Guest, "00ff");
+        assert_eq!(token_role(&token), Some(Role::Guest));
+        assert_eq!(
+            invite_namespace("/home/bob", token_role(&token)).unwrap(),
+            "/home/bob/guest"
+        );
+        assert_eq!(invite_namespace("/home/bob", None).unwrap(), "/home/bob");
+        assert!(invite_namespace("home bob", Some(Role::Member)).is_err());
+    }
 }

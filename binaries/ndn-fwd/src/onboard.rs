@@ -2,17 +2,20 @@
 //! onboarding UX over the [`ndn_cert::hub`] / [`ndn_cert::onboarding`]
 //! primitives. A node does not "join a network"; it *adopts* a trust context.
 //!
-//! These are early-exit subcommands: when `args[1]` is `init` or `adopt`, the
-//! daemon does not start. Both act on the node's PIB directory (`--pib <dir>`,
-//! else `[security].pib_path` from `-c/--config`, else `~/.ndn/pib`):
+//! These are early-exit subcommands: when `args[1]` is `init`, `adopt` or
+//! `schema` ([`crate::schema_cmd`]), the daemon does not start. They act on
+//! the node's PIB directory (`--pib <dir>`, else `[security].pib_path` from
+//! `-c/--config`, else `~/.ndn/pib`):
 //!
 //! - `init` mints the network root `<ns>/KEY/root`, the CA signing identity
-//!   `<ns>/CA` and this node's own identity `<ns>/<node-name>` (`--node-name`,
-//!   default `hub`), both certified by the root, into the PIB, signs the trust
-//!   context with the root, stores it in `<pib>/contexts/`, and prints the
-//!   `ndn-trust://anchor` envelope plus the `[security]` lines that make the
-//!   daemon load the node identity. Config files are never edited. An existing
-//!   root is never replaced unless `--force` is given.
+//!   `<ns>/CA` (certified by the root) and this primary device's admin
+//!   identity `<ns>/admin/<device>` (`--device`, default derived from the
+//!   host name; certified by the CA) into the PIB, signs the trust context —
+//!   carrying the generated personal-network schema — with the root, stores
+//!   it in `<pib>/contexts/`, and prints the `ndn-trust://anchor` envelope
+//!   plus the `[security]` lines that make the daemon load the device
+//!   identity. Config files are never edited. An existing root is never
+//!   replaced unless `--force` is given.
 //! - `adopt` verifies an anchor envelope's inline signed context against the
 //!   anchor fingerprint it pins (TOFU) and stores it in `<pib>/contexts/`; the
 //!   daemon loads that store into its keyring at startup.
@@ -20,7 +23,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use ndn_cert::hub::DEFAULT_NODE_NAME;
+use ndn_cert::roles::sanitize_device_name;
 use ndn_cert::{adopt_envelope_into_store, anchor_fingerprint, init_hub_in_pib};
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
@@ -34,21 +37,22 @@ pub fn maybe_run() -> Option<Result<()>> {
     match args.get(1).map(String::as_str) {
         Some("init") => Some(run_init(&args[2..])),
         Some("adopt") => Some(run_adopt(&args[2..])),
+        Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
         _ => None,
     }
 }
 
 /// Options that take a value (so their value is not mistaken for a positional).
-const VALUE_FLAGS: &[&str] = &[
+pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--profile",
     "--namespace",
-    "--node-name",
+    "--device",
     "--pib",
     "-c",
     "--config",
 ];
 
-fn flag<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
+pub(crate) fn flag<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
     args.iter()
         .position(|a| names.contains(&a.as_str()))
         .and_then(|i| args.get(i + 1))
@@ -57,7 +61,7 @@ fn flag<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
 
 /// The PIB directory: `--pib`, else the config's `[security].pib_path`, else
 /// the daemon's default (`~/.ndn/pib`).
-fn pib_dir(args: &[String]) -> Result<PathBuf> {
+pub(crate) fn pib_dir(args: &[String]) -> Result<PathBuf> {
     if let Some(dir) = flag(args, &["--pib"]) {
         return Ok(PathBuf::from(dir));
     }
@@ -73,6 +77,17 @@ fn pib_dir(args: &[String]) -> Result<PathBuf> {
     Ok(crate::security_init::default_pib_path())
 }
 
+/// This host's name, for the default `--device`: the kernel's, else
+/// `/etc/hostname`, else `$HOSTNAME`.
+fn host_name() -> Option<String> {
+    ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+}
+
 fn run_init(args: &[String]) -> Result<()> {
     let profile = flag(args, &["--profile"]).unwrap_or("hub");
     if profile != "hub" {
@@ -82,35 +97,45 @@ fn run_init(args: &[String]) -> Result<()> {
         .context("init requires --namespace <ndn-name>, e.g. /home/bob")?
         .parse()
         .context("invalid --namespace NDN name")?;
-    let node_name = flag(args, &["--node-name"]).unwrap_or(DEFAULT_NODE_NAME);
+    let device = match flag(args, &["--device"]) {
+        Some(device) => device.to_string(),
+        None => {
+            let host = host_name().unwrap_or_default();
+            sanitize_device_name(&host).with_context(|| {
+                format!(
+                    "cannot derive a device name from the host name {host:?}; pass \
+                     --device <name> (letters, digits, '-', '_', '.')"
+                )
+            })?
+        }
+    };
     let force = args.iter().any(|a| a == "--force");
     let pib_dir = pib_dir(args)?;
     let pib =
         FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
 
-    let out = init_hub_in_pib(&pib, &namespace, node_name, force)?;
+    let out = init_hub_in_pib(&pib, &namespace, &device, force)?;
     let hub = &out.hub;
     // The daemon may run from another directory: print an absolute path.
     let pib_abs = std::fs::canonicalize(&pib_dir).unwrap_or_else(|_| pib_dir.clone());
+    let anchor_fp = hex_lower(&anchor_fingerprint(&hub.anchor));
 
     println!("# ndn-fwd hub initialized");
     println!("namespace      = {namespace}");
     println!("pib            = {}", pib_dir.display());
     println!("anchor_key     = {}", hub.anchor_key);
-    println!(
-        "anchor_fp      = {}",
-        hex_lower(&anchor_fingerprint(&hub.anchor))
-    );
+    println!("anchor_fp      = {anchor_fp}");
     println!("ca_key         = {}", out.ca_key);
     println!("ca_cert        = {}", out.ca_cert_path.display());
-    println!("node_identity  = {}", out.node_identity);
-    println!("node_key       = {}", out.node_key);
-    println!("node_cert      = {}", out.node_cert_path.display());
+    println!("device         = {} (admin)", out.device_identity);
+    println!("device_key     = {}", out.device_key);
+    println!("device_cert    = {} (issued by the CA)", out.device_cert_path.display());
     println!(
         "context        = {} (v{})",
         out.context_path.display(),
         hub.context.version()
     );
+    println!("schema         = generated personal-network schema (see `ndn-fwd schema show`)");
     println!("enrollment     = token AND device-approval");
     println!("anchor_uri     = {}", hub.envelope.to_uri());
     println!(
@@ -119,15 +144,20 @@ fn run_init(args: &[String]) -> Result<()> {
     );
     println!();
     println!("# Scan anchor_uri as a QR, or share anchor_url. Adopting it lets a");
-    println!("# peer VERIFY this namespace; producing still needs enrollment.");
+    println!("# peer VERIFY this namespace; producing still needs enrollment as");
+    println!("# {namespace}/<role>/<device>: members and guests by invite token");
+    println!(
+        "# (ndn-fwd-tokens new --ca {namespace} --namespace {namespace} --anchor-fp {anchor_fp}"
+    );
+    println!("#  --role member|guest), admins and super nodes by device approval.");
     println!("# The root key now lives in the PIB: keep a recovery copy offline.");
     println!("#");
-    println!("# Put these lines in ndn-fwd.toml so the daemon signs as this node's");
-    println!("# identity (certified by the root) instead of an ephemeral key:");
+    println!("# Put these lines in ndn-fwd.toml so the daemon signs as this device's");
+    println!("# admin identity (certified by the CA) instead of an ephemeral key:");
     println!("[security]");
     println!(
         "identity = {}",
-        toml_basic_string(&out.node_identity.to_string())
+        toml_basic_string(&out.device_identity.to_string())
     );
     println!(
         "pib_path = {}",
