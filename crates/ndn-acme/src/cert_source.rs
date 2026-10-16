@@ -47,24 +47,44 @@ impl CertMaterial {
 /// - WebTransport must stay browser-pinnable, and Chrome rejects a
 ///   `serverCertificateHashes` cert valid for more than 14 days.
 /// - A raw-QUIC backbone peer pins the *leaf hash*, not the expiry, so a 13-day
-///   window there only forces needless regeneration across restarts.
+///   window there only forces needless re-issuance (and a new pin).
+///
+/// Either way the key is persisted (see [`SelfSignedDev::cache_dir`]), so the
+/// pinned leaf hash survives restarts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SelfSignedProfile {
     /// Cap validity at 13 days so the cert is usable with Chrome's WebTransport
-    /// `serverCertificateHashes`. The safe default.
+    /// `serverCertificateHashes`. The safe default. The persisted key is kept;
+    /// the cert is re-issued from it once within a day of expiry.
     #[default]
     BrowserPinnable,
     /// Long-lived (10 years) — for a pinned backbone/raw-QUIC link where the
-    /// dialer trusts the leaf hash and ignores expiry.
+    /// dialer trusts the leaf hash and ignores expiry. The persisted cert is
+    /// reused until it expires, so the pin never changes.
     Backbone,
 }
 
-/// Localhost-only dev cert; never for production.
+/// Self-signed cert (dev, `serverCertificateHashes`, or a pinned backbone);
+/// never a publicly trusted cert.
+///
+/// The generated key (PKCS#8) and cert are persisted under
+/// [`cache_dir`](Self::cache_dir), keyed by profile + hostnames, and reused on
+/// later resolves so the leaf SHA-256 that dialers pin stays stable across
+/// restarts. Changing `hostnames` mints a new key and cert.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SelfSignedDev {
     /// Subject-alternative-name hostnames to embed (defaults to `localhost`).
     #[serde(default = "default_hostnames")]
     pub hostnames: Vec<String>,
+    /// Directory for the persisted key + cert (files `0600`, directory
+    /// `0700`). `None` uses [`default_self_signed_cache_dir`]
+    /// (`$XDG_STATE_HOME/ndn-fwd/tls`, else `~/.local/state/ndn-fwd/tls`).
+    /// Nodes sharing one directory and hostname set share the cert; give each
+    /// node its own directory to keep their pins distinct.
+    ///
+    /// [`default_self_signed_cache_dir`]: crate::default_self_signed_cache_dir
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<PathBuf>,
 }
 
 fn default_hostnames() -> Vec<String> {
@@ -106,7 +126,7 @@ pub enum CertSource {
     },
     /// Provision (and cache) a real cert via an ACME CA over DNS-01.
     Acme(AcmeConfig),
-    /// Mint a localhost-only self-signed cert; never for production.
+    /// Mint (once) and persist a self-signed cert; never a publicly trusted one.
     SelfSignedDev(SelfSignedDev),
 }
 
@@ -114,8 +134,8 @@ impl CertSource {
     /// Runs an ACME order if the cached cert is missing or stale.
     ///
     /// `profile` only affects the [`SelfSignedDev`](Self::SelfSignedDev) arm —
-    /// it picks the self-signed validity window (see [`SelfSignedProfile`]).
-    /// `Pem` and `Acme` ignore it.
+    /// it picks the self-signed validity window and re-issue policy (see
+    /// [`SelfSignedProfile`]). `Pem` and `Acme` ignore it.
     pub async fn resolve(
         &self,
         provider: Option<Arc<dyn DnsProvider>>,
@@ -148,32 +168,7 @@ impl CertSource {
                     .await?;
                 Ok(mat)
             }
-            CertSource::SelfSignedDev(s) => {
-                let mut params = rcgen::CertificateParams::new(s.hostnames.clone())
-                    .map_err(|e| AcmeError::Other(e.to_string()))?;
-                let now = time::OffsetDateTime::now_utc();
-                params.not_before = now - time::Duration::hours(1);
-                params.not_after = now
-                    + match profile {
-                        // Chrome's WebTransport `serverCertificateHashes`
-                        // rejects certs valid for more than 14 days.
-                        SelfSignedProfile::BrowserPinnable => time::Duration::days(13),
-                        // A pinned backbone peer trusts the leaf hash, not the
-                        // expiry — a long window avoids restart-time regen.
-                        SelfSignedProfile::Backbone => time::Duration::days(3650),
-                    };
-                let key_pair =
-                    rcgen::KeyPair::generate().map_err(|e| AcmeError::Other(e.to_string()))?;
-                let cert = params
-                    .self_signed(&key_pair)
-                    .map_err(|e| AcmeError::Other(e.to_string()))?;
-                let cert_chain_pem = cert.pem().into_bytes();
-                let private_key_pem = key_pair.serialize_pem().into_bytes();
-                Ok(CertMaterial {
-                    cert_chain_pem,
-                    private_key_pem,
-                })
-            }
+            CertSource::SelfSignedDev(s) => crate::self_signed::resolve(s, profile).await,
         }
     }
 }

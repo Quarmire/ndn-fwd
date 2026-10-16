@@ -77,7 +77,6 @@ smtp        = ["dep:lettre"]
 [dependencies]
 portable-atomic = { workspace = true }
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname"], optional = true }
-base64           = { workspace = true }
 ndn-engine       = { workspace = true }
 ndn-mgmt         = { workspace = true }
 # The `ControlSurface` trait for MgmtHandles.control_surfaces — named
@@ -108,6 +107,7 @@ ndn-strategy     = { workspace = true }
 ndn-store        = { workspace = true }
 ndn-security     = { workspace = true, features = ["custodian"] }
 ndn-cert         = { workspace = true }
+ndn-trust-envelope = { workspace = true }
 ndn-identity     = { workspace = true }
 ndn-face-webrtc  = { workspace = true, optional = true }
 ndn-rtc-signaling-relay = { workspace = true, optional = true }

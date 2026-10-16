@@ -90,12 +90,20 @@ ndn-fwd {version} — standalone NDN forwarder daemon
 
 USAGE:
   ndn-fwd [OPTIONS]                       run the forwarder
-  ndn-fwd init --profile hub --namespace <ndn-name>
-                                          stand up a network trust root, print
-                                          a bootstrap ticket, and exit
-  ndn-fwd adopt <ticket>                  inspect a bootstrap ticket (URL or
-                                          fragment), report the anchor
-                                          fingerprint it pins, and exit
+  ndn-fwd init --profile hub --namespace <ndn-name> [--node-name <name>]
+               [--pib <dir>] [--force]
+                                          stand up a network trust root in the
+                                          PIB (root key, CA identity <ns>/CA,
+                                          this node's identity <ns>/<name>
+                                          (default hub), root-signed trust
+                                          context), print its ndn-trust://anchor
+                                          envelope and the [security] lines for
+                                          ndn-fwd.toml, and exit
+  ndn-fwd adopt <envelope> [--pib <dir>]  TOFU-verify an anchor envelope's
+                                          signed context against its pinned
+                                          fingerprint, store it in
+                                          <pib>/contexts/, and exit
+  (both take -c/--config to find [security].pib_path; default ~/.ndn/pib)
 
 OPTIONS:
   -c, --config <path>       TOML config file (default: built-in defaults;
@@ -165,6 +173,45 @@ fn parse_args() -> CliArgs {
         config_path,
         log_level,
         list_modules,
+    }
+}
+
+/// Load the trust contexts this node adopted (`ndn-fwd adopt`, or its own
+/// context from `ndn-fwd init`) from `<pib_path>/contexts/` into `mgr`'s
+/// keyring — the one the engine's validator uses. Each stored context's
+/// signature is re-verified against its own anchors; a file that fails is
+/// logged and skipped, never trusted. The store sits beside the PIB even when
+/// the node runs an ephemeral identity.
+fn load_adopted_contexts(cfg: &ForwarderConfig, mgr: &ndn_security::SecurityManager) {
+    let pib_root = cfg
+        .security
+        .pib_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(security_init::default_pib_path);
+    let loaded = match ndn_cert::load_persisted_contexts(&pib_root, mgr.keyring()) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            tracing::warn!(target: "security", error = %e, "cannot read adopted trust contexts");
+            return;
+        }
+    };
+    for (path, result) in loaded {
+        match result {
+            Ok(ctx) => tracing::info!(
+                target: "security",
+                namespace = %ctx.namespace(),
+                version = ctx.version(),
+                path = %path.display(),
+                "loaded adopted trust context"
+            ),
+            Err(e) => tracing::warn!(
+                target: "security",
+                path = %path.display(),
+                error = %e,
+                "refusing stored trust context"
+            ),
+        }
     }
 }
 
@@ -278,24 +325,33 @@ async fn main() -> Result<()> {
     };
 
     let security_init = load_security(&fwd_config);
+    load_adopted_contexts(&fwd_config, &security_init.mgr);
     // Capture the identity signer before `security_init.mgr` moves into the
-    // EngineBuilder; DV's `StaticTrust`/`LvsTrust` modes consume it.
+    // EngineBuilder; DV's `DvStaticKeys`/`DvLvs` modes consume it.
     let identity_signer: Option<std::sync::Arc<dyn ndn_security::Signer>> =
         security_init.mgr.any_signer();
     let mgmt_validator = load_mgmt_validator(&fwd_config.security.mgmt)?;
     let mut localhop_validator = load_localhop_validator(&fwd_config.security.mgmt)?;
 
-    // Prepare the demo CA's in-process face and ephemeral identity before
-    // build so the face can be attached, and splice its self-signed cert
-    // into the localhop validator anchors so issued certs work without an
-    // on-disk PIB.
+    // Prepare the CA's in-process faces and signing identity (from the PIB,
+    // or a throwaway key with `ephemeral = true`) before build so the faces
+    // can be attached, and splice its trust anchor into the localhop
+    // validator so certs it issues authorise localhop commands.
     let demo_ca_artifacts = if fwd_config.demo_ca.enabled {
-        let (face, spawn) = demo_ca::prepare(&fwd_config.demo_ca)?;
+        // The configured PIB even when the node identity fell back to an
+        // ephemeral key: the CA identity is its own key in that PIB.
+        let ca_pib = fwd_config
+            .security
+            .pib_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(security_init::default_pib_path);
+        let (faces, spawn) = demo_ca::prepare(&fwd_config.demo_ca, &ca_pib).await?;
         localhop_validator = Some(demo_ca::install_localhop_anchor(
-            &spawn.keychain,
+            &spawn,
             localhop_validator,
         )?);
-        Some((face, spawn))
+        Some((faces, spawn))
     } else {
         None
     };
@@ -349,8 +405,10 @@ async fn main() -> Result<()> {
     }
 
     let demo_ca_spawn = match demo_ca_artifacts {
-        Some((face, spawn)) => {
-            builder = builder.face(face);
+        Some((faces, spawn)) => {
+            for face in faces {
+                builder = builder.face(face);
+            }
             Some(spawn)
         }
         None => None,
@@ -701,32 +759,30 @@ async fn main() -> Result<()> {
     // deferred Producer tasks bind to the same shutdown signal.
     let cancel = CancellationToken::new();
 
-    // Give the localhop validator an engine-backed certificate fetcher so it can
-    // authorise a remote node whose operator cert isn't cached locally but is
-    // reachable over NDN (e.g. fetched from the CA that issued it). Without this,
-    // only certs already in the validator's cache validate; with it, any operator
-    // whose cert is fetchable *and* chains to a trusted localhop anchor can
-    // self-register a prefix via `/localhop/nfd/rib/register`. One pooled app
-    // consumer (cert fetches are rare and the CertFetcher dedups them).
-    if let Some(ref validator) = localhop_validator {
-        use ndn_app::EngineAppExt;
-        let consumer = std::sync::Arc::new(tokio::sync::Mutex::new(
-            engine.app_consumer(cancel.child_token()),
-        ));
-        let fetch_fn: ndn_security::FetchFn = std::sync::Arc::new(move |name: ndn_packet::Name| {
-            let consumer = std::sync::Arc::clone(&consumer);
-            Box::pin(async move { consumer.lock().await.fetch(name).await.ok() })
-        });
-        let fetcher = std::sync::Arc::new(ndn_security::CertFetcher::new(
+    // Engine-backed certificate fetching (one helper, two validators):
+    //
+    // * The engine's data-path validator: Data signed by a cert this node hasn't
+    //   cached (e.g. a newly enrolled device's) is parked while the cert is
+    //   fetched over NDN, then validated — instead of being dropped.
+    // * The localhop validator: authorises a remote node whose operator cert
+    //   isn't cached locally but is reachable over NDN (e.g. from the CA that
+    //   issued it) and chains to a trusted localhop anchor, so it can
+    //   self-register a prefix via `/localhop/nfd/rib/register`.
+    //
+    // Each CertFetcher dedups concurrent requests and backs off after a failure.
+    ndn_app::install_engine_cert_fetcher(&engine, cancel.child_token());
+    if let Some(validator) = &localhop_validator {
+        let fetcher = ndn_app::engine_cert_fetcher(
+            &engine,
             validator.cert_cache_arc(),
-            fetch_fn,
-            std::time::Duration::from_secs(4),
-        ));
-        let _ = validator.set_cert_fetcher(fetcher);
-        tracing::info!(
-            target: "security",
-            "localhop validator: engine-backed certificate fetcher attached"
+            cancel.child_token(),
         );
+        if validator.set_cert_fetcher(fetcher).is_ok() {
+            tracing::info!(
+                target: "security",
+                "localhop validator: engine-backed certificate fetcher attached"
+            );
+        }
     }
 
     post_build.apply(&engine, &cancel);
@@ -819,26 +875,32 @@ async fn main() -> Result<()> {
     // `/localhost/nfd` + `/localhop/nfd` FIB entries are installed by
     // `ndn_mgmt::mount_management` below.
 
-    if let Some(spawn) = demo_ca_spawn {
-        engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
-        tracing::info!(
-            target: "demo_ca",
-            prefix = %spawn.prefix,
-            face = spawn.face_id.0,
-            "demo CA FIB entry installed"
-        );
-        if let Some(ns) = &spawn.cert_namespace {
-            // Cost +1 so a more-specific browser-registered prefix wins LPM.
-            engine.fib().add_nexthop(ns, spawn.face_id, 1);
+    // The CA's device-approval store (if it offers that challenge), shared
+    // with the mgmt `ca` module below.
+    let ca_approvals = match demo_ca_spawn {
+        Some(spawn) => {
+            // `/<prefix>` covers `/<prefix>/CA/*` and cert-fetch for the
+            // certs issued under it; more-specific registrations still win LPM.
+            engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
             tracing::info!(
                 target: "demo_ca",
-                namespace = %ns,
+                prefix = %spawn.prefix,
                 face = spawn.face_id.0,
-                "demo CA cert-fetch namespace FIB entry installed"
+                "CA FIB entry installed"
             );
+            if let Some(feed) = &spawn.feed {
+                engine.fib().add_nexthop(&feed.prefix, feed.face_id, 0);
+                tracing::info!(
+                    target: "demo_ca",
+                    prefix = %feed.prefix,
+                    face = feed.face_id.0,
+                    "CA approval-feed FIB entry installed"
+                );
+            }
+            demo_ca::spawn(spawn, &fwd_config.demo_ca, &engine)?
         }
-        demo_ca::spawn(spawn, &fwd_config.demo_ca, &engine)?;
-    }
+        None => None,
+    };
 
     // Face listeners, WT/WebRTC listeners, auto-multicast face creation,
     // and the interface hotplug watcher all live in `face_setup`.
@@ -967,9 +1029,11 @@ async fn main() -> Result<()> {
             #[cfg(not(feature = "webtransport"))]
             webtransport_status_handler: None,
             ble_handler,
-            // Wired to the CA's PendingApprovalStore when a device-approval CA
-            // runs; the demo CA (Nop/Token) registers none.
-            approval_handler: None,
+            // The CA's device-approval store (the same one its challenge and
+            // APPROVE-FEED use), so `ca list-approvals / approve / deny` act
+            // on live requests. None when the CA offers no device-approval.
+            approval_handler: ca_approvals
+                .map(|s| Arc::new(s) as Arc<dyn mgmt_ndn::ApprovalMgmtBackend>),
             // Runtime-mutable mgmt-access policy. `policy-set` hot-flips
             // booleans; validator-anchor changes are `pending_restart`
             // until a Validator rebuild path exists.
@@ -1114,5 +1178,22 @@ mod tests {
             cache.lock().expect("cache lock").is_empty(),
             "ndn-fwd must mount management with a live command replay cache"
         );
+    }
+
+    /// Startup regression: contexts adopted to disk must reach the engine's
+    /// keyring (they used to be printed and forgotten).
+    #[test]
+    fn adopted_contexts_load_into_the_engine_keyring() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pib = FilePib::new(dir.path()).expect("pib");
+        let ns: ndn_packet::Name = "/home/bob".parse().expect("name");
+        ndn_cert::init_hub_in_pib(&pib, &ns, ndn_cert::hub::DEFAULT_NODE_NAME, false)
+            .expect("init hub");
+
+        let mut cfg = ForwarderConfig::default();
+        cfg.security.pib_path = Some(dir.path().display().to_string());
+        let mgr = ndn_security::SecurityManager::new();
+        load_adopted_contexts(&cfg, &mgr);
+        assert_eq!(mgr.keyring().version_of(&ns), Some(1));
     }
 }

@@ -67,7 +67,6 @@ pub async fn prepare(
         hello_retries: nlsr_toml.hello_retries,
         hello_timeout_secs: nlsr_toml.hello_timeout_secs,
         sync_interest_lifetime_ms: nlsr_toml.sync_interest_lifetime_ms,
-        trust_policy: None,
         max_faces_per_prefix: nlsr_toml.max_faces_per_prefix,
     };
 

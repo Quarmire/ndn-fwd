@@ -6,14 +6,18 @@
 //! ```text
 //! ndn-pair-kiosk request <namespace> <ttl-secs>
 //!     → an ndn-trust://capability/ REQUEST URI for the phone to scan
+//! ndn-pair-kiosk pubkey <grant-uri>
+//!     → the operator public key (base64) from the certificate a GRANT carries
 //! ndn-pair-kiosk signreq <name>
 //!     → a base64 WireSignRequest to hand the phone (its Approve tab)
 //! ndn-pair-kiosk verify <name> <response-b64> <operator-pubkey-b64>
 //!     → verify the returned signature over the request's region
 //! ```
 //!
-//! `<operator-pubkey-b64>` is the key the phone returns in the `Capability{Grant}`
-//! envelope; the signature it verifies is what `respond_to_sign_request` produced.
+//! The phone's `Capability{Grant}` envelope carries the operator's certificate
+//! (signed NDN Data wire) in `grant`; `<operator-pubkey-b64>` is that
+//! certificate's public key (what `pubkey` prints). The signature it verifies
+//! is what `respond_to_sign_request` produced.
 
 use std::time::Duration;
 
@@ -25,7 +29,29 @@ use ndn_packet::Name;
 use ndn_packet::encode::InterestBuilder;
 use ndn_security::custodian::{WireSignRequest, WireSignResponse};
 use ndn_security::verifier::{EcdsaSha256Verifier, Verifier, VerifyOutcome};
+use ndn_security::Certificate;
 use ndn_trust_envelope::{CapDirection, Capability, TrustEnvelope};
+
+/// The operator public key from a `Capability{Grant}` URI: `grant` is the
+/// operator's certificate as signed NDN Data wire.
+fn operator_pubkey(grant_uri: &str) -> Vec<u8> {
+    match TrustEnvelope::from_uri(grant_uri.trim())
+        .unwrap_or_else(|e| die(&format!("parse grant: {e}")))
+    {
+        TrustEnvelope::Capability(Capability {
+            grant: Some(cert_wire),
+            ..
+        }) => {
+            let data = ndn_packet::Data::decode(cert_wire)
+                .unwrap_or_else(|e| die(&format!("grant is not a Data packet: {e:?}")));
+            Certificate::decode(&data)
+                .unwrap_or_else(|e| die(&format!("grant is not a certificate: {e}")))
+                .public_key
+                .to_vec()
+        }
+        _ => die("not a capability grant (no operator certificate)"),
+    }
+}
 
 /// The to-be-signed region for a command named `name` — its TLV-encoded Name
 /// (the leading Name the phone scope-checks and signs).
@@ -54,17 +80,7 @@ fn main() {
             println!("{}", env.to_uri());
         }
         Some("pubkey") if args.len() == 2 => {
-            // Extract the operator's public key from a Capability{Grant} envelope.
-            match TrustEnvelope::from_uri(&args[1])
-                .unwrap_or_else(|e| die(&format!("parse grant: {e}")))
-            {
-                TrustEnvelope::Capability(Capability {
-                    grant: Some(pk), ..
-                }) => {
-                    println!("{}", B64.encode(&pk));
-                }
-                _ => die("not a capability grant (no operator key)"),
-            }
+            println!("{}", B64.encode(operator_pubkey(&args[1])));
         }
         Some("signreq") if args.len() == 2 => {
             let req = WireSignRequest {
@@ -146,17 +162,7 @@ fn main() {
                             // Accept either a raw pubkey (base64) or the grant URI
                             // (extract the operator key from the certificate it carries).
                             let pk = if arg.starts_with("ndn-trust://") {
-                                match TrustEnvelope::from_uri(arg.trim()) {
-                                    Ok(TrustEnvelope::Capability(Capability {
-                                        grant: Some(cert),
-                                        ..
-                                    })) => ndn_packet::Data::decode(cert)
-                                        .ok()
-                                        .and_then(|d| d.content().cloned())
-                                        .map(|b| b.to_vec())
-                                        .unwrap_or_else(|| die("grant cert has no public key")),
-                                    _ => die("not a capability grant"),
-                                }
+                                operator_pubkey(&arg)
                             } else {
                                 B64.decode(arg.trim())
                                     .unwrap_or_else(|_| die("bad pubkey base64"))
@@ -178,7 +184,7 @@ fn main() {
             });
         }
         _ => die(
-            "usage: ndn-pair-kiosk (request <ns> <ttl> | signreq <name> | verify <name> <resp-b64> <pubkey-b64> | signnet <socket> <signer-prefix> <name> [pubkey-b64])",
+            "usage: ndn-pair-kiosk (request <ns> <ttl> | pubkey <grant-uri> | signreq <name> | verify <name> <resp-b64> <pubkey-b64> | signnet <socket> <signer-prefix> <name> [pubkey-b64|grant-uri])",
         ),
     }
 }

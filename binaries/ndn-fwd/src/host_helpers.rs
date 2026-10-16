@@ -1,7 +1,6 @@
 //! Host-binary helpers: address and name parsing, validator construction,
 //! content-store builder, and the optional coding + rate-limit loaders.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -23,15 +22,49 @@ pub fn parse_name(uri: &str) -> Name {
     uri.parse().unwrap_or_else(|_| Name::root())
 }
 
+/// Anchor-only validator loaded from the PIB at `pib_path`. The schema is
+/// `accept_all`: any key whose cert chains to one of the PIB's trust anchors
+/// may sign anything, so the anchor set is the only authorization boundary.
+/// Errors (startup failure) if the PIB is unreachable or holds no anchors.
+/// `section` / `key` name the config field in error messages; `scope`
+/// labels the per-anchor log line.
+fn load_anchor_only_validator(
+    pib_path: &str,
+    section: &str,
+    key: &str,
+    scope: &str,
+) -> Result<ndn_security::Validator> {
+    let pib = ndn_security::FilePib::open(pib_path).map_err(|e| {
+        anyhow::anyhow!(
+            "[{section}] cannot open {key} '{pib_path}': {e}. \
+             Run `ndn-sec --pib {pib_path} keygen --anchor /your/identity` to create one."
+        )
+    })?;
+    let anchors = pib.trust_anchors().map_err(|e| {
+        anyhow::anyhow!("[{section}] failed to load anchors from '{pib_path}': {e}")
+    })?;
+    if anchors.is_empty() {
+        return Err(anyhow::anyhow!(
+            "[{section}] {key} '{pib_path}' contains no trust anchors. \
+             Run `ndn-sec --pib {pib_path} anchor add /your/identity` to add one."
+        ));
+    }
+    let validator = ndn_security::Validator::new(ndn_security::TrustSchema::accept_all());
+    for anchor in anchors {
+        tracing::info!(target: "security", name = %anchor.name, "{scope}: loaded trust anchor");
+        validator.add_trust_anchor(anchor);
+    }
+    Ok(validator)
+}
+
 /// `None` when `trust_anchor_pib` is unset. Returns an error (startup
 /// failure) if the PIB is unreachable or empty — operators must either
 /// populate it or set `require_signed_commands = false`. The resulting
-/// validator uses `accept_all`: any Interest signed by a key whose cert
-/// is in the anchor set passes.
+/// validator is anchor-only (see [`load_anchor_only_validator`]).
 pub fn load_mgmt_validator(
     cfg: &ndn_config::MgmtSecurityConfig,
 ) -> Result<Option<Arc<ndn_security::Validator>>> {
-    let Some(pib_path_str) = &cfg.trust_anchor_pib else {
+    let Some(pib_path) = &cfg.trust_anchor_pib else {
         if cfg.require_signed_commands {
             tracing::warn!(
                 target: "security",
@@ -42,71 +75,27 @@ pub fn load_mgmt_validator(
         }
         return Ok(None);
     };
-    let pib_path = PathBuf::from(pib_path_str);
-    let pib = ndn_security::FilePib::open(&pib_path).map_err(|e| {
-        anyhow::anyhow!(
-            "[security.mgmt] cannot open trust_anchor_pib '{}': {e}. \
-             Run `ndn-sec --pib {pib_path_str} keygen --anchor /your/identity` to create one.",
-            pib_path.display()
-        )
-    })?;
-    let anchors = pib.trust_anchors().map_err(|e| {
-        anyhow::anyhow!(
-            "[security.mgmt] failed to load anchors from '{}': {e}",
-            pib_path.display()
-        )
-    })?;
-    if anchors.is_empty() {
-        return Err(anyhow::anyhow!(
-            "[security.mgmt] trust_anchor_pib '{}' contains no trust anchors. \
-             Run `ndn-sec --pib {pib_path_str} anchor add /your/identity` to add one.",
-            pib_path.display()
-        ));
-    }
-    let schema = ndn_security::TrustSchema::accept_all();
-    let validator = ndn_security::Validator::new(schema);
-    for anchor in anchors {
-        tracing::info!(target: "security", name = %anchor.name, "mgmt: loaded trust anchor");
-        validator.add_trust_anchor(anchor);
-    }
+    let validator =
+        load_anchor_only_validator(pib_path, "security.mgmt", "trust_anchor_pib", "mgmt")?;
     Ok(Some(Arc::new(validator)))
 }
 
 /// `Some(validator)` when `[security.mgmt].localhop_trust_anchor_pib` is
 /// populated; `None` disables `/localhop/nfd/...` registration (mirroring
-/// NFD's `enableLocalhop`). Schema is `accept_all`: any Interest signed by
-/// a key whose cert chains to an anchor passes.
+/// NFD's `enableLocalhop`). The validator is anchor-only (see
+/// [`load_anchor_only_validator`]).
 pub fn load_localhop_validator(
     cfg: &ndn_config::MgmtSecurityConfig,
 ) -> Result<Option<Arc<ndn_security::Validator>>> {
-    let Some(pib_path_str) = &cfg.localhop_trust_anchor_pib else {
+    let Some(pib_path) = &cfg.localhop_trust_anchor_pib else {
         return Ok(None);
     };
-    let pib_path = PathBuf::from(pib_path_str);
-    let pib = ndn_security::FilePib::open(&pib_path).map_err(|e| {
-        anyhow::anyhow!(
-            "[security.mgmt] cannot open localhop_trust_anchor_pib '{}': {e}",
-            pib_path.display()
-        )
-    })?;
-    let anchors = pib.trust_anchors().map_err(|e| {
-        anyhow::anyhow!(
-            "[security.mgmt] failed to load anchors from '{}': {e}",
-            pib_path.display()
-        )
-    })?;
-    if anchors.is_empty() {
-        return Err(anyhow::anyhow!(
-            "[security.mgmt] localhop_trust_anchor_pib '{}' contains no trust anchors",
-            pib_path.display()
-        ));
-    }
-    let schema = ndn_security::TrustSchema::accept_all();
-    let validator = ndn_security::Validator::new(schema);
-    for anchor in anchors {
-        tracing::info!(target: "security", name = %anchor.name, "localhop: loaded trust anchor");
-        validator.add_trust_anchor(anchor);
-    }
+    let validator = load_anchor_only_validator(
+        pib_path,
+        "security.mgmt",
+        "localhop_trust_anchor_pib",
+        "localhop",
+    )?;
     Ok(Some(Arc::new(validator)))
 }
 
@@ -163,30 +152,16 @@ fn poll_once<F: std::future::Future>(fut: F) -> Option<F::Output> {
 
 /// Build the service-discovery record verifier from
 /// `[discovery].trust_anchor_pib`. `None` ⇒ fail-closed (peer records are
-/// browseable but never auto-install FIB). Mirrors [`load_mgmt_validator`].
+/// browseable but never auto-install FIB). The validator is anchor-only
+/// (see [`load_anchor_only_validator`]).
 pub fn load_discovery_verifier(
     trust_anchor_pib: Option<&str>,
 ) -> Result<Option<Arc<dyn ndn_discovery::RecordVerifier>>> {
-    let Some(pib_path_str) = trust_anchor_pib else {
+    let Some(pib_path) = trust_anchor_pib else {
         return Ok(None);
     };
-    let pib_path = PathBuf::from(pib_path_str);
-    let pib = ndn_security::FilePib::open(&pib_path).map_err(|e| {
-        anyhow::anyhow!("[discovery] cannot open trust_anchor_pib '{pib_path_str}': {e}")
-    })?;
-    let anchors = pib
-        .trust_anchors()
-        .map_err(|e| anyhow::anyhow!("[discovery] failed to load anchors: {e}"))?;
-    if anchors.is_empty() {
-        return Err(anyhow::anyhow!(
-            "[discovery] trust_anchor_pib '{pib_path_str}' contains no trust anchors"
-        ));
-    }
-    let validator = ndn_security::Validator::new(ndn_security::TrustSchema::accept_all());
-    for anchor in anchors {
-        tracing::info!(target: "discovery", name = %anchor.name, "discovery: loaded trust anchor");
-        validator.add_trust_anchor(anchor);
-    }
+    let validator =
+        load_anchor_only_validator(pib_path, "discovery", "trust_anchor_pib", "discovery")?;
     Ok(Some(Arc::new(DiscoveryVerifier {
         validator: Arc::new(validator),
     })))

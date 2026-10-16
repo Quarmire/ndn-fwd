@@ -1,21 +1,33 @@
 //! NDNCERT 0.3 enrollment helper. Runs NEW → CHALLENGE (pin, 2 rounds) →
-//! cert-fetch against `ndncert-ca-server`. Without `--pin` the helper sends
-//! the trigger round, prints `WAITING_FOR_PIN <request_id>` on stderr, and
-//! reads the PIN from stdin.
+//! cert-fetch against `ndncert-ca-server`, via the shared
+//! [`ndn_cert::client::enroll`] driver. Without `--pin` the helper sends the
+//! trigger round, prints `WAITING_FOR_PIN <request_id>` on stderr, and reads
+//! the PIN from stdin.
 
 use std::io::BufRead as _;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
+use bytes::Bytes;
 use ndn_app::Consumer;
-use ndn_cert::EnrollmentSession;
-use ndn_packet::Name;
-use ndn_packet::SignatureType;
-use ndn_packet::encode::InterestBuilder;
+use ndn_cert::{CaExchange, CertError};
+use ndn_packet::{Data, Name};
 use ndn_security::{EcdsaP256Signer, Signer};
 
 const INTEREST_LIFETIME: Duration = Duration::from_secs(10);
+
+/// [`CaExchange`] over the NFD consumer connection.
+struct ConsumerExchange(Consumer);
+
+impl CaExchange for ConsumerExchange {
+    async fn express(&mut self, interest: Bytes) -> Result<Data, CertError> {
+        self.0
+            .fetch_wire(interest, INTEREST_LIFETIME + Duration::from_millis(500))
+            .await
+            .map_err(|e| CertError::Transport(format!("{e:#}")))
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -47,179 +59,76 @@ async fn main() -> anyhow::Result<()> {
         EcdsaP256Signer::from_seed(&seed, key_name.clone()).context("ecdsa key init")?;
     let signer: Arc<dyn Signer> = Arc::new(ec_signer);
 
-    let mut consumer = Consumer::connect(&face_socket)
+    let consumer = Consumer::connect(&face_socket)
         .await
         .with_context(|| format!("cannot connect to NFD at {face_socket}"))?;
+    let mut exchange = ConsumerExchange(consumer);
 
-    let mut session = EnrollmentSession::new(key_name.clone(), Arc::clone(&signer), 86400);
-
-    // Step 1: NEW.
-    let new_params = session.new_request_body().await?;
-    let new_name = ca_prefix.clone().append("CA").append("NEW");
-
-    let new_wire = sign_interest(
-        InterestBuilder::new(new_name).app_parameters(new_params),
-        SignatureType::SignatureSha256WithEcdsa,
-        &key_name,
-        &signer,
+    let mut pin_opt = pin_opt;
+    let cert_name = ndn_cert::client::enroll(
+        &mut exchange,
+        &ca_prefix,
+        signer,
+        86400,
+        "pin",
+        |round| {
+            let next = match round.round {
+                // CHALLENGE trigger round — selects "pin", no code yet.
+                0 => {
+                    eprintln!("NEW complete — request_id={}", round.request_id);
+                    Ok(Some(serde_json::Map::new()))
+                }
+                // CHALLENGE submit round — the PIN code.
+                1 => {
+                    eprintln!(
+                        "CHALLENGE trigger sent — challenge_status={:?}",
+                        round.status_message
+                    );
+                    read_pin(pin_opt.take(), &round.request_id).map(|pin| {
+                        let mut code = serde_json::Map::new();
+                        code.insert("code".to_string(), serde_json::Value::String(pin));
+                        Some(code)
+                    })
+                }
+                _ => Ok(None),
+            };
+            std::future::ready(next)
+        },
     )
-    .await?;
-
-    let new_data = consumer
-        .fetch_wire(new_wire, INTEREST_LIFETIME + Duration::from_millis(500))
-        .await
-        .context("NEW request failed")?;
-
-    let new_content = new_data.content().context("NEW response has no content")?;
-    session.handle_new_response(new_content)?;
-
-    let request_id_bytes = session
-        .request_id_bytes()
-        .context("no request_id from CA after NEW")?
-        .to_vec();
-
-    eprintln!(
-        "NEW complete — request_id={}",
-        hex_encode(&request_id_bytes)
-    );
-
-    // Step 2a: CHALLENGE trigger round — selects "pin", no code yet.
-    let trigger_params = session.challenge_request_body("pin", serde_json::Map::new())?;
-    let challenge_name = ca_prefix
-        .clone()
-        .append("CA")
-        .append("CHALLENGE")
-        .append(&request_id_bytes);
-
-    let trigger_wire = sign_interest(
-        InterestBuilder::new(challenge_name.clone()).app_parameters(trigger_params),
-        SignatureType::SignatureSha256WithEcdsa,
-        &key_name,
-        &signer,
-    )
-    .await?;
-
-    let trigger_data = consumer
-        .fetch_wire(trigger_wire, INTEREST_LIFETIME + Duration::from_millis(500))
-        .await
-        .context("CHALLENGE trigger request failed")?;
-
-    let trigger_content = trigger_data
-        .content()
-        .context("CHALLENGE trigger response has no content")?;
-    session.handle_challenge_response(trigger_content)?;
-
-    if session.is_complete() {
-        return finish(&mut consumer, &session, &ca_prefix).await;
-    }
-
-    eprintln!(
-        "CHALLENGE trigger sent — challenge_status={:?}",
-        session.challenge_status_message()
-    );
-
-    let pin = if let Some(p) = pin_opt {
-        p
-    } else {
-        eprintln!(
-            "WAITING_FOR_PIN request_id={}",
-            hex_encode(&request_id_bytes)
-        );
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .context("reading PIN from stdin")?;
-        line.trim().to_string()
-    };
-
-    if pin.is_empty() {
-        bail!("PIN is empty");
-    }
-
-    // Step 2c: CHALLENGE submit round.
-    let mut code_params = serde_json::Map::new();
-    code_params.insert("code".to_string(), serde_json::Value::String(pin));
-    let submit_params = session.challenge_request_body("pin", code_params)?;
-
-    let submit_wire = sign_interest(
-        InterestBuilder::new(challenge_name).app_parameters(submit_params),
-        SignatureType::SignatureSha256WithEcdsa,
-        &key_name,
-        &signer,
-    )
-    .await?;
-
-    let submit_data = consumer
-        .fetch_wire(submit_wire, INTEREST_LIFETIME + Duration::from_millis(500))
-        .await
-        .context("CHALLENGE submit request failed")?;
-
-    let submit_content = submit_data
-        .content()
-        .context("CHALLENGE submit response has no content")?;
-    session.handle_challenge_response(submit_content)?;
-
-    if !session.is_complete() {
-        bail!("enrollment did not complete after PIN submission");
-    }
-
-    finish(&mut consumer, &session, &ca_prefix).await
-}
-
-async fn sign_interest(
-    builder: InterestBuilder,
-    sig_type: SignatureType,
-    key_name: &Name,
-    signer: &Arc<dyn Signer>,
-) -> anyhow::Result<bytes::Bytes> {
-    let s = Arc::clone(signer);
-    let kn = key_name.clone();
-    builder
-        .sign_fallible(sig_type, Some(&kn), move |region| {
-            let s = Arc::clone(&s);
-            let owned = region.to_vec();
-            async move { s.sign(&owned).await }
-        })
-        .await
-        .map_err(|e: ndn_security::TrustError| anyhow::anyhow!("Interest signing failed: {e}"))
-}
-
-async fn finish(
-    consumer: &mut Consumer,
-    session: &EnrollmentSession,
-    ca_prefix: &Name,
-) -> anyhow::Result<()> {
-    let cert_name = session
-        .issued_cert_name()
-        .context("no issued cert name after enrollment")?
-        .clone();
+    .await
+    .map_err(|e| match e {
+        CertError::ChallengePending(_) => {
+            anyhow::anyhow!("enrollment did not complete after PIN submission")
+        }
+        e => anyhow::Error::new(e).context("NDNCERT enrollment failed"),
+    })?;
 
     eprintln!("enrollment complete — issued cert name: {cert_name}");
 
-    // Step 3: fetch and decode the issued certificate. The fetched Data packet
-    // is itself the Certificate v2 object; its Content is the SPKI public key,
+    // Fetch and decode the issued certificate. The fetched Data packet is
+    // itself the Certificate v2 object; its Content is the SPKI public key,
     // not another nested Data packet.
     let ca_prefix_str = ca_prefix.to_string();
-    let (issuer_str, fetched) = match consumer.fetch(cert_name.clone()).await {
-        Ok(cert_data) => {
-            let cert = ndn_security::Certificate::decode(&cert_data)
-                .context("issued cert does not decode as NDN Certificate v2")?;
-            let issuer_str = cert
-                .issuer
-                .as_deref()
-                .map(|n| n.to_string())
-                .unwrap_or_default();
-            if !issuer_str.starts_with(ca_prefix_str.as_str()) {
-                bail!("cert issuer {issuer_str} does not chain to CA prefix {ca_prefix_str}");
+    let (issuer_str, fetched) =
+        match ndn_cert::client::fetch_issued_cert(&mut exchange, &cert_name).await {
+            Ok(cert_data) => {
+                let cert = ndn_security::Certificate::decode(&cert_data)
+                    .context("issued cert does not decode as NDN Certificate v2")?;
+                let issuer_str = cert
+                    .issuer
+                    .as_deref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                if !issuer_str.starts_with(ca_prefix_str.as_str()) {
+                    bail!("cert issuer {issuer_str} does not chain to CA prefix {ca_prefix_str}");
+                }
+                (issuer_str, true)
             }
-            (issuer_str, true)
-        }
-        Err(e) => {
-            eprintln!("cert fetch skipped (no repo): {e:#}");
-            (ca_prefix_str.clone(), false)
-        }
-    };
+            Err(e) => {
+                eprintln!("cert fetch skipped (no repo): {e:#}");
+                (ca_prefix_str.clone(), false)
+            }
+        };
 
     println!("CERT_NAME={cert_name}");
     println!("ISSUER={issuer_str}");
@@ -227,6 +136,26 @@ async fn finish(
     println!("ENROLL_OK");
 
     Ok(())
+}
+
+/// The PIN from `--pin`, or (printing `WAITING_FOR_PIN`) read from stdin.
+fn read_pin(pin_arg: Option<String>, request_id: &str) -> Result<String, CertError> {
+    let pin = match pin_arg {
+        Some(p) => p,
+        None => {
+            eprintln!("WAITING_FOR_PIN request_id={request_id}");
+            let mut line = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .map_err(|e| CertError::InvalidRequest(format!("reading PIN from stdin: {e}")))?;
+            line.trim().to_string()
+        }
+    };
+    if pin.is_empty() {
+        return Err(CertError::InvalidRequest("PIN is empty".into()));
+    }
+    Ok(pin)
 }
 
 fn parse_args(args: &[String]) -> anyhow::Result<(String, String, String, Option<String>)> {
@@ -270,8 +199,4 @@ fn parse_args(args: &[String]) -> anyhow::Result<(String, String, String, Option
         bail!("--name is required");
     }
     Ok((face_socket, ca_prefix, name, pin))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

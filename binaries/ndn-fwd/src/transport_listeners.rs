@@ -34,7 +34,8 @@ impl ndn_mgmt::WtCertStatusBackend for WtCertStatusReader {
 /// material — the one path shared by the WebTransport and raw-QUIC listeners.
 /// `profile` only changes the self-signed validity window
 /// ([`ndn_acme::SelfSignedProfile`]): browser-pinnable for WebTransport,
-/// long-lived for a pinned QUIC backbone.
+/// long-lived for a pinned QUIC backbone. Self-signed key + cert persist in the
+/// source's `cache_dir`, so the logged leaf hash is stable across restarts.
 #[cfg(any(feature = "webtransport", feature = "quic"))]
 async fn resolve_cert_source(
     cert_source: &ndn_config::CertSourceConfig,
@@ -265,7 +266,7 @@ pub async fn run_quic_listener(
     };
 
     // Backbone: a pinned dialer trusts the leaf hash, not the expiry, so a
-    // self-signed source gets a long-lived cert (no restart-time pin churn).
+    // self-signed source reuses its persisted long-lived cert (stable pin).
     let material = match resolve_cert_source(
         &cfg.cert_source,
         ndn_acme::SelfSignedProfile::Backbone,

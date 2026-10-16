@@ -9,8 +9,8 @@
  *      forwarder, runs NDNCERT NEW + CHALLENGE(token) + cert-fetch, and
  *      resolves to a `JoinedIdentityInfo { restored:false }` with a cert
  *      name under the requested identity prefix.
- *   2. **Reload restore** — the same browser context reloads without a
- *      `#join=` fragment; `try_restore()` resolves to
+ *   2. **Reload restore** — the same browser context reloads the page with
+ *      no token; `try_restore()` resolves to
  *      `{ restored:true }` with the same cert name, from IdbPib — no
  *      NDNCERT round-trip.
  *
@@ -37,11 +37,10 @@ const NDN_FWD_BIN =
 const WASM_BUNDLE = path.join(__dirname, 'fixture-page', 'sw-pkg', 'shared_engine_bg.wasm');
 
 const WT_PORT = 4443;
-// The CA's identity prefix. `[demo_ca].prefix` is the identity; NdncertCa
-// appends `/CA` itself and serves `/demo/CA/{INFO,NEW,CHALLENGE}`. The enroll
-// client likewise appends `/CA/NEW`, so both sides land on `/demo/CA/NEW`.
-// (Configuring `/demo/CA` would make the CA serve `/demo/CA/CA/NEW` and reject
-// the client's `/demo/CA/NEW` as an unrecognised Interest.)
+// The CA namespace. `[demo_ca].prefix` is the namespace; NdncertCa appends
+// `/CA` itself and serves `/demo/CA/{INFO,NEW,CHALLENGE}`. The enroll client
+// likewise appends `/CA/NEW`, so both sides land on `/demo/CA/NEW`. (A prefix
+// ending in `/CA` is rejected at forwarder startup.)
 const CA_PREFIX = '/demo';
 const IDENTITY_PREFIX = '/demo/users';
 const TOKEN = process.env.JOIN_TOKEN ?? 'TEST_TOKEN_FOR_PLAYWRIGHT';
@@ -62,7 +61,8 @@ cert_source = { type = "self_signed_dev", hostnames = ["localhost", "127.0.0.1"]
 [demo_ca]
 enabled = true
 prefix = "${CA_PREFIX}"
-identity = "${CA_PREFIX}"
+identity = "${CA_PREFIX}/CA"
+ephemeral = true
 tokens = ["${TOKEN}"]
 
 [logging]
@@ -137,7 +137,7 @@ test.describe('Critical-path #4 — onboarding-link join + reload-restore', () =
 
     try {
       // ── First visit: claim the token. ───────────────────────────────
-      await page.goto(`/onboarding-join.html#join=${TOKEN}`);
+      await page.goto('/onboarding-join.html');
       await page.waitForFunction(() => (window as any).__joinReady === true, null, {
         timeout: 15_000,
       });

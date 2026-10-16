@@ -5,21 +5,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ndn_config::ForwarderConfig;
-#[allow(unused_imports)]
 use ndn_packet::Name;
 use ndn_security::{FilePib, SecurityManager};
 
 use crate::parse_name;
 
 pub(crate) struct SecurityInit {
-    pub mgr: SecurityManager,
+    /// Shared with the engine as-is (`EngineBuilder::security`).
+    pub mgr: Arc<SecurityManager>,
     pub pib_path: Option<PathBuf>,
     pub is_ephemeral: bool,
 }
 
-/// Priority: 1) configured `[security].identity` from PIB; 2) on PIB
-/// failure, interactive recovery menu if stdin is a TTY else ephemeral
-/// fallback; 3) no identity ⇒ ephemeral in-memory key.
+/// Priority: 1) configured `[security].identity` — its key under
+/// `<identity>/KEY/` — from the PIB; 2) on PIB failure, interactive recovery
+/// menu if stdin is a TTY else ephemeral fallback; 3) no identity ⇒ ephemeral
+/// in-memory key.
 pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
     let Some(identity_uri) = cfg.security.identity.as_ref() else {
         return make_ephemeral(cfg, None);
@@ -53,7 +54,7 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
                     );
                 }
                 return SecurityInit {
-                    mgr,
+                    mgr: Arc::new(mgr),
                     pib_path: Some(pib_path),
                     is_ephemeral: false,
                 };
@@ -80,7 +81,7 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
                 "loaded security identity from PIB"
             );
             SecurityInit {
-                mgr,
+                mgr: Arc::new(mgr),
                 pib_path: Some(pib_path),
                 is_ephemeral: false,
             }
@@ -123,7 +124,7 @@ pub fn recover_from_pib_error(
                     eprintln!();
                     eprintln!("  Generated new identity '{identity_uri}' in PIB.");
                     return SecurityInit {
-                        mgr,
+                        mgr: Arc::new(mgr),
                         pib_path: Some(pib_path.to_path_buf()),
                         is_ephemeral: false,
                     };
@@ -173,21 +174,7 @@ pub fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) 
     // ndn-cxx trust schema.
     match ndn_security::KeyChain::ephemeral_ecdsa(&name_str) {
         Ok(kc) => {
-            // `into_manager_arc` consumes the keychain so its internal
-            // `Arc::clone` drops first, letting `try_unwrap` succeed and
-            // the signer survive for mgmt-response signing. The fallback
-            // branch copies only trust anchors and is hit only by tests
-            // that intentionally leak a second `Arc`.
-            let arc = kc.into_manager_arc();
-            let mgr = Arc::try_unwrap(arc).unwrap_or_else(|a| {
-                let m = SecurityManager::new();
-                for n in a.trust_anchor_names() {
-                    if let Some(cert) = a.trust_anchor(&n) {
-                        m.add_trust_anchor(cert);
-                    }
-                }
-                m
-            });
+            let mgr = kc.into_manager_arc();
 
             if let Some(id) = configured_identity {
                 tracing::warn!(
@@ -214,7 +201,7 @@ pub fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) 
         Err(e) => {
             tracing::error!(target: "security", error = %e, "failed to generate ephemeral identity; starting unsigned");
             SecurityInit {
-                mgr: SecurityManager::new(),
+                mgr: Arc::new(SecurityManager::new()),
                 pib_path: None,
                 is_ephemeral: true,
             }
@@ -229,4 +216,31 @@ pub fn default_pib_path() -> PathBuf {
     p.push(".ndn");
     p.push("pib");
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `[security].identity` names an identity, not a key: the daemon loads
+    /// that identity's key from a PIB that also holds another identity,
+    /// instead of falling back to an ephemeral key.
+    #[test]
+    fn load_security_resolves_configured_identity_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let pib_path = dir.path().join("pib");
+        let hub: Name = "/home/bob/hub".parse().unwrap();
+        let node: Name = "/home/bob/node".parse().unwrap();
+        SecurityManager::auto_init(&hub, &pib_path).unwrap();
+        let (created, _) = SecurityManager::auto_init(&node, &pib_path).unwrap();
+        let node_key = created.identity_key_name(&node).unwrap();
+
+        let mut cfg = ForwarderConfig::default();
+        cfg.security.identity = Some(node.to_string());
+        cfg.security.pib_path = Some(pib_path.display().to_string());
+        let init = load_security(&cfg);
+
+        assert!(!init.is_ephemeral, "configured identity must load from the PIB");
+        assert_eq!(init.mgr.any_signer().unwrap().key_name(), &node_key);
+    }
 }

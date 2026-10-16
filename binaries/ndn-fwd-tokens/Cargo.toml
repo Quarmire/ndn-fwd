@@ -13,6 +13,7 @@ name = "ndn-fwd-tokens"
 path = "src/main.rs"
 
 [dependencies]
+ndn-trust-envelope = { workspace = true }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 clap   = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }

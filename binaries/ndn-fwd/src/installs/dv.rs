@@ -124,11 +124,11 @@ fn build_trust(
 ) -> ndn_routing::protocols::dv::signing::DvTrustHandle {
     match dv_toml.trust.mode.as_str() {
         "insecure" => {
-            tracing::info!(target: "routing.dv", "DV trust = InsecureTrust (default; wire-compat with ndnd `insecure`)");
-            ndn_routing::protocols::dv::signing::InsecureTrust::handle()
+            tracing::info!(target: "routing.dv", "DV trust = DvInsecure (default; wire-compat with ndnd `insecure`)");
+            ndn_routing::protocols::dv::signing::DvInsecure::handle()
         }
         "lvs" => {
-            use ndn_routing::protocols::dv::signing::LvsTrust;
+            use ndn_routing::protocols::dv::signing::DvLvs;
             let try_build = || -> Option<ndn_routing::protocols::dv::signing::DvTrustHandle> {
                 let schema_path = dv_toml.trust.schema_file.as_ref()?;
                 let schema_bytes = match std::fs::read(schema_path) {
@@ -145,7 +145,7 @@ fn build_trust(
                         return None;
                     }
                 };
-                let mut lt = LvsTrust::new(model, identity_signer.clone());
+                let mut lt = DvLvs::new(model, identity_signer.clone());
                 for tk in &dv_toml.trust.trusted_keys {
                     let key_name = parse_name(&tk.name);
                     match std::fs::read(&tk.public_key_file) {
@@ -158,17 +158,17 @@ fn build_trust(
                         }
                     }
                 }
-                tracing::info!(target: "routing.dv", schema = %schema_path, keys = dv_toml.trust.trusted_keys.len(), "DV trust = LvsTrust");
+                tracing::info!(target: "routing.dv", schema = %schema_path, keys = dv_toml.trust.trusted_keys.len(), "DV trust = DvLvs");
                 Some(lt.handle())
             };
             try_build().unwrap_or_else(|| {
-                tracing::error!(target: "routing.dv", "LVS trust build failed; falling back to InsecureTrust.");
-                ndn_routing::protocols::dv::signing::InsecureTrust::handle()
+                tracing::error!(target: "routing.dv", "LVS trust build failed; falling back to DvInsecure.");
+                ndn_routing::protocols::dv::signing::DvInsecure::handle()
             })
         }
         "static" => {
-            use ndn_routing::protocols::dv::signing::StaticTrust;
-            let mut st = StaticTrust::new(identity_signer.clone());
+            use ndn_routing::protocols::dv::signing::DvStaticKeys;
+            let mut st = DvStaticKeys::new(identity_signer.clone());
             for tk in &dv_toml.trust.trusted_keys {
                 let key_name = parse_name(&tk.name);
                 match std::fs::read(&tk.public_key_file) {
@@ -181,12 +181,12 @@ fn build_trust(
                     }
                 }
             }
-            tracing::info!(target: "routing.dv", keys = dv_toml.trust.trusted_keys.len(), "DV trust = StaticTrust");
+            tracing::info!(target: "routing.dv", keys = dv_toml.trust.trusted_keys.len(), "DV trust = DvStaticKeys");
             st.handle()
         }
         other => {
-            tracing::warn!(target: "routing.dv", mode = %other, "DV trust mode unknown — falling back to InsecureTrust. Supported: insecure | static | lvs");
-            ndn_routing::protocols::dv::signing::InsecureTrust::handle()
+            tracing::warn!(target: "routing.dv", mode = %other, "DV trust mode unknown — falling back to DvInsecure. Supported: insecure | static | lvs");
+            ndn_routing::protocols::dv::signing::DvInsecure::handle()
         }
     }
 }

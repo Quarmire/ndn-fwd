@@ -25,13 +25,19 @@ require_signed_commands = false
 
 # Embedded NDNCERT CA. Browser tabs request certs from `/demo/CA/{INFO,
 # NEW,CHALLENGE/<id>}` over the WebTransport face, then sign
-# `/localhop/nfd/rib/register` Interests with the issued cert. The CA's
-# self-signed root is installed as a /localhop trust anchor at boot —
-# no PIB file required for the demo.
+# `/localhop/nfd/rib/register` Interests with the issued cert. `prefix` is the
+# CA namespace (`/demo`); the CA appends `/CA` itself, as do clients.
+# `ephemeral = true`: the CA mints a throwaway self-signed key at boot (no PIB
+# needed) and installs it as a /localhop trust anchor — certs do not survive a
+# restart. The `nop` challenge auto-approves every request; demo only.
 [demo_ca]
-enabled  = true
-prefix   = "/demo/CA"
-identity = "/demo/CA"
+enabled   = true
+prefix    = "/demo"
+identity  = "/demo/CA"
+ephemeral = true
+
+[[demo_ca.challenge]]
+kind = "nop"
 
 [[face]]
 kind = "udp"

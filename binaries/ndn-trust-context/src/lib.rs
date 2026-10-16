@@ -1,21 +1,29 @@
-//! Author a [`SignedTrustContext`] and pack it as a QR/NFC **join payload** —
-//! the bytes a participant scans to adopt a context (`NdnEngine::join_context`
-//! over FFI, or `Keyring::adopt` natively).
+//! Author a [`SignedTrustContext`] and pack it as an `ndn-trust://anchor`
+//! QR/NFC payload — what a participant scans to adopt a context
+//! (`ndn-fwd adopt`, `NdnEngine::join_context` over FFI, or
+//! `ndn_cert::adopt_anchor_envelope` natively).
 //!
 //! A context binds a `namespace` to a set of trust anchors and a schema
 //! (LVS or the built-in hierarchical/accept-all defaults), plus optional CA
 //! endpoints and revocations. [`build_context`] assembles one from a
-//! [`ContextSpec`]; [`encode_envelope`] / [`parse_envelope`] move it as a
-//! single self-describing text string that carries the version out-of-band
-//! (the value `decode_content` needs).
+//! [`ContextSpec`].
+//!
+//! - [`build_signed_anchor_envelope`] signs the context into its NDN Data with
+//!   an anchor's key and pins that anchor's TOFU fingerprint — the form
+//!   adopters verify and accept.
+//! - [`build_anchor_envelope`] emits the **unsigned legacy** form (bare
+//!   context content). Adopters refuse it by default (its schema could have
+//!   been altered in transit); it exists only for tooling that cannot reach
+//!   the anchor's signing key.
 
 // Documentation ratchet: this crate's public API is fully documented; keep it so.
 #![deny(missing_docs)]
 
-use anyhow::{Context, Result, anyhow};
-use base64::Engine as _;
+use anyhow::{Result, anyhow};
+use ndn_cert::{anchor_fingerprint, open_signed_context};
 use ndn_packet::{Data, Name};
-use ndn_security::{Certificate, SchemaBlob, SignedTrustContext};
+use ndn_security::{Certificate, SchemaBlob, SignedTrustContext, Signer};
+use ndn_trust_envelope::TrustEnvelope;
 
 /// What to put in a trust context. Anchors are raw certificate Data wires;
 /// `schema_lvs` is a python-lvs-compiled binary schema (validated on build).
@@ -85,46 +93,76 @@ pub fn build_context(spec: &ContextSpec) -> Result<SignedTrustContext> {
     Ok(ctx)
 }
 
-/// The join-payload envelope tag: a versioned text format so a scanner can
-/// recognise and evolve it. `ndn-ctx:1:<context-version>:<base64url(content)>`.
-const ENVELOPE_TAG: &str = "ndn-ctx:1";
-
-/// Pack a context's `encode_content()` bytes + its version into a scannable
-/// text string.
-pub fn encode_envelope(version: u64, content: &[u8]) -> String {
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(content);
-    format!("{ENVELOPE_TAG}:{version}:{b64}")
-}
-
-/// Parse an envelope back into `(version, content)` — exactly the two arguments
-/// `SignedTrustContext::decode_content` / `NdnEngine::join_context` take.
-pub fn parse_envelope(s: &str) -> Result<(u64, Vec<u8>)> {
-    let rest = s
-        .trim()
-        .strip_prefix(&format!("{ENVELOPE_TAG}:"))
-        .ok_or_else(|| anyhow!("not an `{ENVELOPE_TAG}` join payload"))?;
-    let (ver, b64) = rest
-        .split_once(':')
-        .ok_or_else(|| anyhow!("missing version/content separator"))?;
-    let version: u64 = ver.parse().context("context version")?;
-    let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(b64.trim())
-        .context("base64 content")?;
-    Ok((version, content))
-}
-
-/// One-shot: build the context and return its scannable join payload.
-pub fn build_join_payload(spec: &ContextSpec) -> Result<String> {
+/// Build the context, sign it into Data with `signer` (whose key must be one
+/// of the context's anchors), and wrap it as an inline anchor envelope pinning
+/// that anchor's fingerprint (render with [`TrustEnvelope::to_uri`]).
+pub fn build_signed_anchor_envelope(
+    spec: &ContextSpec,
+    signer: &dyn Signer,
+) -> Result<TrustEnvelope> {
     let ctx = build_context(spec)?;
-    Ok(encode_envelope(spec.version, &ctx.encode_content()))
+    let data = ctx
+        .sign_into_data(signer)
+        .map_err(|e| anyhow!("sign context: {e}"))?;
+    // Self-check: the result must verify under one of its own anchors, which
+    // also identifies the anchor to pin.
+    let (_, anchor) = open_signed_context(&data).map_err(|e| {
+        anyhow!(
+            "signing key {} does not sign as one of the context's anchors: {e}",
+            signer.key_name()
+        )
+    })?;
+    Ok(TrustEnvelope::Anchor {
+        namespace: Some(spec.namespace.to_string()),
+        fingerprint: Some(anchor_fingerprint(&anchor)),
+        version: Some(spec.version),
+        context_data: Some(data.raw().clone()),
+        context_content: None,
+    })
+}
+
+/// **Unsigned legacy form.** Build the context and wrap its bare content as an
+/// inline anchor envelope pinning the fingerprint of the context's first
+/// anchor, when it has one. Nothing signs the content, so adopters refuse it
+/// unless they explicitly opt in to unverified legacy adoption; prefer
+/// [`build_signed_anchor_envelope`].
+pub fn build_anchor_envelope(spec: &ContextSpec) -> Result<TrustEnvelope> {
+    let ctx = build_context(spec)?;
+    let fingerprint = ctx
+        .anchors()
+        .iter()
+        .next()
+        .map(|r| anchor_fingerprint(r.value()));
+    Ok(TrustEnvelope::Anchor {
+        namespace: Some(spec.namespace.to_string()),
+        fingerprint,
+        version: Some(spec.version),
+        context_data: None,
+        context_content: Some(ctx.encode_content()),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Author → `ndn-trust://` URI → parse (what a scanner does), returning the
+    /// `(version, content)` pair `decode_content` / `join_context` take.
+    fn scan(spec: &ContextSpec) -> (u64, bytes::Bytes) {
+        let uri = build_anchor_envelope(spec).unwrap().to_uri();
+        assert!(uri.starts_with("ndn-trust://anchor/"));
+        match TrustEnvelope::from_uri(&uri).unwrap() {
+            TrustEnvelope::Anchor {
+                version: Some(v),
+                context_content: Some(c),
+                ..
+            } => (v, c),
+            other => panic!("expected an inline anchor envelope, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn authored_context_round_trips_to_a_join_payload() {
+    fn authored_context_round_trips_through_an_anchor_envelope() {
         let spec = ContextSpec {
             namespace: "/home/bob".parse().unwrap(),
             version: 3,
@@ -135,10 +173,8 @@ mod tests {
             revocations: vec!["/home/bob/KEY/old".parse().unwrap()],
         };
 
-        // Author → envelope → parse (what a scanner does) → decode_content
-        // (what join_context does).
-        let payload = build_join_payload(&spec).unwrap();
-        let (version, content) = parse_envelope(&payload).unwrap();
+        // Author → envelope → parse → decode_content (what join_context does).
+        let (version, content) = scan(&spec);
         assert_eq!(version, 3);
 
         let adopted = SignedTrustContext::decode_content(&content, version).unwrap();
@@ -160,18 +196,12 @@ mod tests {
             accept_all: true,
             ..Default::default()
         };
-        let (v, content) = parse_envelope(&build_join_payload(&spec).unwrap()).unwrap();
+        let (v, content) = scan(&spec);
         let adopted = SignedTrustContext::decode_content(&content, v).unwrap();
         assert!(
             adopted.enforces_hierarchy(),
             "adoption must re-impose the hierarchy floor"
         );
-    }
-
-    #[test]
-    fn malformed_envelope_is_rejected() {
-        assert!(parse_envelope("not-a-context").is_err());
-        assert!(parse_envelope("ndn-ctx:1:notanumber:xxx").is_err());
     }
 
     #[test]
@@ -194,7 +224,7 @@ mod tests {
     /// `testbed/tests/interop/fwd_cxx_*` already prove ndn-rs↔ndn-cxx Data).
     #[tokio::test]
     async fn context_anchors_survive_as_spec_compliant_certs() {
-        use ndn_security::{Ed25519Signer, Signer, encode_cert_data};
+        use ndn_security::{Ed25519Signer, encode_cert_data};
 
         // A self-signed anchor certificate (standard NDN Certificate).
         let key_name: Name = "/home/bob/KEY/k0".parse().unwrap();
@@ -205,14 +235,21 @@ mod tests {
             .await
             .expect("encode cert");
 
-        // Author a context carrying it, then round-trip the join payload.
+        // Author a context carrying it, then round-trip the anchor envelope.
         let spec = ContextSpec {
             namespace: "/home/bob".parse().unwrap(),
             version: 1,
             anchor_wires: vec![cert_wire.to_vec()],
             ..Default::default()
         };
-        let (v, content) = parse_envelope(&build_join_payload(&spec).unwrap()).unwrap();
+        // The envelope pins that anchor's fingerprint for TOFU adoption.
+        let TrustEnvelope::Anchor { fingerprint, .. } = build_anchor_envelope(&spec).unwrap()
+        else {
+            panic!("expected an anchor envelope");
+        };
+        assert!(fingerprint.is_some(), "an anchored context pins its root");
+
+        let (v, content) = scan(&spec);
         // decode_content Data-decodes each anchor from the AnchorSet — i.e. the
         // anchors are on the wire as ordinary NDN Data certs an external impl
         // can parse. Success here *is* the wire-compat proof.
@@ -220,6 +257,7 @@ mod tests {
 
         assert_eq!(adopted.anchors().len(), 1);
         let anchor = adopted.anchors().iter().next().unwrap();
+        assert_eq!(fingerprint, Some(anchor_fingerprint(anchor.value())));
         assert!(
             anchor.name.to_string().contains("/KEY/"),
             "anchor cert follows the /KEY/ naming convention: {}",
@@ -229,14 +267,61 @@ mod tests {
         assert!(!anchor.public_key.is_empty());
     }
 
+    /// `build --pib … --sign-key …`: the signed envelope is adopted by the
+    /// verified path; the unsigned legacy form of the same context is not.
+    #[tokio::test]
+    async fn signed_envelope_adopts_and_legacy_is_refused() {
+        use ndn_security::{Ed25519Signer, Keyring, encode_cert_data};
+
+        let key_name: Name = "/home/bob/KEY/k0".parse().unwrap();
+        let signer = Ed25519Signer::from_seed(&[7u8; 32], key_name.clone());
+        let cert_name: Name = "/home/bob/KEY/k0/self/v=1".parse().unwrap();
+        let cert_wire = encode_cert_data(
+            &cert_name,
+            &signer.public_key().unwrap(),
+            &signer,
+            0,
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+        let spec = ContextSpec {
+            namespace: "/home/bob".parse().unwrap(),
+            version: 2,
+            anchor_wires: vec![cert_wire.to_vec()],
+            ..Default::default()
+        };
+
+        let signed = build_signed_anchor_envelope(&spec, &signer).unwrap();
+        let scanned = TrustEnvelope::from_uri(&signed.to_uri()).unwrap();
+        let keyring = Keyring::new();
+        let (ctx, _) = ndn_cert::adopt_anchor_envelope(&keyring, &scanned).unwrap();
+        assert_eq!(ctx.version(), 2);
+
+        let legacy = build_anchor_envelope(&spec).unwrap();
+        assert!(matches!(
+            ndn_cert::adopt_anchor_envelope(&Keyring::new(), &legacy),
+            Err(ndn_cert::AdoptError::UnsignedLegacyContext)
+        ));
+
+        // A key that is not one of the context's anchors cannot sign it.
+        let stranger = Ed25519Signer::from_seed(&[8u8; 32], "/home/eve/KEY/k".parse().unwrap());
+        assert!(build_signed_anchor_envelope(&spec, &stranger).is_err());
+    }
+
     proptest::proptest! {
-        /// Any `(version, content)` survives `encode_envelope` -> `parse_envelope`
-        /// unchanged — the join-payload text envelope is a lossless round-trip.
+        /// Any `(version, content)` survives the anchor envelope's
+        /// `to_uri` -> `from_uri` unchanged — the payload is a lossless round-trip.
         #[test]
         fn envelope_round_trips(version: u64, content: Vec<u8>) {
-            let (v, c) = parse_envelope(&encode_envelope(version, &content)).unwrap();
-            proptest::prop_assert_eq!(v, version);
-            proptest::prop_assert_eq!(c, content);
+            let env = TrustEnvelope::Anchor {
+                namespace: None,
+                fingerprint: None,
+                version: Some(version),
+                context_data: None,
+                context_content: Some(bytes::Bytes::from(content)),
+            };
+            proptest::prop_assert_eq!(TrustEnvelope::from_uri(&env.to_uri()).unwrap(), env);
         }
     }
 }

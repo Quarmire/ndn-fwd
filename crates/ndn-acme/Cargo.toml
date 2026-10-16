@@ -39,6 +39,7 @@ http-body-util = "0.1"
 rustls      = { version = "0.23", default-features = false, features = ["std"] }
 bytes       = { workspace = true, features = ["std"] }
 rcgen       = { workspace = true }
+tempfile    = "3"
 
 [lints]
 workspace = true

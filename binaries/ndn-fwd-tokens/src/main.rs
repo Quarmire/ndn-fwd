@@ -1,10 +1,12 @@
 //! `ndn-fwd-tokens` — mint invite tokens for the onboarding-link flow and
-//! render them as URLs and QR codes (ASCII or SVG). Tokens go into
-//! `[demo_ca].tokens` in `ndn-fwd.toml`; the running CA picks them up on
-//! restart.
+//! render them as `ndn-trust://invite` envelopes (or their
+//! `https://<domain>/t/invite#…` universal-link mirror) and QR codes (ASCII or
+//! SVG). Tokens go into `[demo_ca].tokens` in `ndn-fwd.toml`; the running CA
+//! picks them up on restart.
 
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use anyhow::{Context, Result, bail};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use ndn_trust_envelope::{ANCHOR_FINGERPRINT_LEN, TrustEnvelope};
 use qrcode::QrCode;
 
 #[derive(Parser)]
@@ -14,33 +16,51 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// What every invite envelope carries besides the token itself.
+#[derive(Args)]
+struct InviteArgs {
+    /// NDNCERT CA prefix the invitee enrolls against (e.g. `/demo`).
+    #[arg(long)]
+    ca: String,
+    /// Identity namespace the invitee is certified under (e.g. `/demo/users`).
+    #[arg(long)]
+    namespace: String,
+    /// Optional lowercase-hex SHA-256 of the CA's root anchor public key, so
+    /// the invitee can pin the CA it trusts.
+    #[arg(long)]
+    anchor_fp: Option<String>,
+    /// Public domain serving the host's `JoinClient` page. When set, emit the
+    /// `https://<domain>/t/invite#…` mirror; otherwise `ndn-trust://invite/…`.
+    #[arg(long)]
+    domain: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Generate one or more random tokens + their matching join URLs.
+    /// Generate one or more random tokens + their matching invite envelopes.
     /// The token strings go into `[demo_ca].tokens` in `ndn-fwd.toml`;
-    /// the URLs go to your users.
+    /// the invites go to your users.
     New {
-        /// Public domain serving the host's `JoinClient` page.
-        #[arg(long)]
-        domain: String,
+        #[command(flatten)]
+        invite: InviteArgs,
         /// Number of tokens to mint (default 1).
         #[arg(long, default_value_t = 1)]
         count: usize,
         /// Token byte length (default 16 — 128 bits, fits a small QR).
         #[arg(long, default_value_t = 16)]
         bytes: usize,
-        /// Render a QR code for each URL in addition to the text line.
+        /// Render a QR code for each invite in addition to the text line.
         #[arg(long, default_value_t = false)]
         qr: bool,
         /// QR encoding when `--qr` is set: `ascii` (terminal-friendly)
-        /// or `png` (writes `<token>.png` in the current directory).
+        /// or `svg` (writes `<token>.svg` in the current directory).
         #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
         qr_format: QrFormat,
     },
-    /// Render an existing token as a QR code (e.g. for a paper handoff).
+    /// Render an existing token's invite as a QR code (e.g. for a paper handoff).
     Qr {
-        #[arg(long)]
-        domain: String,
+        #[command(flatten)]
+        invite: InviteArgs,
         #[arg(long)]
         token: String,
         #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
@@ -51,14 +71,14 @@ enum Cmd {
 #[derive(Copy, Clone, ValueEnum)]
 enum QrFormat {
     Ascii,
-    Png,
+    Svg,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::New {
-            domain,
+            invite,
             count,
             bytes,
             qr,
@@ -66,9 +86,9 @@ fn main() -> Result<()> {
         } => {
             for _ in 0..count {
                 let token = mint_token(bytes)?;
-                let url = join_url(&domain, &token);
-                println!("token = \"{token}\"");
-                println!("url   = {url}");
+                let url = invite_url(&invite, &token)?;
+                println!("token  = \"{token}\"");
+                println!("invite = {url}");
                 if qr {
                     render_qr(&url, qr_format, &token)?;
                 }
@@ -76,21 +96,49 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Qr {
-            domain,
+            invite,
             token,
             format,
         } => {
-            let url = join_url(&domain, &token);
+            let url = invite_url(&invite, &token)?;
             render_qr(&url, format, &token)?;
         }
     }
     Ok(())
 }
 
-fn join_url(domain: &str, token: &str) -> String {
-    // URL fragment, not query: fragments don't traverse the HTTP request
-    // line so the token stays out of intermediary access logs.
-    format!("https://{domain}/#join={token}")
+/// The invite envelope for `token`. The https mirror keeps the payload in the
+/// URL fragment, not the query: fragments don't traverse the HTTP request line,
+/// so the token stays out of intermediary access logs.
+fn invite_url(args: &InviteArgs, token: &str) -> Result<String> {
+    let anchor_fingerprint = args.anchor_fp.as_deref().map(parse_fp).transpose()?;
+    let envelope = TrustEnvelope::Invite {
+        ca_prefix: args.ca.clone(),
+        identity_namespace: args.namespace.clone(),
+        token: token.to_owned(),
+        ttl_secs: None,
+        anchor_fingerprint,
+    };
+    Ok(match &args.domain {
+        Some(domain) => envelope.to_https_url(domain),
+        None => envelope.to_uri(),
+    })
+}
+
+fn parse_fp(hex: &str) -> Result<[u8; ANCHOR_FINGERPRINT_LEN]> {
+    let hex = hex.trim();
+    if !hex.is_ascii() || hex.len() != ANCHOR_FINGERPRINT_LEN * 2 {
+        bail!(
+            "--anchor-fp must be {} hex characters (SHA-256), got {hex:?}",
+            ANCHOR_FINGERPRINT_LEN * 2
+        );
+    }
+    let mut out = [0u8; ANCHOR_FINGERPRINT_LEN];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .with_context(|| format!("--anchor-fp is not hex: {hex}"))?;
+    }
+    Ok(out)
 }
 
 fn mint_token(bytes: usize) -> Result<String> {
@@ -116,7 +164,7 @@ fn render_qr(url: &str, format: QrFormat, token: &str) -> Result<()> {
                 .build();
             println!("{s}");
         }
-        QrFormat::Png => {
+        QrFormat::Svg => {
             let image = code
                 .render::<qrcode::render::svg::Color<'_>>()
                 .min_dimensions(256, 256)

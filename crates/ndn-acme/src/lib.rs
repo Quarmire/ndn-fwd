@@ -5,7 +5,9 @@
 //! / `pem` / `acme`) for all of them. It [`resolve`](CertSource::resolve)s to
 //! [`CertMaterial`] (PEM chain + key), whose [`leaf_sha256`](CertMaterial::leaf_sha256)
 //! is the value a pinning dialer trusts. [`SelfSignedProfile`] lets one source
-//! serve both a browser-pinnable transport and a long-lived backbone link.
+//! serve both a browser-pinnable transport and a long-lived backbone link; a
+//! self-signed key/cert is persisted (see [`SelfSignedDev::cache_dir`]) so that
+//! pin survives restarts.
 //!
 //! For ACME: [`AcmeClient`] runs the RFC 8555 order; [`DnsProvider`] fulfills
 //! the DNS-01 challenge; [`renewal_loop`] re-runs the order inside the 30-day
@@ -16,9 +18,11 @@ mod cert_source;
 mod client;
 mod dns;
 mod renewal;
+mod self_signed;
 
 pub use cache::CertCache;
 pub use cert_source::{AcmeConfig, CertMaterial, CertSource, SelfSignedDev, SelfSignedProfile};
 pub use client::{AcmeClient, AcmeError};
 pub use dns::{CloudflareDnsProvider, DnsProvider, DnsRecord, NoopDnsProvider};
 pub use renewal::{CertStatus, cert_status, needs_renewal, renewal_loop};
+pub use self_signed::default_self_signed_cache_dir;

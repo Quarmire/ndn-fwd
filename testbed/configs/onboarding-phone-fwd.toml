@@ -7,8 +7,9 @@
 # The phone runs the wasm `JoinClient`: it opens a WebTransport face to
 # `https://<this-host>:4433/ndn?cert=<spki-hash>`, requests a cert from
 # `/demo/CA/{INFO,NEW,CHALLENGE}` presenting the token, and persists the
-# issued cert as a SafeBag in IndexedDB. The CA's self-signed root is
-# installed as a /localhop trust anchor at boot — no PIB file needed.
+# issued cert as a SafeBag in IndexedDB. The CA runs with `ephemeral = true`:
+# its throwaway self-signed root is installed as a /localhop trust anchor at
+# boot — no PIB file needed (and issued certs do not survive a restart).
 #
 # The signaling relay is NOT involved in onboarding (it's only for the
 # WebRTC remote-signer path).
@@ -33,15 +34,16 @@ require_signed_commands = false
 
 # ── Embedded NDNCERT CA, token-gated ─────────────────────────────────────────
 # A non-empty `tokens` list selects the TokenChallenge (a single-use invite).
-# `prefix`/`identity` are the CA *identity* (`/demo`); NdncertCa appends `/CA`
-# itself and serves `/demo/CA/{INFO,NEW,CHALLENGE}` (the client appends `/CA/NEW`
-# too). Configuring `/demo/CA` here would make it serve `/demo/CA/CA/NEW` and
-# reject the client's `/demo/CA/NEW`. Replace the token before exposing this.
+# `prefix` is the CA namespace (`/demo`); NdncertCa appends `/CA` itself and
+# serves `/demo/CA/{INFO,NEW,CHALLENGE}` (the client appends `/CA/NEW` too).
+# `identity` is the CA's signing identity, `/demo/CA`. A prefix ending in `/CA`
+# is rejected at startup. Replace the token before exposing this.
 [demo_ca]
-enabled  = true
-prefix   = "/demo"
-identity = "/demo"
-tokens   = ["change-me-one-time-invite"]
+enabled   = true
+prefix    = "/demo"
+identity  = "/demo/CA"
+ephemeral = true
+tokens    = ["change-me-one-time-invite"]
 
 # ── WebTransport listener the phone dials ────────────────────────────────────
 # `[::]:4433` is LAN-reachable (dual-stack). On boot, ndn-fwd logs the dial URL

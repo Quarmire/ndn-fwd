@@ -25,11 +25,16 @@ ID="/interop/ctx/$$"
 ndnsec key-gen -t e "$ID" >/dev/null
 ndnsec cert-dump -i "$ID" | base64 -d > "$TMP/anchor.cert"
 
-# ndn-rs builds a trust context with that ndn-cxx cert as its anchor …
+# ndn-rs builds a trust context with that ndn-cxx cert as its anchor and
+# emits it as an `ndn-trust://anchor/…` envelope …
 PAYLOAD="$(cd "$REPO" && cargo run -q -p ndn-trust-context -- \
   build --namespace "$ID" --version 1 --anchor "$TMP/anchor.cert")"
+case "$PAYLOAD" in
+  ndn-trust://anchor/*) ;;
+  *) echo "FAIL: build did not emit an ndn-trust://anchor envelope: '${PAYLOAD}'" >&2; exit 1 ;;
+esac
 
-# … and decoding the join payload recovers exactly that one anchor.
+# … and decoding the anchor envelope recovers exactly that one anchor.
 ANCHORS="$(cd "$REPO" && cargo run -q -p ndn-trust-context -- \
   inspect "$PAYLOAD" | awk '/^anchors:/{print $2}')"
 
