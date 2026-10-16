@@ -19,10 +19,13 @@ pub struct DvInstaller {
     pfs_routes: Vec<(Name, FaceId)>,
 }
 
+/// `node_signer` is the node's current key (switched at runtime by an
+/// enrollment); the `static` and `lvs` trust modes sign with it, one
+/// snapshot per packet.
 pub async fn prepare(
     fwd_config: &ndn_config::ForwarderConfig,
     builder: &mut EngineBuilder,
-    identity_signer: Option<Arc<dyn ndn_security::Signer>>,
+    node_signer: Option<Arc<ndn_security::ActiveSigner>>,
 ) -> Option<DvInstaller> {
     if !fwd_config.routing.dv.enabled {
         return None;
@@ -95,7 +98,7 @@ pub async fn prepare(
         }
     }
 
-    let dv_trust = build_trust(dv_toml, identity_signer);
+    let dv_trust = build_trust(dv_toml, node_signer);
     let dv = ndn_routing::protocols::dv::DvProtocol::with_io_and_trust(
         dv_cfg,
         fetch_handle,
@@ -120,7 +123,7 @@ pub async fn prepare(
 
 fn build_trust(
     dv_toml: &ndn_config::config::DvTomlConfig,
-    identity_signer: Option<Arc<dyn ndn_security::Signer>>,
+    node_signer: Option<Arc<ndn_security::ActiveSigner>>,
 ) -> ndn_routing::protocols::dv::signing::DvTrustHandle {
     match dv_toml.trust.mode.as_str() {
         "insecure" => {
@@ -145,7 +148,7 @@ fn build_trust(
                         return None;
                     }
                 };
-                let mut lt = DvLvs::new(model, identity_signer.clone());
+                let mut lt = DvLvs::new(model, node_signer.clone());
                 for tk in &dv_toml.trust.trusted_keys {
                     let key_name = parse_name(&tk.name);
                     match std::fs::read(&tk.public_key_file) {
@@ -168,7 +171,7 @@ fn build_trust(
         }
         "static" => {
             use ndn_routing::protocols::dv::signing::DvStaticKeys;
-            let mut st = DvStaticKeys::new(identity_signer.clone());
+            let mut st = DvStaticKeys::new(node_signer.clone());
             for tk in &dv_toml.trust.trusted_keys {
                 let key_name = parse_name(&tk.name);
                 match std::fs::read(&tk.public_key_file) {

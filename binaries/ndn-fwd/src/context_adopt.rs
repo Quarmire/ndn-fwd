@@ -30,14 +30,12 @@ pub(crate) struct TrustAdmin {
     pub(crate) pib_root: PathBuf,
     /// `None` when `[security] serve_contexts = false`.
     pub(crate) publisher: Option<PublishedContexts>,
-    /// The key management responses and discovery records are signed with;
-    /// `None` when the node runs unsigned.
+    /// The key management responses, discovery records and DV routing are
+    /// signed with; `None` when the node runs unsigned.
     pub(crate) signing: Option<Arc<ActiveIdentity>>,
     /// `[security] identity` from the config: it takes precedence over the
     /// PIB's default identity, so an enrollment does not change the signer.
     pub(crate) configured_identity: Option<String>,
-    /// DV routing was built with the startup key and keeps it until restart.
-    pub(crate) dv_uses_startup_key: bool,
     /// One enrollment at a time.
     pub(crate) enrolling: tokio::sync::Mutex<()>,
 }
@@ -144,9 +142,9 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
     }
 
     fn signing_identity(&self) -> Option<ndn_mgmt::SigningIdentityInfo> {
-        self.signing.as_ref().map(|s| ndn_mgmt::SigningIdentityInfo {
-            key: s.key(),
-            ephemeral: s.is_ephemeral(),
+        self.signing.as_ref().map(|s| {
+            let (key, ephemeral) = s.current();
+            ndn_mgmt::SigningIdentityInfo { key, ephemeral }
         })
     }
 }

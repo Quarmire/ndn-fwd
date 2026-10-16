@@ -8,8 +8,8 @@
 //! the namespace's CA with the invite's token, stores the issued certificate
 //! beside the key, and makes the identity the PIB's default — loaded at every
 //! start unless `[security] identity` names another one (the config file is
-//! never edited). The running daemon then signs its management responses and
-//! discovery records with the new key at once.
+//! never edited). The running daemon then signs its management responses,
+//! discovery records and DV routing with the new key from the next packet on.
 //!
 //! A failed enrollment leaves the previous state: the new key (and anything
 //! stored for it) is deleted and the default identity is only changed as the
@@ -38,6 +38,7 @@ fn status_of(e: &InviteEnrollError) -> u64 {
         | E::KeyOutsideInvite { .. }
         | E::NoExpectedFingerprint { .. } => status::BAD_PARAMS,
         E::ContextUnreachable { .. } | E::CaUnreachable { .. } => 504,
+        E::NameRefused(_) => 409,
         E::Adopt {
             source: ndn_cert::AdoptError::InProgress(_),
             ..
@@ -134,7 +135,10 @@ pub(crate) async fn enroll(
             409,
             format!(
                 "this node already holds a certificate in {}: {}. To enroll another key anyway, \
-                 run again with --force; the certificate it holds stays valid until it is revoked",
+                 run again with --force and another --device name (the CA certifies a new key \
+                 for a device name it already certified only once that certificate is revoked \
+                 or an admin approves the new key); the certificate this node holds stays valid \
+                 until it is revoked",
                 invite.namespace,
                 list.join(", ")
             ),
@@ -229,15 +233,8 @@ pub(crate) async fn enroll(
             false
         }
         (None, Some(active)) => {
-            let switched = active.switch_to(Arc::clone(&signer));
-            if !switched {
-                at_next_start.push(format!(
-                    "management responses and discovery records: this run already switched \
-                     keys {} times; they sign as {identity} after a restart",
-                    crate::active_identity::SLOTS - 1
-                ));
-            }
-            switched
+            active.switch_to(Arc::clone(&signer));
+            true
         }
         (None, None) => {
             at_next_start.push(format!(
@@ -247,12 +244,6 @@ pub(crate) async fn enroll(
             false
         }
     };
-    if signing_now && admin.dv_uses_startup_key {
-        at_next_start.push(format!(
-            "DV routing: it was set up with the startup key; it signs as {identity} after a \
-             restart"
-        ));
-    }
     let still_valid: Vec<String> = held
         .iter()
         .map(|(k, until)| format!("{k} (valid until {})", iso(*until)))
@@ -276,6 +267,9 @@ pub(crate) async fn enroll(
             .map(Name::to_string)
             .unwrap_or_default(),
         valid_until: iso(issued.cert.valid_until),
+        validity_secs: issued.cert.valid_until.saturating_sub(issued.cert.valid_from)
+            / 1_000_000_000,
+        requested_validity_secs: INVITE_CERT_VALIDITY_SECS,
         adopted_context,
         pib: admin.pib_root.display().to_string(),
         previous_identity: previous_identity.map(|n| n.to_string()),
@@ -353,7 +347,6 @@ mod tests {
                 publisher: None,
                 signing: Some(Arc::new(ActiveIdentity::new(startup, true))),
                 configured_identity: None,
-                dv_uses_startup_key: false,
                 enrolling: tokio::sync::Mutex::new(()),
             },
             fingerprint,
@@ -379,7 +372,7 @@ mod tests {
     /// What the node's state is: PIB keys, default identity, signing key.
     fn state(node: &Node) -> (Vec<Name>, Option<Name>, Name) {
         let pib = FilePib::new(&node.admin.pib_root).unwrap();
-        let signing = node.admin.signing.as_ref().unwrap().key();
+        let (signing, _) = node.admin.signing.as_ref().unwrap().current();
         (pib.list_keys().unwrap(), pib.get_default_identity().unwrap(), signing)
     }
 
@@ -413,8 +406,9 @@ mod tests {
     }
 
     /// Every refused enrollment — a spent token, a token rewritten into
-    /// another role, a second enrollment without `force` — leaves the PIB,
-    /// its default identity and the node's signer exactly as they were.
+    /// another role, a second enrollment without `force`, a forced one under
+    /// the device name the node already holds — leaves the PIB, its default
+    /// identity and the node's signer exactly as they were.
     #[tokio::test]
     async fn refused_enrollment_leaves_the_previous_identity_selected() {
         let (hub, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -424,7 +418,7 @@ mod tests {
             .expect("first enrollment");
         let before = state(&node);
 
-        let spent = enroll(&node.admin, request(&node, "member", "member-m1", "laptop", true)).await;
+        let spent = enroll(&node.admin, request(&node, "member", "member-m1", "phone", true)).await;
         assert_eq!(spent.unwrap_err().status_code, status::UNAUTHORIZED);
         assert_eq!(state(&node), before);
 
@@ -440,7 +434,14 @@ mod tests {
         assert_eq!(wrong_device.unwrap_err().status_code, status::BAD_PARAMS);
         assert_eq!(state(&node), before);
 
-        // With `force` a fresh token enrolls a second key; the first stays.
+        // The CA keeps the device name to the key it certified.
+        let same_name =
+            enroll(&node.admin, request(&node, "member", "member-m2", "laptop", true)).await;
+        assert_eq!(same_name.unwrap_err().status_code, 409);
+        assert_eq!(state(&node), before);
+
+        // With `force` the same (unspent) token enrolls a second key under
+        // another name; the first stays.
         let EnrollOutcome::Enrolled(info) =
             enroll(&node.admin, request(&node, "member", "member-m2", "tab", true))
                 .await

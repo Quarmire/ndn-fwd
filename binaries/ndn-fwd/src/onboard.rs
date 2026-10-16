@@ -400,7 +400,18 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         "issued_by        = {} (chain checked to the root of {} under its schema)",
         info.issuer, invite.namespace
     );
-    println!("valid_until      = {}", info.valid_until);
+    // More than a minute short of the request: the CA capped the lifetime.
+    let capped = info.validity_secs + 60 < info.requested_validity_secs;
+    if capped {
+        println!(
+            "valid_until      = {} ({} — the CA capped the {} requested)",
+            info.valid_until,
+            days(info.validity_secs),
+            days(info.requested_validity_secs)
+        );
+    } else {
+        println!("valid_until      = {} ({})", info.valid_until, days(info.validity_secs));
+    }
     println!("pib              = {}", info.pib);
     println!(
         "default_identity = {} (was: {})",
@@ -420,7 +431,24 @@ async fn run_enroll(args: &[String]) -> Result<()> {
     for old in &info.still_valid {
         println!("# Still valid until revoked: {old}");
     }
+    if capped {
+        println!(
+            "# The CA issued a shorter lifetime than requested: this certificate expires at {}.",
+            info.valid_until
+        );
+    }
     Ok(())
+}
+
+/// A lifetime in days, for display (whole days when within a minute of one:
+/// certificate validity periods are stored to the second).
+fn days(secs: u64) -> String {
+    let whole = (secs + 60) / 86_400;
+    if secs.abs_diff(whole * 86_400) <= 60 {
+        format!("{whole} days")
+    } else {
+        format!("{:.1} days", secs as f64 / 86_400.0)
+    }
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

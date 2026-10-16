@@ -127,8 +127,12 @@ USAGE:
                                           trust context if it holds none, redeems
                                           the token, stores the certificate and
                                           makes it the PIB's default identity;
-                                          --force enrolls again although the node
-                                          already holds a certificate there
+                                          --force enrolls another key although the
+                                          node already holds a certificate there;
+                                          the CA certifies a new key for the same
+                                          <device> only once the old certificate
+                                          is revoked or an admin approves it, so
+                                          pick another --device otherwise
   ndn-fwd schema show [--pib <dir>] [--namespace <ns>]
                                           print an adopted context's trust
                                           schema as readable rules
@@ -364,16 +368,14 @@ async fn main() -> Result<()> {
 
     let security_init = load_security(&fwd_config);
     load_adopted_contexts(&fwd_config, &security_init.mgr);
-    // The key the daemon signs its own packets with, captured before
-    // `security_init.mgr` moves into the EngineBuilder. DV's
-    // `DvStaticKeys`/`DvLvs` modes take it as built; management responses
-    // and discovery records sign through `active_identity`, which
-    // `security/enroll` switches to a newly enrolled key at runtime.
-    let identity_signer: Option<std::sync::Arc<dyn ndn_security::Signer>> =
-        security_init.mgr.any_signer();
-    let active_identity = identity_signer.as_ref().map(|signer| {
+    // The key the daemon signs its own packets with — management responses,
+    // discovery records and DV routing — captured before `security_init.mgr`
+    // moves into the EngineBuilder. They all sign through `active_identity`
+    // (one snapshot per packet), which `security/enroll` switches to a newly
+    // enrolled key at runtime.
+    let active_identity = security_init.mgr.any_signer().map(|signer| {
         Arc::new(active_identity::ActiveIdentity::new(
-            Arc::clone(signer),
+            signer,
             security_init.is_ephemeral,
         ))
     });
@@ -706,11 +708,11 @@ async fn main() -> Result<()> {
             svc_cfg.auto_fib_ttl_multiplier = v;
         }
         // Sign service records / bodies / peer lists with the forwarder's
-        // identity key (replaces the default DigestSha256 self-sign).
-        if let Some(signer) = &active_identity {
-            svc_cfg.record_signer = std::sync::Arc::new(ndn_discovery::SignerAdapter(
-                std::sync::Arc::clone(signer) as std::sync::Arc<dyn ndn_security::Signer>,
-            ));
+        // current identity key, one snapshot per record (replaces the
+        // default DigestSha256 self-sign).
+        if let Some(identity) = &active_identity {
+            svc_cfg.record_signer =
+                Arc::clone(identity.signer()) as Arc<dyn ndn_discovery::RecordSigner>;
         }
         // Verify peer records against the configured discovery trust
         // anchors; absent ⇒ fail-closed (browse-only, no auto-FIB).
@@ -794,9 +796,12 @@ async fn main() -> Result<()> {
     if let Some(installer) = installs::nlsr::prepare(&fwd_config, &mut builder).await {
         builder = builder.install(std::sync::Arc::new(installer), &mut post_build);
     }
-    let dv_installer =
-        installs::dv::prepare(&fwd_config, &mut builder, identity_signer.clone()).await;
-    let dv_uses_startup_key = dv_installer.is_some() && identity_signer.is_some();
+    let dv_installer = installs::dv::prepare(
+        &fwd_config,
+        &mut builder,
+        active_identity.as_ref().map(|identity| Arc::clone(identity.signer())),
+    )
+    .await;
     if let Some(installer) = dv_installer {
         builder = builder.install(std::sync::Arc::new(installer), &mut post_build);
     }
@@ -952,7 +957,6 @@ async fn main() -> Result<()> {
             publisher: published_contexts,
             signing: active_identity.clone(),
             configured_identity: fwd_config.security.identity.clone(),
-            dv_uses_startup_key,
             enrolling: tokio::sync::Mutex::new(()),
         });
 
@@ -1087,8 +1091,8 @@ async fn main() -> Result<()> {
             // (switched at runtime by `security/enroll`), else fall back to
             // DigestSha256 (ephemeral boots still answer).
             command_response_signer: active_identity
-                .clone()
-                .map(|s| s as Arc<dyn ndn_security::Signer>),
+                .as_ref()
+                .map(|identity| Arc::clone(identity.signer())),
             log_inspector: build_log_inspector(),
             #[cfg(feature = "fec")]
             coding_handler: coding_handler_arc

@@ -36,7 +36,7 @@ use ndn_cert::roles::{Role, role_prefix, token_role};
 use ndn_cert::{
     CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore, IssuanceContext,
     IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge, RequireAttestationKind,
-    RolePolicy, TokenChallenge, TokenStore,
+    RolePolicy, SingleKeyIdentity, TokenChallenge, TokenStore,
 };
 use ndn_config::DemoCaConfig;
 use ndn_engine::ForwarderEngine;
@@ -93,6 +93,13 @@ pub(crate) async fn prepare(
     pib_path: &Path,
 ) -> Result<(Vec<InProcFace>, DemoCaSpawn)> {
     let prefix = parse_prefix(&cfg.prefix)?;
+    if cfg.cert_validity_days == 0 {
+        bail!(
+            "[demo_ca] cert_validity_days = 0 would issue certificates that are already \
+             expired; set it to the lifetime of issued certificates in days (default {})",
+            DemoCaConfig::DEFAULT_CERT_VALIDITY_DAYS
+        );
+    }
     let identity: Name = cfg
         .identity
         .parse()
@@ -202,7 +209,8 @@ fn network_of(identity: &Name) -> Option<Name> {
         .then(|| Name::from_components(parent.iter().cloned()))
 }
 
-/// Issues only when every policy issues, at the shortest validity offered.
+/// Issues only when every policy issues, at the shortest validity offered;
+/// an identity is held to one key when any policy holds it so.
 struct AllIssuance(Vec<Box<dyn IssuancePolicy>>);
 
 impl IssuancePolicy for AllIssuance {
@@ -215,6 +223,10 @@ impl IssuancePolicy for AllIssuance {
             }
         }
         IssuanceDecision::Issue { validity }
+    }
+
+    fn single_key_identity(&self, key_name: &Name) -> Option<SingleKeyIdentity> {
+        self.0.iter().find_map(|p| p.single_key_identity(key_name))
     }
 }
 
@@ -373,12 +385,17 @@ pub(crate) fn spawn(
         "NDNCERT challenge set",
     );
 
+    // Certificates last `cert_validity_days`; INFO advertises the same
+    // maximum, so requesters can ask for exactly what they get.
+    let lifetime = std::time::Duration::from_secs(u64::from(cfg.cert_validity_days) * 86_400);
     let mut builder = NdncertCa::builder()
         .name(prep.prefix.to_string())
         .map_err(|e| anyhow::anyhow!("[demo_ca] invalid prefix: {e}"))?
         .info("ndn-fwd NDNCERT CA")
         .signing_identity(&identity)
-        .emit_attestations(cfg.emit_attestations);
+        .emit_attestations(cfg.emit_attestations)
+        .cert_lifetime(lifetime)
+        .max_cert_lifetime(lifetime);
     if let Some(store) = prep.store {
         builder = builder.store(store);
     }
