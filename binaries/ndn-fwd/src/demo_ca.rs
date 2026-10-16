@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use ndn_app::{Consumer, Producer};
 use ndn_cert::challenge::device_approval::{DeviceApprovalChallenge, PendingApprovalStore};
 use ndn_cert::hub::{ANCHOR_CERT_FILE, CA_CERT_FILE, CA_DIR};
-use ndn_cert::roles::{role_prefix, token_role};
+use ndn_cert::roles::{Role, role_prefix, token_role};
 use ndn_cert::{
     CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore, IssuanceContext,
     IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge, RequireAttestationKind,
@@ -134,9 +134,10 @@ pub(crate) async fn prepare(
         (keychain, anchor, Some(Arc::new(store)), network)
     };
     // Role-carrying invite tokens are scoped under the network (the CA
-    // prefix for an ephemeral demo CA).
+    // prefix for an ephemeral demo CA); on a hub CA every token is.
     let token_ns = network.clone().unwrap_or_else(|| prefix.clone());
-    let (challenges, approvals) = build_challenges(cfg, store.as_ref(), &token_ns)?;
+    let (challenges, approvals) =
+        build_challenges(cfg, store.as_ref(), &token_ns, network.is_some())?;
 
     let face_id = FaceId(DEMO_CA_FACE_ID);
     let (face, handle) = InProcFace::new(face_id, 64);
@@ -486,23 +487,25 @@ fn approval_validator(engine: &ForwarderEngine) -> Result<Arc<Validator>> {
 /// `device-approval` entries share one [`PendingApprovalStore`], returned for
 /// the mgmt backend and the APPROVE-FEED. With a CA `store` (PIB mode), token
 /// redemptions persist in it so a redeemed token is refused after a restart.
-/// Role-carrying tokens are scoped under `token_ns` ([`token_challenge`]).
+/// Role-carrying tokens are scoped under `token_ns` ([`token_challenge`]);
+/// `hub` marks a hub CA, whose tokens are all bounded by role.
 fn build_challenges(
     cfg: &DemoCaConfig,
     store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
+    hub: bool,
 ) -> Result<(Vec<Box<dyn ChallengeHandler>>, Option<PendingApprovalStore>)> {
     if !cfg.challenges.is_empty() {
         let mut approvals = None;
         let handlers = cfg
             .challenges
             .iter()
-            .map(|c| build_challenge(c, store, token_ns, &mut approvals))
+            .map(|c| build_challenge(c, store, token_ns, hub, &mut approvals))
             .collect::<Result<Vec<_>>>()?;
         return Ok((handlers, approvals));
     }
     if !cfg.tokens.is_empty() {
-        let challenge = token_challenge(&cfg.tokens, store, token_ns)?;
+        let challenge = token_challenge(&cfg.tokens, store, token_ns, hub)?;
         return Ok((vec![challenge], None));
     }
     bail!(
@@ -516,11 +519,20 @@ fn build_challenges(
 /// A `token` challenge over `tokens`, its redemptions persisted in `store`
 /// when one is given. A token naming a role (`member-…`, `guest-…`, as
 /// `ndn-fwd-tokens new --role` mints them) is scoped to `<token_ns>/<role>`:
-/// it certifies only names under that prefix. Other tokens are unscoped.
+/// it certifies only names under that prefix. Other tokens are unscoped,
+/// except on a hub CA (`hub`).
+///
+/// On a hub CA the issuance policy admits a token only for a member or a
+/// guest, after the challenge has consumed it. So every token is scoped
+/// there: the scope check refuses a request the policy would refuse
+/// *before* the token is spent. Unscoped tokens are scoped to
+/// `/<ns>/member` (the only role the policy grants them), and `admin-…` /
+/// `node-…` tokens, which could never issue anything, are refused here.
 fn token_challenge(
     tokens: &[String],
     store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
+    hub: bool,
 ) -> Result<Box<dyn ChallengeHandler>> {
     let tokens_store = match store {
         Some(store) => TokenStore::with_store(Arc::clone(store) as Arc<dyn CaStore>)
@@ -528,7 +540,16 @@ fn token_challenge(
         None => TokenStore::new(),
     };
     for token in tokens {
-        match token_role(token) {
+        let role = match token_role(token) {
+            Some(role @ (Role::Admin | Role::Node)) if hub => bail!(
+                "[demo_ca] token '{token}' names the {role} role, but a hub CA never issues \
+                 {role} certificates on a token alone; remove it from the config and enroll \
+                 the device with the device-approval challenge (an admin approves it)"
+            ),
+            None if hub => Some(Role::Member),
+            role => role,
+        };
+        match role {
             Some(role) => {
                 tokens_store.add_scoped(token.clone(), None, Some(role_prefix(token_ns, role)))
             }
@@ -542,6 +563,7 @@ fn build_challenge(
     c: &ndn_config::ChallengeConfig,
     store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
+    hub: bool,
     approvals: &mut Option<PendingApprovalStore>,
 ) -> Result<Box<dyn ChallengeHandler>> {
     match c.kind.as_str() {
@@ -553,7 +575,7 @@ fn build_challenge(
             );
             Ok(Box::new(NopChallenge::new()))
         }
-        "token" => token_challenge(&c.tokens, store, token_ns),
+        "token" => token_challenge(&c.tokens, store, token_ns, hub),
         "pin" => {
             let pin = c
                 .pin
@@ -1044,31 +1066,31 @@ mod tests {
 
     /// A hub CA (PIB-backed `/home/bob/CA`) issues only role-layout names, and
     /// an invite token's role bounds what it can certify: a member token never
-    /// yields an admin cert, an unscoped one never a guest cert.
+    /// yields an admin cert, an unscoped one never a guest cert. A request the
+    /// CA refuses does not spend the token: it still enrolls a member after.
     #[tokio::test]
     async fn hub_ca_tokens_are_bounded_by_role() {
         let dir = tempfile::tempdir().unwrap();
         write_hub_pib(dir.path());
-        let tokens = [
-            "member-m1", "member-m2", "guest-g1", "guest-g2", "invite-1", "invite-2", "invite-3",
-        ];
+        let tokens = ["member-m1", "member-m2", "guest-g1", "guest-g2", "invite-1"];
         let cfg = hub_cfg(vec![challenge("token", &tokens)]);
         let mut ca = run_ca(&cfg, dir.path()).await;
 
         // A member token is scoped to /home/bob/member: no admin cert.
         let admin = enroll(&mut ca.client, "admin/evil", "token", token("member-m1")).await;
         assert!(admin.is_err(), "member token must not certify an admin: {admin:?}");
-        // Nor does an unscoped token (admins need a device approval).
-        let admin = enroll(&mut ca.client, "admin/evil", "token", token("invite-1")).await;
-        assert!(admin.is_err(), "a token alone must not certify an admin: {admin:?}");
-        let node = enroll(&mut ca.client, "node/vps", "token", token("invite-2")).await;
-        assert!(node.is_err(), "a token alone must not certify a super node: {node:?}");
-        // Names outside the role layout are refused.
-        let flat = enroll(&mut ca.client, "laptop", "token", token("invite-3")).await;
-        assert!(flat.is_err(), "non-role names must not be certified: {flat:?}");
+        // Nor does an unscoped token (admins need a device approval), nor a
+        // node, guest or non-role name.
+        for name in ["admin/evil", "node/vps", "guest/bob", "laptop"] {
+            let refused = enroll(&mut ca.client, name, "token", token("invite-1")).await;
+            assert!(refused.is_err(), "an unscoped token must not certify {name}: {refused:?}");
+        }
 
+        // The refused requests spent neither token: both still enroll a member.
+        enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
+            .await
+            .expect("an unscoped token survives refused requests and certifies a member");
         // Members by member (or unscoped) tokens; guests only by guest tokens.
-        // (m1 was not consumed: its scope refused the admin request up front.)
         let phone = enroll(&mut ca.client, "member/phone", "token", token("member-m1"))
             .await
             .expect("member token certifies a member");
@@ -1110,5 +1132,16 @@ mod tests {
         approver.await.unwrap();
         assert_eq!(issued.name.to_string(), "/home/bob/admin/tablet/KEY/k1");
         ca.stop().await;
+    }
+
+    /// On a hub CA an admin or node token could never issue anything, so the
+    /// CA refuses to start with one instead of letting requests spend it.
+    #[test]
+    fn hub_ca_refuses_admin_and_node_tokens() {
+        let ns: Name = "/home/bob".parse().unwrap();
+        for t in ["admin-a1", "node-n1"] {
+            assert!(token_challenge(&[t.to_string()], None, &ns, true).is_err(), "{t}");
+            assert!(token_challenge(&[t.to_string()], None, &ns, false).is_ok(), "{t}");
+        }
     }
 }

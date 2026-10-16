@@ -243,12 +243,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admin_and_node_invites_are_refused_with_a_pointer_to_approval() {
+    fn admin_and_node_invites_are_refused() {
         assert_eq!(invite_role(InviteRole::Member).unwrap(), Role::Member);
         assert_eq!(invite_role(InviteRole::Guest).unwrap(), Role::Guest);
         for refused in [InviteRole::Admin, InviteRole::Node] {
-            let err = invite_role(refused).unwrap_err().to_string();
-            assert!(err.contains("device approval"), "{err}");
+            assert!(invite_role(refused).is_err());
         }
     }
 

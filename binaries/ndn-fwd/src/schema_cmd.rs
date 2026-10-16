@@ -17,15 +17,16 @@ use ndn_cert::load_persisted_contexts;
 use ndn_packet::Name;
 use ndn_security::{Keyring, LvsModel, SchemaFormat, SignedTrustContext};
 
-use crate::onboard::{VALUE_FLAGS, flag, pib_dir};
+use crate::onboard::{flag, pib_dir, positionals};
 
 pub fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("show") => show(&args[1..]),
         Some("explain") => explain(&args[1..]),
         _ => bail!(
-            "usage: ndn-fwd schema show [--pib <dir>] [--namespace <ns>]\n       \
-             ndn-fwd schema explain <data-name> <key-name> [--pib <dir>] [--namespace <ns>]"
+            "usage: ndn-fwd schema show [-c <config>] [--pib <dir>] [--namespace <ns>]\n       \
+             ndn-fwd schema explain <data-name> <key-name> [-c <config>] [--pib <dir>] \
+             [--namespace <ns>]"
         ),
     }
 }
@@ -123,17 +124,11 @@ fn show(args: &[String]) -> Result<()> {
 }
 
 fn explain(args: &[String]) -> Result<()> {
-    let positional: Vec<&String> = args
-        .iter()
-        .enumerate()
-        .filter(|(i, a)| {
-            !a.starts_with("--") && (*i == 0 || !VALUE_FLAGS.contains(&args[i - 1].as_str()))
-        })
-        .map(|(_, a)| a)
-        .collect();
+    let positional = positionals(args);
     let [data, key] = positional.as_slice() else {
         bail!(
-            "usage: ndn-fwd schema explain <data-name> <key-name> [--pib <dir>] [--namespace <ns>]"
+            "usage: ndn-fwd schema explain <data-name> <key-name> [-c <config>] [--pib <dir>] \
+             [--namespace <ns>]"
         );
     };
     let data = parse_name(data, "data name")?;

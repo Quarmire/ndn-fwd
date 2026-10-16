@@ -59,6 +59,18 @@ pub(crate) fn flag<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+/// The arguments that are neither a flag (`-c`, `--pib`, …) nor a value
+/// flag's value, in order.
+pub(crate) fn positionals(args: &[String]) -> Vec<&str> {
+    args.iter()
+        .enumerate()
+        .filter(|(i, a)| {
+            !a.starts_with('-') && (*i == 0 || !VALUE_FLAGS.contains(&args[i - 1].as_str()))
+        })
+        .map(|(_, a)| a.as_str())
+        .collect()
+}
+
 /// The PIB directory: `--pib`, else the config's `[security].pib_path`, else
 /// the daemon's default (`~/.ndn/pib`).
 pub(crate) fn pib_dir(args: &[String]) -> Result<PathBuf> {
@@ -185,13 +197,8 @@ fn toml_basic_string(s: &str) -> String {
 
 fn run_adopt(args: &[String]) -> Result<()> {
     // The envelope is the first argument that is neither a flag nor a flag's value.
-    let uri = args
-        .iter()
-        .enumerate()
-        .find(|(i, a)| {
-            !a.starts_with('-') && (*i == 0 || !VALUE_FLAGS.contains(&args[i - 1].as_str()))
-        })
-        .map(|(_, a)| a)
+    let uri = *positionals(args)
+        .first()
         .context("adopt requires an <envelope> (an ndn-trust://anchor URI or its https mirror)")?;
     let envelope =
         TrustEnvelope::from_uri(uri).map_err(|e| anyhow::anyhow!("parse trust envelope: {e}"))?;
@@ -226,4 +233,21 @@ fn hex_lower(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every flag form, short or long, before or after the positionals, is
+    /// skipped together with its value.
+    #[test]
+    fn positionals_skip_flags_and_their_values() {
+        let args: Vec<String> = ["/d", "-c", "x.toml", "/k", "--pib", "p", "--force"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(positionals(&args), ["/d", "/k"]);
+        let args: Vec<String> = ["--config", "x.toml", "/d", "/k"].map(String::from).to_vec();
+        assert_eq!(positionals(&args), ["/d", "/k"]);
+    }
 }
