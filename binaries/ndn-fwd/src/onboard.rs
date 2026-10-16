@@ -1,11 +1,12 @@
-//! `ndn-fwd init --profile hub` and `ndn-fwd adopt <envelope>` — the two-command
-//! onboarding UX over the [`ndn_cert::hub`] / [`ndn_cert::onboarding`]
-//! primitives. A node does not "join a network"; it *adopts* a trust context.
+//! `ndn-fwd init --profile hub`, `ndn-fwd adopt <envelope>` and `ndn-fwd
+//! enroll <invite>` — the onboarding UX over the [`ndn_cert::hub`] /
+//! [`ndn_cert::onboarding`] / [`ndn_cert::invite`] primitives. A node does not
+//! "join"; it *adopts* a trust context and *enrolls* a key with a CA.
 //!
-//! These are early-exit subcommands: when `args[1]` is `init`, `adopt` or
-//! `schema` ([`crate::schema_cmd`]), the daemon does not start. They act on
-//! the node's PIB directory (`--pib <dir>`, else `[security].pib_path` from
-//! `-c/--config`, else `~/.ndn/pib`):
+//! These are early-exit subcommands: when `args[1]` is `init`, `adopt`,
+//! `enroll` or `schema` ([`crate::schema_cmd`]), the daemon does not start.
+//! They act on the node's PIB directory (`--pib <dir>`, else
+//! `[security].pib_path` from `-c/--config`, else `~/.ndn/pib`):
 //!
 //! - `init` mints the network root `<ns>/KEY/root`, the CA signing identity
 //!   `<ns>/CA` (certified by the root) and this primary device's admin
@@ -24,12 +25,21 @@
 //!   daemon trusts, stores and publishes it at once. With no daemon, a link
 //!   with the context inline is verified and stored in `<pib>/contexts/`,
 //!   loaded at the next start; a fingerprint-only link needs the daemon.
+//! - `enroll` asks the running daemon to enroll with the CA an invite link
+//!   (`ndn-trust://invite/…`) names, as `<ns>/<role>/<device>` (`--device`,
+//!   default derived from the host name): the daemon generates the key in its
+//!   PIB, adopts the namespace's trust context if it holds none, redeems the
+//!   token and makes the certified identity the PIB's default (see
+//!   [`crate::enroll`]). There is no offline form: the key belongs to the
+//!   daemon and the CA is reached through it.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use ndn_cert::roles::sanitize_device_name;
-use ndn_cert::{AnchorLink, adopt_envelope_into_store, anchor_fingerprint, init_hub_in_pib};
+use ndn_cert::{
+    AnchorLink, InviteLink, adopt_envelope_into_store, anchor_fingerprint, init_hub_in_pib,
+};
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
 use ndn_security::FilePib;
@@ -42,6 +52,7 @@ pub async fn maybe_run() -> Option<Result<()>> {
     match args.get(1).map(String::as_str) {
         Some("init") => Some(run_init(&args[2..])),
         Some("adopt") => Some(run_adopt(&args[2..]).await),
+        Some("enroll") => Some(run_enroll(&args[2..]).await),
         Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
         _ => None,
     }
@@ -105,6 +116,17 @@ fn host_name() -> Option<String> {
         .filter(|h| !h.is_empty())
 }
 
+/// The default `--device`: the host name, sanitized into a device name.
+fn default_device() -> Result<String> {
+    let host = host_name().unwrap_or_default();
+    sanitize_device_name(&host).with_context(|| {
+        format!(
+            "cannot derive a device name from the host name {host:?}; pass --device <name> \
+             (letters, digits, '-', '_', '.')"
+        )
+    })
+}
+
 fn run_init(args: &[String]) -> Result<()> {
     let profile = flag(args, &["--profile"]).unwrap_or("hub");
     if profile != "hub" {
@@ -116,15 +138,7 @@ fn run_init(args: &[String]) -> Result<()> {
         .context("invalid --namespace NDN name")?;
     let device = match flag(args, &["--device"]) {
         Some(device) => device.to_string(),
-        None => {
-            let host = host_name().unwrap_or_default();
-            sanitize_device_name(&host).with_context(|| {
-                format!(
-                    "cannot derive a device name from the host name {host:?}; pass \
-                     --device <name> (letters, digits, '-', '_', '.')"
-                )
-            })?
-        }
+        None => default_device()?,
     };
     let force = args.iter().any(|a| a == "--force");
     let pib_dir = pib_dir(args)?;
@@ -314,6 +328,98 @@ fn adopt_offline(
     println!();
     println!("# Signed by the anchor with the expected fingerprint. The daemon loads this");
     println!("# context at its next start (same pib_path); producing still needs enrollment.");
+    Ok(())
+}
+
+/// How long the CLI waits for the daemon to enroll: adopting the context
+/// (two fetches) plus NEW, CHALLENGE, the certificate and its issuer's
+/// certificate, each at most ~4.5 s.
+const DAEMON_ENROLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
+
+async fn run_enroll(args: &[String]) -> Result<()> {
+    let uri = *positionals(args).first().context(
+        "enroll requires an <invite link> (an ndn-trust://invite URI or its https mirror, as \
+         `ndn-fwd-tokens new` prints it)",
+    )?;
+    // Read it here first so a malformed invite is reported without a daemon.
+    let invite = InviteLink::from_uri(uri).map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?;
+    let device = match flag(args, &["--device"]) {
+        Some(device) => device.to_string(),
+        None => default_device()?,
+    };
+    let identity = invite
+        .device_identity(&device)
+        .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?;
+    let force = args.iter().any(|a| a == "--force");
+    let socket = face_socket(args)?;
+    let client = ndn_ipc::MgmtClient::connect(&socket).await.map_err(|e| {
+        anyhow::anyhow!(
+            "enroll refused: the daemon is not reachable at {socket} ({e}). The running daemon \
+             enrolls: it generates the key in its own PIB and reaches the CA through its faces. \
+             Start ndn-fwd (with `-c <config>` if it uses another socket), give it a face and a \
+             route for {} toward a forwarder that serves it, and retry",
+            invite.namespace
+        )
+    })?;
+    let resp = client
+        .security_enroll(uri, &identity, force, DAEMON_ENROLL_TIMEOUT)
+        .await
+        .with_context(|| format!("ask the daemon at {socket} to enroll"))?;
+    if !resp.is_ok() {
+        bail!("enroll refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+    }
+    let outcome: ndn_mgmt::EnrollOutcome = serde_json::from_str(&resp.status_text)
+        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
+    let ndn_mgmt::EnrollOutcome::Enrolled(info) = outcome;
+    println!("# ndn-fwd enroll (by the running daemon at {socket})");
+    match &info.adopted_context {
+        Some(ctx) => {
+            println!(
+                "trust_context    = adopted {} v{} ({}; root fingerprint {} as the invite \
+                 expects)",
+                ctx.namespace,
+                ctx.version,
+                if ctx.fetched {
+                    "fetched by name"
+                } else {
+                    "inline"
+                },
+                ctx.expected_fingerprint
+            );
+            println!("context_stored   = {}", ctx.stored);
+        }
+        None => println!(
+            "trust_context    = {} (already held; signed by the root the invite expects)",
+            invite.namespace
+        ),
+    }
+    println!("identity         = {}", info.identity);
+    println!("key              = {} (generated in the daemon's PIB)", info.key);
+    println!("certificate      = {}", info.certificate);
+    println!(
+        "issued_by        = {} (chain checked to the root of {} under its schema)",
+        info.issuer, invite.namespace
+    );
+    println!("valid_until      = {}", info.valid_until);
+    println!("pib              = {}", info.pib);
+    println!(
+        "default_identity = {} (was: {})",
+        info.identity,
+        info.previous_identity.as_deref().unwrap_or("none")
+    );
+    println!("signing_now      = {}", info.signing_now);
+    println!();
+    if info.signing_now {
+        println!("# The daemon signs its management responses and discovery records with this");
+        println!("# key now, and loads this identity at every start (the PIB's default");
+        println!("# identity; [security] identity in the config would take precedence).");
+    }
+    for note in &info.at_next_start {
+        println!("# At the next start: {note}");
+    }
+    for old in &info.still_valid {
+        println!("# Still valid until revoked: {old}");
+    }
     Ok(())
 }
 

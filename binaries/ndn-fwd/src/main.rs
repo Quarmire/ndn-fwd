@@ -44,9 +44,11 @@ fn build_obs_retention(
     }
 }
 
+mod active_identity;
 mod context_adopt;
 mod context_publisher;
 mod demo_ca;
+mod enroll;
 mod face_provision;
 mod face_setup;
 mod host_helpers;
@@ -84,7 +86,7 @@ struct CliArgs {
 
 /// `--help` text. The parser is deliberately hand-rolled (the daemon stays
 /// dependency-light; only the tooling siblings use clap), so keep this in
-/// sync with the options `parse_args` accepts and the `init`/`adopt`/`schema`
+/// sync with the options `parse_args` accepts and the `init`/`adopt`/`enroll`/`schema`
 /// subcommands `onboard::maybe_run` intercepts.
 fn print_help() {
     println!(
@@ -115,6 +117,18 @@ USAGE:
                                           then trusts, stores and publishes it;
                                           without a daemon an inline context is
                                           verified and stored in <pib>/contexts/
+  ndn-fwd enroll <invite-link> [--device <name>] [--force] [-c <config>]
+                                          enroll this node with the CA an
+                                          ndn-trust://invite link names: the
+                                          running daemon generates the key for
+                                          <ns>/<role>/<device> in its PIB
+                                          (device default: the host name,
+                                          sanitized), adopts the namespace's
+                                          trust context if it holds none, redeems
+                                          the token, stores the certificate and
+                                          makes it the PIB's default identity;
+                                          --force enrolls again although the node
+                                          already holds a certificate there
   ndn-fwd schema show [--pib <dir>] [--namespace <ns>]
                                           print an adopted context's trust
                                           schema as readable rules
@@ -350,12 +364,21 @@ async fn main() -> Result<()> {
 
     let security_init = load_security(&fwd_config);
     load_adopted_contexts(&fwd_config, &security_init.mgr);
-    // Capture the identity signer before `security_init.mgr` moves into the
-    // EngineBuilder; DV's `DvStaticKeys`/`DvLvs` modes consume it.
+    // The key the daemon signs its own packets with, captured before
+    // `security_init.mgr` moves into the EngineBuilder. DV's
+    // `DvStaticKeys`/`DvLvs` modes take it as built; management responses
+    // and discovery records sign through `active_identity`, which
+    // `security/enroll` switches to a newly enrolled key at runtime.
     let identity_signer: Option<std::sync::Arc<dyn ndn_security::Signer>> =
         security_init.mgr.any_signer();
-    // The keyring the engine's validator uses; a network adopted at runtime
-    // (`security/context-adopt`) lands here.
+    let active_identity = identity_signer.as_ref().map(|signer| {
+        Arc::new(active_identity::ActiveIdentity::new(
+            Arc::clone(signer),
+            security_init.is_ephemeral,
+        ))
+    });
+    // The keyring the engine's validator uses; a trust context adopted at
+    // runtime (`security/context-adopt`, `security/enroll`) lands here.
     let trust_keyring = Arc::clone(security_init.mgr.keyring());
     let mgmt_validator = load_mgmt_validator(&fwd_config.security.mgmt)?;
     let mut localhop_validator = load_localhop_validator(&fwd_config.security.mgmt)?;
@@ -684,9 +707,10 @@ async fn main() -> Result<()> {
         }
         // Sign service records / bodies / peer lists with the forwarder's
         // identity key (replaces the default DigestSha256 self-sign).
-        if let Some(signer) = &identity_signer {
-            svc_cfg.record_signer =
-                std::sync::Arc::new(ndn_discovery::SignerAdapter(std::sync::Arc::clone(signer)));
+        if let Some(signer) = &active_identity {
+            svc_cfg.record_signer = std::sync::Arc::new(ndn_discovery::SignerAdapter(
+                std::sync::Arc::clone(signer) as std::sync::Arc<dyn ndn_security::Signer>,
+            ));
         }
         // Verify peer records against the configured discovery trust
         // anchors; absent ⇒ fail-closed (browse-only, no auto-FIB).
@@ -770,9 +794,10 @@ async fn main() -> Result<()> {
     if let Some(installer) = installs::nlsr::prepare(&fwd_config, &mut builder).await {
         builder = builder.install(std::sync::Arc::new(installer), &mut post_build);
     }
-    if let Some(installer) =
-        installs::dv::prepare(&fwd_config, &mut builder, identity_signer.clone()).await
-    {
+    let dv_installer =
+        installs::dv::prepare(&fwd_config, &mut builder, identity_signer.clone()).await;
+    let dv_uses_startup_key = dv_installer.is_some() && identity_signer.is_some();
+    if let Some(installer) = dv_installer {
         builder = builder.install(std::sync::Arc::new(installer), &mut post_build);
     }
 
@@ -916,14 +941,19 @@ async fn main() -> Result<()> {
     // `ndn_mgmt::mount_management` below.
 
     let published_contexts = context_publisher.map(|publisher| publisher.spawn(&engine));
-    // `security/context-adopt`: adopt a network at runtime, store it beside
-    // the PIB and publish it by name.
-    let trust_context_handler: Arc<dyn mgmt_ndn::TrustContextMgmtBackend> =
-        Arc::new(context_adopt::ContextAdopter {
+    // `security/context-adopt` / `security/enroll`: adopt a trust context
+    // (stored beside the PIB and published by name) and enroll with an invite
+    // at runtime; `security/identity-status` reports `active_identity`.
+    let trust_context_handler: Arc<dyn mgmt_ndn::TrustAdminMgmtBackend> =
+        Arc::new(context_adopt::TrustAdmin {
             engine: engine.clone(),
             keyring: trust_keyring,
             pib_root: pib_root(&fwd_config),
             publisher: published_contexts,
+            signing: active_identity.clone(),
+            configured_identity: fwd_config.security.identity.clone(),
+            dv_uses_startup_key,
+            enrolling: tokio::sync::Mutex::new(()),
         });
 
     // The CA's device-approval store (if it offers that challenge), shared
@@ -1053,9 +1083,12 @@ async fn main() -> Result<()> {
             localhop_command_validator: localhop_validator,
             require_signed_commands: fwd_config.security.mgmt.require_signed_commands,
             command_replay_cache: Some(default_command_replay_cache()),
-            // Sign mgmt responses with the daemon identity when one exists,
-            // else fall back to DigestSha256 (ephemeral boots still answer).
-            command_response_signer: engine.security().and_then(|m| m.any_signer()),
+            // Sign mgmt responses with the daemon identity when one exists
+            // (switched at runtime by `security/enroll`), else fall back to
+            // DigestSha256 (ephemeral boots still answer).
+            command_response_signer: active_identity
+                .clone()
+                .map(|s| s as Arc<dyn ndn_security::Signer>),
             log_inspector: build_log_inspector(),
             #[cfg(feature = "fec")]
             coding_handler: coding_handler_arc

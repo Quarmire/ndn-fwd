@@ -508,6 +508,13 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
             let s = mgmt.status().await.map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut out = String::new();
             render_status_into(&mut out, &s);
+            // The key the forwarder signs its own packets with (it changes
+            // when `ndn-fwd enroll` selects a new identity).
+            if let Ok(id) = mgmt.security_identity_status().await
+                && id.is_ok()
+            {
+                out.push_str(&format!("signing: {}\n", id.status_text.trim()));
+            }
             print!("{out}");
         }
         Command::Shutdown => {

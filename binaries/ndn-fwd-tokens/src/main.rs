@@ -30,13 +30,15 @@ struct InviteArgs {
     /// NDNCERT CA prefix the invitee enrolls against (e.g. `/home/bob`).
     #[arg(long)]
     ca: String,
-    /// The network namespace (`ndn-fwd init --namespace`, e.g. `/home/bob`).
-    /// The invite names `<namespace>/<role>` as the invitee's identity
+    /// The namespace (`ndn-fwd init --namespace`, e.g. `/home/bob`). The
+    /// invite names `<namespace>/<role>` as the invitee's identity
     /// namespace.
     #[arg(long)]
     namespace: String,
-    /// Optional lowercase-hex SHA-256 of the CA's root anchor public key, so
-    /// the invitee can pin the CA it trusts.
+    /// Lowercase-hex SHA-256 of the namespace's root anchor public key
+    /// (`anchor_fp` from `ndn-fwd init`). With it, `ndn-fwd enroll <invite>`
+    /// adopts the namespace's trust context by itself and checks it is signed
+    /// by that root; without it the invitee must adopt the context first.
     #[arg(long)]
     anchor_fp: Option<String>,
     /// Public domain serving the host's `JoinClient` page. When set, emit the

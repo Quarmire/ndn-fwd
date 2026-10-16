@@ -18,14 +18,11 @@ pub(crate) struct SecurityInit {
 }
 
 /// Priority: 1) configured `[security].identity` — its key under
-/// `<identity>/KEY/` — from the PIB; 2) on PIB failure, interactive recovery
-/// menu if stdin is a TTY else ephemeral fallback; 3) no identity ⇒ ephemeral
-/// in-memory key.
+/// `<identity>/KEY/` — from the PIB; 2) else the PIB's default identity (set
+/// by `ndn-fwd enroll`; the config file is never edited); 3) on PIB failure,
+/// interactive recovery menu if stdin is a TTY else ephemeral fallback; 4) no
+/// identity ⇒ ephemeral in-memory key.
 pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
-    let Some(identity_uri) = cfg.security.identity.as_ref() else {
-        return make_ephemeral(cfg, None);
-    };
-
     let pib_path = cfg
         .security
         .pib_path
@@ -33,9 +30,26 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
         .map(PathBuf::from)
         .unwrap_or_else(default_pib_path);
 
-    let identity = parse_name(identity_uri);
+    let (identity_uri, identity) = match cfg.security.identity.as_ref() {
+        Some(uri) => (uri.clone(), parse_name(uri)),
+        None => match pib_default_identity(&pib_path) {
+            Some(identity) => {
+                tracing::info!(
+                    target: "security",
+                    identity = %identity,
+                    pib = %pib_path.display(),
+                    "no [security] identity configured: using the PIB's default identity"
+                );
+                (identity.to_string(), identity)
+            }
+            None => return make_ephemeral(cfg, None),
+        },
+    };
+    let identity_uri = identity_uri.as_str();
 
-    if cfg.security.auto_init {
+    // `auto_init` mints a key for a configured identity the PIB lacks; the
+    // PIB's own default identity always has one, so it is only loaded.
+    if cfg.security.auto_init && cfg.security.identity.is_some() {
         match SecurityManager::auto_init(&identity, &pib_path) {
             Ok((mgr, generated)) => {
                 if generated {
@@ -218,6 +232,23 @@ pub fn default_pib_path() -> PathBuf {
     p
 }
 
+/// The PIB's default identity, when the PIB exists and records one.
+fn pib_default_identity(pib_path: &std::path::Path) -> Option<Name> {
+    let pib = FilePib::open(pib_path).ok()?;
+    match pib.get_default_identity() {
+        Ok(identity) => identity,
+        Err(e) => {
+            tracing::warn!(
+                target: "security",
+                pib = %pib_path.display(),
+                error = %e,
+                "unreadable default identity in the PIB; ignoring it"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +273,37 @@ mod tests {
 
         assert!(!init.is_ephemeral, "configured identity must load from the PIB");
         assert_eq!(init.mgr.any_signer().unwrap().key_name(), &node_key);
+    }
+
+    /// Without `[security].identity` the PIB's default identity is loaded;
+    /// a configured identity still takes precedence over it.
+    #[test]
+    fn pib_default_identity_is_used_unless_config_names_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let pib_path = dir.path().join("pib");
+        let hub: Name = "/home/bob/hub".parse().unwrap();
+        let node: Name = "/home/bob/node".parse().unwrap();
+        let (hub_mgr, _) = SecurityManager::auto_init(&hub, &pib_path).unwrap();
+        let (node_mgr, _) = SecurityManager::auto_init(&node, &pib_path).unwrap();
+        FilePib::open(&pib_path)
+            .unwrap()
+            .set_default_identity(&node)
+            .unwrap();
+
+        let mut cfg = ForwarderConfig::default();
+        cfg.security.pib_path = Some(pib_path.display().to_string());
+        let init = load_security(&cfg);
+        assert!(!init.is_ephemeral);
+        assert_eq!(
+            init.mgr.any_signer().unwrap().key_name(),
+            &node_mgr.identity_key_name(&node).unwrap()
+        );
+
+        cfg.security.identity = Some(hub.to_string());
+        let init = load_security(&cfg);
+        assert_eq!(
+            init.mgr.any_signer().unwrap().key_name(),
+            &hub_mgr.identity_key_name(&hub).unwrap()
+        );
     }
 }
