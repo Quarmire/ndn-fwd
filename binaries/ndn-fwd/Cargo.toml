@@ -30,7 +30,11 @@ required-features = ["websocket"]
 # Deployment baseline. webtransport and quic are opt-in (like bluetooth/webrtc):
 # webtransport drags ndn-acme -> instant-acme/reqwest/rustls and quic drags
 # quinn into every default build; enable with --features webtransport,quic.
-default = ["spsc-shm", "websocket", "serial", "l2", "fec", "rate-limit"]
+default = ["spsc-shm", "websocket", "serial", "l2", "fec", "rate-limit", "os-keyring"]
+# The namespace root in the OS keychain (`ndn-fwd init --root-store os-keyring`,
+# the default when a keychain is reachable): Secret Service / Keychain /
+# Credential Manager. libdbus is built from source, no system headers needed.
+os-keyring  = ["ndn-cert/os-keyring"]
 # Per-worker partitioned forwarding data plane (selected via `[engine]
 # data_plane = "partitioned"`). Without it, that config falls back to shared.
 partitioned-fwd = ["ndn-engine/partitioned-fwd"]
@@ -56,7 +60,9 @@ quic        = ["dep:ndn-face-quic"]
 # Browser-as-peer WebRTC datachannel faces + signaling-relay listener.
 # Pulls in the full webrtc stack (DTLS/SCTP/ICE/SRTP), so it is opt-in.
 webrtc      = ["dep:ndn-face-webrtc", "dep:ndn-rtc-signaling-relay"]
-yubikey-piv = ["ndn-security/yubikey-piv", "ndn-mgmt/yubikey-piv"]
+# YubiKey PIV: `ndn-fwd init --root-store yubikey-piv` (the namespace root on
+# the token) and the `security/yubikey-*` management verbs. Needs pcscd.
+yubikey-piv = ["ndn-security/yubikey-piv", "ndn-mgmt/yubikey-piv", "ndn-cert/yubikey-piv"]
 # Enable tokio-console task inspector.
 # Requires RUSTFLAGS="--cfg tokio_unstable" at build time (tokio requirement).
 console     = ["dep:console-subscriber"]

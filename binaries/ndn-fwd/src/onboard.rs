@@ -14,9 +14,11 @@
 //! <dir>`, else `[security].pib_path` from `-c/--config`, else
 //! `~/.ndn/pib`) or ask the running daemon:
 //!
-//! - `init` (run on the root device) mints the namespace root `<ns>/KEY/root`,
-//!   the CA signing identity `<ns>/CA` (certified by the root) and this primary
-//!   device's admin
+//! - `init` (run on the root device) mints the namespace root `<ns>/KEY/root`
+//!   into a root store (`--root-store`: the OS keychain by default, a
+//!   passphrase-sealed file, a YubiKey, or plaintext `file`; see
+//!   [`crate::root_key`]), the CA signing identity `<ns>/CA` (certified by
+//!   the root) and this primary device's admin
 //!   identity `<ns>/admin/<device>` (`--device`, default derived from the
 //!   host name; certified by the CA) into the PIB, signs the trust context —
 //!   carrying the generated namespace schema — with the root, stores
@@ -44,9 +46,12 @@
 //!   of the current certificate, no invite (see [`crate::renewal`]).
 //! - `revoke` (run on the root device) asks the running daemon to revoke a
 //!   device identity, key or certificate at its CA and in a new, root-signed
-//!   version of the namespace's trust context (see [`crate::revoke`]).
+//!   version of the namespace's trust context (see [`crate::revoke`]),
+//!   sending the root store's passphrase or PIN when it needs one.
 //! - `context refresh [<ns>]` asks the running daemon to check its held trust
 //!   contexts for a newer version now (see [`crate::context_refresh`]).
+//! - `root-key status|move` shows or moves where the root key lives
+//!   ([`crate::root_key`]).
 
 use std::path::PathBuf;
 
@@ -65,13 +70,14 @@ use ndn_trust_envelope::TrustEnvelope;
 pub async fn maybe_run() -> Option<Result<()>> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        Some("init") => Some(run_init(&args[2..])),
+        Some("init") => Some(run_init(&args[2..]).await),
         Some("adopt") => Some(run_adopt(&args[2..]).await),
         Some("enroll") => Some(run_enroll(&args[2..]).await),
         Some("revoke") => Some(run_revoke(&args[2..]).await),
         Some("renew") => Some(run_renew(&args[2..]).await),
         Some("context") => Some(run_context(&args[2..]).await),
         Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
+        Some("root-key") => Some(crate::root_key::run(&args[2..]).await),
         _ => None,
     }
 }
@@ -83,6 +89,13 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--pib",
     "-c",
     "--config",
+    "--root-store",
+    "--passphrase-file",
+    "--pin-file",
+    "--yubikey-slot",
+    "--yubikey-serial",
+    "--touch-policy",
+    "--to",
 ];
 
 pub(crate) fn flag<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
@@ -144,7 +157,7 @@ fn default_device() -> Result<String> {
     })
 }
 
-fn run_init(args: &[String]) -> Result<()> {
+async fn run_init(args: &[String]) -> Result<()> {
     if let Some(profile) = flag(args, &["--profile"]) {
         bail!(
             "`ndn-fwd init --profile {profile}` was removed: init has a single form. Run \
@@ -168,10 +181,14 @@ fn run_init(args: &[String]) -> Result<()> {
     };
     let force = args.iter().any(|a| a == "--force");
     let pib_dir = pib_dir(args)?;
+    // Where the root goes, and its passphrase / PIN — asked now, never
+    // taken from the command line.
+    let root = crate::root_key::new_root_store(args)?;
     let pib =
         FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
 
-    let out = init_namespace_in_pib(&pib, &namespace, &device, force)?;
+    let out = init_namespace_in_pib(&pib, &namespace, &device, force, &root).await?;
+    drop(root);
     let root_dev = &out.init;
     // The daemon may run from another directory: print an absolute path.
     let pib_abs = std::fs::canonicalize(&pib_dir).unwrap_or_else(|_| pib_dir.clone());
@@ -187,6 +204,8 @@ fn run_init(args: &[String]) -> Result<()> {
     println!("device         = {} (admin)", out.device_identity);
     println!("device_key     = {}", out.device_key);
     println!("device_cert    = {} (issued by the CA)", out.device_cert_path.display());
+    let root_lines = crate::root_key::describe_new_root(&out.root_store, &pib_dir);
+    println!("{}", root_lines[0]);
     println!(
         "context        = {} (v{})",
         out.context_path.display(),
@@ -218,7 +237,9 @@ fn run_init(args: &[String]) -> Result<()> {
         "# (ndn-fwd-tokens new --ca {namespace} --namespace {namespace} --anchor-fp {anchor_fp}"
     );
     println!("#  --role member|guest), admins and relays by device approval.");
-    println!("# The root key now lives in the PIB: keep a recovery copy offline.");
+    for line in &root_lines[1..] {
+        println!("{line}");
+    }
     println!("#");
     println!("# Put these lines in ndn-fwd.toml so the daemon signs as this device's");
     println!("# admin identity (certified by the CA) instead of an ephemeral key:");
@@ -482,8 +503,9 @@ async fn daemon(args: &[String], what: &str) -> Result<(ndn_ipc::MgmtClient, Str
 }
 
 /// How long the CLI waits for the daemon to revoke (local work only: the
-/// CA store, the PIB, the context store).
-const DAEMON_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// CA store, the PIB, the context store — and, for a YubiKey root, the
+/// operator's touch).
+const DAEMON_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 async fn run_revoke(args: &[String]) -> Result<()> {
     let target = *positionals(args).first().context(
@@ -494,8 +516,24 @@ async fn run_revoke(args: &[String]) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("revoke refused: {target:?} is not an NDN name: {e}"))?;
     let (client, socket) = daemon(args, "revoke").await?;
+    // A sealed or hardware root is unlocked for this one signature: its
+    // passphrase / PIN is asked here and travels with the command over the
+    // local management socket.
+    let unlock = match crate::root_key::daemon_root_unlock(&client).await {
+        Some(kind) => crate::root_key::operator_secret(
+            args,
+            kind,
+            &format!("Revoking {name} signs a new trust context version"),
+            false,
+        )?,
+        None => None,
+    };
     let resp = client
-        .security_revoke(&name, DAEMON_REVOKE_TIMEOUT)
+        .security_revoke(
+            &name,
+            unlock.map(|s| ndn_mgmt_wire::UnlockSecret::new(s.expose().to_vec())),
+            DAEMON_REVOKE_TIMEOUT,
+        )
         .await
         .with_context(|| format!("ask the daemon at {socket} to revoke"))?;
     if !resp.is_ok() {

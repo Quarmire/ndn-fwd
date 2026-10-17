@@ -63,6 +63,7 @@ mod own_certs;
 mod radio_face;
 mod renewal;
 mod revoke;
+mod root_key;
 mod schema_cmd;
 mod security_init;
 #[cfg(feature = "smtp")]
@@ -91,7 +92,7 @@ struct CliArgs {
 /// `--help` text. The parser is deliberately hand-rolled (the daemon stays
 /// dependency-light; only the tooling siblings use clap), so keep this in
 /// sync with the options `parse_args` accepts and the
-/// `init`/`adopt`/`enroll`/`revoke`/`context`/`schema` subcommands
+/// `init`/`adopt`/`enroll`/`revoke`/`context`/`schema`/`root-key` subcommands
 /// `onboard::maybe_run` intercepts.
 fn print_help() {
     println!(
@@ -101,9 +102,13 @@ ndn-fwd {version} — standalone NDN forwarder daemon
 USAGE:
   ndn-fwd [OPTIONS]                       run the forwarder
   ndn-fwd init --namespace <ndn-name> [--device <name>] [--pib <dir>]
-               [--force]
+               [--force] [--root-store <store>]
+               [--passphrase-file <path> | --pin-file <path>]
+               [--yubikey-slot 9c] [--yubikey-serial <n>]
+               [--touch-policy always|cached|never]
                                           create a namespace on this root
-                                          device: write to the PIB its root key, CA identity <ns>/CA,
+                                          device: its root key in a root store,
+                                          and in the PIB its CA identity <ns>/CA,
                                           this primary device's admin identity
                                           <ns>/admin/<device> certified by the
                                           CA — device name default: the host
@@ -112,7 +117,15 @@ USAGE:
                                           role schema), print its
                                           ndn-trust://anchor envelope and the
                                           [security] lines for ndn-fwd.toml,
-                                          and exit
+                                          and exit. <store>: os-keyring (the
+                                          default; the OS keychain), sealed-file
+                                          (a SafeBag sealed by a passphrase,
+                                          asked twice), yubikey-piv (generated
+                                          on the token; PIN), file (plaintext,
+                                          unprotected: tests). A passphrase or
+                                          PIN is read from NDN_ROOT_PASSPHRASE /
+                                          NDN_ROOT_PIN, the --*-file, else the
+                                          terminal; never from the command line
   ndn-fwd adopt <anchor-link> [-c <config>] [--pib <dir>]
                                           adopt the namespace an ndn-trust://anchor
                                           link names: the running daemon checks
@@ -139,6 +152,7 @@ USAGE:
                                           is revoked or an admin approves it, so
                                           pick another --device otherwise
   ndn-fwd revoke <device-identity | key-name | cert-name> [-c <config>]
+                [--passphrase-file <path> | --pin-file <path>]
                                           on the root device: revoke the device's
                                           key(s) at this node's CA (its
                                           certificates are no longer served and
@@ -147,7 +161,11 @@ USAGE:
                                           of the namespace's trust context,
                                           which the daemon stores and publishes;
                                           other nodes refuse the key once they
-                                          hold that version
+                                          hold that version. A sealed-file or
+                                          yubikey-piv root asks for its
+                                          passphrase / PIN here and sends it to
+                                          the daemon over the local management
+                                          socket for this one signature
   ndn-fwd renew [-c <config>]             renew, now, the certificates the
                                           namespace CA issued to this node:
                                           same key, no invite (the daemon also
@@ -169,6 +187,17 @@ USAGE:
                                           say whether <key-name> may sign
                                           <data-name> and which rule decides
                                           (exit status 1 on deny)
+  ndn-fwd root-key status [--pib <dir>]   where this root device keeps its
+                                          namespace root key
+  ndn-fwd root-key move --to <store> [--pib <dir>]
+                [--passphrase-file <path>]
+                                          move the root key into another store
+                                          (os-keyring, sealed-file): the new
+                                          store must sign as the root before
+                                          the old copy is removed (a plaintext
+                                          file is overwritten first). A
+                                          software root cannot move onto a
+                                          YubiKey (PIV takes no Ed25519 key)
   (all take -c/--config to find [security].pib_path; default ~/.ndn/pib)
 
 OPTIONS:
@@ -1024,6 +1053,10 @@ async fn main() -> Result<()> {
         cancel.child_token(),
     );
 
+    // On a namespace's root device whose root key is still plaintext in the
+    // PIB (a namespace made before root stores), say so and how to seal it.
+    root_key::warn_if_unprotected(&pib_root(&fwd_config));
+
     // `security/context-adopt` / `enroll` / `revoke` / `context-refresh`:
     // adopt a trust context (stored beside the PIB and published by name),
     // enroll with an invite, revoke a device (root device), refresh held
@@ -1349,7 +1382,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let pib = FilePib::new(dir.path()).expect("pib");
         let ns: ndn_packet::Name = "/home/bob".parse().expect("name");
-        ndn_cert::init_namespace_in_pib(&pib, &ns, "laptop", false).expect("init namespace");
+        futures::executor::block_on(ndn_cert::init_namespace_in_pib(
+            &pib,
+            &ns,
+            "laptop",
+            false,
+            &ndn_cert::NewRootStore::File,
+        ))
+        .expect("init namespace");
 
         let mut cfg = ForwarderConfig::default();
         cfg.security.pib_path = Some(dir.path().display().to_string());

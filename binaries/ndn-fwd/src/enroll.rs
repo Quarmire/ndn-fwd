@@ -343,7 +343,10 @@ pub(crate) mod tests {
     pub(crate) async fn node(root_dev: &Path, device: &Path, tokens: &[&str]) -> Node {
         let ns: Name = "/home/bob".parse().unwrap();
         let pib = FilePib::new(root_dev).unwrap();
-        let persisted = ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false).unwrap();
+        let persisted =
+            ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false, &ndn_cert::NewRootStore::File)
+                .await
+                .unwrap();
         let cfg = CaTomlConfig {
             enabled: true,
             prefix: "/home/bob".into(),

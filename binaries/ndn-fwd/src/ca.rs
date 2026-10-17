@@ -768,8 +768,14 @@ mod tests {
     /// `ca/`, admin device `/home/bob/admin/desk`). Returns the root anchor.
     fn write_namespace_pib(dir: &Path) -> Certificate {
         let pib = FilePib::new(dir).unwrap();
-        ndn_cert::init_namespace_in_pib(&pib, &"/home/bob".parse().unwrap(), "desk", false)
-            .expect("namespace_ca init");
+        futures::executor::block_on(ndn_cert::init_namespace_in_pib(
+            &pib,
+            &"/home/bob".parse().unwrap(),
+            "desk",
+            false,
+            &ndn_cert::NewRootStore::File,
+        ))
+        .expect("namespace_ca init");
         read_cert_wire(&dir.join(CA_DIR).join(ANCHOR_CERT_FILE))
             .unwrap()
             .expect("init writes the root anchor cert")

@@ -306,8 +306,15 @@ mod tests {
     async fn serves_its_certificates_but_never_a_revoked_one() {
         let dir = tempfile::tempdir().unwrap();
         let pib = FilePib::new(dir.path()).unwrap();
-        let ns = ndn_cert::init_namespace_in_pib(&pib, &"/home/bob".parse().unwrap(), "desk", false)
-            .unwrap();
+        let ns = ndn_cert::init_namespace_in_pib(
+            &pib,
+            &"/home/bob".parse().unwrap(),
+            "desk",
+            false,
+            &ndn_cert::NewRootStore::File,
+        )
+        .await
+        .unwrap();
         let device_cert = Bytes::from(std::fs::read(&ns.device_cert_path).unwrap());
         let ca_cert = Bytes::from(std::fs::read(&ns.ca_cert_path).unwrap());
         let keyring = Arc::new(Keyring::new());
@@ -349,9 +356,16 @@ mod tests {
             Some(device_cert),
             "the old certificate stays retrievable by name"
         );
-        let bump = ndn_cert::bump_context_revoking(&pib, &ns.init.context_data, &[ns.device_key.clone()])
-            .unwrap()
-            .expect("a new version");
+        let root = ndn_cert::RootStore::open(&pib).unwrap().unwrap();
+        let root = root.signer(None).await.unwrap();
+        let bump = ndn_cert::bump_context_revoking(
+            root.as_ref(),
+            &ns.init.context_data,
+            &[ns.device_key.clone()],
+        )
+        .await
+        .unwrap()
+        .expect("a new version");
         keyring.adopt_update(Arc::new(bump.context)).unwrap();
         assert_eq!(fetch(&engine, &ns.device_key, &cancel).await, None, "withdrawn");
         assert_eq!(fetch_as(&engine, &renewed_name, false, &cancel).await, None, "every certificate of the key");

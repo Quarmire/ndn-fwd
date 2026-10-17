@@ -13,14 +13,17 @@
 //! Interests go upstream instead of being answered with the version held.
 //!
 //! A node holding the namespace root key (the root device) is where new
-//! versions are made, so it does not fetch its own namespace. A failed or
+//! versions are made, so it does not fetch its own namespace. That is
+//! decided from its root store's descriptor and the context's anchor public
+//! keys ([`ndn_cert::RootStore::holds_anchor_of`]): the root's private key is
+//! never loaded for it. A failed or
 //! refused refresh is logged with its reason and changes nothing: the held
 //! version stays in force, and a missed refresh only delays an update.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use ndn_cert::{ContextRefresh, key_name_of};
+use ndn_cert::{ContextRefresh, RootStore};
 use ndn_mgmt::{ContextRefreshInfo, RefreshState, TrustRefusal};
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::Name;
@@ -33,19 +36,17 @@ use crate::context_adopt::{TrustAdmin, refusal};
 /// if shorter), so a node that was off catches up without waiting a period.
 const FIRST_CHECK_AFTER: Duration = Duration::from_secs(30);
 
-/// Whether this node's PIB holds the private key of one of `ctx`'s anchors —
-/// the root device, which makes new versions rather than fetching them.
+/// Whether this node is the root device of `ctx`'s namespace — its root
+/// store holds the key of one of `ctx`'s anchors — which makes new versions
+/// rather than fetching them. Public keys only; the root stays locked.
 fn holds_root_key(admin: &TrustAdmin, ctx: &SignedTrustContext) -> bool {
     let Ok(pib) = FilePib::open(&admin.pib_root) else {
         return false;
     };
-    ctx.anchors().iter().any(|anchor| {
-        let key = key_name_of(anchor.key()).unwrap_or_else(|| (**anchor.key()).clone());
-        pib.get_signer(&key)
-            .ok()
-            .and_then(|signer| signer.public_key())
-            .is_some_and(|pk| pk == anchor.value().public_key)
-    })
+    RootStore::open(&pib)
+        .ok()
+        .flatten()
+        .is_some_and(|store| store.holds_anchor_of(ctx))
 }
 
 pub(crate) async fn refresh_contexts(

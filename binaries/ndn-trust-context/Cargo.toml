@@ -16,6 +16,12 @@ path = "src/lib.rs"
 name = "ndn-trust-context"
 path = "src/main.rs"
 
+[features]
+default = ["os-keyring"]
+# `--sign-key` naming a namespace root kept in the OS keychain / on a YubiKey.
+os-keyring = ["ndn-cert/os-keyring"]
+yubikey-piv = ["ndn-cert/yubikey-piv"]
+
 [dependencies]
 ndn-security = { workspace = true }
 ndn-cert     = { workspace = true }
@@ -25,6 +31,7 @@ bytes        = { workspace = true }
 qrcode       = { version = "0.14", default-features = false, features = ["svg"] }
 clap         = { version = "4", features = ["derive"] }
 anyhow       = { workspace = true }
+futures      = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

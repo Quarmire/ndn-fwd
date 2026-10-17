@@ -94,15 +94,17 @@ pub fn build_context(spec: &ContextSpec) -> Result<SignedTrustContext> {
 }
 
 /// Build the context, sign it into Data with `signer` (whose key must be one
-/// of the context's anchors), and wrap it as an inline anchor envelope pinning
-/// that anchor's fingerprint (render with [`TrustEnvelope::to_uri`]).
-pub fn build_signed_anchor_envelope(
+/// of the context's anchors) through its async signing path — so a root in a
+/// hardware or sealed store works — and wrap it as an inline anchor envelope
+/// pinning that anchor's fingerprint (render with [`TrustEnvelope::to_uri`]).
+pub async fn build_signed_anchor_envelope(
     spec: &ContextSpec,
     signer: &dyn Signer,
 ) -> Result<TrustEnvelope> {
     let ctx = build_context(spec)?;
     let data = ctx
-        .sign_into_data(signer)
+        .sign_into_data_async(signer)
+        .await
         .map_err(|e| anyhow!("sign context: {e}"))?;
     // Self-check: the result must verify under one of its own anchors, which
     // also identifies the anchor to pin.
@@ -292,7 +294,7 @@ mod tests {
             ..Default::default()
         };
 
-        let signed = build_signed_anchor_envelope(&spec, &signer).unwrap();
+        let signed = build_signed_anchor_envelope(&spec, &signer).await.unwrap();
         let scanned = TrustEnvelope::from_uri(&signed.to_uri()).unwrap();
         let keyring = Keyring::new();
         let (ctx, _) = ndn_cert::adopt_anchor_envelope(&keyring, &scanned).unwrap();
@@ -306,7 +308,7 @@ mod tests {
 
         // A key that is not one of the context's anchors cannot sign it.
         let stranger = Ed25519Signer::from_seed(&[8u8; 32], "/home/eve/KEY/k".parse().unwrap());
-        assert!(build_signed_anchor_envelope(&spec, &stranger).is_err());
+        assert!(build_signed_anchor_envelope(&spec, &stranger).await.is_err());
     }
 
     proptest::proptest! {

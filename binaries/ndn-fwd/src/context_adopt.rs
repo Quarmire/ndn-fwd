@@ -210,9 +210,9 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
 
     async fn revoke(
         &self,
-        name: ndn_packet::Name,
+        request: ndn_mgmt::RevokeRequest,
     ) -> Result<ndn_mgmt::RevokedInfo, ndn_mgmt::TrustRefusal> {
-        crate::revoke::revoke(self, name).await
+        crate::revoke::revoke(self, request).await
     }
 
     async fn refresh_contexts(
@@ -241,5 +241,9 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
                 valid_until,
             }
         })
+    }
+
+    fn root_store(&self) -> Option<ndn_mgmt::RootStoreInfo> {
+        crate::root_key::status_info(&self.pib_root)
     }
 }

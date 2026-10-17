@@ -64,6 +64,15 @@ enum Cmd {
         /// is the unsigned legacy form, which adopters refuse by default.
         #[arg(long, requires = "pib")]
         sign_key: Option<String>,
+        /// When `--sign-key` is the namespace root in a `sealed-file` store:
+        /// read its passphrase from this file (else NDN_ROOT_PASSPHRASE,
+        /// else the terminal).
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
+        /// When `--sign-key` is the namespace root on a YubiKey: read its PIN
+        /// from this file (else NDN_ROOT_PIN, else the terminal).
+        #[arg(long)]
+        pin_file: Option<PathBuf>,
         /// Also render the payload as a QR code.
         #[arg(long, default_value_t = false)]
         qr: bool,
@@ -98,6 +107,8 @@ fn main() -> Result<()> {
             revocations,
             pib,
             sign_key,
+            passphrase_file,
+            pin_file,
             qr,
             qr_format,
         } => {
@@ -130,10 +141,36 @@ fn main() -> Result<()> {
                 (Some(pib), Some(key)) => {
                     let pib = FilePib::open(&pib)
                         .with_context(|| format!("open PIB {}", pib.display()))?;
-                    let signer = pib
-                        .get_signer(&parse_name(&key)?)
-                        .with_context(|| format!("load signing key {key}"))?;
-                    build_signed_anchor_envelope(&spec, signer.as_ref())?
+                    let key = parse_name(&key)?;
+                    // The namespace root signs from its root store, unlocked
+                    // for this one signature; any other anchor key from the PIB.
+                    let root = ndn_cert::RootStore::open(&pib)?
+                        .filter(|store| *store.key_name() == key);
+                    let signer = match root {
+                        Some(store) => {
+                            let file = match store.unlock_kind() {
+                                ndn_cert::RootUnlockKind::Pin => pin_file.as_deref(),
+                                _ => passphrase_file.as_deref(),
+                            };
+                            let secret = match store.unlock_kind() {
+                                ndn_cert::RootUnlockKind::Nothing => None,
+                                kind => Some(ndn_cert::read_root_secret(
+                                    kind,
+                                    file,
+                                    false,
+                                    "Signing a trust context",
+                                )?),
+                            };
+                            futures::executor::block_on(store.signer(secret.as_ref()))?
+                        }
+                        None => pib
+                            .get_signer(&key)
+                            .with_context(|| format!("load signing key {key}"))?,
+                    };
+                    futures::executor::block_on(build_signed_anchor_envelope(
+                        &spec,
+                        signer.as_ref(),
+                    ))?
                 }
                 _ => {
                     eprintln!(
