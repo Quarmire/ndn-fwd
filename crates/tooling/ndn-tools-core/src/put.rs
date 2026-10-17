@@ -27,11 +27,55 @@ pub struct PutParams {
     pub chunk_size: usize,
     pub sign: bool,
     pub hmac: bool,
+    /// Sign with a key from a PIB (e.g. the identity `ndn-fwd enroll`
+    /// certified) instead of an ephemeral one; takes precedence over `sign`
+    /// and `hmac`.
+    pub sign_with: Option<PibKey>,
     /// Data freshness period in milliseconds (0 = omit).
     pub freshness_ms: u64,
     /// 0 = serve until cancelled or disconnected.
     pub timeout_secs: u64,
     pub quiet: bool,
+}
+
+/// A signing key held in a PIB directory.
+#[derive(Debug, Clone)]
+pub struct PibKey {
+    pub pib: std::path::PathBuf,
+    /// The identity whose default key signs; `None`: the PIB's default
+    /// identity.
+    pub identity: Option<String>,
+}
+
+impl PibKey {
+    /// The signer: the identity's default key (the newest one when the PIB
+    /// names none).
+    pub fn signer(&self) -> Result<Arc<dyn Signer>> {
+        let pib = ndn_security::FilePib::open(&self.pib)
+            .map_err(|e| anyhow::anyhow!("open PIB {}: {e}", self.pib.display()))?;
+        let identity: Name = match &self.identity {
+            Some(id) => id.parse().map_err(|e| anyhow::anyhow!("identity {id:?}: {e}"))?,
+            None => pib
+                .get_default_identity()
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "the PIB {} has no default identity; pass --identity",
+                        self.pib.display()
+                    )
+                })?,
+        };
+        let key = match pib.default_key(&identity).map_err(|e| anyhow::anyhow!("{e}"))? {
+            Some(key) => key,
+            None => pib
+                .identity_keys(&identity)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .pop()
+                .ok_or_else(|| anyhow::anyhow!("the PIB holds no key for {identity}"))?,
+        };
+        pib.get_signer(&key)
+            .map_err(|e| anyhow::anyhow!("key {key}: {e}"))
+    }
 }
 
 impl PutParams {
@@ -86,7 +130,18 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
         )))
         .await;
 
-    let signer: Option<Arc<dyn Signer>> = if params.sign {
+    let signer: Option<Arc<dyn Signer>> = if let Some(pib_key) = &params.sign_with {
+        let s = pib_key.signer()?;
+        let _ = tx
+            .send(ToolEvent::info(format!(
+                "ndn-put: signing with {} ({:?}) from the PIB {}",
+                s.key_name(),
+                s.sig_type(),
+                pib_key.pib.display()
+            )))
+            .await;
+        Some(s)
+    } else if params.sign {
         let keychain = KeyChain::ephemeral(name.to_string().as_str())?;
         let s = keychain.signer()?;
         let _ = tx

@@ -369,14 +369,21 @@ pub(crate) fn install_localhop_anchor(
     Ok(validator)
 }
 
+/// The CA once spawned: its device-approval store (with a `device-approval`
+/// challenge) for the mgmt `ca` module, and its state, which `ndn-fwd
+/// revoke` administers directly.
+pub(crate) struct RunningCa {
+    pub approvals: Option<PendingApprovalStore>,
+    pub state: Arc<ndn_cert::CaState>,
+}
+
 /// Must run after the FIB entries for `prefix` (and the APPROVE-FEED prefix)
-/// are in place. Returns the device-approval store, if any, for the mgmt
-/// `ca` backend.
+/// are in place.
 pub(crate) fn spawn(
     prep: CaSpawn,
     cfg: &CaTomlConfig,
     engine: &ForwarderEngine,
-) -> Result<Option<PendingApprovalStore>> {
+) -> Result<RunningCa> {
     let identity = ndn_identity::Identity::from_keychain_public(prep.keychain);
 
     tracing::info!(
@@ -439,6 +446,7 @@ pub(crate) fn spawn(
     let ca = builder
         .build()
         .map_err(|e| anyhow::anyhow!("[ca] CA build failed: {e}"))?;
+    let state = ca.state();
 
     let producer = Producer::from_handle(prep.handle, prep.prefix.clone());
     let prefix_str = prep.prefix.to_string();
@@ -473,7 +481,10 @@ pub(crate) fn spawn(
         }
     }
 
-    Ok(prep.approvals)
+    Ok(RunningCa {
+        approvals: prep.approvals,
+        state,
+    })
 }
 
 /// Validator for signed approvals on the APPROVE-FEED: the engine's own
@@ -716,6 +727,7 @@ mod tests {
     struct RunningCa {
         client: NdncertClient,
         approvals: Option<PendingApprovalStore>,
+        state: Arc<ndn_cert::CaState>,
         engine: ForwarderEngine,
         shutdown: ShutdownHandle,
     }
@@ -751,10 +763,11 @@ mod tests {
             engine.fib().add_nexthop(&feed.prefix, feed.face_id, 0);
         }
         let prefix = spawn_state.prefix.clone();
-        let approvals = spawn(spawn_state, cfg, &engine).expect("CA spawns");
+        let running = spawn(spawn_state, cfg, &engine).expect("CA spawns");
         RunningCa {
             client: NdncertClient::new(Consumer::from_handle(client_handle), prefix),
-            approvals,
+            approvals: running.approvals,
+            state: running.state,
             engine,
             shutdown,
         }
@@ -768,7 +781,16 @@ mod tests {
         kind: &str,
         params: serde_json::Map<String, serde_json::Value>,
     ) -> std::result::Result<ndn_packet::Data, ndn_cert::CertError> {
-        let signer = device_signer(who);
+        enroll_with(client, device_signer(who), kind, params).await
+    }
+
+    /// As [`enroll`], with the key `signer` (its key name names the device).
+    async fn enroll_with(
+        client: &mut NdncertClient,
+        signer: Arc<dyn Signer>,
+        kind: &str,
+        params: serde_json::Map<String, serde_json::Value>,
+    ) -> std::result::Result<ndn_packet::Data, ndn_cert::CertError> {
         let ca_prefix: Name = "/home/bob".parse().unwrap();
         let cert_name = ndn_cert::client::enroll(client, &ca_prefix, signer, 86_400, kind, |r| {
             let params = params.clone();
@@ -904,6 +926,52 @@ mod tests {
         assert!(!ca_serves(&mut ca.client, &phone).await, "still revoked after restart");
         let again = enroll(&mut ca.client, "member/laptop", "token", token("invite-3")).await;
         assert!(again.is_err(), "a revoked key is not re-certified: {again:?}");
+        ca.stop().await;
+    }
+
+    /// `ndn-fwd revoke`'s CA side (`CaState::revoke_issued_under`, no
+    /// possession proof — the CA host's own administration): every cert of
+    /// the key stops being served, the revocation is persisted, and the
+    /// device name is free for a new key (one key per name), while the
+    /// revoked key itself is never certified again.
+    #[tokio::test]
+    async fn admin_revocation_stops_serving_and_frees_the_device_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_namespace_pib(dir.path());
+        let cfg = namespace_cfg(vec![challenge(
+            "token",
+            &["invite-1", "invite-2", "invite-3", "invite-4"],
+        )]);
+        let mut ca = run_ca(&cfg, dir.path()).await;
+        let phone = enroll(&mut ca.client, "member/phone", "token", token("invite-1"))
+            .await
+            .expect("phone enrolls");
+        let phone = (*phone.name).clone();
+        let new_key: Arc<dyn Signer> = Arc::new(Ed25519Signer::from_seed(
+            &[8; 32],
+            "/home/bob/member/phone/KEY/k2".parse().unwrap(),
+        ));
+        let taken = enroll_with(&mut ca.client, Arc::clone(&new_key), "token", token("invite-2"))
+            .await;
+        assert!(taken.is_err(), "the name is held by the first key: {taken:?}");
+
+        let key = ndn_cert::key_name_of(&phone).unwrap();
+        let out = ca.state.revoke_issued_under(&key);
+        assert_eq!(out.revoked, vec![phone.clone()]);
+        assert!(out.not_persisted.is_none());
+        assert!(!ca_serves(&mut ca.client, &phone).await, "a revoked cert is not served");
+        assert_eq!(
+            dir.path().join(CA_DIR).join("revoked").read_dir().unwrap().count(),
+            1,
+            "revocation persisted"
+        );
+        assert!(ca.state.revoke_issued_under(&key).revoked.is_empty(), "revoked once");
+
+        let again = enroll(&mut ca.client, "member/phone", "token", token("invite-3")).await;
+        assert!(again.is_err(), "the revoked key is never certified again: {again:?}");
+        enroll_with(&mut ca.client, new_key, "token", token("invite-4"))
+            .await
+            .expect("the device name is free for a new key");
         ca.stop().await;
     }
 

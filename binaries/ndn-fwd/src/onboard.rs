@@ -1,14 +1,17 @@
-//! `ndn-fwd init --namespace <ns>`, `ndn-fwd adopt <envelope>` and `ndn-fwd
-//! enroll <invite>` — the onboarding UX over the [`ndn_cert::namespace`] /
-//! [`ndn_cert::onboarding`] / [`ndn_cert::invite`] primitives. A node does not
-//! "join" anything: it *adopts* a namespace's trust context and *enrolls* a key
-//! with the namespace's CA. Neither forms a link; links and routes toward other
+//! `ndn-fwd init --namespace <ns>`, `ndn-fwd adopt <envelope>`, `ndn-fwd
+//! enroll <invite>`, `ndn-fwd revoke <name>` and `ndn-fwd context refresh` —
+//! the onboarding UX over the [`ndn_cert::namespace`] /
+//! [`ndn_cert::onboarding`] / [`ndn_cert::invite`] /
+//! [`ndn_cert::context_update`] primitives. A node does not "join" anything:
+//! it *adopts* a namespace's trust context and *enrolls* a key with the
+//! namespace's CA. Neither forms a link; links and routes toward other
 //! forwarders are configured separately.
 //!
 //! These are early-exit subcommands: when `args[1]` is `init`, `adopt`,
-//! `enroll` or `schema` ([`crate::schema_cmd`]), the daemon does not start.
-//! They act on the node's PIB directory (`--pib <dir>`, else
-//! `[security].pib_path` from `-c/--config`, else `~/.ndn/pib`):
+//! `enroll`, `revoke`, `context` or `schema` ([`crate::schema_cmd`]), the
+//! daemon does not start. They act on the node's PIB directory (`--pib
+//! <dir>`, else `[security].pib_path` from `-c/--config`, else
+//! `~/.ndn/pib`) or ask the running daemon:
 //!
 //! - `init` (run on the root device) mints the namespace root `<ns>/KEY/root`,
 //!   the CA signing identity `<ns>/CA` (certified by the root) and this primary
@@ -35,6 +38,11 @@
 //!   token and makes the certified identity the PIB's default (see
 //!   [`crate::enroll`]). There is no offline form: the key belongs to the
 //!   daemon and the CA is reached through it.
+//! - `revoke` (run on the root device) asks the running daemon to revoke a
+//!   device identity, key or certificate at its CA and in a new, root-signed
+//!   version of the namespace's trust context (see [`crate::revoke`]).
+//! - `context refresh [<ns>]` asks the running daemon to check its held trust
+//!   contexts for a newer version now (see [`crate::context_refresh`]).
 
 use std::path::PathBuf;
 
@@ -56,6 +64,8 @@ pub async fn maybe_run() -> Option<Result<()>> {
         Some("init") => Some(run_init(&args[2..])),
         Some("adopt") => Some(run_adopt(&args[2..]).await),
         Some("enroll") => Some(run_enroll(&args[2..]).await),
+        Some("revoke") => Some(run_revoke(&args[2..]).await),
+        Some("context") => Some(run_context(&args[2..]).await),
         Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
         _ => None,
     }
@@ -448,6 +458,141 @@ async fn run_enroll(args: &[String]) -> Result<()> {
     }
     for old in &info.still_valid {
         println!("# Still valid until revoked: {old}");
+    }
+    Ok(())
+}
+
+/// The running daemon's management client, or why it is needed.
+async fn daemon(args: &[String], what: &str) -> Result<(ndn_ipc::MgmtClient, String)> {
+    let socket = face_socket(args)?;
+    let client = ndn_ipc::MgmtClient::connect(&socket).await.map_err(|e| {
+        anyhow::anyhow!(
+            "{what} refused: the daemon is not reachable at {socket} ({e}). The running daemon \
+             does it; start ndn-fwd (with `-c <config>` if it uses another socket) and retry"
+        )
+    })?;
+    Ok((client, socket))
+}
+
+/// How long the CLI waits for the daemon to revoke (local work only: the
+/// CA store, the PIB, the context store).
+const DAEMON_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn run_revoke(args: &[String]) -> Result<()> {
+    let target = *positionals(args).first().context(
+        "revoke requires a device identity (/<ns>/<role>/<device>), a key name \
+         (<identity>/KEY/<id>) or a certificate name",
+    )?;
+    let name: Name = target
+        .parse()
+        .map_err(|e| anyhow::anyhow!("revoke refused: {target:?} is not an NDN name: {e}"))?;
+    let (client, socket) = daemon(args, "revoke").await?;
+    let resp = client
+        .security_revoke(&name, DAEMON_REVOKE_TIMEOUT)
+        .await
+        .with_context(|| format!("ask the daemon at {socket} to revoke"))?;
+    if !resp.is_ok() {
+        bail!("revoke refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+    }
+    let info: ndn_mgmt::RevokedInfo = serde_json::from_str(&resp.status_text)
+        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
+    println!("# ndn-fwd revoke (by the running daemon at {socket})");
+    println!("namespace        = {}", info.namespace);
+    for key in &info.keys {
+        println!("revoked_key      = {key}");
+    }
+    for cert in &info.ca_revoked {
+        println!("ca_revoked       = {cert} (no longer served by the CA)");
+    }
+    if let Some(e) = &info.ca_not_persisted {
+        println!("ca_not_persisted = {e} (holds until the CA restarts)");
+    }
+    if info.version > info.previous_version {
+        println!(
+            "trust_context    = v{} -> v{} (signed by the root, stored and {})",
+            info.previous_version,
+            info.version,
+            if info.published {
+                "published"
+            } else {
+                "not published: [security] serve_contexts = false"
+            }
+        );
+        if let Some(stored) = &info.stored {
+            println!("stored           = {stored}");
+        }
+    } else {
+        println!(
+            "trust_context    = v{} (already revokes every key named; no new version)",
+            info.version
+        );
+    }
+    println!();
+    println!("# This node and its CA refuse the key now. Every other node refuses it once it");
+    println!("# holds v{}: it fetches it at its next refresh ([security]", info.version);
+    println!("# context_refresh_secs, default 300 s), or at once with `ndn-fwd context refresh`.");
+    println!("# The device name is free to enroll again with a new key.");
+    Ok(())
+}
+
+/// How long the CLI waits for a refresh: per namespace two fetches of at most
+/// the app timeout each, for a handful of namespaces.
+const DAEMON_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn run_context(args: &[String]) -> Result<()> {
+    let positional = positionals(args);
+    match positional.first().copied() {
+        Some("refresh") => {}
+        other => bail!(
+            "unknown `ndn-fwd context` command {other:?}; usage: ndn-fwd context refresh \
+             [<namespace>] [-c <config>]"
+        ),
+    }
+    let namespace = positional
+        .get(1)
+        .map(|ns| {
+            ns.parse::<Name>()
+                .map_err(|e| anyhow::anyhow!("{ns:?} is not an NDN name: {e}"))
+        })
+        .transpose()?;
+    let (client, socket) = daemon(args, "context refresh").await?;
+    let resp = client
+        .security_context_refresh(namespace.as_ref(), DAEMON_REFRESH_TIMEOUT)
+        .await
+        .with_context(|| format!("ask the daemon at {socket} to refresh"))?;
+    if !resp.is_ok() {
+        bail!(
+            "context refresh refused by the daemon ({}): {}",
+            resp.status_code,
+            resp.status_text
+        );
+    }
+    let results: Vec<ndn_mgmt::ContextRefreshInfo> = serde_json::from_str(&resp.status_text)
+        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
+    println!("# ndn-fwd context refresh (by the running daemon at {socket})");
+    if results.is_empty() {
+        println!("# this node holds no trust context");
+    }
+    let mut failed = false;
+    for r in &results {
+        let state = match r.state {
+            ndn_mgmt::RefreshState::Updated => "updated",
+            ndn_mgmt::RefreshState::Current => "current",
+            ndn_mgmt::RefreshState::UpstreamOlder => "upstream-older",
+            ndn_mgmt::RefreshState::Source => "source",
+            ndn_mgmt::RefreshState::Failed => {
+                failed = true;
+                "failed"
+            }
+        };
+        println!("{} v{} -> v{}: {state}", r.namespace, r.held_version, r.version);
+        for revoked in &r.revoked {
+            println!("  revoked {revoked}");
+        }
+        println!("  {}", r.detail);
+    }
+    if failed {
+        bail!("a refresh failed or was refused (see above); the held versions stay in force");
     }
     Ok(())
 }

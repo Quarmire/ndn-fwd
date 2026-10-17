@@ -47,6 +47,7 @@ fn build_obs_retention(
 mod active_identity;
 mod context_adopt;
 mod context_publisher;
+mod context_refresh;
 mod ca;
 mod enroll;
 mod face_provision;
@@ -55,10 +56,12 @@ mod host_helpers;
 mod installs;
 mod monitors;
 mod onboard;
+mod own_certs;
 // The named-radio medium face: `[[face]] kind="radio"` (one face over N radio
 // capabilities). Gated behind the `radio` feature.
 #[cfg(feature = "radio")]
 mod radio_face;
+mod revoke;
 mod schema_cmd;
 mod security_init;
 #[cfg(feature = "smtp")]
@@ -86,8 +89,9 @@ struct CliArgs {
 
 /// `--help` text. The parser is deliberately hand-rolled (the daemon stays
 /// dependency-light; only the tooling siblings use clap), so keep this in
-/// sync with the options `parse_args` accepts and the `init`/`adopt`/`enroll`/`schema`
-/// subcommands `onboard::maybe_run` intercepts.
+/// sync with the options `parse_args` accepts and the
+/// `init`/`adopt`/`enroll`/`revoke`/`context`/`schema` subcommands
+/// `onboard::maybe_run` intercepts.
 fn print_help() {
     println!(
         "\
@@ -133,6 +137,22 @@ USAGE:
                                           <device> only once the old certificate
                                           is revoked or an admin approves it, so
                                           pick another --device otherwise
+  ndn-fwd revoke <device-identity | key-name | cert-name> [-c <config>]
+                                          on the root device: revoke the device's
+                                          key(s) at this node's CA (its
+                                          certificates are no longer served and
+                                          the device name is free for a new
+                                          key) and in a new, root-signed version
+                                          of the namespace's trust context,
+                                          which the daemon stores and publishes;
+                                          other nodes refuse the key once they
+                                          hold that version
+  ndn-fwd context refresh [<namespace>] [-c <config>]
+                                          check the held trust context(s) for a
+                                          newer version now (the daemon also
+                                          checks every [security]
+                                          context_refresh_secs) and adopt one
+                                          signed by the held version's root
   ndn-fwd schema show [--pib <dir>] [--namespace <ns>]
                                           print an adopted context's trust
                                           schema as readable rules
@@ -946,26 +966,11 @@ async fn main() -> Result<()> {
     // `ndn_mgmt::mount_management` below.
 
     let published_contexts = context_publisher.map(|publisher| publisher.spawn(&engine));
-    // `security/context-adopt` / `security/enroll`: adopt a trust context
-    // (stored beside the PIB and published by name) and enroll with an invite
-    // at runtime; `security/identity-status` reports `active_identity`.
-    let trust_context_handler: Arc<dyn mgmt_ndn::TrustAdminMgmtBackend> =
-        Arc::new(context_adopt::TrustAdmin {
-            engine: engine.clone(),
-            keyring: trust_keyring,
-            pib_root: pib_root(&fwd_config),
-            publisher: published_contexts,
-            signing: active_identity.clone(),
-            dv_keeps_startup_key: fwd_config.routing.dv.enabled
-                && matches!(fwd_config.routing.dv.trust.mode.as_str(), "static" | "lvs"),
-            configured_identity: fwd_config.security.identity.clone(),
-            enrolling: tokio::sync::Mutex::new(()),
-            keeping: std::sync::Mutex::new(()),
-        });
 
     // The CA's device-approval store (if it offers that challenge), shared
-    // with the mgmt `ca` module below.
-    let ca_approvals = match ca_spawn {
+    // with the mgmt `ca` module below, and its state, which `security/revoke`
+    // administers.
+    let running_ca = match ca_spawn {
         Some(spawn) => {
             // `/<prefix>` covers `/<prefix>/CA/*` and cert-fetch for the
             // certs issued under it; more-specific registrations still win LPM.
@@ -985,10 +990,50 @@ async fn main() -> Result<()> {
                     "CA approval-feed FIB entry installed"
                 );
             }
-            ca::spawn(spawn, &fwd_config.ca, &engine)?
+            Some(ca::spawn(spawn, &fwd_config.ca, &engine)?)
         }
         None => None,
     };
+    let (ca_approvals, ca_state) = match running_ca {
+        Some(running) => (running.approvals, Some(running.state)),
+        None => (None, None),
+    };
+
+    // This node's certificates, by name, so a peer validating its Data can
+    // fetch the chain from it (the CA serves the certificates it issued).
+    let own_certs = own_certs::OwnCertificates::spawn(
+        &engine,
+        pib.as_deref(),
+        &trust_keyring,
+        cancel.child_token(),
+    );
+
+    // `security/context-adopt` / `enroll` / `revoke` / `context-refresh`:
+    // adopt a trust context (stored beside the PIB and published by name),
+    // enroll with an invite, revoke a device (root device), refresh held
+    // contexts at runtime; `security/identity-status` reports
+    // `active_identity`.
+    let trust_admin = Arc::new(context_adopt::TrustAdmin {
+        engine: engine.clone(),
+        keyring: trust_keyring,
+        pib_root: pib_root(&fwd_config),
+        publisher: published_contexts,
+        signing: active_identity.clone(),
+        own_certs: Some(own_certs),
+        dv_keeps_startup_key: fwd_config.routing.dv.enabled
+            && matches!(fwd_config.routing.dv.trust.mode.as_str(), "static" | "lvs"),
+        configured_identity: fwd_config.security.identity.clone(),
+        enrolling: tokio::sync::Mutex::new(()),
+        keeping: std::sync::Mutex::new(()),
+        ca: ca_state,
+        context_change: tokio::sync::Mutex::new(()),
+    });
+    context_refresh::spawn_periodic(
+        Arc::clone(&trust_admin),
+        fwd_config.security.context_refresh_secs,
+        cancel.clone(),
+    );
+    let trust_context_handler: Arc<dyn mgmt_ndn::TrustAdminMgmtBackend> = trust_admin;
 
     // Face listeners, WT/WebRTC listeners, auto-multicast face creation,
     // and the interface hotplug watcher all live in `face_setup`.

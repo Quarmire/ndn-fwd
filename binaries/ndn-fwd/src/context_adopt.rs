@@ -1,7 +1,9 @@
 //! The running daemon's trust-admin backend: `security/context-adopt`
 //! (`ndn-fwd adopt`), `security/enroll` (`ndn-fwd enroll`, see
-//! [`crate::enroll`]) and the signing identity `security/identity-status`
-//! reports.
+//! [`crate::enroll`]), `security/revoke` (`ndn-fwd revoke`, see
+//! [`crate::revoke`]), `security/context-refresh` (`ndn-fwd context
+//! refresh`, see [`crate::context_refresh`]) and the signing identity
+//! `security/identity-status` reports.
 //!
 //! Adopting: the daemon reads the `ndn-trust://anchor` link and adopts the
 //! trust context it names with [`ndn_identity::adopt_anchor_link_via_engine`]
@@ -15,13 +17,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ndn_cert::{AdoptError, AnchorLink, LinkAdoption};
+use ndn_cert::{AdoptError, AnchorLink, CaState, LinkAdoption};
 use ndn_engine::ForwarderEngine;
 use ndn_mgmt_wire::control_response::status;
-use ndn_security::Keyring;
+use ndn_packet::Data;
+use ndn_security::{Keyring, SignedTrustContext};
 
 use crate::active_identity::ActiveIdentity;
 use crate::context_publisher::PublishedContexts;
+use crate::own_certs::OwnCertificates;
 
 pub(crate) struct TrustAdmin {
     pub(crate) engine: ForwarderEngine,
@@ -33,6 +37,9 @@ pub(crate) struct TrustAdmin {
     /// The key management responses and discovery records are signed with;
     /// `None` when the node runs unsigned.
     pub(crate) signing: Option<Arc<ActiveIdentity>>,
+    /// Serves this node's certificates by name; a certificate enrolled at
+    /// runtime is added to it. `None` only in tests.
+    pub(crate) own_certs: Option<Arc<OwnCertificates>>,
     /// DV routing runs with `static`/`lvs` trust: it keeps the key the node
     /// started with (see `installs::dv::prepare`), so an enrollment says so.
     pub(crate) dv_keeps_startup_key: bool,
@@ -45,6 +52,13 @@ pub(crate) struct TrustAdmin {
     /// adoptions of one namespace the disk and the publisher end up with the
     /// version the keyring holds, never an older one.
     pub(crate) keeping: std::sync::Mutex<()>,
+    /// This node's CA (`[ca]`), which `security/revoke` revokes at; `None`
+    /// when the node runs none.
+    pub(crate) ca: Option<Arc<CaState>>,
+    /// One context change at a time: a revocation (new version made here)
+    /// or a refresh (newer version fetched), so neither works from a version
+    /// the other is replacing.
+    pub(crate) context_change: tokio::sync::Mutex<()>,
 }
 
 pub(crate) fn refusal(status_code: u64, reason: impl Into<String>) -> ndn_mgmt::TrustRefusal {
@@ -83,38 +97,7 @@ impl TrustAdmin {
         expected_fingerprint: &[u8; 32],
     ) -> Result<ndn_mgmt::AdoptedContextInfo, ndn_mgmt::TrustRefusal> {
         let ctx = &adopted.context;
-        let _keeping = self
-            .keeping
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(held) = self.keyring.version_of(ctx.namespace())
-            && held > ctx.version()
-        {
-            return Err(refusal(
-                409,
-                format!(
-                    "{} v{} was adopted, but v{held} was adopted meanwhile by another command; \
-                     v{held} is the version this node holds, stores and publishes",
-                    ctx.namespace(),
-                    ctx.version()
-                ),
-            ));
-        }
-        let stored = ndn_cert::persist_context(&self.pib_root, ctx, &adopted.data).map_err(|e| {
-            refusal(
-                status::SERVER_ERROR,
-                format!(
-                    "adopted {} v{} for this run, but storing it failed ({e}); it will be gone \
-                     after a restart — fix the PIB directory ({}) and adopt again",
-                    ctx.namespace(),
-                    ctx.version(),
-                    self.pib_root.display()
-                ),
-            )
-        })?;
-        if let Some(publisher) = &self.publisher {
-            publisher.publish(ctx, &adopted.data);
-        }
+        let stored = self.keep(ctx, &adopted.data)?;
         tracing::info!(
             target: "security",
             namespace = %ctx.namespace(),
@@ -133,6 +116,50 @@ impl TrustAdmin {
             stored: stored.display().to_string(),
             published: self.publisher.is_some(),
         })
+    }
+
+    /// Store `ctx` (signed Data `data`), already in the keyring, in
+    /// `<pib>/contexts/` and publish it by name, replacing the earlier
+    /// version. Refused (`409`) when the keyring meanwhile holds a newer
+    /// version of the namespace: that one is what is kept.
+    pub(crate) fn keep(
+        &self,
+        ctx: &SignedTrustContext,
+        data: &Data,
+    ) -> Result<PathBuf, ndn_mgmt::TrustRefusal> {
+        let _keeping = self
+            .keeping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = self.keyring.version_of(ctx.namespace())
+            && held > ctx.version()
+        {
+            return Err(refusal(
+                409,
+                format!(
+                    "{} v{} was adopted, but v{held} was adopted meanwhile by another command; \
+                     v{held} is the version this node holds, stores and publishes",
+                    ctx.namespace(),
+                    ctx.version()
+                ),
+            ));
+        }
+        let stored = ndn_cert::persist_context(&self.pib_root, ctx, data).map_err(|e| {
+            refusal(
+                status::SERVER_ERROR,
+                format!(
+                    "adopted {} v{} for this run, but storing it failed ({e}); it will be gone \
+                     after a restart — fix the PIB directory ({})",
+                    ctx.namespace(),
+                    ctx.version(),
+                    self.pib_root.display()
+                ),
+            )
+        })?;
+        if let Some(publisher) = &self.publisher {
+            publisher.publish(ctx, data);
+        }
+        Ok(stored)
     }
 }
 
@@ -172,6 +199,20 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         request: ndn_mgmt::EnrollRequest,
     ) -> Result<ndn_mgmt::EnrollOutcome, ndn_mgmt::TrustRefusal> {
         crate::enroll::enroll(self, request).await
+    }
+
+    async fn revoke(
+        &self,
+        name: ndn_packet::Name,
+    ) -> Result<ndn_mgmt::RevokedInfo, ndn_mgmt::TrustRefusal> {
+        crate::revoke::revoke(self, name).await
+    }
+
+    async fn refresh_contexts(
+        &self,
+        namespace: Option<ndn_packet::Name>,
+    ) -> Result<Vec<ndn_mgmt::ContextRefreshInfo>, ndn_mgmt::TrustRefusal> {
+        crate::context_refresh::refresh_contexts(self, namespace).await
     }
 
     fn signing_identity(&self) -> Option<ndn_mgmt::SigningIdentityInfo> {

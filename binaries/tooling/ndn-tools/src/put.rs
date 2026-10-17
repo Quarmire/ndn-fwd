@@ -31,6 +31,16 @@ struct Cli {
     #[arg(long)]
     hmac: bool,
 
+    /// Sign with a key from this PIB directory (e.g. the identity `ndn-fwd
+    /// enroll` certified) instead of an ephemeral key.
+    #[arg(long)]
+    pib: Option<String>,
+
+    /// With `--pib`: the identity whose default key signs (default: the
+    /// PIB's default identity).
+    #[arg(long, requires = "pib")]
+    identity: Option<String>,
+
     #[arg(long, default_value_t = 10_000)]
     freshness: u64,
 
@@ -88,6 +98,10 @@ async fn main() -> Result<()> {
             chunk_size: cli.chunk_size,
             sign: cli.sign,
             hmac: cli.hmac,
+            sign_with: cli.pib.map(|pib| ndn_tools_core::put::PibKey {
+                pib: pib.into(),
+                identity: cli.identity,
+            }),
             freshness_ms: cli.freshness,
             timeout_secs: cli.timeout,
             quiet: cli.quiet,

@@ -21,9 +21,11 @@
 //! entry `/<ns>`, so longest-prefix match routes here. The store holds one file
 //! (the newest adopted version) per namespace, so "newest stored version" is
 //! that file's. The store is read at startup; a context the running daemon
-//! adopts (`security/context-adopt`) is added with
-//! [`PublishedContexts::publish`], replacing any older version of the same
-//! namespace, and served at once.
+//! adopts (`security/context-adopt`), makes (`security/revoke` on the root
+//! device) or fetches as an update (`security/context-refresh`, the periodic
+//! refresh) is added with [`PublishedContexts::publish`], replacing any older
+//! version of the same namespace, and served at once — which is how an update
+//! travels on to the nodes downstream of this one.
 
 use std::path::Path;
 use std::collections::HashMap;
@@ -271,9 +273,9 @@ impl PublishedContexts {
 
     /// While the returned guard lives, Interests under `namespace`'s
     /// trust-context prefix are not routed to this publisher, so an adoption
-    /// fetch reaches the forwarders that serve the namespace instead of
-    /// being answered with the version this node already holds (which would
-    /// make a newer version impossible to fetch).
+    /// or refresh fetch reaches the forwarders that serve the namespace
+    /// instead of being answered with the version this node already holds
+    /// (which would make a newer version impossible to fetch).
     pub(crate) fn bypass(&self, namespace: &Name) -> PublisherBypass {
         let prefix = ndn_cert::rdr_prefix(namespace);
         let mut bypassed = self.lock_bypassed();

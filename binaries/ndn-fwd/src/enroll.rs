@@ -24,7 +24,7 @@ use ndn_cert::{InviteEnrollError, InviteLink, new_device_key_name};
 use ndn_mgmt::{EnrollOutcome, EnrollRequest, EnrolledInfo, TrustRefusal};
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::Name;
-use ndn_security::{FilePib, Signer};
+use ndn_security::{FilePib, Keyring, Signer};
 
 use crate::context_adopt::{TrustAdmin, refusal};
 
@@ -75,13 +75,14 @@ fn device_of<'a>(invite: &InviteLink, identity: &'a Name) -> Result<&'a str, Tru
 }
 
 /// Device keys in `namespace` this PIB holds a currently valid certificate
-/// for: `(key, valid until)`.
-fn certified_in(pib: &FilePib, namespace: &Name) -> Vec<(Name, u64)> {
+/// for, not revoked by the held trust context: `(key, valid until)`.
+fn certified_in(pib: &FilePib, keyring: &Keyring, namespace: &Name) -> Vec<(Name, u64)> {
     let mut held: Vec<(Name, u64)> = pib
         .list_keys()
         .unwrap_or_default()
         .into_iter()
         .filter(|k| parse_device_key(namespace, k).is_some())
+        .filter(|k| !keyring.context_for(k).is_revoked(k))
         .filter_map(|k| {
             let cert = pib.get_cert(&k).ok()?;
             cert.is_valid_now().then_some((k, cert.valid_until))
@@ -127,7 +128,7 @@ pub(crate) async fn enroll(
         )
     })?;
     let previous_identity = pib.get_default_identity().ok().flatten();
-    let held = certified_in(&pib, &invite.namespace);
+    let held = certified_in(&pib, &admin.keyring, &invite.namespace);
     if !held.is_empty() && !request.force {
         let list: Vec<String> = held
             .iter()
@@ -238,6 +239,10 @@ pub(crate) async fn enroll(
         mgr.register_signer(key.clone(), Arc::clone(&signer));
         mgr.cert_cache().insert(issued.cert.clone());
     }
+    // Peers validating this node's Data can fetch the certificate from it.
+    if let Some(own) = &admin.own_certs {
+        own.serve(issued.data.raw().clone());
+    }
     let mut at_next_start = Vec::new();
     if let Some(reason) = context_warning {
         at_next_start.push(format!(
@@ -308,7 +313,7 @@ pub(crate) async fn enroll(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
 
     use ndn_config::{ChallengeConfig, CaTomlConfig};
@@ -319,19 +324,21 @@ mod tests {
     use super::*;
     use crate::active_identity::ActiveIdentity;
 
-    struct Node {
-        admin: TrustAdmin,
-        startup_key: Name,
-        fingerprint: [u8; 32],
+    pub(crate) struct Node {
+        pub(crate) admin: TrustAdmin,
+        pub(crate) startup_key: Name,
+        pub(crate) fingerprint: [u8; 32],
         /// The signed trust context the node holds.
-        context_data: ndn_packet::Data,
-        shutdown: ShutdownHandle,
+        pub(crate) context_data: ndn_packet::Data,
+        /// The root device's CA, on the same engine.
+        pub(crate) ca: Arc<ndn_cert::CaState>,
+        pub(crate) shutdown: ShutdownHandle,
     }
 
     /// One engine carrying the root device's CA (PIB `root_dev`, tokens `tokens`) and
     /// the enrolling node's trust-admin backend (PIB `device`, holding the root device's
     /// trust context already, signing with an ephemeral key).
-    async fn node(root_dev: &Path, device: &Path, tokens: &[&str]) -> Node {
+    pub(crate) async fn node(root_dev: &Path, device: &Path, tokens: &[&str]) -> Node {
         let ns: Name = "/home/bob".parse().unwrap();
         let pib = FilePib::new(root_dev).unwrap();
         let persisted = ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false).unwrap();
@@ -361,7 +368,7 @@ mod tests {
         }
         let (engine, shutdown) = builder.build().await.unwrap();
         engine.fib().add_nexthop(&ca.prefix, ca.face_id, 0);
-        crate::ca::spawn(ca, &cfg, &engine).unwrap();
+        let ca = crate::ca::spawn(ca, &cfg, &engine).unwrap().state;
 
         let keyring = Arc::new(Keyring::new());
         let fingerprint = ndn_cert::anchor_fingerprint(&persisted.init.anchor);
@@ -379,19 +386,29 @@ mod tests {
                 pib_root: device.to_path_buf(),
                 publisher: None,
                 signing: Some(Arc::new(ActiveIdentity::new(startup, true))),
+                own_certs: None,
                 dv_keeps_startup_key: false,
                 configured_identity: None,
                 enrolling: tokio::sync::Mutex::new(()),
                 keeping: std::sync::Mutex::new(()),
+                ca: None,
+                context_change: tokio::sync::Mutex::new(()),
             },
             fingerprint,
             context_data: ndn_packet::Data::decode(persisted.init.context_data.raw().clone())
                 .unwrap(),
+            ca,
             shutdown,
         }
     }
 
-    fn request(node: &Node, role: &str, token: &str, device: &str, force: bool) -> EnrollRequest {
+    pub(crate) fn request(
+        node: &Node,
+        role: &str,
+        token: &str,
+        device: &str,
+        force: bool,
+    ) -> EnrollRequest {
         EnrollRequest {
             invite_uri: TrustEnvelope::Invite {
                 ca_prefix: "/home/bob".into(),
