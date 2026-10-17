@@ -26,7 +26,8 @@
 //! namespace, and served at once.
 
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -196,6 +197,7 @@ impl ContextPublisher {
             engine: engine.clone(),
             face_id: self.face_id,
             list: Arc::new(RwLock::new(Arc::new(self.contexts))),
+            bypassed: Arc::new(Mutex::new(HashMap::new())),
         };
         let list = Arc::clone(&published.list);
         let producer = Producer::from_handle(self.handle, Name::root());
@@ -246,6 +248,9 @@ pub(crate) struct PublishedContexts {
     engine: ForwarderEngine,
     face_id: FaceId,
     list: Arc<RwLock<Snapshot>>,
+    /// `/<ns>/32=trust-context` prefixes whose FIB entry toward this
+    /// publisher is withdrawn, with how many adoption fetches need it so.
+    bypassed: Arc<Mutex<HashMap<Name, usize>>>,
 }
 
 impl PublishedContexts {
@@ -253,9 +258,64 @@ impl PublishedContexts {
     /// version of the same namespace.
     pub(crate) fn publish(&self, ctx: &SignedTrustContext, data: &Data) {
         let added = Published::new(ctx, data);
-        log_published(&self.engine, &added, self.face_id);
+        let bypassed = self.lock_bypassed();
+        if bypassed.contains_key(&added.prefix) {
+            // Routed toward the publisher again when the fetch ends.
+            tracing::info!(target: "security", context = %added.versioned, "publishing trust context (RDR)");
+        } else {
+            log_published(&self.engine, &added, self.face_id);
+        }
         let mut list = self.list.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         *list = Arc::new(with_context(&list, added));
+    }
+
+    /// While the returned guard lives, Interests under `namespace`'s
+    /// trust-context prefix are not routed to this publisher, so an adoption
+    /// fetch reaches the forwarders that serve the namespace instead of
+    /// being answered with the version this node already holds (which would
+    /// make a newer version impossible to fetch).
+    pub(crate) fn bypass(&self, namespace: &Name) -> PublisherBypass {
+        let prefix = ndn_cert::rdr_prefix(namespace);
+        let mut bypassed = self.lock_bypassed();
+        let count = bypassed.entry(prefix.clone()).or_insert(0);
+        if *count == 0 {
+            self.engine.fib().remove_nexthop(&prefix, self.face_id);
+        }
+        *count += 1;
+        PublisherBypass {
+            published: self.clone(),
+            prefix,
+        }
+    }
+
+    fn lock_bypassed(&self) -> std::sync::MutexGuard<'_, HashMap<Name, usize>> {
+        self.bypassed.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// See [`PublishedContexts::bypass`]; routes the prefix back to the
+/// publisher on drop (if it still publishes it and no other fetch runs).
+pub(crate) struct PublisherBypass {
+    published: PublishedContexts,
+    prefix: Name,
+}
+
+impl Drop for PublisherBypass {
+    fn drop(&mut self) {
+        let p = &self.published;
+        let mut bypassed = p.lock_bypassed();
+        let Some(count) = bypassed.get_mut(&self.prefix) else {
+            return;
+        };
+        *count -= 1;
+        if *count > 0 {
+            return;
+        }
+        bypassed.remove(&self.prefix);
+        let list = p.list.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if list.iter().any(|c| c.prefix == self.prefix) {
+            p.engine.fib().add_nexthop(&self.prefix, p.face_id, 0);
+        }
     }
 }
 
@@ -363,5 +423,37 @@ mod tests {
             answer(&replaced, &other_bob.context.rdr_name()),
             Some(other_bob.context_data.raw())
         );
+    }
+
+    /// While the node adopts a namespace by fetching, Interests for its
+    /// trust context go where the namespace is served (here: the `/home/bob`
+    /// route), not to this node's own publisher holding an older version;
+    /// afterwards the publisher serves again.
+    #[tokio::test]
+    async fn adoption_fetches_bypass_the_local_publisher() {
+        let dir = tempfile::tempdir().unwrap();
+        stored(dir.path(), "/home/bob");
+        let (face, publisher) = prepare(dir.path());
+        let publisher_face = publisher.face_id;
+        let (engine, shutdown) = ndn_engine::EngineBuilder::new(ndn_engine::EngineConfig::default())
+            .face(face)
+            .build()
+            .await
+            .unwrap();
+        let published = publisher.spawn(&engine);
+        let upstream = FaceId(4242);
+        engine.fib().add_nexthop(&n("/home/bob"), upstream, 0);
+        let metadata = ndn_cert::rdr_metadata_name(&n("/home/bob"));
+        let next_face = |e: &ForwarderEngine| e.fib().lpm(&metadata).unwrap().nexthops[0].face_id;
+        assert_eq!(next_face(&engine), publisher_face);
+
+        let first = published.bypass(&n("/home/bob"));
+        let second = published.bypass(&n("/home/bob"));
+        assert_eq!(next_face(&engine), upstream);
+        drop(first);
+        assert_eq!(next_face(&engine), upstream, "another fetch still runs");
+        drop(second);
+        assert_eq!(next_face(&engine), publisher_face);
+        shutdown.shutdown().await;
     }
 }

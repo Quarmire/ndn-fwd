@@ -119,12 +119,10 @@ async fn run_face_setup_inner(
         std::borrow::Cow::Borrowed(&fwd_config.faces)
     };
 
-    let udp_listeners = udp_listener_addrs(&face_configs);
-
     // Bind every UDP listener before any peer face is created: a peer face
     // joins its listener's port (`ConnectedPort::Listener`), so the listener
     // must claim the port first. A port another process holds is fatal.
-    let mut bound_udp_listeners = std::collections::HashMap::new();
+    let mut bound_udp_listeners = std::collections::BTreeMap::new();
     for (face_idx, face_cfg) in face_configs.iter().enumerate() {
         if let ndn_config::FaceConfig::Udp { bind, remote: None } = face_cfg
             && let Some(addr) =
@@ -143,6 +141,12 @@ async fn run_face_setup_inner(
             }
         }
     }
+    // What the listeners actually hold (a port-0 listener resolved, a failed
+    // bind absent): a peer face shares only a port one of them holds.
+    let udp_listeners: Vec<std::net::SocketAddr> = bound_udp_listeners
+        .values()
+        .map(mgmt_ndn::UdpListener::local_addr)
+        .collect();
 
     for (face_idx, face_cfg) in face_configs.iter().enumerate() {
         match face_cfg {
@@ -680,23 +684,9 @@ fn udp_listener_in_use(addr: std::net::SocketAddr) -> anyhow::Error {
     )
 }
 
-/// The addresses of this config's UDP listeners (`[[face]] kind = "udp"`
-/// without `remote`): the only sockets a configured peer face shares its port
-/// with.
-fn udp_listener_addrs(faces: &[ndn_config::FaceConfig]) -> Vec<std::net::SocketAddr> {
-    faces
-        .iter()
-        .filter_map(|f| match f {
-            ndn_config::FaceConfig::Udp { bind, remote: None } => {
-                bind.as_deref().unwrap_or("0.0.0.0:6363").parse().ok()
-            }
-            _ => None,
-        })
-        .collect()
-}
-
 /// The local port of a configured UDP peer face (`[[face]] kind = "udp"` with
-/// `remote`, optional `bind`), given this forwarder's UDP listeners.
+/// `remote`, optional `bind`), given the addresses this forwarder's UDP
+/// listeners are bound to.
 ///
 /// With a listener, the face binds the listener's port beside it and
 /// connects to the peer. An ephemeral port (the previous `0.0.0.0:0`) made our
@@ -720,8 +710,14 @@ fn peer_face_port(
     listeners: &[std::net::SocketAddr],
 ) -> ndn_face::net::ConnectedPort {
     use ndn_face::net::ConnectedPort;
+    // A listener holds `b` when it is bound to the same port on the same
+    // address, or either of them on every address.
+    let holds = |l: &std::net::SocketAddr, b: &std::net::SocketAddr| {
+        l.port() == b.port()
+            && (l.ip() == b.ip() || l.ip().is_unspecified() || b.ip().is_unspecified())
+    };
     match bind.and_then(|b| b.parse::<std::net::SocketAddr>().ok()) {
-        Some(b) if listeners.iter().any(|l| l.port() == b.port()) => {
+        Some(b) if b.port() != 0 && listeners.iter().any(|l| holds(l, &b)) => {
             ConnectedPort::Listener(b.port())
         }
         Some(b) => ConnectedPort::Exclusive(b.port()),
@@ -740,7 +736,20 @@ mod tests {
     use ndn_face::net::{ConnectedPort, UdpFace};
     use ndn_transport::{FaceId, Transport};
 
-    use super::{peer_face_port, udp_listener_addrs};
+    use super::peer_face_port;
+
+    /// The addresses of a config's UDP listeners, as they would bind.
+    fn udp_listener_addrs(faces: &[FaceConfig]) -> Vec<std::net::SocketAddr> {
+        faces
+            .iter()
+            .filter_map(|f| match f {
+                FaceConfig::Udp { bind, remote: None } => {
+                    bind.as_deref().unwrap_or("0.0.0.0:6363").parse().ok()
+                }
+                _ => None,
+            })
+            .collect()
+    }
 
     /// The port each `[[face]] kind = "udp"` entry with `remote` binds.
     fn peer_face_ports(toml: &str) -> Vec<ConnectedPort> {
@@ -756,6 +765,19 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A peer face joins only a port a bound listener holds on its address;
+    /// a port-0 listener is shared at the port it resolved to.
+    #[test]
+    fn a_peer_face_joins_only_what_a_listener_holds() {
+        let a = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+        let on_one_ip = [a("10.0.0.1:6363")];
+        assert_eq!(peer_face_port(Some("10.0.0.2:6363"), &on_one_ip), ConnectedPort::Exclusive(6363));
+        assert_eq!(peer_face_port(Some("10.0.0.1:6363"), &on_one_ip), ConnectedPort::Listener(6363));
+        assert_eq!(peer_face_port(Some("0.0.0.0:6363"), &[]), ConnectedPort::Exclusive(6363));
+        assert_eq!(peer_face_port(None, &[a("127.0.0.1:40123")]), ConnectedPort::Listener(40123));
+        assert_eq!(peer_face_port(Some("0.0.0.0:0"), &[a("0.0.0.0:0")]), ConnectedPort::Exclusive(0));
     }
 
     #[test]

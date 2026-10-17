@@ -368,11 +368,11 @@ async fn main() -> Result<()> {
 
     let security_init = load_security(&fwd_config);
     load_adopted_contexts(&fwd_config, &security_init.mgr);
-    // The key the daemon signs its own packets with — management responses,
-    // discovery records and DV routing — captured before `security_init.mgr`
-    // moves into the EngineBuilder. They all sign through `active_identity`
-    // (one snapshot per packet), which `security/enroll` switches to a newly
-    // enrolled key at runtime.
+    // The key the daemon signs its own packets with — management responses
+    // and discovery records — captured before `security_init.mgr` moves into
+    // the EngineBuilder. They sign through `active_identity` (one snapshot per
+    // packet), which `security/enroll` switches to a newly enrolled key at
+    // runtime. DV `static`/`lvs` trust keeps the startup key (installs/dv.rs).
     let active_identity = security_init.mgr.any_signer().map(|signer| {
         Arc::new(active_identity::ActiveIdentity::new(
             signer,
@@ -956,8 +956,11 @@ async fn main() -> Result<()> {
             pib_root: pib_root(&fwd_config),
             publisher: published_contexts,
             signing: active_identity.clone(),
+            dv_keeps_startup_key: fwd_config.routing.dv.enabled
+                && matches!(fwd_config.routing.dv.trust.mode.as_str(), "static" | "lvs"),
             configured_identity: fwd_config.security.identity.clone(),
             enrolling: tokio::sync::Mutex::new(()),
+            keeping: std::sync::Mutex::new(()),
         });
 
     // The CA's device-approval store (if it offers that challenge), shared

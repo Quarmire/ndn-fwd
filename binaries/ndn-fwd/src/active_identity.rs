@@ -1,6 +1,8 @@
 //! The key the running daemon signs its own packets with — management
-//! responses, discovery records and DV routing — which `security/enroll`
-//! replaces while the daemon runs.
+//! responses and discovery records — which `security/enroll` replaces while
+//! the daemon runs. (DV routing with `static`/`lvs` trust takes a fixed
+//! copy of the startup key instead: its neighbours trust only the keys they
+//! list.)
 //!
 //! Those subsystems share one [`ActiveSigner`] and take one snapshot of it
 //! per packet, so a switch applies from the next packet on and every packet's

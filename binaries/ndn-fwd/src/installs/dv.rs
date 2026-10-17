@@ -19,9 +19,12 @@ pub struct DvInstaller {
     pfs_routes: Vec<(Name, FaceId)>,
 }
 
-/// `node_signer` is the node's current key (switched at runtime by an
-/// enrollment); the `static` and `lvs` trust modes sign with it, one
-/// snapshot per packet.
+/// `node_signer` is the node's key; the `static` and `lvs`
+/// trust modes sign with the key it holds at startup and keep it: DV
+/// neighbours accept only the keys in their `[routing.dv.trust]
+/// trusted_keys`, so a key the node switches to at runtime (`ndn-fwd
+/// enroll`) would silently cut it off from routing. DV moves to an enrolled
+/// key at a restart, once neighbours trust it.
 pub async fn prepare(
     fwd_config: &ndn_config::ForwarderConfig,
     builder: &mut EngineBuilder,
@@ -98,7 +101,8 @@ pub async fn prepare(
         }
     }
 
-    let dv_trust = build_trust(dv_toml, node_signer);
+    let dv_signer = node_signer.map(|s| Arc::new(ndn_security::ActiveSigner::new(s.current())));
+    let dv_trust = build_trust(dv_toml, dv_signer);
     let dv = ndn_routing::protocols::dv::DvProtocol::with_io_and_trust(
         dv_cfg,
         fetch_handle,

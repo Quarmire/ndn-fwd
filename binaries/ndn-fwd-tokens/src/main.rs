@@ -8,11 +8,13 @@
 //! scopes it to `<namespace>/<role>`, so it can only certify a device of that
 //! role, and the invite names that prefix as the invitee's identity
 //! namespace. Admin and relay (`node` role) certificates are never issued on a token —
-//! they need an admin's device approval.
+//! they need an admin's device approval. With `--ttl` a token also carries its
+//! expiry (`…-until<unix-secs>`): the CA refuses it after that, and so does
+//! the invitee's `ndn-fwd enroll` before contacting the CA.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ndn_cert::roles::{Role, role_prefix, role_token, token_role};
+use ndn_cert::roles::{Role, role_prefix, role_token, token_expiry, token_role, token_with_expiry};
 use ndn_packet::Name;
 use ndn_trust_envelope::{ANCHOR_FINGERPRINT_LEN, TrustEnvelope};
 use qrcode::QrCode;
@@ -78,16 +80,38 @@ fn invite_role(role: InviteRole) -> Result<Role> {
     }
 }
 
-/// The invitee's identity namespace: `<namespace>/<role>` for a role token,
-/// `<namespace>` for a legacy unscoped one.
-fn invite_namespace(namespace: &str, role: Option<Role>) -> Result<String> {
+/// The invitee's identity namespace: `<namespace>/<role>`.
+fn invite_namespace(namespace: &str, role: Role) -> Result<String> {
     let ns: Name = namespace
         .parse()
         .map_err(|e| anyhow::anyhow!("--namespace {namespace:?} is not an NDN name: {e}"))?;
-    Ok(match role {
-        Some(role) => role_prefix(&ns, role).to_string(),
-        None => ns.to_string(),
-    })
+    Ok(role_prefix(&ns, role).to_string())
+}
+
+/// A `--ttl` value: seconds, or a number with an `m`, `h` or `d` suffix.
+fn parse_ttl(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (digits, unit) = match s.char_indices().last() {
+        Some((i, 'm')) => (&s[..i], 60),
+        Some((i, 'h')) => (&s[..i], 3_600),
+        Some((i, 'd')) => (&s[..i], 86_400),
+        Some((i, 's')) => (&s[..i], 1),
+        _ => (s, 1),
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| format!("{s:?} is not a duration (e.g. 3600, 90m, 12h, 7d)"))?;
+    match n.checked_mul(unit) {
+        Some(0) | None => Err(format!("{s:?} must be a positive duration")),
+        Some(secs) => Ok(secs),
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Subcommand)]
@@ -105,6 +129,11 @@ enum Cmd {
         /// Number of tokens to mint (default 1).
         #[arg(long, default_value_t = 1)]
         count: usize,
+        /// How long the invite can be redeemed: seconds, or `90m`, `12h`,
+        /// `7d`. The expiry is written into the token itself, so it holds
+        /// however long the token sits in the config. Default: no expiry.
+        #[arg(long, value_parser = parse_ttl)]
+        ttl: Option<u64>,
         /// Token byte length (default 16 — 128 bits, fits a small QR).
         #[arg(long, default_value_t = 16)]
         bytes: usize,
@@ -116,7 +145,8 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
         qr_format: QrFormat,
     },
-    /// Render an existing token's invite as a QR code (e.g. for a paper handoff).
+    /// Render an existing token's invite as a QR code (e.g. for a paper
+    /// handoff). A token without a role prefix is a member token.
     Qr {
         #[command(flatten)]
         invite: InviteArgs,
@@ -140,14 +170,18 @@ fn main() -> Result<()> {
             invite,
             role,
             count,
+            ttl,
             bytes,
             qr,
             qr_format,
         } => {
             let role = invite_role(role)?;
-            let identity_namespace = invite_namespace(&invite.namespace, Some(role))?;
+            let identity_namespace = invite_namespace(&invite.namespace, role)?;
             for _ in 0..count {
-                let token = role_token(role, &mint_token(bytes)?);
+                let mut token = role_token(role, &mint_token(bytes)?);
+                if let Some(ttl) = ttl {
+                    token = token_with_expiry(&token, now_secs().saturating_add(ttl));
+                }
                 let url = invite_url(&invite, &identity_namespace, &token)?;
                 println!("token  = \"{token}\"  # {role} only: scoped to {identity_namespace}");
                 println!("invite = {url}");
@@ -162,7 +196,9 @@ fn main() -> Result<()> {
             token,
             format,
         } => {
-            let identity_namespace = invite_namespace(&invite.namespace, token_role(&token))?;
+            // The namespace CA scopes a token without a role prefix to members.
+            let role = token_role(&token).unwrap_or(Role::Member);
+            let identity_namespace = invite_namespace(&invite.namespace, role)?;
             let url = invite_url(&invite, &identity_namespace, &token)?;
             render_qr(&url, format, &token)?;
         }
@@ -179,7 +215,8 @@ fn invite_url(args: &InviteArgs, identity_namespace: &str, token: &str) -> Resul
         ca_prefix: args.ca.clone(),
         identity_namespace: identity_namespace.to_owned(),
         token: token.to_owned(),
-        ttl_secs: None,
+        // What is left of the token's own expiry, for readers of the envelope.
+        ttl_secs: token_expiry(token).map(|at| at.saturating_sub(now_secs())),
         anchor_fingerprint,
     };
     Ok(match &args.domain {
@@ -260,10 +297,43 @@ mod tests {
         let token = role_token(Role::Guest, "00ff");
         assert_eq!(token_role(&token), Some(Role::Guest));
         assert_eq!(
-            invite_namespace("/home/bob", token_role(&token)).unwrap(),
+            invite_namespace("/home/bob", Role::Guest).unwrap(),
             "/home/bob/guest"
         );
-        assert_eq!(invite_namespace("/home/bob", None).unwrap(), "/home/bob");
-        assert!(invite_namespace("home bob", Some(Role::Member)).is_err());
+        assert!(invite_namespace("home bob", Role::Member).is_err());
+    }
+
+    /// `qr` for a token without a role prefix renders a member invite the
+    /// invitee can enroll with.
+    #[test]
+    fn unprefixed_token_qr_is_a_usable_member_invite() {
+        let args = InviteArgs {
+            ca: "/home/bob".into(),
+            namespace: "/home/bob".into(),
+            anchor_fp: None,
+            domain: None,
+        };
+        let role = token_role("plain").unwrap_or(Role::Member);
+        let url = invite_url(&args, &invite_namespace("/home/bob", role).unwrap(), "plain").unwrap();
+        let link = ndn_cert::InviteLink::from_uri(&url).expect("usable invite");
+        assert_eq!(link.role, Role::Member);
+    }
+
+    /// A `--ttl` token carries its expiry into the invite.
+    #[test]
+    fn ttl_travels_in_the_token() {
+        assert_eq!(parse_ttl("7d"), Ok(7 * 86_400));
+        assert_eq!(parse_ttl("90"), Ok(90));
+        assert!(parse_ttl("0").is_err() && parse_ttl("x").is_err());
+        let token = token_with_expiry(&role_token(Role::Member, "ab"), now_secs() + 600);
+        let args = InviteArgs {
+            ca: "/home/bob".into(),
+            namespace: "/home/bob".into(),
+            anchor_fp: None,
+            domain: None,
+        };
+        let url = invite_url(&args, "/home/bob/member", &token).unwrap();
+        let link = ndn_cert::InviteLink::from_uri(&url).unwrap();
+        assert_eq!(link.expires_at_secs, token_expiry(&token));
     }
 }

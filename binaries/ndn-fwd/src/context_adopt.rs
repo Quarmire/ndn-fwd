@@ -30,14 +30,21 @@ pub(crate) struct TrustAdmin {
     pub(crate) pib_root: PathBuf,
     /// `None` when `[security] serve_contexts = false`.
     pub(crate) publisher: Option<PublishedContexts>,
-    /// The key management responses, discovery records and DV routing are
-    /// signed with; `None` when the node runs unsigned.
+    /// The key management responses and discovery records are signed with;
+    /// `None` when the node runs unsigned.
     pub(crate) signing: Option<Arc<ActiveIdentity>>,
+    /// DV routing runs with `static`/`lvs` trust: it keeps the key the node
+    /// started with (see `installs::dv::prepare`), so an enrollment says so.
+    pub(crate) dv_keeps_startup_key: bool,
     /// `[security] identity` from the config: it takes precedence over the
     /// PIB's default identity, so an enrollment does not change the signer.
     pub(crate) configured_identity: Option<String>,
     /// One enrollment at a time.
     pub(crate) enrolling: tokio::sync::Mutex<()>,
+    /// Held while a context is stored and published, so of two concurrent
+    /// adoptions of one namespace the disk and the publisher end up with the
+    /// version the keyring holds, never an older one.
+    pub(crate) keeping: std::sync::Mutex<()>,
 }
 
 pub(crate) fn refusal(status_code: u64, reason: impl Into<String>) -> ndn_mgmt::TrustRefusal {
@@ -68,13 +75,31 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 impl TrustAdmin {
     /// Keep a context adopted into the keyring: store it in `<pib>/contexts/`
-    /// and publish it by name.
+    /// and publish it by name. Refused (`409`) when the keyring meanwhile
+    /// holds a newer version of the namespace: that one is what is kept.
     pub(crate) fn keep_adopted(
         &self,
         adopted: &LinkAdoption,
         expected_fingerprint: &[u8; 32],
     ) -> Result<ndn_mgmt::AdoptedContextInfo, ndn_mgmt::TrustRefusal> {
         let ctx = &adopted.context;
+        let _keeping = self
+            .keeping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(held) = self.keyring.version_of(ctx.namespace())
+            && held > ctx.version()
+        {
+            return Err(refusal(
+                409,
+                format!(
+                    "{} v{} was adopted, but v{held} was adopted meanwhile by another command; \
+                     v{held} is the version this node holds, stores and publishes",
+                    ctx.namespace(),
+                    ctx.version()
+                ),
+            ));
+        }
         let stored = ndn_cert::persist_context(&self.pib_root, ctx, &adopted.data).map_err(|e| {
             refusal(
                 status::SERVER_ERROR,
@@ -119,6 +144,13 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
     ) -> Result<ndn_mgmt::AdoptedContextInfo, ndn_mgmt::TrustRefusal> {
         let refuse = |e: AdoptError| refusal(status_of(&e), e.to_string());
         let link = AnchorLink::from_uri(&link_uri).map_err(refuse)?;
+        // A fetched context must come from the forwarders serving the
+        // namespace, not from this node's own publisher (which holds only the
+        // version this node already has).
+        let bypass = match (&self.publisher, &link.context_data) {
+            (Some(publisher), None) => Some(publisher.bypass(&link.namespace)),
+            _ => None,
+        };
         let adopted =
             ndn_identity::adopt_anchor_link_via_engine(&self.engine, &self.keyring, &link)
                 .await
@@ -131,6 +163,7 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
                     );
                     refuse(e)
                 })?;
+        drop(bypass);
         self.keep_adopted(&adopted, &link.expected_fingerprint)
     }
 

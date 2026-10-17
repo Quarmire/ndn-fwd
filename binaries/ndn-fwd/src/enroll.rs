@@ -8,8 +8,10 @@
 //! the namespace's CA with the invite's token, stores the issued certificate
 //! beside the key, and makes the identity the PIB's default — loaded at every
 //! start unless `[security] identity` names another one (the config file is
-//! never edited). The running daemon then signs its management responses,
-//! discovery records and DV routing with the new key from the next packet on.
+//! never edited). The running daemon then signs its management responses and
+//! discovery records with the new key from the next packet on. DV routing in
+//! the `static`/`lvs` trust modes keeps the key it started with (neighbours
+//! list it in their `trusted_keys`) until the next start.
 //!
 //! A failed enrollment leaves the previous state: the new key (and anything
 //! stored for it) is deleted and the default identity is only changed as the
@@ -18,7 +20,7 @@
 use std::sync::Arc;
 
 use ndn_cert::roles::parse_device_key;
-use ndn_cert::{INVITE_CERT_VALIDITY_SECS, InviteEnrollError, InviteLink, new_device_key_name};
+use ndn_cert::{InviteEnrollError, InviteLink, new_device_key_name};
 use ndn_mgmt::{EnrollOutcome, EnrollRequest, EnrolledInfo, TrustRefusal};
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::Name;
@@ -165,34 +167,48 @@ pub(crate) async fn enroll(
         &admin.keyring,
         &invite,
         Arc::clone(&signer),
-        INVITE_CERT_VALIDITY_SECS,
     )
     .await
     {
         Ok(enrollment) => enrollment,
         Err(failure) => {
             discard(&pib, &key);
+            let mut reason = failure.error.to_string();
             if let (Some(adopted), Some(fp)) = (&failure.adopted, &invite.expected_fingerprint) {
                 // The context passed the fingerprint check on its own; keep
                 // what the keyring already holds across a restart.
-                let _ = admin.keep_adopted(adopted, fp);
+                match admin.keep_adopted(adopted, fp) {
+                    Ok(info) => reason.push_str(&format!(
+                        ". The trust context {} v{} was adopted on the way and stays adopted",
+                        info.namespace, info.version
+                    )),
+                    Err(e) => reason.push_str(&format!(". Also: {}", e.reason)),
+                }
             }
             tracing::warn!(
                 target: "security",
                 identity = %identity,
-                error = %failure.error,
+                error = %reason,
                 "enrollment failed; nothing was kept for the new key"
             );
-            return Err(refusal(status_of(&failure.error), failure.error.to_string()));
+            return Err(refusal(status_of(&failure.error), reason));
         }
     };
 
+    // The certificate is issued and the token spent: whatever happens to
+    // the adopted context's copy on disk, keep the certificate.
+    let mut context_warning = None;
     let adopted_context = match (&enrollment.adopted, &invite.expected_fingerprint) {
         (Some(adopted), Some(fp)) => match admin.keep_adopted(adopted, fp) {
             Ok(info) => Some(info),
             Err(e) => {
-                discard(&pib, &key);
-                return Err(e);
+                tracing::warn!(
+                    target: "security",
+                    reason = %e.reason,
+                    "enrolled, but the adopted trust context was not stored"
+                );
+                context_warning = Some(e.reason);
+                None
             }
         },
         _ => None,
@@ -223,6 +239,19 @@ pub(crate) async fn enroll(
         mgr.cert_cache().insert(issued.cert.clone());
     }
     let mut at_next_start = Vec::new();
+    if let Some(reason) = context_warning {
+        at_next_start.push(format!(
+            "the trust context for {} is held for this run only: {reason}",
+            invite.namespace
+        ));
+    }
+    if admin.dv_keeps_startup_key {
+        at_next_start.push(format!(
+            "DV routing: it keeps signing with the key this node started with (DV `static`/`lvs` \
+             trust); it signs with {key} after a restart, so add that key to every DV \
+             neighbour's [routing.dv.trust] trusted_keys before restarting"
+        ));
+    }
     let signing_now = match (&admin.configured_identity, &admin.signing) {
         (Some(configured), _) => {
             at_next_start.push(format!(
@@ -269,7 +298,6 @@ pub(crate) async fn enroll(
         valid_until: iso(issued.cert.valid_until),
         validity_secs: issued.cert.valid_until.saturating_sub(issued.cert.valid_from)
             / 1_000_000_000,
-        requested_validity_secs: INVITE_CERT_VALIDITY_SECS,
         adopted_context,
         pib: admin.pib_root.display().to_string(),
         previous_identity: previous_identity.map(|n| n.to_string()),
@@ -295,6 +323,8 @@ mod tests {
         admin: TrustAdmin,
         startup_key: Name,
         fingerprint: [u8; 32],
+        /// The signed trust context the node holds.
+        context_data: ndn_packet::Data,
         shutdown: ShutdownHandle,
     }
 
@@ -317,6 +347,9 @@ mod tests {
                 ttl_secs: None,
                 smtp: None,
             }],
+            // Above the 90 days a device once asked for: the CA's setting,
+            // not the request, decides the lifetime.
+            cert_validity_days: 200,
             ..CaTomlConfig::default()
         };
         let (faces, ca) = crate::ca::prepare(&cfg, root_dev).await.unwrap();
@@ -346,10 +379,14 @@ mod tests {
                 pib_root: device.to_path_buf(),
                 publisher: None,
                 signing: Some(Arc::new(ActiveIdentity::new(startup, true))),
+                dv_keeps_startup_key: false,
                 configured_identity: None,
                 enrolling: tokio::sync::Mutex::new(()),
+                keeping: std::sync::Mutex::new(()),
             },
             fingerprint,
+            context_data: ndn_packet::Data::decode(persisted.init.context_data.raw().clone())
+                .unwrap(),
             shutdown,
         }
     }
@@ -367,6 +404,30 @@ mod tests {
             identity: format!("/home/bob/{role}/{device}").parse().unwrap(),
             force,
         }
+    }
+
+    /// Of two adoptions of one namespace, the one finishing last never
+    /// stores (or publishes) an older version than the keyring holds.
+    #[tokio::test]
+    async fn an_older_adoption_never_overwrites_the_held_version() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-x"]).await;
+        let ns: Name = "/home/bob".parse().unwrap();
+        let held = node.admin.keyring.contexts().pop().unwrap();
+        let older = ndn_cert::LinkAdoption {
+            context: Arc::clone(&held),
+            data: ndn_packet::Data::decode(node.context_data.raw().clone()).unwrap(),
+            fetched: false,
+        };
+        // Another command adopted a newer version meanwhile.
+        node.admin.keyring.adopt(Arc::new(
+            ndn_security::SignedTrustContext::hierarchical(ns.clone())
+                .with_version(held.version() + 1),
+        ));
+        let refused = node.admin.keep_adopted(&older, &node.fingerprint);
+        assert_eq!(refused.unwrap_err().status_code, 409);
+        assert!(!ndn_cert::context_file_path(device.path(), &ns).exists());
+        node.shutdown.shutdown().await;
     }
 
     /// What the node's state is: PIB keys, default identity, signing key.
@@ -394,6 +455,7 @@ mod tests {
         assert!(key.has_prefix(&identity));
         assert_eq!(info.issuer, "/home/bob/CA/KEY/ca");
         assert!(info.signing_now);
+        assert_eq!(info.validity_secs / 86_400, 200, "the CA's cert_validity_days decides");
 
         let pib = FilePib::open(device.path()).unwrap();
         assert_eq!(state(&node), (vec![key.clone()], Some(identity), key.clone()));

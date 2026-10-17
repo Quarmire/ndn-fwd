@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use ndn_app::{Consumer, Producer};
 use ndn_cert::challenge::device_approval::{DeviceApprovalChallenge, PendingApprovalStore};
 use ndn_cert::namespace::{ANCHOR_CERT_FILE, CA_CERT_FILE, CA_DIR};
-use ndn_cert::roles::{Role, role_prefix, token_role};
+use ndn_cert::roles::{Role, role_prefix, token_expiry, token_role};
 use ndn_cert::{
     CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore, IssuanceContext,
     IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge, RequireAttestationKind,
@@ -385,8 +385,9 @@ pub(crate) fn spawn(
         "NDNCERT challenge set",
     );
 
-    // Certificates last `cert_validity_days`; INFO advertises the same
-    // maximum, so requesters can ask for exactly what they get.
+    // Certificates last `cert_validity_days`: a request that names no
+    // lifetime (what `ndn-fwd enroll` and the mobile enroll send) gets
+    // exactly this, and INFO advertises it as the maximum.
     let lifetime = std::time::Duration::from_secs(u64::from(cfg.cert_validity_days) * 86_400);
     let mut builder = NdncertCa::builder()
         .name(prep.prefix.to_string())
@@ -566,12 +567,20 @@ fn token_challenge(
             None if namespace_ca => Some(Role::Member),
             role => role,
         };
-        match role {
-            Some(role) => {
-                tokens_store.add_scoped(token.clone(), None, Some(role_prefix(token_ns, role)))
-            }
-            None => tokens_store.add(token.clone()),
-        }
+        // A token minted with `ndn-fwd-tokens new --ttl` carries its expiry:
+        // redeemable until then, measured from now (past: refused).
+        let ttl = token_expiry(token).map(|at| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            std::time::Duration::from_secs(at.saturating_sub(now))
+        });
+        tokens_store.add_scoped(
+            token.clone(),
+            ttl,
+            role.map(|role| role_prefix(token_ns, role)),
+        );
     }
     Ok(Box::new(TokenChallenge::new(tokens_store)))
 }

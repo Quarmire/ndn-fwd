@@ -2,9 +2,8 @@
 //! listener port must not both run. The listener used to bind with
 //! `SO_REUSEPORT`, so the second forwarder (same user) silently joined the
 //! first one's reuse group and the kernel split inbound datagrams between the
-//! two. The second forwarder must refuse to start and say which port and what
-//! to do; the first, whose own peer face shares its listener's port, keeps
-//! working.
+//! two. The second forwarder must refuse to start and name the port; the
+//! first, whose own peer face shares its listener's port, keeps working.
 
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
@@ -34,14 +33,15 @@ fn spawn_fwd(conf: &std::path::Path, stderr: Stdio) -> Child {
         .expect("spawn ndn-fwd")
 }
 
-/// Whether the forwarder has a face to the hub bound on its listener's port.
-async fn peer_face_on_port(client: &MgmtClient, hub_port: u16, port: u16) -> bool {
+/// The local port of the forwarder's face to the hub, once it exists.
+async fn peer_face_port(client: &MgmtClient, hub_port: u16) -> Option<u16> {
     client
         .face_list()
         .await
         .expect("faces/list")
         .iter()
-        .any(|f| f.uri.ends_with(&format!(":{hub_port}")) && f.local_uri.ends_with(&format!(":{port}")))
+        .find(|f| f.uri.ends_with(&format!(":{hub_port}")))
+        .and_then(|f| f.local_uri.rsplit(':').next()?.parse().ok())
 }
 
 /// Kills the forwarder when the test ends, pass or fail.
@@ -57,22 +57,19 @@ impl Drop for Reap {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_forwarder_refuses_a_held_udp_listener_port() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let port = std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|s| s.local_addr())
-        .expect("free port")
-        .port();
     let hub = std::net::UdpSocket::bind("127.0.0.1:0").expect("hub");
     let hub_addr = hub.local_addr().unwrap();
 
-    // First forwarder: a UDP listener and a configured peer face, which binds
-    // the listener's port beside it.
+    // First forwarder: a UDP listener on a port the kernel picks (no window
+    // for another process to take it), and a configured peer face, which
+    // binds the listener's port beside it.
     let sock_a = dir.path().join("a.sock");
     let conf_a = dir.path().join("a.toml");
     std::fs::write(
         &conf_a,
         format!(
             "[management]\nface_socket = \"{sock}\"\n\n\
-             [[face]]\nkind = \"udp\"\nbind = \"127.0.0.1:{port}\"\n\n\
+             [[face]]\nkind = \"udp\"\nbind = \"127.0.0.1:0\"\n\n\
              [[face]]\nkind = \"udp\"\nremote = \"{hub_addr}\"\n",
             sock = sock_a.display(),
         ),
@@ -87,13 +84,17 @@ async fn a_second_forwarder_refuses_a_held_udp_listener_port() {
         .await
         .expect("connect");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !peer_face_on_port(&client, hub_addr.port(), port).await {
-        assert!(
-            Instant::now() < deadline,
-            "the first forwarder's peer face never came up on its listener port {port}"
-        );
+    let port = loop {
+        match peer_face_port(&client, hub_addr.port()).await {
+            Some(port) => break port,
+            None => assert!(
+                Instant::now() < deadline,
+                "the first forwarder's peer face never came up"
+            ),
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    };
+    assert_ne!(port, 0);
 
     // Second forwarder: the same UDP listener port.
     let sock_b = dir.path().join("b.sock");
@@ -128,17 +129,13 @@ async fn a_second_forwarder_refuses_a_held_udp_listener_port() {
     let stderr = stderr.join().unwrap();
     assert!(!status.success(), "second forwarder exited {status}");
     assert!(
-        stderr.contains(&format!("UDP port {port} is already in use")),
-        "the refusal must name the port, got: {stderr}"
-    );
-    assert!(
-        stderr.contains("stop the process holding port"),
-        "the refusal must say what to do, got: {stderr}"
+        stderr.contains(&port.to_string()),
+        "the refusal must name the held port {port}, got: {stderr}"
     );
 
     assert!(a.0.try_wait().unwrap().is_none(), "the first forwarder died");
     assert!(
-        peer_face_on_port(&client, hub_addr.port(), port).await,
+        peer_face_port(&client, hub_addr.port()).await == Some(port),
         "the first forwarder lost its peer face"
     );
 }

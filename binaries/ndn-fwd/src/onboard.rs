@@ -269,10 +269,11 @@ async fn run_adopt(args: &[String]) -> Result<()> {
         Err(e) if link.context_data.is_some() => adopt_offline(args, uri, &socket, &e),
         Err(e) => bail!(
             "adopt refused: the daemon is not reachable at {socket} ({e}). This link carries \
-             only the expected fingerprint, so the network's context has to be fetched, which \
-             needs the running daemon with a route toward the network: start ndn-fwd (with \
-             `-c <config>` if it uses another socket) and retry, or ask for an anchor link with \
-             the context inline (`ndn-fwd init` prints one as anchor_uri)"
+             only the expected fingerprint, so the namespace's trust context has to be fetched, \
+             which needs the running daemon with a route toward a forwarder serving {}: start \
+             ndn-fwd (with `-c <config>` if it uses another socket) and retry, or ask for an \
+             anchor link with the context inline (`ndn-fwd init` prints one as anchor_uri)",
+            link.namespace
         ),
     }
 }
@@ -342,10 +343,12 @@ fn adopt_offline(
     Ok(())
 }
 
-/// How long the CLI waits for the daemon to enroll: adopting the context
-/// (two fetches) plus NEW, CHALLENGE, the certificate and its issuer's
-/// certificate, each at most ~4.5 s.
-const DAEMON_ENROLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(40);
+/// How long the CLI waits for the daemon to enroll: the longest the daemon's
+/// enrollment can take (every exchange timing out), plus a margin for the
+/// key generation and storing.
+fn daemon_enroll_timeout() -> std::time::Duration {
+    ndn_identity::enroll_via_engine_budget() + std::time::Duration::from_secs(5)
+}
 
 async fn run_enroll(args: &[String]) -> Result<()> {
     let uri = *positionals(args).first().context(
@@ -372,10 +375,21 @@ async fn run_enroll(args: &[String]) -> Result<()> {
             invite.namespace
         )
     })?;
-    let resp = client
-        .security_enroll(uri, &identity, force, DAEMON_ENROLL_TIMEOUT)
-        .await
-        .with_context(|| format!("ask the daemon at {socket} to enroll"))?;
+    let wait = daemon_enroll_timeout();
+    let resp = match client.security_enroll(uri, &identity, force, wait).await {
+        Ok(resp) => resp,
+        Err(ndn_ipc::ForwarderError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => bail!(
+            "no answer from the daemon at {socket} within {}s. It may still complete the \
+             enrollment: check `ndn-ctl status` (signing: identity=…) or the daemon's log \
+             before retrying — once it holds a certificate in {}, enrolling again is refused \
+             as already enrolled",
+            wait.as_secs(),
+            invite.namespace
+        ),
+        Err(e) => {
+            return Err(e).with_context(|| format!("ask the daemon at {socket} to enroll"));
+        }
+    };
     if !resp.is_ok() {
         bail!("enroll refused by the daemon ({}): {}", resp.status_code, resp.status_text);
     }
@@ -411,18 +425,11 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         "issued_by        = {} (chain checked to the root of {} under its schema)",
         info.issuer, invite.namespace
     );
-    // More than a minute short of the request: the CA capped the lifetime.
-    let capped = info.validity_secs + 60 < info.requested_validity_secs;
-    if capped {
-        println!(
-            "valid_until      = {} ({} — the CA capped the {} requested)",
-            info.valid_until,
-            days(info.validity_secs),
-            days(info.requested_validity_secs)
-        );
-    } else {
-        println!("valid_until      = {} ({})", info.valid_until, days(info.validity_secs));
-    }
+    println!(
+        "valid_until      = {} ({}, as the CA's policy decides)",
+        info.valid_until,
+        days(info.validity_secs)
+    );
     println!("pib              = {}", info.pib);
     println!(
         "default_identity = {} (was: {})",
@@ -441,12 +448,6 @@ async fn run_enroll(args: &[String]) -> Result<()> {
     }
     for old in &info.still_valid {
         println!("# Still valid until revoked: {old}");
-    }
-    if capped {
-        println!(
-            "# The CA issued a shorter lifetime than requested: this certificate expires at {}.",
-            info.valid_until
-        );
     }
     Ok(())
 }

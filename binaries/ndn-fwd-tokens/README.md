@@ -44,8 +44,8 @@ CLI flags only.
 
 | Subcommand | Purpose |
 |---|---|
-| `new --ca <p> --namespace <p> [--role member\|guest] [--anchor-fp <hex>] [--domain <d>] [--count N] [--bytes N] [--qr [--qr-format ascii\|svg]]` | Mint one or more tokens + invites. |
-| `qr --ca <p> --namespace <p> [--anchor-fp <hex>] [--domain <d>] --token <t> [--format ascii\|svg]` | Render the QR for an existing token's invite. |
+| `new --ca <p> --namespace <p> [--role member\|guest] [--ttl <dur>] [--anchor-fp <hex>] [--domain <d>] [--count N] [--bytes N] [--qr [--qr-format ascii\|svg]]` | Mint one or more tokens + invites. |
+| `qr --ca <p> --namespace <p> [--anchor-fp <hex>] [--domain <d>] --token <t> [--format ascii\|svg]` | Render the QR for an existing token's invite (a token without a role prefix is a member token). |
 
 ### Invite flags (both subcommands)
 
@@ -53,7 +53,7 @@ CLI flags only.
 |---|---|---|
 | `--ca` | required | NDNCERT CA prefix the invitee enrolls against (`[ca].prefix`). |
 | `--namespace` | required | The namespace (`ndn-fwd init --namespace`); the invite names `<namespace>/<role>` (the token's role) as the identity namespace. |
-| `--anchor-fp` | none | 64-hex SHA-256 of the CA's root anchor public key; lets the invitee pin the CA. |
+| `--anchor-fp` | none | Lowercase-hex SHA-256 of the namespace's root anchor public key (`anchor_fp` from `ndn-fwd init`). With it, `ndn-fwd enroll <invite>` adopts the namespace's trust context by itself and checks it is signed by that root; without it the invitee must adopt the context first. |
 | `--domain` | none | DNS domain serving the `EnrollClient` page. Set → `https://<d>/t/invite#…`; unset → `ndn-trust://invite/…`. |
 
 ### `new` flags
@@ -62,6 +62,7 @@ CLI flags only.
 |---|---|---|
 | `--role` | `member` | `member` or `guest`; `admin`/`node` are refused (device approval only). |
 | `--count` | `1` | How many tokens to mint. |
+| `--ttl` | none | How long the invite can be redeemed: seconds, or `90m`, `12h`, `7d`. The expiry is written into the token (`…-until<unix-secs>`), so it holds however long the token sits in `[ca].tokens`; the CA refuses the token after it, and `ndn-fwd enroll` refuses the invite before contacting the CA. |
 | `--bytes` | `16` | Token byte length (128 bits → small QR). |
 | `--qr` | off | Also render a QR code for each invite. |
 | `--qr-format` | `ascii` | `ascii` (terminal) or `svg` (write `<token>.svg`). |
