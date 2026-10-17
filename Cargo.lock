@@ -2733,6 +2733,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndn-e2e"
+version = "0.1.0"
+dependencies = [
+ "bip39",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ndn-engine"
 version = "0.1.0"
 dependencies = [

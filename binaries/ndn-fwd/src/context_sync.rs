@@ -27,13 +27,22 @@
 //! **Routes.** SVS floods Sync Interests to every member, so the group needs
 //! a route both ways. Up: the group is routed over the non-local faces the
 //! namespace itself is routed over (the route a device has toward the root
-//! device or a relay), taken again before each Sync Interest this node sends.
+//! device or a relay), taken when the group is joined and again for each
+//! Sync Interest this node sends or receives (SVS may suppress this node's
+//! own for as long as its neighbours' keep arriving).
 //! Down: each face a Sync Interest of the group arrives on is added to the
 //! group's route, so the root device reaches the devices that joined
-//! without a route configured toward them. The group runs the multicast
-//! strategy. A relay between them carries the group only if it runs
-//! `context_sync` too; otherwise the devices behind it get updates by
-//! refresh.
+//! without a route configured toward them. Each such face routes both the
+//! Sync Interests (`<group>/v=<SVS dialect>`) and the group Data
+//! (`<group>`); this node's own sync face routes the Sync Interests only.
+//! Were it a nexthop of `<group>`, a neighbour's fetch of `<group>/<member>/
+//! seg=N` would be multicast to it alone (the face it came from excluded),
+//! go no further, and hold the PIT entry this node's own fetch of the same
+//! version is aggregated onto until both time out. The group runs the
+//! multicast strategy. A relay between them carries the group only if it
+//! runs `context_sync` too; otherwise the devices behind it get updates by
+//! refresh. A version whose fetch failed is fetched again while it is newer
+//! than the held one ([`ndn_identity::context_sync::Retry`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -104,6 +113,7 @@ pub(crate) struct Groups {
     kept: mpsc::UnboundedReceiver<KeptVersion>,
     member: NameComponent,
     pub(crate) svs: SvsConfig,
+    pub(crate) retry: group::Retry,
 }
 
 /// With `[security] context_sync`, the handle for the [`TrustAdmin`] and the
@@ -126,6 +136,7 @@ pub(crate) fn prepare(enabled: bool, pib_root: &Path) -> Option<(ContextSync, Gr
             // how soon the root device learns the face of a member that
             // (re)joined, and how soon a lost announcement is repeated.
             svs: SvsConfig::wan(),
+            retry: group::Retry::default(),
         },
     ))
 }
@@ -164,7 +175,8 @@ impl Groups {
             // The root device announces the version it holds as its
             // sequence number; the versions it stores are served by it.
             let seq = if root { held.version() } else { 0 };
-            let group = Group::join(&admin, &self.member, &namespace, seq, &self.svs, &cancel);
+            let group =
+                Group::join(&admin, &self.member, &namespace, seq, &self.svs, self.retry, &cancel);
             if root {
                 group.serve_stored(&admin.pib_root, &namespace);
             }
@@ -179,7 +191,7 @@ impl Groups {
                 },
             };
             let group = joined.entry(kept.namespace.clone()).or_insert_with(|| {
-                Group::join(&admin, &self.member, &kept.namespace, 0, &self.svs, &cancel)
+                Group::join(&admin, &self.member, &kept.namespace, 0, &self.svs, self.retry, &cancel)
             });
             if kept.root {
                 group.put(&kept).await;
@@ -213,6 +225,7 @@ impl Group {
         namespace: &Name,
         seq: u64,
         svs: &SvsConfig,
+        retry: group::Retry,
         cancel: &CancellationToken,
     ) -> Self {
         let engine = &admin.engine;
@@ -223,10 +236,10 @@ impl Group {
             Arc::new(MulticastStrategy::new()) as Arc<dyn ErasedStrategy>,
         );
 
-        // Sync Interests in and out.
+        // Sync Interests in and out; nothing else (see the module docs).
+        let sync = prefix.clone().append_version(svs.dialect.sync_version());
         let (sync_id, sync_face) = local_face(engine, cancel);
-        engine.fib().add_nexthop(&prefix, sync_id, 0);
-        // This member's group Data.
+        engine.fib().add_nexthop(&sync, sync_id, 0);
         let (serve_id, serve_face) = local_face(engine, cancel);
         engine.fib().add_nexthop(&node, serve_id, 0);
         let served = Arc::new(RwLock::new(BTreeMap::new()));
@@ -236,6 +249,7 @@ impl Group {
             engine: engine.clone(),
             namespace: namespace.clone(),
             group: prefix.clone(),
+            sync,
             own: sync_id,
         };
         let (out_tx, out_rx) = mpsc::channel(FACE_BUFFER);
@@ -259,12 +273,14 @@ impl Group {
         let keeper = Arc::clone(admin);
         tokio::spawn(group::run(
             handle,
+            namespace.clone(),
             fetcher,
             Arc::clone(&admin.keyring),
             move |update| {
                 // `keep_update` logs what became of it.
                 let _ = keep_update(&keeper, update, Adopted::OverSync);
             },
+            retry,
             cancel.child_token(),
         ));
         tracing::info!(
@@ -403,25 +419,31 @@ fn serve(handle: InProcHandle, node: Name, served: Arc<RwLock<BTreeMap<u64, Byte
 struct Routes {
     engine: ForwarderEngine,
     namespace: Name,
+    /// `<group>`: the group Data of every member.
     group: Name,
-    /// The group's own sync face.
+    /// `<group>/v=<dialect>`: the Sync Interests.
+    sync: Name,
+    /// The group's own sync face, a nexthop of `sync` only.
     own: FaceId,
 }
 
 impl Routes {
-    /// Route the group over `face` too, if it is not already.
+    /// Route the group's Sync Interests and group Data over `face` too,
+    /// where they are not already.
     fn add(&self, face: FaceId) {
         if face == self.own {
             return;
         }
         let fib = self.engine.fib();
-        let routed = fib
-            .lpm_with_depth(&self.group)
-            .filter(|(depth, _)| *depth == self.group.len())
-            .is_some_and(|(_, entry)| entry.nexthops.iter().any(|hop| hop.face_id == face));
-        if !routed {
-            fib.add_nexthop(&self.group, face, MEMBER_COST);
-            tracing::debug!(target: "security", group = %self.group, face = face.0, "trust-context sync group routed over a face");
+        for prefix in [&self.group, &self.sync] {
+            let routed = fib
+                .lpm_with_depth(prefix)
+                .filter(|(depth, _)| *depth == prefix.len())
+                .is_some_and(|(_, entry)| entry.nexthops.iter().any(|hop| hop.face_id == face));
+            if !routed {
+                fib.add_nexthop(prefix, face, MEMBER_COST);
+                tracing::debug!(target: "security", prefix = %prefix, face = face.0, "trust-context sync group routed over a face");
+            }
         }
     }
 
@@ -442,23 +464,20 @@ impl Routes {
         }
     }
 
-    /// Whether `name` is one of the group's Sync Interests (`<group>/v=<N>`,
-    /// then its parameters digest).
+    /// Whether `name` is one of the group's Sync Interests
+    /// (`<group>/v=<dialect>`, then its parameters digest).
     fn is_sync_interest(&self, name: &Name) -> bool {
-        name.has_prefix(&self.group)
-            && name
-                .components()
-                .get(self.group.len())
-                .and_then(NameComponent::as_version)
-                .is_some()
+        name.has_prefix(&self.sync)
     }
 }
 
 /// Carry SVS's packets between it and the sync face: the group's Sync
-/// Interests out, after routing the group upstream; and in, after routing
-/// the group toward the face each arrived on. Anything else reaching the
-/// face (another member's Data being fetched, flooded by the multicast
-/// strategy) is not for SVS.
+/// Interests out and in, after routing the group upstream (at once, and again
+/// for each Sync Interest either way: SVS suppresses this node's own while its
+/// neighbours' keep arriving, so a relay may send none for minutes, and its
+/// members' Sync Interests must still reach the root device through it); and
+/// in, after routing the group toward the face each arrived on. Nothing
+/// else is routed to the face (see the module docs).
 fn pump(
     routes: Routes,
     face: Arc<InProcHandle>,
@@ -466,6 +485,7 @@ fn pump(
     into_svs: mpsc::Sender<Bytes>,
     cancel: CancellationToken,
 ) {
+    routes.upstream();
     let routes = Arc::new(routes);
     let (out_face, out_routes) = (Arc::clone(&face), Arc::clone(&routes));
     tokio::spawn(async move {
@@ -494,6 +514,7 @@ fn pump(
             if let Some(from) = routes.engine.source_face_id(&interest) {
                 routes.add(from);
             }
+            routes.upstream();
             if into_svs.send(pkt).await.is_err() {
                 break;
             }
@@ -506,14 +527,9 @@ struct EngineFetcher(tokio::sync::Mutex<Consumer>);
 
 #[async_trait::async_trait]
 impl ContextFetcher for EngineFetcher {
-    async fn fetch_content(&self, name: Name) -> Option<Bytes> {
-        match self.0.lock().await.fetch(name.clone()).await {
-            Ok(data) => data.content().cloned(),
-            Err(e) => {
-                tracing::debug!(target: "security", name = %name, error = %e, "trust-context sync fetch failed");
-                None
-            }
-        }
+    async fn fetch_content(&self, name: Name) -> Result<Bytes, String> {
+        let data = self.0.lock().await.fetch(name).await.map_err(|e| e.to_string())?;
+        data.content().cloned().ok_or_else(|| "the Data carries no Content".to_string())
     }
 }
 
@@ -568,8 +584,18 @@ mod tests {
         pib_root: &Path,
         cancel: &CancellationToken,
     ) -> Arc<TrustAdmin> {
+        node_with(engine, keyring, pib_root, cancel, quick())
+    }
+
+    fn node_with(
+        engine: &ForwarderEngine,
+        keyring: Keyring,
+        pib_root: &Path,
+        cancel: &CancellationToken,
+        svs: SvsConfig,
+    ) -> Arc<TrustAdmin> {
         let (sync, mut groups) = prepare(true, pib_root).unwrap();
-        groups.svs = quick();
+        groups.svs = svs;
         let admin = Arc::new(TrustAdmin {
             engine: engine.clone(),
             keyring: Arc::new(keyring),
@@ -724,5 +750,193 @@ mod tests {
         drop(rogue_handle);
         root_down.shutdown().await;
         dev_down.shutdown().await;
+    }
+
+    /// The group is routed upstream from the moment it is joined, and again
+    /// for each Sync Interest received, not only before one of this node's
+    /// own: SVS resets that timer whenever a neighbour's Sync Interest covers
+    /// the local state, so a relay between the root device and its devices
+    /// may send none for minutes. Seen in the end-to-end harness
+    /// (ndn-fwd/testbed/e2e, `lifecycle-push`): such a relay never routed the
+    /// group toward the root device, the root device's announcement of a
+    /// revocation went nowhere, and the devices behind the relay never got it.
+    #[tokio::test]
+    async fn the_group_is_routed_upstream_without_a_sync_interest_of_its_own() {
+        let (root_dev, relay) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ns: Name = "/home/bob".parse().unwrap();
+        let pib = FilePib::new(root_dev.path()).unwrap();
+        let init =
+            ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false, &ndn_cert::NewRootStore::File)
+                .await
+                .unwrap();
+
+        let cancel = CancellationToken::new();
+        let (engine, down) = engine().await;
+        let non_local_face = |engine: &ForwarderEngine| {
+            let id = engine.faces().alloc_id();
+            let (face, handle) = InProcFace::new_kind(id, FACE_BUFFER, FaceKind::Udp);
+            engine.add_face(face, cancel.child_token());
+            (id, handle)
+        };
+        // The relay's route toward the root device.
+        let (up, _up) = non_local_face(&engine);
+        engine.fib().add_nexthop(&ns, up, 10);
+
+        let keyring = Keyring::new();
+        ndn_cert::adopt_with_tofu(
+            &keyring,
+            &init.init.context_data,
+            &ns,
+            &ndn_cert::anchor_fingerprint(&init.init.anchor),
+        )
+        .unwrap();
+        // Its own Sync Interests would go out once an hour at the earliest.
+        let quiet = SvsConfig {
+            sync_interval: Duration::from_secs(3600),
+            ..quick()
+        };
+        let _relay = node_with(&engine, keyring, relay.path(), &cancel, quiet);
+
+        let prefix = group::group_prefix(&ns);
+        let routed_over = |face: FaceId| {
+            let (engine, prefix) = (engine.clone(), prefix.clone());
+            async move {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !engine
+                        .fib()
+                        .lpm_with_depth(&prefix)
+                        .filter(|(depth, _)| *depth == prefix.len())
+                        .is_some_and(|(_, e)| e.nexthops.iter().any(|hop| hop.face_id == face))
+                    {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            }
+        };
+        assert!(
+            routed_over(up).await,
+            "the group must be routed toward the root device once joined"
+        );
+
+        // A route toward the namespace added later is taken when a member's
+        // Sync Interest arrives.
+        let (up2, _up2) = non_local_face(&engine);
+        engine.fib().add_nexthop(&ns, up2, 10);
+        let (_, member) = non_local_face(&engine);
+        let sync = ndn_packet::encode::InterestBuilder::new(
+            prefix.clone().append_version(quick().dialect.sync_version()),
+        )
+        .build();
+        member.send(sync).await.unwrap();
+        assert!(
+            routed_over(up2).await,
+            "a member's Sync Interest must take the namespace's routes up again"
+        );
+
+        cancel.cancel();
+        down.shutdown().await;
+    }
+
+    /// A neighbour's fetch of a member's group Data, arriving here, must not
+    /// be routed to this node's own sync face, which passes only Sync
+    /// Interests to SVS: multicast there alone (the face it came from
+    /// excluded), it went nowhere, and this node's own fetch of the same
+    /// version, aggregated onto that PIT entry, timed out. Seen in the
+    /// end-to-end harness (ndn-fwd/testbed/e2e, `lifecycle-push`): a relay
+    /// multicast its fetch of the root device's revocation to a device just
+    /// before the device fetched it, and the device never adopted it. Here
+    /// the device's own fetch must reach the upstream that leads to the
+    /// publisher, and be answered.
+    #[tokio::test]
+    async fn a_neighbours_fetch_of_group_data_does_not_hold_up_this_nodes_own() {
+        let (root_dev, tab) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ns: Name = "/home/bob".parse().unwrap();
+        let pib = FilePib::new(root_dev.path()).unwrap();
+        let init =
+            ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false, &ndn_cert::NewRootStore::File)
+                .await
+                .unwrap();
+
+        let cancel = CancellationToken::new();
+        let (engine, down) = engine().await;
+        // The device's only link: toward the relay, which leads to the root
+        // device.
+        let up = engine.faces().alloc_id();
+        let (face, relay) = InProcFace::new_kind(up, FACE_BUFFER, FaceKind::Udp);
+        engine.add_face(face, cancel.child_token());
+        engine.fib().add_nexthop(&ns, up, 10);
+        let keyring = Keyring::new();
+        ndn_cert::adopt_with_tofu(
+            &keyring,
+            &init.init.context_data,
+            &ns,
+            &ndn_cert::anchor_fingerprint(&init.init.anchor),
+        )
+        .unwrap();
+        // Its own Sync Interests would go out once an hour at the earliest.
+        let quiet = SvsConfig {
+            sync_interval: Duration::from_secs(3600),
+            ..quick()
+        };
+        let _tab = node_with(&engine, keyring, tab.path(), &cancel, quiet);
+
+        let publisher = group::group_prefix(&ns)
+            .append_component(NameComponent::generic(Bytes::from_static(b"desk")));
+        // The group Data of the version the root device holds, v1.
+        let wanted = publisher.clone().append_segment(1);
+        let prefix = group::group_prefix(&ns);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !engine
+                .fib()
+                .lpm_with_depth(&prefix)
+                .filter(|(depth, _)| *depth == prefix.len())
+                .is_some_and(|(_, e)| e.nexthops.iter().any(|hop| hop.face_id == up))
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the device never joined the group");
+
+        // The relay's own fetch, multicast to the device, and the device's
+        // own right after it (within the PIT's 10 ms retransmission window,
+        // as in the harness: aggregated onto the relay's, not sent again).
+        let from_relay = ndn_packet::encode::InterestBuilder::new(wanted.clone())
+            .lifetime(Duration::from_secs(4))
+            .build();
+        let fetcher = EngineFetcher(tokio::sync::Mutex::new(engine.app_consumer(cancel.child_token())));
+        relay.send(from_relay).await.unwrap();
+        let fetch = {
+            let wanted = wanted.clone();
+            tokio::spawn(async move { fetcher.fetch_content(wanted).await })
+        };
+        let reached = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let pkt = relay.recv().await.expect("the device's link closed");
+                // An Interest sent on, not the Nack of the relay's own.
+                let interest = match ndn_packet::lp::LpPacket::decode(pkt.clone()) {
+                    Ok(lp) if lp.nack.is_none() => lp.fragment.map(Interest::decode),
+                    Ok(_) => None,
+                    Err(_) => Some(Interest::decode(pkt)),
+                };
+                if interest.is_some_and(|i| i.is_ok_and(|i| *i.name == wanted)) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "the device's fetch of the group Data never went toward the publisher"
+        );
+        let data = group::group_data(&publisher, &init.init.context_data).unwrap();
+        relay.send(data).await.unwrap();
+        let content = fetch.await.unwrap().expect("the device's fetch was not answered");
+        assert_eq!(&content, init.init.context_data.raw());
+
+        cancel.cancel();
+        down.shutdown().await;
     }
 }

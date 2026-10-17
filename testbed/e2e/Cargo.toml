@@ -1,0 +1,24 @@
+[package]
+name = "ndn-e2e"
+description = "End-to-end harness: runs real ndn-fwd daemons and CLI binaries through the personal-namespace life cycle (init, adopt, enroll, renew, revoke, recovery) inside a throwaway user+network+PID namespace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[package.metadata.scope]
+classification = "tooling"
+
+[[bin]]
+name = "ndn-e2e"
+path = "src/main.rs"
+
+[dependencies]
+# Deterministic mistyped / swapped recovery words: the harness picks a variant
+# whose BIP39 checksum fails, so the refusal it asserts is the checksum's.
+bip39      = { version = "2.2", default-features = false, features = ["std"] }
+serde_json = { workspace = true }
+tokio      = { workspace = true, features = ["rt", "signal", "macros", "time"] }
+
+[lints]
+workspace = true

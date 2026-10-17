@@ -14,6 +14,11 @@ members = [
     "binaries/ndn-trust-context",
     "binaries/tooling/audit-strict-mgmt-validation",
     "binaries/tooling/ndn-otel-bridge",
+    # Opt-in end-to-end harness (multi-daemon, minutes long): a member so it
+    # shares the lockfile and lints, kept out of default-members so a plain
+    # `cargo build` / `cargo test` never builds or runs it.
+    # Run: `cargo run -p ndn-e2e` (see testbed/e2e/README.md).
+    "testbed/e2e",
 ]
 default-members = [
     "crates/ndn-pib-idb",

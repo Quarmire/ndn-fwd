@@ -85,6 +85,7 @@ while `interop` carries reference peer tools such as `nfdc`, `ndnpeek`,
 | `tests/browser/` | Playwright tests for WebSocket / WASM / Web Bluetooth transports. |
 | `tests/audit/` | **New.** Per-audit-finding witness scripts. See the audit-to-test map below. |
 | `bench/` | Throughput, latency, internal throughput benchmarks. |
+| `e2e/` | End-to-end run of the personal-namespace life cycle (init, adopt, enroll, renew, revoke, recovery, refusals) with real daemons and CLIs in a throwaway user+network+PID namespace; no Docker. `cargo run -p ndn-e2e`. See [`e2e/README.md`](e2e/README.md). |
 
 ## Audit findings → witness tests
 
