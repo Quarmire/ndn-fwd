@@ -10,7 +10,9 @@
 //!
 //! - every issued certificate the PIB stores beside a key
 //!   (`keys/*/cert.data`, what `ndn-fwd enroll` stores), and one that
-//!   `security/enroll` adds while the daemon runs;
+//!   `security/enroll` or a renewal ([`crate::renewal`]) adds while the
+//!   daemon runs (the CA names a certificate after its key, so a renewed
+//!   one replaces the one served under that name);
 //! - on the root device, the CA's and the device's certificates
 //!   (`ca/ca-cert.data`, `ca/device-cert.data`, written by `ndn-fwd init`).
 //!

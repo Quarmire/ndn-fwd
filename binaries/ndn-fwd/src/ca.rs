@@ -17,7 +17,10 @@
 //! `/<ns>/<role>/<device>/KEY/…` only; `admin` and `node` certs need a device
 //! approval, tokens admit members and (guest-scoped) guests. An invite token
 //! minted with a role (`ndn-fwd-tokens new --role guest` → `guest-<hex>`) is
-//! scoped to `/<ns>/<role>`, so it cannot certify any other role.
+//! scoped to `/<ns>/<role>`, so it cannot certify any other role. Each role's
+//! certificates last its `[ca] cert_validity_days`, and a device holding a
+//! current certificate of a role in `[ca] renewable_roles` renews it without
+//! an invite (the CA's built-in `renewal` challenge; [`ndn_cert::renewal`]).
 //!
 //! A `device-approval` challenge holds each request in ONE
 //! [`PendingApprovalStore`], shared by the challenge, the mgmt
@@ -93,13 +96,9 @@ pub(crate) async fn prepare(
     pib_path: &Path,
 ) -> Result<(Vec<InProcFace>, CaSpawn)> {
     let prefix = parse_prefix(&cfg.prefix)?;
-    if cfg.cert_validity_days == 0 {
-        bail!(
-            "[ca] cert_validity_days = 0 would issue certificates that are already \
-             expired; set it to the lifetime of issued certificates in days (default {})",
-            CaTomlConfig::DEFAULT_CERT_VALIDITY_DAYS
-        );
-    }
+    // Refuse a lifetime or role the CA could not issue with before anything
+    // starts (the role policy is built again at spawn).
+    role_policy(prefix.clone(), cfg)?;
     let identity: Name = cfg
         .identity
         .parse()
@@ -201,6 +200,38 @@ fn parse_prefix(raw: &str) -> Result<Name> {
     Ok(prefix)
 }
 
+/// A day as a `Duration`.
+fn days(n: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(u64::from(n) * 86_400)
+}
+
+/// The namespace CA's issuance by role: each role's certificates last its
+/// `[ca] cert_validity_days`; the roles in `[ca] renewable_roles` renew.
+/// Refuses a lifetime of 0 days and an unknown role name.
+fn role_policy(namespace: Name, cfg: &CaTomlConfig) -> Result<RolePolicy> {
+    let lifetimes = &cfg.cert_validity_days;
+    if lifetimes.default == 0 || Role::ALL.iter().any(|r| lifetimes.for_role(r.as_str()) == 0) {
+        bail!(
+            "[ca] cert_validity_days: 0 days would issue certificates that are already \
+             expired; set the lifetime of issued certificates in days (default {})",
+            CaTomlConfig::DEFAULT_CERT_VALIDITY_DAYS
+        );
+    }
+    let renewable = cfg
+        .renewable_roles
+        .iter()
+        .map(|r| {
+            r.parse::<Role>()
+                .map_err(|e| anyhow::anyhow!("[ca] renewable_roles: {e}"))
+        })
+        .collect::<Result<Vec<Role>>>()?;
+    Ok(Role::ALL.into_iter().fold(RolePolicy::new(namespace), |policy, role| {
+        policy
+            .with_validity(role, days(lifetimes.for_role(role.as_str())))
+            .with_renewable(role, renewable.contains(&role))
+    }))
+}
+
 /// The namespace a CA identity `/<ns>/CA` serves: `/<ns>`.
 fn namespace_of(identity: &Name) -> Option<Name> {
     let comps = identity.components();
@@ -227,6 +258,10 @@ impl IssuancePolicy for AllIssuance {
 
     fn single_key_identity(&self, key_name: &Name) -> Option<SingleKeyIdentity> {
         self.0.iter().find_map(|p| p.single_key_identity(key_name))
+    }
+
+    fn offers_renewal(&self) -> bool {
+        self.0.iter().any(|p| p.offers_renewal())
     }
 }
 
@@ -392,18 +427,19 @@ pub(crate) fn spawn(
         "NDNCERT challenge set",
     );
 
-    // Certificates last `cert_validity_days`: a request that names no
-    // lifetime (what `ndn-fwd enroll` and the mobile enroll send) gets
-    // exactly this, and INFO advertises it as the maximum.
-    let lifetime = std::time::Duration::from_secs(u64::from(cfg.cert_validity_days) * 86_400);
+    // A request that names no lifetime (what `ndn-fwd enroll`, `ndn-fwd
+    // renew` and the mobile enroll send) gets its role's `cert_validity_days`
+    // (the default for a CA without the role layout), and INFO advertises the
+    // longest as the maximum.
+    let lifetimes = &cfg.cert_validity_days;
     let mut builder = NdncertCa::builder()
         .name(prep.prefix.to_string())
         .map_err(|e| anyhow::anyhow!("[ca] invalid prefix: {e}"))?
         .info("ndn-fwd NDNCERT CA")
         .signing_identity(&identity)
         .emit_attestations(cfg.emit_attestations)
-        .cert_lifetime(lifetime)
-        .max_cert_lifetime(lifetime);
+        .cert_lifetime(days(lifetimes.default))
+        .max_cert_lifetime(days(lifetimes.max_days()));
     if let Some(store) = prep.store {
         builder = builder.store(store);
     }
@@ -413,13 +449,25 @@ pub(crate) fn spawn(
 
     let mut issuance: Vec<Box<dyn IssuancePolicy>> = Vec::new();
     if let Some(namespace) = prep.namespace {
+        let policy = role_policy(namespace.clone(), cfg)?;
+        let terms: Vec<String> = Role::ALL
+            .iter()
+            .map(|&role| {
+                let t = policy.terms(role);
+                let days = t.validity.map_or(0, |v| v.as_secs() / 86_400);
+                let renew = if t.renewable { "renewable" } else { "not renewable" };
+                format!("{role} {days}d {renew}")
+            })
+            .collect();
         tracing::info!(
             target: "ca",
             namespace = %namespace,
+            roles = %terms.join(", "),
             "issuance follows the role layout: <namespace>/<role>/<device>/KEY/...; admin and \
-             node certs need a device approval",
+             node certs need a device approval; a current certificate of a renewable role \
+             renews without an invite",
         );
-        issuance.push(Box::new(RolePolicy::new(namespace)));
+        issuance.push(Box::new(policy));
     }
     if let Some(ra) = &cfg.require_attestation {
         let prefix: Name = ra.prefix.parse().with_context(|| {

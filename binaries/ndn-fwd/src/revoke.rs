@@ -254,6 +254,8 @@ mod tests {
             keeping: std::sync::Mutex::new(()),
             ca: with_ca.then(|| Arc::clone(&node.ca)),
             context_change: tokio::sync::Mutex::new(()),
+            renewing: tokio::sync::Mutex::new(()),
+            certificates_changed: tokio::sync::Notify::new(),
         }
     }
 

@@ -1,5 +1,6 @@
 //! `ndn-fwd init --namespace <ns>`, `ndn-fwd adopt <envelope>`, `ndn-fwd
-//! enroll <invite>`, `ndn-fwd revoke <name>` and `ndn-fwd context refresh` —
+//! enroll <invite>`, `ndn-fwd renew`, `ndn-fwd revoke <name>` and `ndn-fwd
+//! context refresh` —
 //! the onboarding UX over the [`ndn_cert::namespace`] /
 //! [`ndn_cert::onboarding`] / [`ndn_cert::invite`] /
 //! [`ndn_cert::context_update`] primitives. A node does not "join" anything:
@@ -8,7 +9,7 @@
 //! forwarders are configured separately.
 //!
 //! These are early-exit subcommands: when `args[1]` is `init`, `adopt`,
-//! `enroll`, `revoke`, `context` or `schema` ([`crate::schema_cmd`]), the
+//! `enroll`, `renew`, `revoke`, `context` or `schema` ([`crate::schema_cmd`]), the
 //! daemon does not start. They act on the node's PIB directory (`--pib
 //! <dir>`, else `[security].pib_path` from `-c/--config`, else
 //! `~/.ndn/pib`) or ask the running daemon:
@@ -38,6 +39,9 @@
 //!   token and makes the certified identity the PIB's default (see
 //!   [`crate::enroll`]). There is no offline form: the key belongs to the
 //!   daemon and the CA is reached through it.
+//! - `renew` asks the running daemon to renew, now, every certificate the
+//!   namespace CA issued to its keys — the same key, re-certified on proof
+//!   of the current certificate, no invite (see [`crate::renewal`]).
 //! - `revoke` (run on the root device) asks the running daemon to revoke a
 //!   device identity, key or certificate at its CA and in a new, root-signed
 //!   version of the namespace's trust context (see [`crate::revoke`]).
@@ -65,6 +69,7 @@ pub async fn maybe_run() -> Option<Result<()>> {
         Some("adopt") => Some(run_adopt(&args[2..]).await),
         Some("enroll") => Some(run_enroll(&args[2..]).await),
         Some("revoke") => Some(run_revoke(&args[2..]).await),
+        Some("renew") => Some(run_renew(&args[2..]).await),
         Some("context") => Some(run_context(&args[2..]).await),
         Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
         _ => None,
@@ -453,6 +458,8 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         println!("# key now, and loads this identity at every start (the PIB's default");
         println!("# identity; [security] identity in the config would take precedence).");
     }
+    println!("# The daemon renews this certificate for the same key before it expires");
+    println!("# ([security] renew_before) if the CA renews the role; `ndn-fwd renew` renews now.");
     for note in &info.at_next_start {
         println!("# At the next start: {note}");
     }
@@ -532,6 +539,68 @@ async fn run_revoke(args: &[String]) -> Result<()> {
     println!("# holds v{}: it fetches it at its next refresh ([security]", info.version);
     println!("# context_refresh_secs, default 300 s), or at once with `ndn-fwd context refresh`.");
     println!("# The device name is free to enroll again with a new key.");
+    Ok(())
+}
+
+/// How long the CLI waits for the daemon to renew: one renewal's exchanges
+/// for each of the (few) certificates it holds.
+fn daemon_renew_timeout() -> std::time::Duration {
+    ndn_identity::renew_via_engine_budget() * 2 + std::time::Duration::from_secs(5)
+}
+
+async fn run_renew(args: &[String]) -> Result<()> {
+    let (client, socket) = daemon(args, "renew").await?;
+    let wait = daemon_renew_timeout();
+    let resp = match client.security_renew(wait).await {
+        Ok(resp) => resp,
+        Err(ndn_ipc::ForwarderError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => bail!(
+            "no answer from the daemon at {socket} within {}s; it may still complete the \
+             renewal: check `ndn-ctl status` (signing: … valid_until=…) or the daemon's log",
+            wait.as_secs()
+        ),
+        Err(e) => return Err(e).with_context(|| format!("ask the daemon at {socket} to renew")),
+    };
+    if !resp.is_ok() {
+        bail!("renew refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+    }
+    let results: Vec<ndn_mgmt::RenewalInfo> = serde_json::from_str(&resp.status_text)
+        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
+    println!("# ndn-fwd renew (by the running daemon at {socket})");
+    let mut not_renewed = false;
+    for r in &results {
+        println!("key              = {}", r.key);
+        println!("previous         = {} (valid until {})", r.previous, r.previous_valid_until);
+        match r.state {
+            ndn_mgmt::RenewalState::Renewed => {
+                println!(
+                    "certificate      = {} (same key; stored, served, signing with it)",
+                    r.certificate.as_deref().unwrap_or("?")
+                );
+                println!(
+                    "valid_until      = {} ({}, as the CA's policy for the role decides)",
+                    r.valid_until.as_deref().unwrap_or("?"),
+                    days(r.validity_secs.unwrap_or(0))
+                );
+            }
+            ndn_mgmt::RenewalState::Refused => {
+                not_renewed = true;
+                println!("refused          = {}", r.detail);
+            }
+            ndn_mgmt::RenewalState::Failed => {
+                not_renewed = true;
+                println!("failed           = {}", r.detail);
+            }
+        }
+        println!();
+    }
+    if not_renewed {
+        bail!(
+            "a certificate was not renewed (see above); it keeps working until it expires. A \
+             failed renewal can be retried (the daemon also retries on its own); a refused one \
+             needs what the reason says — for an expired certificate, a revoked key or a role \
+             that does not renew, a new invite"
+        );
+    }
     Ok(())
 }
 

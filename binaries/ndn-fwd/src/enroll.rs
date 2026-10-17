@@ -50,7 +50,7 @@ fn status_of(e: &InviteEnrollError) -> u64 {
     }
 }
 
-fn iso(ns: u64) -> String {
+pub(crate) fn iso(ns: u64) -> String {
     let basic = ndn_security::iso8601::format_iso_basic(ns);
     format!("{}Z", String::from_utf8_lossy(&basic))
 }
@@ -243,6 +243,8 @@ pub(crate) async fn enroll(
     if let Some(own) = &admin.own_certs {
         own.serve(issued.data.raw().clone());
     }
+    // The renewal timer schedules the new certificate's renewal.
+    admin.certificates_changed.notify_one();
     let mut at_next_start = Vec::new();
     if let Some(reason) = context_warning {
         at_next_start.push(format!(
@@ -356,7 +358,7 @@ pub(crate) mod tests {
             }],
             // Above the 90 days a device once asked for: the CA's setting,
             // not the request, decides the lifetime.
-            cert_validity_days: 200,
+            cert_validity_days: ndn_config::CertValidityDays::uniform(200),
             ..CaTomlConfig::default()
         };
         let (faces, ca) = crate::ca::prepare(&cfg, root_dev).await.unwrap();
@@ -393,6 +395,8 @@ pub(crate) mod tests {
                 keeping: std::sync::Mutex::new(()),
                 ca: None,
                 context_change: tokio::sync::Mutex::new(()),
+                renewing: tokio::sync::Mutex::new(()),
+                certificates_changed: tokio::sync::Notify::new(),
             },
             fingerprint,
             context_data: ndn_packet::Data::decode(persisted.init.context_data.raw().clone())

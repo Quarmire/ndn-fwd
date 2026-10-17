@@ -2,7 +2,8 @@
 //! (`ndn-fwd adopt`), `security/enroll` (`ndn-fwd enroll`, see
 //! [`crate::enroll`]), `security/revoke` (`ndn-fwd revoke`, see
 //! [`crate::revoke`]), `security/context-refresh` (`ndn-fwd context
-//! refresh`, see [`crate::context_refresh`]) and the signing identity
+//! refresh`, see [`crate::context_refresh`]), `security/renew` (`ndn-fwd
+//! renew`, see [`crate::renewal`]) and the signing identity
 //! `security/identity-status` reports.
 //!
 //! Adopting: the daemon reads the `ndn-trust://anchor` link and adopts the
@@ -59,6 +60,12 @@ pub(crate) struct TrustAdmin {
     /// or a refresh (newer version fetched), so neither works from a version
     /// the other is replacing.
     pub(crate) context_change: tokio::sync::Mutex<()>,
+    /// One certificate renewal at a time (`security/renew` and the renewal
+    /// timer).
+    pub(crate) renewing: tokio::sync::Mutex<()>,
+    /// Woken whenever this node's certificates change (an enrollment, a
+    /// renewal), so the renewal timer reads them again.
+    pub(crate) certificates_changed: tokio::sync::Notify,
 }
 
 pub(crate) fn refusal(status_code: u64, reason: impl Into<String>) -> ndn_mgmt::TrustRefusal {
@@ -215,10 +222,24 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         crate::context_refresh::refresh_contexts(self, namespace).await
     }
 
+    async fn renew(&self) -> Result<Vec<ndn_mgmt::RenewalInfo>, ndn_mgmt::TrustRefusal> {
+        crate::renewal::renew_now(self).await
+    }
+
     fn signing_identity(&self) -> Option<ndn_mgmt::SigningIdentityInfo> {
         self.signing.as_ref().map(|s| {
             let (key, ephemeral) = s.current();
-            ndn_mgmt::SigningIdentityInfo { key, ephemeral }
+            // A self-signed key certificate that never expires reports none.
+            let valid_until = ndn_security::FilePib::open(&self.pib_root)
+                .and_then(|pib| pib.get_cert(&key))
+                .ok()
+                .map(|cert| cert.valid_until)
+                .filter(|&until| until != u64::MAX);
+            ndn_mgmt::SigningIdentityInfo {
+                key,
+                ephemeral,
+                valid_until,
+            }
         })
     }
 }

@@ -61,6 +61,7 @@ mod own_certs;
 // capabilities). Gated behind the `radio` feature.
 #[cfg(feature = "radio")]
 mod radio_face;
+mod renewal;
 mod revoke;
 mod schema_cmd;
 mod security_init;
@@ -147,6 +148,14 @@ USAGE:
                                           which the daemon stores and publishes;
                                           other nodes refuse the key once they
                                           hold that version
+  ndn-fwd renew [-c <config>]             renew, now, the certificates the
+                                          namespace CA issued to this node:
+                                          same key, no invite (the daemon also
+                                          renews on its own once [security]
+                                          renew_before of the lifetime is left);
+                                          an expired certificate, a revoked key
+                                          or a non-renewable role (guest) needs
+                                          a new invite
   ndn-fwd context refresh [<namespace>] [-c <config>]
                                           check the held trust context(s) for a
                                           newer version now (the daemon also
@@ -1027,10 +1036,19 @@ async fn main() -> Result<()> {
         keeping: std::sync::Mutex::new(()),
         ca: ca_state,
         context_change: tokio::sync::Mutex::new(()),
+        renewing: tokio::sync::Mutex::new(()),
+        certificates_changed: tokio::sync::Notify::new(),
     });
     context_refresh::spawn_periodic(
         Arc::clone(&trust_admin),
         fwd_config.security.context_refresh_secs,
+        cancel.clone(),
+    );
+    // Renew this node's certificates before they expire (`[security]
+    // renew_before`); `ndn-fwd renew` renews now.
+    renewal::spawn_periodic(
+        Arc::clone(&trust_admin),
+        fwd_config.security.renew_before,
         cancel.clone(),
     );
     let trust_context_handler: Arc<dyn mgmt_ndn::TrustAdminMgmtBackend> = trust_admin;
