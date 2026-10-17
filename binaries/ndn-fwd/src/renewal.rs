@@ -18,12 +18,17 @@
 //! newest valid certificate, so nothing else changes.
 //!
 //! The timer renews a certificate once its remaining validity falls below
-//! `renew_before` (a third of its lifetime by default). A failed attempt is
-//! retried after a growing backoff (about a minute, doubling up to an hour;
-//! an hour after a refusal) and logged as a WARN with the days the
-//! certificate has left. A certificate that expired, a key the CA revoked
-//! and a role it does not renew (guest, by default) cannot be renewed: the
-//! device needs a new invite. An expired one is reported once, as an ERROR.
+//! `renew_before` (a third of its lifetime by default). A duration at least
+//! the lifetime of the certificates the CA issues would make each one due as
+//! it is issued: those are renewed once a third of their lifetime is left,
+//! with a WARN, once. A key is not renewed again before the certificate its
+//! last renewal issued is due. A failed attempt is retried after a growing,
+//! jittered backoff (30–60 s, doubling up to 30–60 min; 30–60 min after a
+//! refusal) and logged as a WARN with the days the certificate has left; a
+//! PIB the daemon cannot read is logged as a WARN and retried likewise. A
+//! certificate that expired, a key the CA revoked and a role it does not
+//! renew (guest, by default) cannot be renewed: the device needs a new
+//! invite. An expired one is reported once, as an ERROR.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -59,10 +64,18 @@ struct Held {
 
 /// The certificates the PIB stores for device keys `/<ns>/<role>/<device>`
 /// of a namespace whose trust context this node holds, issued by a CA
-/// (`/<prefix>/CA/KEY/…`).
-fn held_certificates(admin: &TrustAdmin) -> Vec<Held> {
-    let Ok(pib) = FilePib::open(&admin.pib_root) else {
-        return Vec::new();
+/// (`/<prefix>/CA/KEY/…`); none when there is no PIB yet. Err: the PIB
+/// cannot be read (why, with its path).
+fn held_certificates(admin: &TrustAdmin) -> Result<Vec<Held>, String> {
+    let unreadable = |e: ndn_security::PibError| {
+        format!("cannot read the PIB {}: {e}", admin.pib_root.display())
+    };
+    let pib = match FilePib::open(&admin.pib_root) {
+        Ok(pib) => pib,
+        Err(ndn_security::PibError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(unreadable(e)),
     };
     let namespaces: Vec<Name> = admin
         .keyring
@@ -70,18 +83,35 @@ fn held_certificates(admin: &TrustAdmin) -> Vec<Held> {
         .iter()
         .map(|c| c.namespace().clone())
         .collect();
-    pib.list_keys()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|key| namespaces.iter().any(|ns| parse_device_key(ns, key).is_some()))
-        .filter_map(|key| {
-            let wire = pib.get_issued_cert(&key).ok().flatten()?;
-            let data = Data::decode(wire).ok()?;
-            let cert = Certificate::decode(&data).ok()?;
-            ndn_cert::issuing_ca_prefix(&cert)?;
-            Some(Held { key, data, cert })
-        })
-        .collect()
+    let mut held = Vec::new();
+    for key in pib.list_keys().map_err(unreadable)? {
+        if !namespaces.iter().any(|ns| parse_device_key(ns, &key).is_some()) {
+            continue;
+        }
+        let Some(wire) = pib.get_issued_cert(&key).map_err(unreadable)? else {
+            continue;
+        };
+        let decoded = Data::decode(wire)
+            .map_err(|e| e.to_string())
+            .and_then(|data| Certificate::decode(&data).map(|cert| (data, cert)).map_err(|e| e.to_string()));
+        let (data, cert) = match decoded {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                tracing::warn!(
+                    target: "security",
+                    key = %key,
+                    pib = %admin.pib_root.display(),
+                    error = %e,
+                    "the stored certificate of this key does not decode; it is not renewed"
+                );
+                continue;
+            }
+        };
+        if ndn_cert::issuing_ca_prefix(&cert).is_some() {
+            held.push(Held { key, data, cert });
+        }
+    }
+    Ok(held)
 }
 
 /// Renew `held` and keep the new certificate: PIB, validation cache,
@@ -188,7 +218,12 @@ fn info(held: &Held, result: &Result<Certificate, (RenewalState, String)>) -> Re
 /// node's keys now, whatever their remaining validity.
 pub(crate) async fn renew_now(admin: &TrustAdmin) -> Result<Vec<RenewalInfo>, TrustRefusal> {
     let _one_at_a_time = admin.renewing.lock().await;
-    let held = held_certificates(admin);
+    let held = held_certificates(admin).map_err(|why| {
+        refusal(
+            500,
+            format!("{why}: nothing was renewed. Make the PIB readable by this daemon, then renew again"),
+        )
+    })?;
     if held.is_empty() {
         return Err(refusal(
             404,
@@ -239,8 +274,16 @@ pub(crate) fn spawn_periodic(
     tokio::spawn(async move {
         // Per certificate: consecutive failures and when to try again.
         let mut retry: HashMap<Name, (u32, Instant)> = HashMap::new();
+        // Per key: when the certificate its last renewal issued is due. The
+        // key is not renewed again before then, whichever certificate the
+        // PIB reports as its current one.
+        let mut renewed: HashMap<Name, u64> = HashMap::new();
         // Expired certificates, reported once.
         let mut expired: HashSet<Name> = HashSet::new();
+        // Keys whose certificates are shorter than `renew_before`, reported once.
+        let mut short_lived: HashSet<Name> = HashSet::new();
+        // Consecutive scans that could not read the PIB.
+        let mut unreadable: u32 = 0;
         let mut wait = FIRST_CHECK_AFTER;
         loop {
             tokio::select! {
@@ -248,13 +291,46 @@ pub(crate) fn spawn_periodic(
                 _ = tokio::time::sleep(wait) => {}
                 _ = admin.certificates_changed.notified() => {}
             }
-            let held = held_certificates(&admin);
+            let held = match held_certificates(&admin) {
+                Ok(held) => {
+                    unreadable = 0;
+                    held
+                }
+                Err(why) => {
+                    unreadable += 1;
+                    wait = ndn_identity::backoff_delay(RETRY_BASE, unreadable - 1);
+                    tracing::warn!(
+                        target: "security",
+                        error = %why,
+                        retry_in_secs = wait.as_secs(),
+                        "no certificate is renewed while the PIB cannot be read; they expire unless \
+                         it becomes readable"
+                    );
+                    continue;
+                }
+            };
             retry.retain(|name, _| held.iter().any(|h| *h.cert.name == *name));
+            renewed.retain(|key, _| held.iter().any(|h| h.key == *key));
             let mut next = MAX_WAIT;
             for h in &held {
                 let name = (*h.cert.name).clone();
                 let now = now_ns();
-                let due_at = before.renew_at(h.cert.valid_from, h.cert.valid_until);
+                if before.exceeds_lifetime(h.cert.valid_from, h.cert.valid_until)
+                    && short_lived.insert(h.key.clone())
+                {
+                    tracing::warn!(
+                        target: "security",
+                        key = %h.key,
+                        certificate = %name,
+                        validity_days = (h.cert.valid_until.saturating_sub(h.cert.valid_from)) / 86_400_000_000_000,
+                        renew_before = ?before,
+                        "[security] renew_before is at least the lifetime of the certificates this \
+                         CA issues; renewing them once a third of their lifetime is left instead"
+                    );
+                }
+                let due_at = before
+                    .renew_at(h.cert.valid_from, h.cert.valid_until)
+                    .max(renewed.get(&h.key).copied().unwrap_or(0));
                 if now < due_at {
                     next = next.min(Duration::from_nanos(due_at - now));
                     continue;
@@ -273,9 +349,13 @@ pub(crate) fn spawn_periodic(
                     let _one_at_a_time = admin.renewing.lock().await;
                     renew_one(&admin, h).await
                 };
-                let Err((state, why)) = result else {
-                    retry.remove(&name);
-                    continue;
+                let (state, why) = match result {
+                    Ok(issued) => {
+                        retry.remove(&name);
+                        renewed.insert(h.key.clone(), before.renew_at(issued.valid_from, issued.valid_until));
+                        continue;
+                    }
+                    Err(failure) => failure,
                 };
                 let days_left = (h.cert.valid_until as f64 - now_ns() as f64) / 86_400e9;
                 if days_left <= 0.0 {
@@ -428,5 +508,57 @@ mod tests {
         assert_eq!(renewed.public_key, before.public_key, "for the same key");
         cancel.cancel();
         shutdown.shutdown().await;
+    }
+
+    /// A `renew_before` longer than the lifetime the CA issues never makes
+    /// the timer renew in a loop (each new certificate due as it is issued).
+    #[tokio::test]
+    async fn renew_before_longer_than_the_lifetime_does_not_renew_in_a_loop() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-m1"]).await;
+        let ndn_mgmt::EnrollOutcome::Enrolled(enrolled) =
+            crate::enroll::enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
+                .await
+                .expect("enrolls");
+        let key: Name = enrolled.key.parse().unwrap();
+        let lifetime = Duration::from_secs(enrolled.validity_secs);
+        let crate::enroll::tests::Node {
+            admin, shutdown, ..
+        } = node;
+        let admin = Arc::new(admin);
+        let cancel = CancellationToken::new();
+        spawn_periodic(
+            Arc::clone(&admin),
+            RenewBeforeConfig::Before(lifetime + Duration::from_secs(86_400)),
+            cancel.clone(),
+        );
+        admin.certificates_changed.notify_one();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let pib = FilePib::open(device.path()).unwrap();
+        assert!(pib.valid_cert_wires(&key).unwrap().len() <= 2, "renewed at most once");
+        cancel.cancel();
+        shutdown.shutdown().await;
+    }
+
+    /// A PIB the daemon cannot read is refused as unreadable, not as a node
+    /// holding nothing (whose advice, enrolling again, would burn an invite).
+    #[tokio::test]
+    async fn an_unreadable_pib_is_not_reported_as_holding_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-m1"]).await;
+        crate::enroll::enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
+            .await
+            .expect("enrolls");
+        let keys = device.path().join("keys");
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Permissions bind only an unprivileged user.
+        let enforced = std::fs::read_dir(&keys).is_err();
+        let refused = renew_now(&node.admin).await;
+        std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if enforced {
+            assert_ne!(refused.unwrap_err().status_code, 404);
+        }
+        node.shutdown.shutdown().await;
     }
 }

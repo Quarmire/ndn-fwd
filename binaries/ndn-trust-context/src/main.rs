@@ -50,7 +50,9 @@ enum Cmd {
         /// python-lvs-compiled binary schema file.
         #[arg(long)]
         schema_lvs: Option<PathBuf>,
-        /// CA endpoint name for enrollment. Repeatable.
+        /// CA identity for enrollment, e.g. `<namespace>/CA`. Repeatable. Only
+        /// a CA named here (or an anchor) may certify keys under the namespace
+        /// that are not under its own identity.
         #[arg(long = "ca")]
         ca_endpoints: Vec<String>,
         /// Revoked key/cert name. Repeatable.

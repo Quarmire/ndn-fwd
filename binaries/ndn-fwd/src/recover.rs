@@ -2,8 +2,9 @@
 //! namespace whose root device is lost, with a recovery kit
 //! ([`ndn_cert::recovery`]).
 //!
-//! On the replacement device, its own daemon running and linked to the
-//! namespace (directly or through a relay):
+//! On the replacement device, its own daemon running (the one that uses the
+//! PIB recovered into) and linked to the namespace (directly or through a
+//! relay):
 //!
 //! 1. **The newest version, by name.** The daemon refreshes the context it
 //!    holds (RDR, under the continuity rule — the same as `ndn-fwd context
@@ -16,23 +17,30 @@
 //!    is refused still stops it.
 //! 2. **The kit.** Its key must be a recovery anchor of that version (and
 //!    the version must verify under its own anchors), else nothing is
-//!    signed. A mistyped word list is refused by its checksum.
+//!    signed. A mistyped word list is refused by its checksum. A YubiKey
+//!    kit's token is selected with `--kit-yubikey-serial/--kit-yubikey-slot`.
 //! 3. **The new root device.** [`ndn_cert::recover_namespace_in_pib`]: a new
-//!    root in the root store the operator picks (as `init`), a new CA key
-//!    and admin identity with fresh key ids, version `N+1` signed by the
-//!    recovery key — the old root kept as an anchor (`--old-root
-//!    destroyed`) or removed and revoked with the old CA and admin keys
-//!    (`--old-root compromised`) — and version `N+2`, the same content
-//!    signed by the new root.
+//!    root in the root store the operator picks (as `init`; never on the
+//!    kit's token, nor over an occupied slot without `--replace-slot`), a
+//!    new CA key and admin identity with fresh key ids, version `N+1` signed
+//!    by the recovery key — the old root kept as an anchor with every
+//!    recovery kit (`--old-root destroyed`), or removed and revoked with the
+//!    old CA and admin keys and every recovery kit but the one used and
+//!    those named with `--keep-kit` (`--old-root compromised`: whoever held
+//!    the root could have added a kit) — and version `N+2`, the same content
+//!    signed by the new root. Every anchor `N+1` keeps is printed.
 //! 4. **Hand-over.** `N+1`, then `N+2`, go to the daemon
 //!    (`security/context-update`), which adopts each by the continuity rule,
 //!    stores and publishes it; every other node adopts them the same way at
 //!    its next refresh, one after the other (a node that missed `N+1`
-//!    follows the versions by name, `ndn_cert::follow_versions`). If the
-//!    daemon refuses `N+1`, everything step 3 wrote is removed again. Once
-//!    `N+2` is taken, the newest version is signed by the new root, so the
-//!    root's fingerprint is the namespace's expected fingerprint again: the
-//!    anchor link printed, and invites minted from then on, carry it.
+//!    follows the versions by name, `ndn_cert::follow_versions`). Only the
+//!    daemon's refusal of `N+1` removes what step 3 wrote; a request it does
+//!    not answer in time is made again, and the answer says what became of
+//!    `N+1` ([`crate::recovery_kit::hand_over`]). Once `N+2` is taken, the
+//!    newest version is signed by the new root, so the root's fingerprint is
+//!    the namespace's expected fingerprint again: the anchor link printed,
+//!    and invites minted from then on, carry it. Until then no link is
+//!    printed.
 
 use anyhow::{Context, Result, bail};
 use ndn_cert::{
@@ -45,7 +53,7 @@ use ndn_security::FilePib;
 use ndn_trust_envelope::TrustEnvelope;
 
 use crate::onboard::{flag, pib_dir};
-use crate::recovery_kit::{KitSpec, hand_over, open_kit};
+use crate::recovery_kit::{KitSpec, NotTaken, hand_over, open_kit};
 
 /// How long the CLI waits for the daemon to fetch the newest version.
 const DAEMON_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -183,8 +191,10 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         );
     }
 
-    // 1. The newest version, by name.
+    // 1. The newest version, by name — from the daemon that uses this PIB,
+    //    which is also the one the new versions go to.
     let (client, socket) = crate::onboard::daemon(args, "recover").await?;
+    crate::recovery_kit::ensure_daemon_pib(&client, &socket, &pib_dir).await?;
     let from_held = args.iter().any(|a| a == "--from-held");
     let (newest, confirmed) =
         fetch_newest(&client, &socket, &namespace, kit_fingerprint, from_held).await?;
@@ -209,41 +219,70 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         .with_context(|| format!("the stored {namespace} v{newest} does not verify"))?;
 
     // 2. The kit: its key must be a recovery anchor of v{newest}.
-    let recovery = open_kit(args, &spec, &namespace, &format!("Recovering {namespace}")).await?;
-    let recovery_key = kit_anchor(
+    let (recovery, kit_token) =
+        open_kit(args, &spec, &namespace, &format!("Recovering {namespace}")).await?;
+    kit_anchor(
         &held,
         &recovery
             .public_key()
             .context("the kit's key reports no public key")?,
     )?;
 
-    // 3. The new root device.
-    let root = crate::root_key::new_root_store(args)?;
+    // 3. The new root device: never on the kit's token, which must sign
+    //    N+1 after the new root exists.
+    let mut root = crate::root_key::new_root_store(args)?;
+    if let (ndn_cert::NewRootStore::YubikeyPiv { guard, .. }, Some(serial)) = (&mut root, kit_token)
+    {
+        guard.not_on = Some((serial, "the recovery kit used here".to_string()));
+    }
+    let kept_kits = crate::onboard::flag_values(args, "--keep-kit")
+        .into_iter()
+        .map(|key| {
+            key.parse::<Name>()
+                .map_err(|e| anyhow::anyhow!("--keep-kit {key:?} is not an NDN name: {e}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let recovered = recover_namespace_in_pib(
         &pib,
         &held_data,
         recovery.as_ref(),
         &device,
         old_root,
+        &kept_kits,
         &root,
     )
     .await?;
     drop(root);
-    let recovery_fp = held
-        .anchor_for(&recovery_key)
-        .map(|a| anchor_fingerprint(&a))
-        .unwrap_or_default();
     drop(recovery);
 
-    // 4. Hand N+1, then N+2, to the daemon.
+    // 4. Hand N+1, then N+2, to the daemon. Only the daemon's refusal of
+    //    N+1 undoes step 3: without an answer it may still adopt N+1, which
+    //    names the new root.
+    let next = recovered.version.bump.context.version();
     let handed = match hand_over(args, &pib_dir, &recovered.version.bump).await {
         Ok(handed) => handed,
-        Err(e) => {
+        Err(NotTaken::Refused(e)) => {
             recovered.undo(&pib);
             return Err(e.context(
                 "the daemon did not take the recovered version; everything this command wrote \
                  to the PIB was removed again and nothing changed",
             ));
+        }
+        Err(NotTaken::Unknown(e)) => {
+            return Err(e.context(format!(
+                "whether the daemon adopted v{next} is not known, so nothing this command wrote \
+                 was removed (v{next} names the new root {}). `ndn-fwd recovery-kit list --pib \
+                 {pib}` shows the version the daemon stored: v{next} means the recovery took — \
+                 run `ndn-fwd recovery-kit create --pib {pib}` then, so the new root signs the \
+                 newest version; v{} once the daemon is idle or restarted means it did not — \
+                 remove {pib}/root, {pib}/ca and the keys {} and {} from the PIB, and recover \
+                 again",
+                recovered.anchor.key_name(),
+                recovered.previous_version,
+                recovered.ca_key,
+                recovered.device_key,
+                pib = pib_dir.display(),
+            )));
         }
     };
     // N+1 is the namespace's from here on (its new root is an anchor of
@@ -252,7 +291,6 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     let root_handed = hand_over(args, &pib_dir, &recovered.root_version).await;
 
     let v = &recovered.version;
-    let next = v.bump.context.version();
     let settled = recovered.root_version.context.version();
     let root_fp = hex(&anchor_fingerprint(&recovered.anchor));
     let pib_abs = std::fs::canonicalize(&pib_dir).unwrap_or_else(|_| pib_dir.clone());
@@ -279,8 +317,12 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         Ok(handed) => println!(
             "trust_context  = v{next} -> v{settled} (the same, signed by the new root; {handed})"
         ),
-        Err(e) => println!(
+        Err(NotTaken::Refused(e)) => println!(
             "trust_context  = v{settled} (the same, signed by the new root) NOT taken: {e:#}"
+        ),
+        Err(NotTaken::Unknown(e)) => println!(
+            "trust_context  = v{settled} (the same, signed by the new root) NOT KNOWN whether \
+             taken: {e:#}"
         ),
     }
     println!("root_key       = {}", recovered.anchor.key_name());
@@ -299,37 +341,57 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         "device_cert    = {} (issued by the new CA)",
         recovered.device_cert_path.display()
     );
-    match old_root {
-        OldRoot::Destroyed => {
-            for key in &v.old_root_keys {
-                println!("kept_anchor    = {key} (the old root; its certificates stay valid)");
-            }
-        }
-        OldRoot::Compromised => {
-            for key in &v.bump.added {
-                println!("revoked        = {key}");
-            }
-        }
+    // Every anchor v{next} keeps, so a key nobody expects stands out.
+    let mut anchors: Vec<Name> = v
+        .bump
+        .context
+        .anchors()
+        .iter()
+        .map(|a| a.value().key_name())
+        .collect();
+    anchors.sort();
+    anchors.dedup();
+    for key in &anchors {
+        let what = if *key == recovered.anchor.key_name() {
+            "the new root"
+        } else if *key == v.recovery_key {
+            "recovery kit, used here"
+        } else if v.kept_kits.contains(key) {
+            "recovery kit"
+        } else {
+            "the old root; its certificates stay valid"
+        };
+        println!("anchor         = {key} ({what})");
     }
-    // The newest version's signer is what an anchor link's expected
-    // fingerprint authenticates: the new root once it signed v{settled}.
-    let (fingerprint, version, newest) = match &root_handed {
-        Ok(_) => (
-            anchor_fingerprint(&recovered.anchor),
-            settled,
-            &recovered.root_version.data,
-        ),
-        Err(_) => (recovery_fp, next, &v.bump.data),
-    };
-    let link = |context_data| TrustEnvelope::Anchor {
-        namespace: Some(namespace.to_string()),
-        fingerprint: Some(fingerprint),
-        version: Some(version),
-        context_data,
-        context_content: None,
-    };
-    println!("anchor_uri     = {}", link(Some(newest.raw().clone())).to_uri());
-    println!("anchor_uri_fp  = {}", link(None).to_uri());
+    for key in &v.bump.added {
+        let what = if v.removed_kits.contains(key) {
+            "a recovery kit not named with --keep-kit"
+        } else if v.old_root_keys.contains(key) {
+            "the old root"
+        } else {
+            "a key of the old root device"
+        };
+        println!("revoked        = {key} ({what})");
+    }
+    // An anchor link names the newest version's signer as the expected
+    // fingerprint: the new root, once it signed v{settled}. Until then no
+    // link is printed — one with the recovery key's fingerprint would stop
+    // working as soon as the root signs anything, and would put the kit's
+    // fingerprint into circulation.
+    if root_handed.is_ok() {
+        let link = |context_data| TrustEnvelope::Anchor {
+            namespace: Some(namespace.to_string()),
+            fingerprint: Some(anchor_fingerprint(&recovered.anchor)),
+            version: Some(settled),
+            context_data,
+            context_content: None,
+        };
+        println!(
+            "anchor_uri     = {}",
+            link(Some(recovered.root_version.data.raw().clone())).to_uri()
+        );
+        println!("anchor_uri_fp  = {}", link(None).to_uri());
+    }
     println!();
     println!("# Restart this device's daemon with these lines in ndn-fwd.toml, so it signs as its");
     println!(
@@ -372,15 +434,19 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         }
         Err(_) => {
             println!(
-                "# v{settled} was not taken, so the newest version is signed by the recovery key and"
+                "# v{settled} is not known to be taken, so the newest version may be signed by the"
             );
             println!(
-                "# the anchor links carry its fingerprint. Run `ndn-fwd recovery-kit create` now: the"
+                "# recovery key, and no anchor link is printed. Once the daemon is reachable and"
             );
             println!(
-                "# root signs that version, and its fingerprint ({root_fp}) becomes the namespace's"
+                "# holds v{next} (`ndn-fwd recovery-kit list --pib {}`), run `ndn-fwd recovery-kit",
+                pib_abs.display()
             );
-            println!("# expected fingerprint for anchor links and invites.");
+            println!(
+                "# create`: the root signs the newest version, and its fingerprint ({root_fp})"
+            );
+            println!("# becomes the namespace's expected fingerprint for anchor links and invites.");
         }
     }
     match old_root {
@@ -418,6 +484,12 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         }
     }
     println!("#");
+    if !v.removed_kits.is_empty() {
+        println!(
+            "# Revoked recovery kits (whoever held the old root could have added them): any of"
+        );
+        println!("# them that was yours no longer recovers anything; create new ones.");
+    }
     println!("# Create a new recovery kit now (`ndn-fwd recovery-kit create`); the kit used here");
     println!(
         "# stays a recovery anchor until `ndn-fwd recovery-kit revoke {}`.",

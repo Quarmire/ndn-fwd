@@ -108,7 +108,7 @@ USAGE:
                [--force] [--root-store <store>]
                [--passphrase-file <path> | --pin-file <path>]
                [--yubikey-slot 9c] [--yubikey-serial <n>]
-               [--touch-policy always|cached|never]
+               [--touch-policy always|cached|never] [--replace-slot]
                                           create a namespace on this root
                                           device: its root key in a root store,
                                           and in the PIB its CA identity <ns>/CA,
@@ -128,7 +128,10 @@ USAGE:
                                           unprotected: tests). A passphrase or
                                           PIN is read from NDN_ROOT_PASSPHRASE /
                                           NDN_ROOT_PIN, the --*-file, else the
-                                          terminal; never from the command line
+                                          terminal; never from the command line.
+                                          A yubikey-piv slot that already holds
+                                          a key is refused unless --replace-slot
+                                          (its key is destroyed)
   ndn-fwd adopt <anchor-link> [-c <config>] [--pib <dir>]
                                           adopt the namespace an ndn-trust://anchor
                                           link names: the running daemon checks
@@ -172,8 +175,10 @@ USAGE:
   ndn-fwd renew [-c <config>]             renew, now, the certificates the
                                           namespace CA issued to this node:
                                           same key, no invite (the daemon also
-                                          renews on its own once [security]
-                                          renew_before of the lifetime is left);
+                                          renews on its own once less than
+                                          [security] renew_before is left: a
+                                          fraction of the lifetime, or a time
+                                          before expiry such as \"30d\");
                                           an expired certificate, a revoked key
                                           or a non-renewable role (guest) needs
                                           a new invite
@@ -182,7 +187,10 @@ USAGE:
                                           newer version now (the daemon also
                                           checks every [security]
                                           context_refresh_secs) and adopt one
-                                          signed by the held version's root
+                                          signed by an anchor of the held
+                                          version (its root or a recovery
+                                          kit), following the versions in
+                                          between one by one after a recovery
   ndn-fwd schema show [--pib <dir>] [--namespace <ns>]
                                           print an adopted context's trust
                                           schema as readable rules
@@ -203,8 +211,8 @@ USAGE:
                                           YubiKey (PIV takes no Ed25519 key)
   ndn-fwd recovery-kit create --format words|file|yubikey [--out <path>]
                 [--kit-passphrase-file <path>] [--kit-pin-file <path>]
-                [--yubikey-slot 9d] [--yubikey-serial <n>]
-                [--touch-policy always|cached|never]
+                [--kit-yubikey-slot 9d] [--kit-yubikey-serial <n>]
+                [--kit-touch-policy always|cached|never] [--replace-slot]
                 [--passphrase-file <path> | --pin-file <path>] [--pib <dir>]
                                           on the root device: make a recovery
                                           kit — a separate recovery key added
@@ -215,7 +223,11 @@ USAGE:
                                           file (a SafeBag sealed by a kit
                                           passphrase, written 0600 to --out) or
                                           yubikey (P-256 on a second token's PIV
-                                          slot). Kit secrets come from
+                                          slot; never the root's token, never
+                                          over a slot's key unless
+                                          --replace-slot). The version goes to
+                                          the daemon that uses this PIB. Kit
+                                          secrets come from
                                           NDN_KIT_PASSPHRASE / NDN_KIT_PIN /
                                           NDN_KIT_WORDS, the --*-file, else the
                                           terminal
@@ -223,28 +235,43 @@ USAGE:
                                           the anchors of the held trust context:
                                           root and recovery kits
   ndn-fwd recovery-kit check words|yubikey|<kit-file> [--namespace <ns>]
+                [--words-file <path>] [--kit-passphrase-file <path>]
+                [--kit-pin-file <path>] [--kit-yubikey-slot <slot>]
+                [--kit-yubikey-serial <n>] [--pib <dir>]
                                           open a kit and confirm its key is a
                                           recovery anchor of the held context;
                                           signs nothing
   ndn-fwd recovery-kit revoke <recovery-key-name>
+                [--passphrase-file <path> | --pin-file <path>] [--pib <dir>]
                                           on the root device: a new version
                                           without that recovery anchor, revoking
                                           its key
   ndn-fwd recover --kit words|yubikey|<kit-file> --old-root destroyed|compromised
-                [--namespace <ns>] [--device <name>] [--root-store <store>]
+                [--keep-kit <recovery-key-name>]... [--namespace <ns>]
+                [--device <name>] [--words-file <path>]
+                [--kit-passphrase-file <path>] [--kit-pin-file <path>]
+                [--kit-yubikey-slot <slot>] [--kit-yubikey-serial <n>]
+                [--root-store <store>] [--passphrase-file <path> | --pin-file <path>]
+                [--yubikey-slot 9c] [--yubikey-serial <n>]
+                [--touch-policy always|cached|never] [--replace-slot]
                 [-c <config>] [--pib <dir>] [--from-held]
                                           on a replacement device whose daemon
-                                          holds the namespace's context: fetch
-                                          its newest version, then make this the
-                                          root device — a new root (as init), a
-                                          new CA key and admin identity — with a
-                                          version signed by the kit's recovery
-                                          key, handed to the daemon. destroyed:
-                                          the old root stays an anchor, devices
-                                          keep working and renew with the new
-                                          CA; compromised: the old root, CA and
-                                          admin keys are revoked and devices
-                                          enroll again. --from-held: when no
+                                          (the one using this PIB) holds the
+                                          namespace's context: fetch its newest
+                                          version, then make this the root
+                                          device — a new root (as init; never
+                                          on the kit's token), a new CA key and
+                                          admin identity — with a version
+                                          signed by the kit's recovery key,
+                                          handed to the daemon. destroyed: the
+                                          old root and every recovery kit stay
+                                          anchors, devices keep working and
+                                          renew with the new CA; compromised:
+                                          the old root, CA and admin keys are
+                                          revoked and devices enroll again, and
+                                          of the other recovery kits only those
+                                          named with --keep-kit stay (the rest
+                                          are revoked). --from-held: when no
                                           other node answers for the namespace,
                                           recover from the version held (you
                                           vouch that no newer one exists)

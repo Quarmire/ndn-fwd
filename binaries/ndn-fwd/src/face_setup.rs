@@ -160,7 +160,16 @@ async fn run_face_setup_inner(
                         }
                     };
                     let face_id = id_for(face_idx);
-                    let local_port = peer_face_port(bind.as_deref(), &udp_listeners);
+                    let bind_addr = match bind.as_deref() {
+                        // An unparsable bind is refused (and logged), not
+                        // replaced by an address nobody configured.
+                        Some(b) => match parse_bind_addr(b, "UDP") {
+                            Some(addr) => Some(addr),
+                            None => continue,
+                        },
+                        None => None,
+                    };
+                    let local_port = peer_face_port(bind_addr, &udp_listeners);
                     let eng = engine.clone();
                     tokio::spawn(async move {
                         match ndn_face::net::UdpFace::bind_connected(local_port, peer, face_id)
@@ -168,7 +177,7 @@ async fn run_face_setup_inner(
                         {
                             Ok(face) => {
                                 let c = CancellationToken::new();
-                                tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, port = ?local_port, "udp pre-connected face created");
+                                tracing::info!(target: "face.udp", face = face_id.0, remote = %peer, local = ?ndn_transport::Transport::local_uri(&face), port = ?local_port, "udp pre-connected face created");
                                 // PERMANENT, not Persistent. This is a
                                 // statically CONFIGURED peer endpoint, so it
                                 // must outlive I/O errors: a Persistent face is
@@ -197,7 +206,7 @@ async fn run_face_setup_inner(
                                 );
                             }
                             Err(e) => {
-                                tracing::error!(target: "face.udp", remote = %peer, port = ?local_port, error = %e, "failed to create UDP face");
+                                tracing::error!(target: "face.udp", remote = %peer, bind = %local_port.addr(), error = %e, "failed to create UDP face");
                             }
                         }
                     });
@@ -684,9 +693,11 @@ fn udp_listener_in_use(addr: std::net::SocketAddr) -> anyhow::Error {
     )
 }
 
-/// The local port of a configured UDP peer face (`[[face]] kind = "udp"` with
-/// `remote`, optional `bind`), given the addresses this forwarder's UDP
-/// listeners are bound to.
+/// The local address and port policy of a configured UDP peer face
+/// (`[[face]] kind = "udp"` with `remote`, optional `bind`), given the
+/// addresses this forwarder's UDP listeners are bound to. A specific `bind`
+/// IP is the one bound; an unspecified one, or no `bind`, binds the address
+/// that routes to the peer.
 ///
 /// With a listener, the face binds the listener's port beside it and
 /// connects to the peer. An ephemeral port (the previous `0.0.0.0:0`) made our
@@ -706,24 +717,26 @@ fn udp_listener_in_use(addr: std::net::SocketAddr) -> anyhow::Error {
 /// went unanswered. A `bind` port no listener of ours holds is bound
 /// exclusively, so a clash with another process fails loudly instead.
 fn peer_face_port(
-    bind: Option<&str>,
+    bind: Option<std::net::SocketAddr>,
     listeners: &[std::net::SocketAddr],
 ) -> ndn_face::net::ConnectedPort {
     use ndn_face::net::ConnectedPort;
+    use std::net::SocketAddr;
     // A listener holds `b` when it is bound to the same port on the same
     // address, or either of them on every address.
-    let holds = |l: &std::net::SocketAddr, b: &std::net::SocketAddr| {
+    let holds = |l: &SocketAddr, b: &SocketAddr| {
         l.port() == b.port()
             && (l.ip() == b.ip() || l.ip().is_unspecified() || b.ip().is_unspecified())
     };
-    match bind.and_then(|b| b.parse::<std::net::SocketAddr>().ok()) {
+    let any = |port: u16| SocketAddr::from(([0, 0, 0, 0], port));
+    match bind {
         Some(b) if b.port() != 0 && listeners.iter().any(|l| holds(l, &b)) => {
-            ConnectedPort::Listener(b.port())
+            ConnectedPort::Listener(b)
         }
-        Some(b) => ConnectedPort::Exclusive(b.port()),
-        None => listeners.first().map_or(ConnectedPort::Exclusive(0), |l| {
-            ConnectedPort::Listener(l.port())
-        }),
+        Some(b) => ConnectedPort::Exclusive(b),
+        None => listeners
+            .first()
+            .map_or(ConnectedPort::Exclusive(any(0)), |l| ConnectedPort::Listener(any(l.port()))),
     }
 }
 
@@ -751,7 +764,7 @@ mod tests {
             .collect()
     }
 
-    /// The port each `[[face]] kind = "udp"` entry with `remote` binds.
+    /// The local address each `[[face]] kind = "udp"` entry with `remote` binds.
     fn peer_face_ports(toml: &str) -> Vec<ConnectedPort> {
         let cfg: ForwarderConfig = toml.parse().unwrap();
         let listeners = udp_listener_addrs(&cfg.faces);
@@ -761,44 +774,50 @@ mod tests {
                 FaceConfig::Udp {
                     bind,
                     remote: Some(_),
-                } => Some(peer_face_port(bind.as_deref(), &listeners)),
+                } => Some(peer_face_port(bind.as_deref().map(a), &listeners)),
                 _ => None,
             })
             .collect()
     }
 
+    fn a(s: &str) -> std::net::SocketAddr {
+        s.parse().unwrap()
+    }
+
     /// A peer face joins only a port a bound listener holds on its address;
-    /// a port-0 listener is shared at the port it resolved to.
+    /// a port-0 listener is shared at the port it resolved to. A configured
+    /// IP is kept as given.
     #[test]
     fn a_peer_face_joins_only_what_a_listener_holds() {
-        let a = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+        use ConnectedPort::{Exclusive, Listener};
         let on_one_ip = [a("10.0.0.1:6363")];
-        assert_eq!(peer_face_port(Some("10.0.0.2:6363"), &on_one_ip), ConnectedPort::Exclusive(6363));
-        assert_eq!(peer_face_port(Some("10.0.0.1:6363"), &on_one_ip), ConnectedPort::Listener(6363));
-        assert_eq!(peer_face_port(Some("0.0.0.0:6363"), &[]), ConnectedPort::Exclusive(6363));
-        assert_eq!(peer_face_port(None, &[a("127.0.0.1:40123")]), ConnectedPort::Listener(40123));
-        assert_eq!(peer_face_port(Some("0.0.0.0:0"), &[a("0.0.0.0:0")]), ConnectedPort::Exclusive(0));
+        assert_eq!(peer_face_port(Some(a("10.0.0.2:6363")), &on_one_ip), Exclusive(a("10.0.0.2:6363")));
+        assert_eq!(peer_face_port(Some(a("10.0.0.1:6363")), &on_one_ip), Listener(a("10.0.0.1:6363")));
+        assert_eq!(peer_face_port(Some(a("0.0.0.0:6363")), &[]), Exclusive(a("0.0.0.0:6363")));
+        assert_eq!(peer_face_port(None, &[a("127.0.0.1:40123")]), Listener(a("0.0.0.0:40123")));
+        assert_eq!(peer_face_port(Some(a("0.0.0.0:0")), &[a("0.0.0.0:0")]), Exclusive(a("0.0.0.0:0")));
     }
 
     #[test]
     fn a_peer_face_shares_a_port_only_with_its_own_listener() {
+        use ConnectedPort::{Exclusive, Listener};
         let device = "[[face]]\nkind = \"udp\"\nremote = \"127.0.0.1:16363\"\n";
-        assert_eq!(peer_face_ports(device), [ConnectedPort::Exclusive(0)]);
+        assert_eq!(peer_face_ports(device), [Exclusive(a("0.0.0.0:0"))]);
 
         let node = "[[face]]\nkind = \"udp\"\n\n\
                     [[face]]\nkind = \"udp\"\nremote = \"10.0.0.2:6363\"\n";
-        assert_eq!(peer_face_ports(node), [ConnectedPort::Listener(6363)]);
+        assert_eq!(peer_face_ports(node), [Listener(a("0.0.0.0:6363"))]);
 
         let hub = "[[face]]\nkind = \"udp\"\nbind = \"127.0.0.1:16363\"\n\n\
                    [[face]]\nkind = \"udp\"\nremote = \"10.0.0.2:6363\"\n\n\
                    [[face]]\nkind = \"udp\"\nremote = \"10.0.0.3:6363\"\nbind = \"0.0.0.0:16363\"\n\n\
-                   [[face]]\nkind = \"udp\"\nremote = \"10.0.0.4:6363\"\nbind = \"0.0.0.0:7000\"\n";
+                   [[face]]\nkind = \"udp\"\nremote = \"10.0.0.4:6363\"\nbind = \"10.0.0.9:7000\"\n";
         assert_eq!(
             peer_face_ports(hub),
             [
-                ConnectedPort::Listener(16363),
-                ConnectedPort::Listener(16363),
-                ConnectedPort::Exclusive(7000),
+                Listener(a("0.0.0.0:16363")),
+                Listener(a("0.0.0.0:16363")),
+                Exclusive(a("10.0.0.9:7000")),
             ]
         );
     }

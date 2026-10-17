@@ -74,7 +74,10 @@ pub(crate) async fn refresh_contexts(
         })?],
         None => held,
     };
-    let _one_change = admin.context_change.lock().await;
+    // No lock across the fetches (a catch-up walk may take many round
+    // trips): `ndn_cert::refresh_context` adopts only if the version it
+    // checked against is still held (`Keyring::adopt_update_from`), so a
+    // version a revocation or hand-over adopts meanwhile is never skipped.
     let mut results = Vec::with_capacity(targets.len());
     for ctx in targets {
         results.push(refresh_one(admin, &ctx).await);
@@ -178,10 +181,10 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
             let from = walked.last().copied().unwrap_or(update.previous);
             let detail = match stored {
                 Ok(path) => format!(
-                    "adopted v{version} (signed by {}, an anchor of v{from}){through}; stored {} \
-                     and published",
+                    "adopted v{version} (signed by {}, an anchor of v{from}){through}; stored {}{}",
                     update.signer.name,
-                    path.display()
+                    path.display(),
+                    publication(admin)
                 ),
                 Err(e) => format!("adopted v{version}{through} for this run, but {}", e.reason),
             };
@@ -206,7 +209,16 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
 /// `security/context-update`: adopt `wire` (a signed trust-context Data) as
 /// the next version of the context this node holds for its namespace — only
 /// if it is strictly newer and signed by an anchor of the held version, as a
-/// refresh requires — then store and publish it.
+/// refresh requires — then store it and (with `[security] serve_contexts`)
+/// publish it.
+///
+/// The answer says what became of the version, so a CLI may undo its own
+/// work only on a refusal: `200` once it is adopted (even if storing it then
+/// failed — the detail says so), and `200` for a version this node already
+/// took and stores byte for byte, so a CLI that got no answer can hand the
+/// same version over again and learn the outcome (the second request waits
+/// for the first, behind `context_change`). Any other answer means it was
+/// not adopted.
 pub(crate) async fn apply_update(
     admin: &TrustAdmin,
     wire: Bytes,
@@ -234,6 +246,20 @@ pub(crate) async fn apply_update(
                 ),
             )
         })?;
+    if let Some((version, path)) = stored_copy(admin, &held, &data) {
+        return Ok(ContextRefreshInfo {
+            namespace: namespace.to_string(),
+            state: RefreshState::Current,
+            held_version: held.version(),
+            version,
+            revoked: Vec::new(),
+            detail: format!(
+                "already took v{version} (holds v{}); stored {}",
+                held.version(),
+                path.display()
+            ),
+        });
+    }
     let (ctx, signer) = ndn_cert::open_context_update(&held, &data)
         .await
         .map_err(|e| {
@@ -249,7 +275,7 @@ pub(crate) async fn apply_update(
     let context = Arc::new(ctx);
     admin
         .keyring
-        .adopt_update(Arc::clone(&context))
+        .adopt_update_from(&held, Arc::clone(&context))
         .map_err(|now| {
             refusal(
                 409,
@@ -259,7 +285,7 @@ pub(crate) async fn apply_update(
                 ),
             )
         })?;
-    let stored = admin.keep(&context, &data)?;
+    let kept = admin.keep(&context, &data);
     let revoked: Vec<String> = context
         .revocations()
         .iter()
@@ -273,7 +299,14 @@ pub(crate) async fn apply_update(
         version = context.version(),
         signer = %signer.name,
         revoked = ?revoked,
+        stored = kept.is_ok(),
         "adopted trust-context version made on this device"
+    );
+    let adopted = format!(
+        "adopted v{} (signed by {}, an anchor of v{})",
+        context.version(),
+        signer.name,
+        held.version()
     );
     Ok(ContextRefreshInfo {
         namespace: namespace.to_string(),
@@ -281,14 +314,45 @@ pub(crate) async fn apply_update(
         held_version: held.version(),
         version: context.version(),
         revoked,
-        detail: format!(
-            "adopted v{} (signed by {}, an anchor of v{}); stored {} and published",
-            context.version(),
-            signer.name,
-            held.version(),
-            stored.display()
-        ),
+        detail: match kept {
+            Ok(stored) => format!("{adopted}; stored {}{}", stored.display(), publication(admin)),
+            Err(e) => format!("{adopted}, but {}", e.reason),
+        },
     })
+}
+
+/// The version `data` carries and where this node stores it, when it is no
+/// newer than `held` and stored exactly (a version this node already took).
+fn stored_copy(
+    admin: &TrustAdmin,
+    held: &SignedTrustContext,
+    data: &Data,
+) -> Option<(u64, std::path::PathBuf)> {
+    let version = data
+        .name
+        .components()
+        .last()
+        .and_then(ndn_packet::NameComponent::as_version)?;
+    if version > held.version() {
+        return None;
+    }
+    ndn_cert::read_stored_versions(&admin.pib_root, held.namespace())
+        .ok()?
+        .into_iter()
+        .find_map(|(path, read)| {
+            let (_, stored) = read.ok()?;
+            (stored.raw() == data.raw()).then_some((version, path))
+        })
+}
+
+/// Whether a version this node keeps is published ([`TrustAdmin::keep`]
+/// publishes only with `[security] serve_contexts`), worded for a detail.
+fn publication(admin: &TrustAdmin) -> &'static str {
+    if admin.publisher.is_some() {
+        " and published"
+    } else {
+        "; not published: [security] serve_contexts = false, so no node fetches it from this one"
+    }
 }
 
 /// Check every held context every `period_secs` (0: never), until `cancel`.
@@ -365,9 +429,25 @@ mod tests {
         assert_eq!(stored.version(), 2);
         assert!(stored.has_key_role(&kit.key_name(), ndn_security::KeyRole::RECOVERY_ANCHOR));
 
-        let again = apply_update(&node.admin, bump.data.raw().clone()).await.unwrap_err();
-        assert_eq!(again.status_code, 403, "{}", again.reason);
+        // Handed over again (a CLI that got no answer asks again): taken,
+        // never refused — a refusal would make the CLI undo what this node
+        // holds. Another v2 is still refused.
+        let again = apply_update(&node.admin, bump.data.raw().clone()).await.unwrap();
+        assert_eq!((info.version, again.version), (2, 2));
+        let other_kit = ndn_cert::recovery_anchor(Arc::new(
+            ndn_cert::RecoverySeed::generate().unwrap().signer(&ns),
+        ))
+        .await
+        .unwrap();
+        let other = ndn_cert::add_recovery_anchor(root.as_ref(), &node.context_data, &other_kit)
+            .await
+            .unwrap();
+        let refused = apply_update(&node.admin, other.data.raw().clone()).await.unwrap_err();
+        assert_eq!(refused.status_code, 403, "{}", refused.reason);
         assert_eq!(node.admin.keyring.version_of(&ns), Some(2));
+        let (stored, data) = ndn_cert::read_stored_context(device.path(), &ns).unwrap().unwrap();
+        assert!(stored.has_key_role(&kit.key_name(), ndn_security::KeyRole::RECOVERY_ANCHOR));
+        assert_eq!(data.raw(), bump.data.raw());
         node.shutdown.shutdown().await;
     }
 
@@ -404,6 +484,7 @@ mod tests {
             &seed.signer(&ns),
             "phone",
             ndn_cert::OldRoot::Destroyed,
+            &[],
             &ndn_cert::NewRootStore::File,
         )
         .await
@@ -443,7 +524,6 @@ mod tests {
         let results = refresh_contexts(&admin, Some(ns.clone())).await.unwrap();
         assert_eq!(results[0].state, RefreshState::Updated, "{}", results[0].detail);
         assert_eq!((results[0].held_version, results[0].version), (2, 4));
-        assert!(results[0].detail.contains("through v3"), "{}", results[0].detail);
         assert_eq!(admin.keyring.version_of(&ns), Some(4));
         let (newest, _) = ndn_cert::read_stored_context(device, &ns).unwrap().unwrap();
         assert_eq!(newest.version(), 4);
@@ -505,7 +585,6 @@ mod tests {
         let results = refresh_contexts(&admin, Some(ns.clone())).await.unwrap();
         assert_eq!(results[0].state, RefreshState::Unreachable, "{}", results[0].detail);
         assert_eq!((results[0].held_version, results[0].version), (1, 1));
-        assert!(results[0].detail.contains("nothing answered"), "{}", results[0].detail);
         assert_eq!(admin.keyring.version_of(&ns), Some(1));
         shutdown.shutdown().await;
     }

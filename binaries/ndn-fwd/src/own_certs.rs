@@ -127,7 +127,9 @@ impl OwnCertificates {
     }
 
     /// Serve the certificate Data `wire` from now on, beside the other
-    /// certificates of its key.
+    /// certificates of its key. A certificate already served under its name
+    /// (the PIB, the `ca/` files and the running signer can each hold the
+    /// same one) is served once: no second entry, FIB route or log line.
     pub(crate) fn serve(&self, wire: Bytes) {
         let cert = match Data::decode(wire.clone())
             .map_err(|e| e.to_string())
@@ -140,14 +142,20 @@ impl OwnCertificates {
             }
         };
         let name = (*cert.name).clone();
-        self.engine
-            .fib()
-            .add_nexthop(&key_name_of(&name), self.face_id, 0);
+        let key = key_name_of(&name);
+        {
+            // The route is added under the lock `withdraw_where` removes it
+            // under, so the two never interleave.
+            let mut certs = self.certs.write().unwrap_or_else(PoisonError::into_inner);
+            if certs.contains_key(&name) {
+                return;
+            }
+            if !certs.keys().any(|served| key_name_of(served) == key) {
+                self.engine.fib().add_nexthop(&key, self.face_id, 0);
+            }
+            certs.insert(name.clone(), Served { cert, wire });
+        }
         tracing::info!(target: "security", certificate = %name, "serving this node's certificate");
-        self.certs
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(name, Served { cert, wire });
     }
 
     fn withdraw_where(&self, revoked: impl Fn(&Name) -> bool) {

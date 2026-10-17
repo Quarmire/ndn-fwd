@@ -43,7 +43,10 @@ pub struct ContextSpec {
     /// Optional python-lvs-compiled binary schema (validated on build); when
     /// absent, the built-in hierarchical / accept-all default applies.
     pub schema_lvs: Option<Vec<u8>>,
-    /// CA endpoints participants may enroll against under this context.
+    /// CA identities (e.g. `<namespace>/CA`) participants may enroll against
+    /// under this context; only these (and anchors) may certify keys under
+    /// the namespace outside their own identity
+    /// ([`SignedTrustContext::authorizes_certification`]).
     pub ca_endpoints: Vec<Name>,
     /// Names of revoked certificates or keys to reject.
     pub revocations: Vec<Name>,

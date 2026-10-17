@@ -58,9 +58,10 @@ pub(crate) struct TrustAdmin {
     /// This node's CA (`[ca]`), which `security/revoke` revokes at; `None`
     /// when the node runs none.
     pub(crate) ca: Option<Arc<CaState>>,
-    /// One context change at a time: a revocation (new version made here)
-    /// or a refresh (newer version fetched), so neither works from a version
-    /// the other is replacing.
+    /// One context change made or handed over on this node at a time (a
+    /// revocation, a `security/context-update`), so neither works from a
+    /// version the other is replacing. A refresh takes no lock: it adopts
+    /// only if the version it fetched against is still held.
     pub(crate) context_change: tokio::sync::Mutex<()>,
     /// One certificate renewal at a time (`security/renew` and the renewal
     /// timer).

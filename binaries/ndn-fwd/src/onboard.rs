@@ -72,22 +72,29 @@ use ndn_trust_envelope::TrustEnvelope;
 /// `Some(result)`. Returns `None` for the normal daemon path.
 pub async fn maybe_run() -> Option<Result<()>> {
     let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("init") => Some(run_init(&args[2..]).await),
-        Some("adopt") => Some(run_adopt(&args[2..]).await),
-        Some("enroll") => Some(run_enroll(&args[2..]).await),
-        Some("revoke") => Some(run_revoke(&args[2..]).await),
-        Some("renew") => Some(run_renew(&args[2..]).await),
-        Some("context") => Some(run_context(&args[2..]).await),
-        Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
-        Some("root-key") => Some(crate::root_key::run(&args[2..]).await),
-        Some("recovery-kit") => Some(crate::recovery_kit::run(&args[2..]).await),
-        Some("recover") => Some(crate::recover::run(&args[2..]).await),
+    let command = args.get(1).map(String::as_str)?;
+    if let Some((name, spec)) = arg_spec(command, &args[2..])
+        && let Err(e) = check_args(&name, &args[2..], spec)
+    {
+        return Some(Err(e));
+    }
+    match command {
+        "init" => Some(run_init(&args[2..]).await),
+        "adopt" => Some(run_adopt(&args[2..]).await),
+        "enroll" => Some(run_enroll(&args[2..]).await),
+        "revoke" => Some(run_revoke(&args[2..]).await),
+        "renew" => Some(run_renew(&args[2..]).await),
+        "context" => Some(run_context(&args[2..]).await),
+        "schema" => Some(crate::schema_cmd::run(&args[2..])),
+        "root-key" => Some(crate::root_key::run(&args[2..]).await),
+        "recovery-kit" => Some(crate::recovery_kit::run(&args[2..]).await),
+        "recover" => Some(crate::recover::run(&args[2..]).await),
         _ => None,
     }
 }
 
-/// Options that take a value (so their value is not mistaken for a positional).
+/// Options that take a value (so their value is not mistaken for a
+/// positional): every value flag of [`ARG_SPECS`].
 pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--namespace",
     "--device",
@@ -108,13 +115,209 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--kit-passphrase-file",
     "--kit-pin-file",
     "--words-file",
+    "--kit-yubikey-serial",
+    "--kit-yubikey-slot",
+    "--kit-touch-policy",
+    "--keep-kit",
 ];
+
+/// The arguments one onboarding subcommand takes.
+struct ArgSpec {
+    /// Flags followed by a value (`--pib <dir>`).
+    values: &'static [&'static str],
+    /// Those of `values` that may be given more than once.
+    repeatable: &'static [&'static str],
+    /// Flags without a value (`--force`).
+    switches: &'static [&'static str],
+    /// The most positional arguments; a subcommand word (`refresh`,
+    /// `create`) counts.
+    positionals: usize,
+}
+
+/// Per subcommand (and its subcommand word, if it has them): the arguments
+/// it takes. Anything else is refused before it runs, so no argument is
+/// silently ignored.
+const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
+    ("init", None, ArgSpec {
+        values: &[
+            "--namespace", "--device", "--pib", "-c", "--config", "--root-store",
+            "--passphrase-file", "--pin-file", "--yubikey-slot", "--yubikey-serial",
+            "--touch-policy",
+        ],
+        repeatable: &[],
+        switches: &["--force", "--replace-slot"],
+        positionals: 0,
+    }),
+    ("adopt", None, ArgSpec {
+        values: &["--pib", "-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 1,
+    }),
+    ("enroll", None, ArgSpec {
+        values: &["--device", "-c", "--config"],
+        repeatable: &[],
+        switches: &["--force"],
+        positionals: 1,
+    }),
+    ("revoke", None, ArgSpec {
+        values: &["-c", "--config", "--passphrase-file", "--pin-file"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 1,
+    }),
+    ("renew", None, ArgSpec {
+        values: &["-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 0,
+    }),
+    ("context", Some("refresh"), ArgSpec {
+        values: &["-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 2,
+    }),
+    ("schema", Some("show"), ArgSpec {
+        values: &["--namespace", "--pib", "-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 1,
+    }),
+    ("schema", Some("explain"), ArgSpec {
+        values: &["--namespace", "--pib", "-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 3,
+    }),
+    ("root-key", Some("status"), ArgSpec {
+        values: &["--pib", "-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 1,
+    }),
+    ("root-key", Some("move"), ArgSpec {
+        values: &["--to", "--passphrase-file", "--pin-file", "--pib", "-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 1,
+    }),
+    ("recovery-kit", Some("create"), ArgSpec {
+        values: &[
+            "--format", "--out", "--pib", "-c", "--config", "--passphrase-file", "--pin-file",
+            "--kit-passphrase-file", "--kit-pin-file", "--kit-yubikey-serial",
+            "--kit-yubikey-slot", "--kit-touch-policy",
+        ],
+        repeatable: &[],
+        switches: &["--replace-slot"],
+        positionals: 1,
+    }),
+    ("recovery-kit", Some("list"), ArgSpec {
+        values: &["--namespace", "--pib", "-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 1,
+    }),
+    ("recovery-kit", Some("check"), ArgSpec {
+        values: &[
+            "--namespace", "--pib", "-c", "--config", "--kit-passphrase-file", "--kit-pin-file",
+            "--words-file", "--kit-yubikey-serial", "--kit-yubikey-slot",
+        ],
+        repeatable: &[],
+        switches: &[],
+        positionals: 2,
+    }),
+    ("recovery-kit", Some("revoke"), ArgSpec {
+        values: &["--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 2,
+    }),
+    ("recover", None, ArgSpec {
+        values: &[
+            "--old-root", "--kit", "--namespace", "--device", "--pib", "-c", "--config",
+            "--kit-passphrase-file", "--kit-pin-file", "--words-file", "--kit-yubikey-serial",
+            "--kit-yubikey-slot", "--root-store", "--passphrase-file", "--pin-file",
+            "--yubikey-slot", "--yubikey-serial", "--touch-policy", "--keep-kit",
+        ],
+        repeatable: &["--keep-kit"],
+        switches: &["--from-held", "--replace-slot"],
+        positionals: 0,
+    }),
+];
+
+/// The spec of `ndn-fwd <command> <rest…>` and its name for refusals
+/// (`recovery-kit create`). `None`: not an onboarding subcommand, or a
+/// subcommand word it does not have (the subcommand refuses that itself,
+/// with its usage).
+fn arg_spec(command: &str, rest: &[String]) -> Option<(String, &'static ArgSpec)> {
+    let word = positionals(rest).first().copied();
+    ARG_SPECS.iter().find_map(|(cmd, sub, spec)| match sub {
+        _ if *cmd != command => None,
+        None => Some((command.to_string(), spec)),
+        Some(sub) if word == Some(*sub) => Some((format!("{command} {sub}"), spec)),
+        Some(_) => None,
+    })
+}
+
+/// Refuse an argument `ndn-fwd <command>` does not take — an unknown flag,
+/// `--flag=value`, a value flag without its value (or followed by another
+/// flag), a value flag given twice, a surplus positional — instead of
+/// ignoring it.
+fn check_args(command: &str, args: &[String], spec: &ArgSpec) -> Result<()> {
+    let refuse = |what: String| anyhow::anyhow!("{what} for `ndn-fwd {command}`; see `ndn-fwd --help`");
+    let mut given: Vec<&str> = Vec::new();
+    let mut positionals = 0;
+    let mut rest = args.iter().map(String::as_str);
+    while let Some(arg) = rest.next() {
+        if !arg.starts_with('-') {
+            positionals += 1;
+            if positionals > spec.positionals {
+                return Err(refuse(format!("unexpected argument {arg:?}")));
+            }
+            continue;
+        }
+        if let Some((name, value)) = arg.split_once('=')
+            && (spec.values.contains(&name) || spec.switches.contains(&name))
+        {
+            return Err(refuse(format!(
+                "unrecognized argument {arg:?} (write `{name} {value}`, with a space)"
+            )));
+        }
+        if spec.switches.contains(&arg) {
+            continue;
+        }
+        if !spec.values.contains(&arg) {
+            return Err(refuse(format!("unrecognized argument {arg:?}")));
+        }
+        match rest.next() {
+            Some(value) if !value.starts_with('-') => {}
+            Some(other) => return Err(refuse(format!("{arg} needs a value, not {other:?},"))),
+            None => return Err(refuse(format!("{arg} needs a value"))),
+        }
+        // `-c` and `--config` are one flag.
+        let flag = if arg == "--config" { "-c" } else { arg };
+        if given.contains(&flag) && !spec.repeatable.contains(&arg) {
+            return Err(refuse(format!("{arg} is given more than once")));
+        }
+        given.push(flag);
+    }
+    Ok(())
+}
 
 pub(crate) fn flag<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
     args.iter()
         .position(|a| names.contains(&a.as_str()))
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
+}
+
+/// Every value of a repeatable value flag `name`, in order.
+pub(crate) fn flag_values<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {
+    args.windows(2)
+        .filter(|pair| pair[0] == name)
+        .map(|pair| pair[1].as_str())
+        .collect()
 }
 
 /// The arguments that are neither a flag (`-c`, `--pib`, …) nor a value
@@ -170,19 +373,6 @@ pub(crate) fn default_device() -> Result<String> {
 }
 
 async fn run_init(args: &[String]) -> Result<()> {
-    if let Some(profile) = flag(args, &["--profile"]) {
-        bail!(
-            "`ndn-fwd init --profile {profile}` was removed: init has a single form. Run \
-             `ndn-fwd init --namespace <ndn-name> [--device <name>]` on the device that \
-             creates the namespace (its root device)"
-        );
-    }
-    if args.iter().any(|a| a == "--profile") {
-        bail!(
-            "`ndn-fwd init --profile` was removed: run `ndn-fwd init --namespace <ndn-name> \
-             [--device <name>]` on the device that creates the namespace (its root device)"
-        );
-    }
     let namespace: Name = flag(args, &["--namespace"])
         .context("init requires --namespace <ndn-name>, e.g. /home/bob")?
         .parse()
@@ -506,7 +696,13 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         println!("# At the next start: {note}");
     }
     for old in &info.still_valid {
-        println!("# Still valid until revoked: {old}");
+        println!("# Also held, still valid: {old}");
+    }
+    for dead in &info.unusable {
+        println!(
+            "# Unusable: {dead}; the trust context revokes its chain, so it validates nowhere \
+             (the key enrolled now takes its place)"
+        );
     }
     Ok(())
 }
@@ -764,5 +960,47 @@ mod tests {
         assert_eq!(positionals(&args), ["/d", "/k"]);
         let args: Vec<String> = ["--config", "x.toml", "/d", "/k"].map(String::from).to_vec();
         assert_eq!(positionals(&args), ["/d", "/k"]);
+    }
+
+    fn check(argv: &[&str]) -> Result<()> {
+        let argv: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
+        let (name, spec) = arg_spec(&argv[0], &argv[1..]).expect("an onboarding subcommand");
+        check_args(&name, &argv[1..], spec)
+    }
+
+    /// A choice on the command line is used or refused, never silently
+    /// dropped: unknown flags, `--flag=value`, a flag taken as another's
+    /// value, a flag given twice and surplus positionals are refused.
+    #[test]
+    fn arguments_a_subcommand_does_not_take_are_refused() {
+        check(&["init", "--namespace", "/home/bob", "--root-store", "sealed-file", "--force"])
+            .expect("init's own flags");
+        check(&["recovery-kit", "check", "words", "--pib", "p", "--words-file", "w"])
+            .expect("a subcommand word and its flags");
+        check(&["recover", "--old-root", "destroyed", "--kit", "words", "--keep-kit", "/a", "--keep-kit", "/b"])
+            .expect("a repeatable flag");
+        for refused in [
+            &["init", "--namespace", "/home/bob", "--root-store=sealed-file"][..],
+            &["init", "--namespace=/home/bob"],
+            &["recover", "--old-root", "destroyed", "--kit", "words", "--from-hold"],
+            &["revoke", "/a", "/b"],
+            &["adopt", "ndn-trust://anchor/x", "--pib", "--force"],
+            &["renew", "-c"],
+            &["renew", "-c", "a.toml", "--config", "b.toml"],
+            &["enroll", "ndn-trust://invite/x", "--yubikey-slot", "9c"],
+        ] {
+            assert!(check(refused).is_err(), "{refused:?} must be refused");
+        }
+    }
+
+    /// Every value flag a subcommand takes is skipped with its value when
+    /// positionals are read, so a value is never taken for a positional.
+    #[test]
+    fn every_value_flag_is_known_to_positionals() {
+        for (_, _, spec) in ARG_SPECS {
+            for flag in spec.values {
+                assert!(VALUE_FLAGS.contains(flag), "{flag} is missing from VALUE_FLAGS");
+            }
+        }
     }
 }

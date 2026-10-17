@@ -25,8 +25,8 @@ use ndn_cert::roles::parse_device_key;
 use ndn_cert::{InviteEnrollError, InviteLink, new_device_key_name};
 use ndn_mgmt::{EnrollOutcome, EnrollRequest, EnrolledInfo, TrustRefusal};
 use ndn_mgmt_wire::control_response::status;
-use ndn_packet::Name;
-use ndn_security::{FilePib, Keyring, Signer};
+use ndn_packet::{Data, Name};
+use ndn_security::{Certificate, FilePib, Signer, SignedTrustContext};
 
 use crate::context_adopt::{TrustAdmin, refusal};
 
@@ -76,22 +76,81 @@ fn device_of<'a>(invite: &InviteLink, identity: &'a Name) -> Result<&'a str, Tru
     })
 }
 
+/// A device key of a namespace this PIB holds a currently valid certificate
+/// for.
+struct Certified {
+    key: Name,
+    valid_until: u64,
+    /// What the held trust context revokes on the certificate's chain — the
+    /// key itself, or an issuer up to the root: the certificate validates
+    /// nowhere.
+    revoked: Option<Name>,
+}
+
 /// Device keys in `namespace` this PIB holds a currently valid certificate
-/// for, not revoked by the held trust context: `(key, valid until)`.
-fn certified_in(pib: &FilePib, keyring: &Keyring, namespace: &Name) -> Vec<(Name, u64)> {
-    let mut held: Vec<(Name, u64)> = pib
+/// for, each with what revokes its chain, if anything. Issuer certificates
+/// come from those kept under `<pib>/issuers` ([`ndn_cert::issuers`]), else
+/// the validation cache.
+fn certified_in(admin: &TrustAdmin, pib: &FilePib, namespace: &Name) -> Vec<Certified> {
+    let kept: Vec<Certificate> = ndn_cert::issuers::stored_issuer_certs(&admin.pib_root)
+        .into_iter()
+        .filter_map(|wire| Certificate::decode(&Data::decode(wire).ok()?).ok())
+        .collect();
+    let issuer_cert = |key: &Name| {
+        kept.iter()
+            .filter(|c| c.name.has_prefix(key))
+            .max_by_key(|c| c.valid_from)
+            .cloned()
+            .or_else(|| admin.engine.security()?.cert_cache().get_valid(key))
+    };
+    let mut held: Vec<Certified> = pib
         .list_keys()
         .unwrap_or_default()
         .into_iter()
         .filter(|k| parse_device_key(namespace, k).is_some())
-        .filter(|k| !keyring.context_for(k).is_revoked(k))
-        .filter_map(|k| {
-            let cert = pib.get_cert(&k).ok()?;
-            cert.is_valid_now().then_some((k, cert.valid_until))
+        .filter_map(|key| {
+            let cert = pib.get_cert(&key).ok()?;
+            if !cert.is_valid_now() {
+                return None;
+            }
+            let revoked = revoked_on_chain(&admin.keyring.context_for(&key), &cert, &issuer_cert);
+            Some(Certified {
+                key,
+                valid_until: cert.valid_until,
+                revoked,
+            })
         })
         .collect();
-    held.sort();
+    held.sort_by(|a, b| a.key.cmp(&b.key));
     held
+}
+
+/// The first name on `cert`'s chain that `ctx` revokes: each certificate
+/// (a revoked key or identity is a prefix of its certificates' names) and
+/// each issuer key, walking issuer certificates `issuer_cert` resolves up to
+/// a self-signed one or one it cannot resolve.
+fn revoked_on_chain(
+    ctx: &SignedTrustContext,
+    cert: &Certificate,
+    issuer_cert: impl Fn(&Name) -> Option<Certificate>,
+) -> Option<Name> {
+    const MAX_CHAIN: usize = 8;
+    let mut current = cert.clone();
+    for _ in 0..MAX_CHAIN {
+        if ctx.is_revoked(&current.name) {
+            return Some((*current.name).clone());
+        }
+        let issuer = current.issuer.clone()?;
+        if ctx.is_revoked(&issuer) {
+            return Some((*issuer).clone());
+        }
+        let next = issuer_cert(&issuer)?;
+        if next.name == current.name {
+            return None;
+        }
+        current = next;
+    }
+    None
 }
 
 /// Delete a key this enrollment generated (and whatever was stored for it).
@@ -130,12 +189,15 @@ pub(crate) async fn enroll(
         )
     })?;
     let previous_identity = pib.get_default_identity().ok().flatten();
-    let held = certified_in(&pib, &admin.keyring, &invite.namespace);
+    let (unusable, held): (Vec<Certified>, Vec<Certified>) =
+        certified_in(admin, &pib, &invite.namespace)
+            .into_iter()
+            .partition(|c| c.revoked.is_some());
+    let still_valid: Vec<String> = held
+        .iter()
+        .map(|c| format!("{} (valid until {})", c.key, iso(c.valid_until)))
+        .collect();
     if !held.is_empty() && !request.force {
-        let list: Vec<String> = held
-            .iter()
-            .map(|(k, until)| format!("{k} (valid until {})", iso(*until)))
-            .collect();
         return Err(refusal(
             409,
             format!(
@@ -143,12 +205,16 @@ pub(crate) async fn enroll(
                  run again with --force and another --device name (the CA certifies a new key \
                  for a device name it already certified only once that certificate is revoked \
                  or an admin approves the new key); the certificate this node holds stays valid \
-                 until it is revoked",
+                 until it expires or is revoked",
                 invite.namespace,
-                list.join(", ")
+                still_valid.join(", ")
             ),
         ));
     }
+    let unusable: Vec<String> = unusable
+        .iter()
+        .filter_map(|c| Some(format!("{} (revoked: {})", c.key, c.revoked.as_ref()?)))
+        .collect();
 
     let key = new_device_key_name(&identity);
     let generated = pib.generate_ed25519(&key).map_err(|e| {
@@ -298,11 +364,6 @@ pub(crate) async fn enroll(
             false
         }
     };
-    let still_valid: Vec<String> = held
-        .iter()
-        .map(|(k, until)| format!("{k} (valid until {})", iso(*until)))
-        .collect();
-
     tracing::info!(
         target: "security",
         identity = %identity,
@@ -329,6 +390,7 @@ pub(crate) async fn enroll(
         signing_now,
         at_next_start,
         still_valid,
+        unusable,
     }))
 }
 
@@ -559,6 +621,40 @@ pub(crate) mod tests {
                 .expect("forced enrollment");
         assert_eq!(info.still_valid.len(), 1);
         assert_eq!(state(&node).0.len(), 2);
+        node.shutdown.shutdown().await;
+    }
+
+    /// A certificate whose chain the held trust context revokes — its CA
+    /// key, or the root above it (a recovery after a compromise) — is not
+    /// a held, valid certificate: it validates nowhere.
+    #[tokio::test]
+    async fn a_certificate_under_a_revoked_issuer_is_not_held() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-m1"]).await;
+        let EnrollOutcome::Enrolled(info) =
+            enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
+                .await
+                .expect("enrolls");
+        let ns: Name = "/home/bob".parse().unwrap();
+        let pib = FilePib::open(device.path()).unwrap();
+        let held = certified_in(&node.admin, &pib, &ns);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].revoked, None, "nothing revokes a fresh certificate's chain");
+
+        let version = node.admin.keyring.version_of(&ns).unwrap();
+        for (bump, revoked) in [ndn_cert::namespace::ca_key_name(&ns), ndn_cert::namespace::root_key_name(&ns)]
+            .into_iter()
+            .enumerate()
+        {
+            node.admin.keyring.adopt(Arc::new(
+                ndn_security::SignedTrustContext::hierarchical(ns.clone())
+                    .with_version(version + 1 + bump as u64)
+                    .with_revocation(revoked.clone()),
+            ));
+            let held = certified_in(&node.admin, &pib, &ns);
+            assert_eq!(held[0].key.to_string(), info.key);
+            assert_eq!(held[0].revoked.as_ref(), Some(&revoked), "revoking {revoked}");
+        }
         node.shutdown.shutdown().await;
     }
 }

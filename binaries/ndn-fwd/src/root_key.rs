@@ -85,6 +85,13 @@ pub(crate) fn new_root_store(args: &[String]) -> Result<NewRootStore> {
                 .map(|s| s.parse::<u32>())
                 .transpose()
                 .context("--yubikey-serial must be the token's serial number")?,
+            // An occupied slot is refused unless the operator says its key
+            // is not needed; `recover` also keeps the root off the kit's
+            // token.
+            guard: ndn_cert::SlotGuard {
+                replace: args.iter().any(|a| a == "--replace-slot"),
+                not_on: None,
+            },
         },
         RootStoreKind::File => {
             eprintln!(
