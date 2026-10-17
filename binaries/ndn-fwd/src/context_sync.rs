@@ -49,10 +49,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
-use ndn_app::{Consumer, EngineAppExt, Producer};
+use ndn_app::{AppError, Consumer, EngineAppExt, Producer};
 use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
-use ndn_identity::context_sync::{self as group, ContextFetcher};
+use ndn_identity::context_sync::{self as group, ContextFetchError, ContextFetcher};
 use ndn_packet::{Data, Interest, NackReason, Name, NameComponent};
 use ndn_security::SignedTrustContext;
 use ndn_strategy::{ErasedStrategy, MulticastStrategy};
@@ -62,7 +62,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::context_adopt::TrustAdmin;
-use crate::context_refresh::{Adopted, holds_root_key, keep_update};
+use crate::context_refresh::{Adopted, faces_up, holds_root_key, keep_update};
 
 const FACE_BUFFER: usize = 256;
 
@@ -84,7 +84,13 @@ struct KeptVersion {
 pub(crate) struct ContextSync {
     pib_root: PathBuf,
     kept: mpsc::UnboundedSender<KeptVersion>,
+    /// The newest version each namespace's group announced, and by whom.
+    announced: Announced,
 }
+
+/// By namespace: the newest version its group announced (a member's
+/// sequence number) and the member that announced it.
+type Announced = Arc<std::sync::Mutex<HashMap<Name, (u64, Name)>>>;
 
 impl ContextSync {
     /// `ctx` (signed Data `data`) was stored and published: join its
@@ -104,6 +110,17 @@ impl ContextSync {
                 "trust-context sync is stopped; the version is not put into its group"
             );
         }
+    }
+
+    /// The newest version of `namespace` its sync group announced, and the
+    /// member that announced it: a version this node knows exists, whether
+    /// or not it obtained it.
+    pub(crate) fn announced(&self, namespace: &Name) -> Option<(u64, Name)> {
+        self.announced
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(namespace)
+            .cloned()
     }
 }
 
@@ -127,14 +144,15 @@ pub(crate) fn prepare(enabled: bool, pib_root: &Path) -> Option<(ContextSync, Gr
         ContextSync {
             pib_root: pib_root.to_path_buf(),
             kept: tx,
+            announced: Announced::default(),
         },
         Groups {
             kept: rx,
             member: member_id(pib_root),
             // Routed links, not one LAN: a Sync Interest every ~15 s per
-            // group. A new version is announced at once; the period bounds
-            // how soon the root device learns the face of a member that
-            // (re)joined, and how soon a lost announcement is repeated.
+            // group. A new version, and a member joining, are announced at
+            // once; the period bounds how soon a lost announcement is
+            // repeated.
             svs: SvsConfig::wan(),
             retry: group::Retry::default(),
         },
@@ -162,24 +180,44 @@ fn member_id(pib_root: &Path) -> NameComponent {
 
 impl Groups {
     /// Join the group of every namespace held, then follow the versions
-    /// kept, until `cancel`.
+    /// kept, until `cancel`. A namespace this node fetches is joined once its
+    /// route has a face ([`faces_up`]), at most one SVS period after start:
+    /// joining announces this node to the group at once, and an announcement
+    /// sent before the face is up is lost until the next period.
     pub(crate) fn spawn(self, admin: Arc<TrustAdmin>, cancel: CancellationToken) {
         tokio::spawn(self.run(admin, cancel));
     }
 
     async fn run(mut self, admin: Arc<TrustAdmin>, cancel: CancellationToken) {
         let mut joined: HashMap<Name, Group> = HashMap::new();
-        for held in admin.keyring.contexts() {
+        let (roots, fetched): (Vec<_>, Vec<_>) = admin
+            .keyring
+            .contexts()
+            .into_iter()
+            .partition(|held| holds_root_key(&admin.pib_root, held));
+        // The root device announces the version it holds as its sequence
+        // number; the versions it stores are served by it.
+        for held in roots {
             let namespace = held.namespace().clone();
-            let root = holds_root_key(&admin.pib_root, &held);
-            // The root device announces the version it holds as its
-            // sequence number; the versions it stores are served by it.
-            let seq = if root { held.version() } else { 0 };
-            let group =
-                Group::join(&admin, &self.member, &namespace, seq, &self.svs, self.retry, &cancel);
-            if root {
-                group.serve_stored(&admin.pib_root, &namespace);
-            }
+            let group = Group::join(
+                &admin,
+                &self.member,
+                &namespace,
+                held.version(),
+                &self.svs,
+                self.retry,
+                &cancel,
+            );
+            group.serve_stored(&admin.pib_root, &namespace);
+            joined.insert(namespace, group);
+        }
+        let namespaces: Vec<Name> = fetched.iter().map(|held| held.namespace().clone()).collect();
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = faces_up(&admin.engine, &namespaces, self.svs.sync_interval) => {}
+        }
+        for namespace in namespaces {
+            let group = Group::join(&admin, &self.member, &namespace, 0, &self.svs, self.retry, &cancel);
             joined.insert(namespace, group);
         }
         loop {
@@ -271,6 +309,8 @@ impl Group {
             engine.app_consumer(cancel.child_token()),
         )));
         let keeper = Arc::clone(admin);
+        let announced = admin.context_sync.as_ref().map(|s| Arc::clone(&s.announced));
+        let group_namespace = namespace.clone();
         tokio::spawn(group::run(
             handle,
             namespace.clone(),
@@ -279,6 +319,15 @@ impl Group {
             move |update| {
                 // `keep_update` logs what became of it.
                 let _ = keep_update(&keeper, update, Adopted::OverSync);
+            },
+            move |update| {
+                let Some(announced) = &announced else { return };
+                let mut announced =
+                    announced.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let newest = announced.entry(group_namespace.clone()).or_insert((0, Name::root()));
+                if update.high_seq > newest.0 {
+                    *newest = (update.high_seq, update.name.clone());
+                }
             },
             retry,
             cancel.child_token(),
@@ -522,14 +571,21 @@ fn pump(
     });
 }
 
-/// Fetches group Data through this node's forwarder, like any app.
+/// Fetches group Data through this node's forwarder, like any app. A Data
+/// the forwarder refused (it answers the fetch with a refusal at once) is
+/// refused for what it is; anything else is missing for now.
 struct EngineFetcher(tokio::sync::Mutex<Consumer>);
 
 #[async_trait::async_trait]
 impl ContextFetcher for EngineFetcher {
-    async fn fetch_content(&self, name: Name) -> Result<Bytes, String> {
-        let data = self.0.lock().await.fetch(name).await.map_err(|e| e.to_string())?;
-        data.content().cloned().ok_or_else(|| "the Data carries no Content".to_string())
+    async fn fetch_content(&self, name: Name) -> Result<Bytes, ContextFetchError> {
+        let data = self.0.lock().await.fetch(name).await.map_err(|e| match e {
+            AppError::Refused { reason } => ContextFetchError::Refused(reason.to_string()),
+            e => ContextFetchError::Missing(e.to_string()),
+        })?;
+        data.content()
+            .cloned()
+            .ok_or_else(|| ContextFetchError::Missing("the Data carries no Content".to_string()))
     }
 }
 
@@ -790,7 +846,8 @@ mod tests {
             &ndn_cert::anchor_fingerprint(&init.init.anchor),
         )
         .unwrap();
-        // Its own Sync Interests would go out once an hour at the earliest.
+        // After its join announcement, its own Sync Interests would go out
+        // once an hour at the earliest.
         let quiet = SvsConfig {
             sync_interval: Duration::from_secs(3600),
             ..quick()
@@ -837,6 +894,85 @@ mod tests {
 
         cancel.cancel();
         down.shutdown().await;
+    }
+
+    /// A member that starts announces itself to the group at once, so the
+    /// root device reaches it (routes the group toward its face) without
+    /// waiting a period — both periods here are an hour. At start its route
+    /// toward the root device is in the FIB before the face it names is up
+    /// (`[[route]]` entries are installed before face setup opens the
+    /// `[[face]]` entries), so it joins once that face is up: an
+    /// announcement sent earlier would be dropped.
+    #[tokio::test]
+    async fn a_starting_member_is_announced_once_its_face_is_up() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ns: Name = "/home/bob".parse().unwrap();
+        let pib = FilePib::new(root_dev.path()).unwrap();
+        let init =
+            ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false, &ndn_cert::NewRootStore::File)
+                .await
+                .unwrap();
+        let hourly = SvsConfig {
+            sync_interval: Duration::from_secs(3600),
+            ..quick()
+        };
+
+        let cancel = CancellationToken::new();
+        let ((root_engine, root_down), (dev_engine, dev_down)) = (engine().await, engine().await);
+        let root_keyring = Keyring::new();
+        ndn_cert::load_persisted_contexts(root_dev.path(), &root_keyring).unwrap();
+        let _root = node_with(&root_engine, root_keyring, root_dev.path(), &cancel, hourly.clone());
+
+        // The link: the root device's end is up; the device's end is routed
+        // but not up yet.
+        let root_face = root_engine.faces().alloc_id();
+        let (face, root_end) = InProcFace::new_kind(root_face, FACE_BUFFER, FaceKind::Udp);
+        root_engine.add_face(face, cancel.child_token());
+        let dev_face = dev_engine.faces().alloc_id();
+        let (face, dev_end) = InProcFace::new_kind(dev_face, FACE_BUFFER, FaceKind::Udp);
+        dev_engine.fib().add_nexthop(&ns, dev_face, 10);
+        let dev_keyring = Keyring::new();
+        ndn_cert::adopt_with_tofu(
+            &dev_keyring,
+            &init.init.context_data,
+            &ns,
+            &ndn_cert::anchor_fingerprint(&init.init.anchor),
+        )
+        .unwrap();
+        let _dev = node_with(&dev_engine, dev_keyring, device.path(), &cancel, hourly);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        dev_engine.add_face(face, cancel.child_token());
+        let (root_end, dev_end) = (Arc::new(root_end), Arc::new(dev_end));
+        for (from, to) in [(Arc::clone(&root_end), Arc::clone(&dev_end)), (dev_end, root_end)] {
+            tokio::spawn(async move {
+                while let Some(pkt) = from.recv().await {
+                    if to.send(pkt).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
+        let prefix = group::group_prefix(&ns);
+        let reached = tokio::time::timeout(Duration::from_secs(3), async {
+            while !root_engine
+                .fib()
+                .lpm_with_depth(&prefix)
+                .filter(|(depth, _)| *depth == prefix.len())
+                .is_some_and(|(_, e)| e.nexthops.iter().any(|hop| hop.face_id == root_face))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            reached.is_ok(),
+            "the root device must route the group toward a member that just started"
+        );
+
+        cancel.cancel();
+        root_down.shutdown().await;
+        dev_down.shutdown().await;
     }
 
     /// A neighbour's fetch of a member's group Data, arriving here, must not
@@ -938,5 +1074,69 @@ mod tests {
 
         cancel.cancel();
         down.shutdown().await;
+    }
+
+    /// A refresh answered with the version held while the node's sync group
+    /// announced a newer one reports `behind` (naming the announcer), not
+    /// `current`, and changes nothing.
+    #[tokio::test]
+    async fn a_refresh_answered_older_than_announced_is_behind() {
+        let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let (root_dev, upstream, device) = (dirs[0].path(), dirs[1].path(), dirs[2].path());
+        let ns: Name = "/home/bob".parse().unwrap();
+        let init = ndn_cert::init_namespace_in_pib(
+            &FilePib::new(root_dev).unwrap(),
+            &ns,
+            "desk",
+            false,
+            &ndn_cert::NewRootStore::File,
+        )
+        .await
+        .unwrap();
+        ndn_cert::persist_context(upstream, &init.init.context, &init.init.context_data).unwrap();
+        let (face, publisher) = crate::context_publisher::prepare(upstream);
+        let (engine, shutdown) = EngineBuilder::new(EngineConfig::default())
+            .security_profile(ndn_security::SecurityProfile::Disabled)
+            .security(Arc::new(SecurityManager::new()))
+            .face(face)
+            .build()
+            .await
+            .unwrap();
+        let _serving = publisher.spawn(&engine);
+        let keyring = Keyring::new();
+        assert!(keyring.adopt(Arc::new(
+            ndn_cert::open_signed_context(&init.init.context_data).unwrap().0
+        )));
+        let (sync, _groups) = prepare(true, device).unwrap();
+        let member: Name = "/home/bob/member/tab".parse().unwrap();
+        sync.announced
+            .lock()
+            .unwrap()
+            .insert(ns.clone(), (2, member.clone()));
+        let admin = TrustAdmin {
+            engine,
+            keyring: Arc::new(keyring),
+            pib_root: device.to_path_buf(),
+            publisher: None,
+            signing: None,
+            own_certs: None,
+            dv_keeps_startup_key: false,
+            configured_identity: None,
+            enrolling: tokio::sync::Mutex::new(()),
+            keeping: std::sync::Mutex::new(()),
+            ca: None,
+            context_change: tokio::sync::Mutex::new(()),
+            renewing: tokio::sync::Mutex::new(()),
+            certificates_changed: tokio::sync::Notify::new(),
+            context_sync: Some(sync),
+        };
+
+        let results = crate::context_refresh::refresh_contexts(&admin, Some(ns.clone()))
+            .await
+            .unwrap();
+        assert_eq!(results[0].state, ndn_mgmt::RefreshState::Behind, "{}", results[0].detail);
+        assert!(results[0].detail.contains(&member.to_string()), "{}", results[0].detail);
+        assert_eq!(admin.keyring.version_of(&ns), Some(1));
+        shutdown.shutdown().await;
     }
 }

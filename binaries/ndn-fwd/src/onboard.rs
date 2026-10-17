@@ -714,7 +714,7 @@ async fn run_enroll(args: &[String]) -> Result<()> {
                 check.namespace, check.detail
             ),
             S::Current | S::Source => {}
-            S::UpstreamOlder | S::Unreachable | S::Failed => {
+            S::UpstreamOlder | S::Behind | S::Unreachable | S::Failed => {
                 if !info.still_valid.is_empty() || !info.unusable.is_empty() {
                     println!(
                         "# The certificates above are judged against the trust context v{} \
@@ -850,6 +850,7 @@ async fn run_context(args: &[String]) -> Result<()> {
             ndn_mgmt::RefreshState::Updated => "updated",
             ndn_mgmt::RefreshState::Current => "current",
             ndn_mgmt::RefreshState::UpstreamOlder => "upstream-older",
+            ndn_mgmt::RefreshState::Behind => "behind",
             ndn_mgmt::RefreshState::Source => "source",
             ndn_mgmt::RefreshState::Unreachable => {
                 failed = true;

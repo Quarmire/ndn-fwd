@@ -14,8 +14,10 @@
 //! they are stored and published too, so the nodes behind this one follow
 //! the same way. During the fetch the route from the namespace's
 //! trust-context prefix to this node's own publisher is withdrawn
-//! ([`crate::context_publisher::PublishedContexts::bypass`]), so the
-//! Interests go upstream instead of being answered with the versions held.
+//! ([`crate::context_publisher::PublishedContexts::bypass`]) and the
+//! metadata this node cached is dropped
+//! ([`crate::context_publisher::forget_cached_metadata`]), so the Interests
+//! go upstream instead of being answered with the versions held.
 //!
 //! A node holding the namespace root key (the root device) is where new
 //! versions are made, so it does not fetch its own namespace. That is
@@ -40,6 +42,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use ndn_cert::{ContextRefresh, ContextUpdate, RootStore};
+use ndn_engine::ForwarderEngine;
 use ndn_mgmt::{ContextRefreshInfo, RefreshState, TrustRefusal};
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::{Data, Name};
@@ -48,9 +51,44 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context_adopt::{Kept, TrustAdmin, refusal};
 
-/// The first periodic check runs this soon after start (or after one period,
-/// if shorter), so a node that was off catches up without waiting a period.
-const FIRST_CHECK_AFTER: Duration = Duration::from_secs(30);
+/// The latest the first periodic check runs after start (or after one
+/// period, if shorter) when the routes of the held namespaces never get a
+/// face (a namespace reached over routes installed later, or none), so a
+/// node that was off catches up without waiting a period.
+const FIRST_CHECK_LATEST: Duration = Duration::from_secs(30);
+
+/// How often [`faces_up`] looks at the FIB and the face table.
+const FACE_POLL: Duration = Duration::from_millis(50);
+
+/// The namespaces this node fetches: those it holds whose root key its
+/// root store does not hold.
+fn fetched_namespaces(admin: &TrustAdmin) -> Vec<Name> {
+    admin
+        .keyring
+        .contexts()
+        .into_iter()
+        .filter(|ctx| !holds_root_key(&admin.pib_root, ctx))
+        .map(|ctx| ctx.namespace().clone())
+        .collect()
+}
+
+/// Wait until the route of every namespace in `namespaces` has a nexthop
+/// whose face is up, or `within` passed. At start the FIB holds the
+/// `[[route]]` entries before face setup has opened the `[[face]]` entries
+/// they point at (it opens them in tasks it spawns), and an Interest
+/// forwarded to a face not yet up is dropped: a check, or a Sync Interest,
+/// sent then would be lost until the next period.
+pub(crate) async fn faces_up(engine: &ForwarderEngine, namespaces: &[Name], within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    let has_face = |ns: &Name| {
+        engine.fib().lpm(ns).is_some_and(|entry| {
+            entry.nexthops.iter().any(|hop| engine.faces().get(hop.face_id).is_some())
+        })
+    };
+    while !namespaces.iter().all(has_face) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(FACE_POLL).await;
+    }
+}
 
 /// Whether the node using the PIB at `pib_root` is the root device of
 /// `ctx`'s namespace — its root store holds the key of one of `ctx`'s
@@ -112,12 +150,49 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
     }
 
     let bypass = admin.publisher.as_ref().map(|p| p.bypass(&namespace));
+    // The question is "what is newest now": not a pointer this node cached.
+    crate::context_publisher::forget_cached_metadata(&admin.engine, &namespace);
     let result =
         ndn_identity::refresh_context_via_engine(&admin.engine, &admin.keyring, &namespace).await;
     drop(bypass);
 
+    // A version this node knows exists (its sync group announced it) and
+    // does not hold: an answer naming an older one is stale, not current.
+    let known_newer = |answered: u64| {
+        let held = admin.keyring.version_of(&namespace).unwrap_or(held_version);
+        admin
+            .context_sync
+            .as_ref()
+            .and_then(|s| s.announced(&namespace))
+            .filter(|(announced, _)| *announced > held && *announced > answered)
+    };
+    let behind = |answered: u64, (announced, by): (u64, Name)| {
+        tracing::info!(
+            target: "security",
+            namespace = %namespace,
+            answered,
+            announced,
+            by = %by,
+            "the refresh got an answer older than a version announced over sync"
+        );
+        info(
+            RefreshState::Behind,
+            held_version,
+            Vec::new(),
+            format!(
+                "the answer names v{answered}, but v{announced} exists (announced over the \
+                 namespace's sync group by {by}) and is not held: a cache may answer with the \
+                 previous metadata for up to {} s after a new version, or the upstream has not \
+                 refreshed yet; nothing changed — refresh again",
+                crate::context_publisher::METADATA_FRESHNESS.as_secs()
+            ),
+        )
+    };
     match result {
         Ok(ContextRefresh::Current { version }) => {
+            if let Some(known) = known_newer(version) {
+                return behind(version, known);
+            }
             tracing::debug!(target: "security", namespace = %namespace, version, "trust context is current");
             info(
                 RefreshState::Current,
@@ -127,6 +202,9 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
             )
         }
         Ok(ContextRefresh::UpstreamOlder { held, offered }) => {
+            if let Some(known) = known_newer(offered) {
+                return behind(offered, known);
+            }
             tracing::info!(
                 target: "security",
                 namespace = %namespace,
@@ -139,8 +217,11 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
                 held,
                 Vec::new(),
                 format!(
-                    "the forwarder that answered serves v{offered}, older than the held v{held} \
-                     (it has not refreshed yet); nothing changed"
+                    "the answer names v{offered}, older than the held v{held}: the forwarder \
+                     that answered has not refreshed yet, or a cache answered with the metadata \
+                     of an earlier version (it may for up to {} s after a new one); nothing \
+                     changed",
+                    crate::context_publisher::METADATA_FRESHNESS.as_secs()
                 ),
             )
         }
@@ -405,6 +486,9 @@ fn publication(admin: &TrustAdmin) -> &'static str {
 }
 
 /// Check every held context every `period_secs` (0: never), until `cancel`.
+/// The first check runs as soon as the routes of the namespaces this node
+/// fetches have their faces ([`faces_up`]), so a node that starts, or comes
+/// back after being off, catches up at once rather than a period later.
 pub(crate) fn spawn_periodic(admin: Arc<TrustAdmin>, period_secs: u64, cancel: CancellationToken) {
     if period_secs == 0 {
         tracing::info!(
@@ -417,19 +501,21 @@ pub(crate) fn spawn_periodic(admin: Arc<TrustAdmin>, period_secs: u64, cancel: C
     let period = Duration::from_secs(period_secs);
     tracing::info!(target: "security", period_secs, "refreshing held trust contexts periodically");
     tokio::spawn(async move {
-        let mut wait = period.min(FIRST_CHECK_AFTER);
+        let fetched = fetched_namespaces(&admin);
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = faces_up(&admin.engine, &fetched, period.min(FIRST_CHECK_LATEST)) => {}
+        }
         loop {
+            // Each namespace's outcome is logged by `refresh_one`.
+            if !admin.keyring.is_empty()
+                && let Err(e) = refresh_contexts(&admin, None).await
+            {
+                tracing::warn!(target: "security", error = %e.reason, "trust-context refresh failed");
+            }
             tokio::select! {
                 _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(wait) => {}
-            }
-            wait = period;
-            if admin.keyring.is_empty() {
-                continue;
-            }
-            // Each namespace's outcome is logged by `refresh_one`.
-            if let Err(e) = refresh_contexts(&admin, None).await {
-                tracing::warn!(target: "security", error = %e.reason, "trust-context refresh failed");
+                _ = tokio::time::sleep(period) => {}
             }
         }
     });
@@ -637,6 +723,82 @@ mod tests {
         assert_eq!(results[0].state, RefreshState::Unreachable, "{}", results[0].detail);
         assert_eq!((results[0].held_version, results[0].version), (1, 1));
         assert_eq!(admin.keyring.version_of(&ns), Some(1));
+        shutdown.shutdown().await;
+    }
+
+    /// A node that starts checks its held contexts as soon as the route of
+    /// each namespace it fetches has its face, not a period (here an hour)
+    /// or 30 s later, and not before: at start `[[route]]` entries are in
+    /// the FIB before face setup has opened the faces they name.
+    #[tokio::test]
+    async fn the_first_periodic_check_runs_once_the_namespace_route_has_its_face() {
+        use ndn_engine::{EngineBuilder, EngineConfig};
+        use ndn_face::local::InProcFace;
+        use ndn_security::{Keyring, SecurityManager};
+
+        let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let (root_dev, upstream, device) = (dirs[0].path(), dirs[1].path(), dirs[2].path());
+        let ns: Name = "/home/bob".parse().unwrap();
+        let pib = FilePib::new(root_dev).unwrap();
+        let init =
+            ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false, &ndn_cert::NewRootStore::File)
+                .await
+                .unwrap();
+        let root = RootStore::open(&pib).unwrap().unwrap().signer(None).await.unwrap();
+        let seed = ndn_cert::RecoverySeed::generate().unwrap();
+        let kit = ndn_cert::recovery_anchor(Arc::new(seed.signer(&ns))).await.unwrap();
+        let v2 = ndn_cert::add_recovery_anchor(root.as_ref(), &init.init.context_data, &kit)
+            .await
+            .unwrap();
+        ndn_cert::persist_context(upstream, &v2.context, &v2.data).unwrap();
+
+        let (face, publisher) = crate::context_publisher::prepare(upstream);
+        let (engine, shutdown) = EngineBuilder::new(EngineConfig::default())
+            .security_profile(ndn_security::SecurityProfile::Disabled)
+            .security(Arc::new(SecurityManager::new()))
+            .face(face)
+            .build()
+            .await
+            .unwrap();
+        let _serving = publisher.spawn(&engine);
+        // The namespace's route names a face that is not up yet.
+        let late = engine.faces().alloc_id();
+        engine.fib().add_nexthop(&ns, late, 10);
+        let keyring = Arc::new(Keyring::new());
+        let held = ndn_cert::open_signed_context(&init.init.context_data).unwrap().0;
+        assert!(keyring.adopt(Arc::new(held)));
+        let admin = Arc::new(TrustAdmin {
+            engine: engine.clone(),
+            keyring,
+            pib_root: device.to_path_buf(),
+            publisher: None,
+            signing: None,
+            own_certs: None,
+            dv_keeps_startup_key: false,
+            configured_identity: None,
+            enrolling: tokio::sync::Mutex::new(()),
+            keeping: std::sync::Mutex::new(()),
+            ca: None,
+            context_change: tokio::sync::Mutex::new(()),
+            renewing: tokio::sync::Mutex::new(()),
+            certificates_changed: tokio::sync::Notify::new(),
+            context_sync: None,
+        });
+        let cancel = CancellationToken::new();
+        spawn_periodic(Arc::clone(&admin), 3600, cancel.clone());
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(admin.keyring.version_of(&ns), Some(1), "checked before the face was up");
+        let (face, _handle) = InProcFace::new(late, 16);
+        engine.add_face(face, cancel.child_token());
+        let adopted = tokio::time::timeout(Duration::from_secs(3), async {
+            while admin.keyring.version_of(&ns) != Some(2) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(adopted.is_ok(), "no check once the face was up");
+        cancel.cancel();
         shutdown.shutdown().await;
     }
 }

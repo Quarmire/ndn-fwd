@@ -74,6 +74,14 @@ ndn-peek /ndn/example/file --timeout-ms 4000
 ndn-peek /ndn/example/data --hex                # raw wire output
 ```
 
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| `0` | fetched |
+| `1` | any other failure: timeout, Nack, decode, connection |
+| `3` | the local forwarder **refused** the Data that answered: it failed validation with a final verdict. `refused: <token>` is printed on stderr, `<token>` one of `chain`, `revoked`, `bad-signature`, `schema`, `untrusted-root`, `context`, `unverifiable` (see the ndn-rs security model, "Local refusal") |
+
 ### `ndn-put` — publish from stdin
 
 ```bash

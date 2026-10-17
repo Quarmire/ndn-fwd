@@ -26,7 +26,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 route(n("/member/phone"), "phone"),
                 route(n("/member/tablet"), "fresh"),
             ],
-            refresh_secs: 3,
+            refresh_secs: 1,
             ..Default::default()
         },
     );
@@ -36,7 +36,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         NodeCfg {
             links: vec![link("relay", 2)],
             routes: vec![route(NS, "relay")],
-            refresh_secs: 3,
+            refresh_secs: 1,
             ..Default::default()
         },
     );
@@ -46,7 +46,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         NodeCfg {
             links: vec![link("relay", 2)],
             routes: vec![route(NS, "relay")],
-            refresh_secs: 3,
+            refresh_secs: 1,
             ..Default::default()
         },
     );
@@ -144,6 +144,15 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         if pib.exists() {
             return Err("root PIB still present".into());
         }
+        // The relay's content store may still hold the root's last answers
+        // (the trust-context metadata is fresh for 1 s), which would answer
+        // the next step's "is v3 the newest?" as a live node would. A device
+        // recovering minutes after the loss sees no such copy; erase them.
+        let sock = cx.w.node("relay").sock().display().to_string();
+        let erase = cx
+            .tool("ndn-ctl")
+            .args(["--socket", &sock, "cs", "erase", NS]);
+        cx.ok(erase, "erase the relay's cached copies")?;
         Ok(())
     })?;
     let recover_op = |cx: &crate::step::Cx<'_>, from_held: bool| {

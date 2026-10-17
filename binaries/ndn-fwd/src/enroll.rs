@@ -192,7 +192,10 @@ async fn check_context(admin: &TrustAdmin, namespace: &Name) -> Option<ContextRe
 fn judged_on_held(check: &ContextRefreshInfo) -> String {
     match check.state {
         RefreshState::Updated | RefreshState::Current | RefreshState::Source => String::new(),
-        RefreshState::UpstreamOlder | RefreshState::Unreachable | RefreshState::Failed => {
+        RefreshState::UpstreamOlder
+        | RefreshState::Behind
+        | RefreshState::Unreachable
+        | RefreshState::Failed => {
             format!(
                 " (judged against the trust context v{} this node holds; whether a newer \
                  version revokes it could not be checked: {})",
@@ -788,9 +791,8 @@ pub(crate) mod tests {
         node.root_contexts.publish(&bump.context, &bump.data);
         assert_eq!(node.admin.keyring.version_of(&ns), Some(held));
         // The first enrollment's check left the publisher's metadata (v1) in
-        // the shared engine's Content Store; it stops satisfying MustBeFresh
-        // after its FreshnessPeriod (1 s), as on any forwarder in between.
-        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        // the shared engine's Content Store; publishing v2 purges it, so the
+        // next check is answered by the publisher at once.
 
         let EnrollOutcome::Enrolled(second) =
             enroll(&node.admin, request(&node, "member", "member-m2", "tab", false))

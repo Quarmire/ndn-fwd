@@ -3425,6 +3425,7 @@ dependencies = [
  "sha2 0.11.0",
  "smallvec",
  "thiserror 2.0.18",
+ "tokio",
  "web-time",
 ]
 

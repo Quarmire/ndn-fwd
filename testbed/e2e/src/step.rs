@@ -291,7 +291,7 @@ impl Cx<'_> {
                     within.as_secs()
                 ));
             }
-            thread::sleep(Duration::from_millis(200));
+            thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -331,13 +331,16 @@ impl Cx<'_> {
         self.transcript.push_str(&format!("$ {} &\n", op.display()));
         let log = dir.join(format!("put-{seq}.log"));
         let mut proc = op.spawn_logged(&log, &format!("put-{seq}"))?;
+        // A local fetch is answered within milliseconds once ndn-put has
+        // registered; before that the probe goes upstream and waits out its
+        // lifetime (plus ndn-peek's 500 ms grace), so keep it short.
         let probe = self
             .tool("ndn-peek")
             .arg("--face-socket")
             .arg(sock.display().to_string())
             .arg("--can-be-prefix")
             .arg("--lifetime")
-            .arg("500")
+            .arg("100")
             .arg(name)
             .timeout(Duration::from_secs(5));
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -397,11 +400,17 @@ impl Cx<'_> {
         ))
     }
 
-    /// Fetch `name` through `node`'s daemon: nothing may come back.
-    pub fn fetch_refused(&mut self, node: &str, name: &str) -> StepResult<()> {
+    /// Fetch `name` through `node`'s daemon: the daemon must refuse the
+    /// answering Data for `reason` — `ndn-peek` exits 3 with
+    /// `refused: <reason>` (the forwarder's local refusal Nack), well
+    /// before the Interest lifetime; nothing is written.
+    pub fn fetch_refused(&mut self, node: &str, name: &str, reason: &str) -> StepResult<()> {
+        const EXIT_REFUSED: i32 = 3;
         let seq = self.w.next_seq();
         let file = self.w.node(node).dir.join(format!("fetch-{seq}.bin"));
-        let op = self.peek(node, name, &file, false, 3000);
+        let op = self
+            .peek(node, name, &file, false, 3000)
+            .timeout(Duration::from_secs(10));
         let out = self.op(op);
         if out.timed_out {
             return Err(format!("ndn-peek of {name} hung"));
@@ -410,6 +419,14 @@ impl Cx<'_> {
             return Err(format!(
                 "{name} was delivered at {node} ({}), expected it refused",
                 out.status_text()
+            ));
+        }
+        let token = format!("refused: {reason}");
+        if out.code != Some(EXIT_REFUSED) || !out.stderr.lines().any(|l| l.trim() == token) {
+            return Err(format!(
+                "{name} at {node}: expected `{token}` (exit {EXIT_REFUSED}), got {}: {}",
+                out.status_text(),
+                out.stderr.trim()
             ));
         }
         Ok(())

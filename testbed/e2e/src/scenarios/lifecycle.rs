@@ -5,11 +5,10 @@
 //! Data itself rather than trusting the relay's check.
 //!
 //! The push variant runs the same steps with `context_sync = true` and
-//! `context_refresh_secs = 3600` everywhere: the revocation can then only
-//! arrive over the namespace's sync group.
+//! `context_refresh_secs = 0` (no periodic refresh) everywhere: the
+//! revocation can then only arrive over the namespace's sync group.
 
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::run::snapshot;
 use crate::scenarios::*;
@@ -18,7 +17,7 @@ use crate::world::NodeCfg;
 
 pub fn run(sc: &mut Scenario, push: bool) -> Result<(), Abort> {
     let ns = if push { "/lp" } else { "/lc" };
-    let refresh = if push { 3600 } else { 3 };
+    let refresh = if push { 0 } else { 1 };
     let n = |s: &str| format!("{ns}{s}");
     let base = NodeCfg {
         refresh_secs: refresh,
@@ -158,23 +157,6 @@ pub fn run(sc: &mut Scenario, push: bool) -> Result<(), Abort> {
         fetch_all(cx, &["tab", "relay"], &n("/member/phone/doc2"), &doc2)
     })?;
 
-    if push {
-        sc.step("let the first periodic refresh after start pass (refresh is 3600 s)", |cx| {
-            // A daemon checks min(context_refresh_secs, 30) s after start, then
-            // every context_refresh_secs: past that first check only the sync
-            // group can deliver a version within the next hour.
-            let last = ["relay", "phone", "tab"]
-                .iter()
-                .filter_map(|x| cx.w.node(x).started_at)
-                .max()
-                .ok_or("no start time")?;
-            let wait = Duration::from_secs(35).saturating_sub(last.elapsed());
-            cx.note(&format!("sleeping {:.1}s", wait.as_secs_f64()));
-            thread::sleep(wait);
-            Ok(())
-        })?;
-    }
-
     let v0 = sc.world.held_version("root", ns).unwrap_or(0);
     sc.step("revoke with a wrong passphrase changes nothing", |cx| {
         let pib = cx.w.node("root").pib();
@@ -209,12 +191,11 @@ pub fn run(sc: &mut Scenario, push: bool) -> Result<(), Abort> {
         }
         Ok(())
     })?;
-    let how = if push { "by push (context_sync; refresh 3600 s)" } else { "by pull (refresh every 3 s)" };
+    let how = if push { "by push (context_sync; no periodic refresh)" } else { "by pull (refresh every 1 s)" };
     sc.step(&format!("relay and tab adopt the revocation {how}"), |cx| {
-        let limit = if push { Duration::from_secs(60) } else { SHORT };
         let start = Instant::now();
-        cx.wait_version("relay", ns, v0 + 1, limit)?;
-        cx.wait_version("tab", ns, v0 + 1, limit.saturating_sub(start.elapsed()))?;
+        cx.wait_version("relay", ns, v0 + 1, SHORT)?;
+        cx.wait_version("tab", ns, v0 + 1, SHORT.saturating_sub(start.elapsed()))?;
         Ok(())
     })?;
     let doc3 = content(5_000, 3);
@@ -222,10 +203,10 @@ pub fn run(sc: &mut Scenario, push: bool) -> Result<(), Abort> {
         cx.publish("phone", &n("/member/phone/doc3"), &doc3, None, None)
     })?;
     sc.step("the revoked member's Data is refused at the relay", |cx| {
-        cx.fetch_refused("relay", &n("/member/phone/doc3"))
+        cx.fetch_refused("relay", &n("/member/phone/doc3"), "revoked")
     })?;
     sc.step("the revoked member's Data is refused at tab (its own validation)", |cx| {
-        cx.fetch_refused("tab", &n("/member/phone/doc3"))
+        cx.fetch_refused("tab", &n("/member/phone/doc3"), "revoked")
     })?;
     let note = content(3_000, 4);
     sc.step("control: tab's Data still validates at the relay", |cx| {

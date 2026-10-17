@@ -24,7 +24,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         NodeCfg {
             links: vec![link("root", 1), link("phone", 3)],
             routes: vec![route(NS, "root"), route(n("/member/phone"), "phone")],
-            refresh_secs: 3,
+            refresh_secs: 1,
             ..Default::default()
         },
     );
@@ -34,7 +34,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         NodeCfg {
             links: vec![link("relay", 2)],
             routes: vec![route(NS, "relay")],
-            refresh_secs: 3,
+            refresh_secs: 1,
             ..Default::default()
         },
     );
@@ -150,7 +150,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let doc2 = content(6_000, 22);
     sc.step("the member's Data under its old certificate is refused at the relay", |cx| {
         cx.publish("phone", &n("/member/phone/doc2"), &doc2, None, None)?;
-        cx.fetch_refused("relay", &n("/member/phone/doc2"))
+        // The recovered version revokes the old CA that certified it.
+        cx.fetch_refused("relay", &n("/member/phone/doc2"), "revoked")
     })?;
     sc.step("phone enrolls again with the new invite (--force)", |cx| {
         let c = enroll(cx, "phone", &new_invites[0], "phone", true, None)?;

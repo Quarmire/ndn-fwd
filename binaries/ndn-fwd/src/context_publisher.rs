@@ -52,7 +52,7 @@ pub(crate) const CONTEXT_FACE_ID: u64 = 0xFFFF_0005;
 /// MustBeFresh discovery Interest reach the publisher again soon after an
 /// update instead of being answered from caches. Matches
 /// `ndn_app::rdr` (the same 1 s for objects it publishes).
-const METADATA_FRESHNESS: Duration = Duration::from_secs(1);
+pub(crate) const METADATA_FRESHNESS: Duration = Duration::from_secs(1);
 
 /// One published namespace: the names it answers and the wires it answers
 /// with.
@@ -300,6 +300,15 @@ impl PublishedContexts {
     /// Serve version `ctx` (signed Data `data`) from now on, beside the
     /// versions of its namespace served already; the metadata names it when
     /// it is the newest.
+    ///
+    /// When the newest version changes, the metadata this node answered
+    /// before (`<ns>/32=trust-context/32=metadata/...`) is evicted from the
+    /// node's own Content Store before this returns: the new set is swapped
+    /// in first, then the store is purged, so no Interest after `publish`
+    /// is answered with a pointer to the superseded version (without this, a
+    /// cached pointer satisfies MustBeFresh for up to [`METADATA_FRESHNESS`]
+    /// and a downstream refresh reports `upstream-older`/`behind`). The
+    /// versioned contexts themselves are immutable and stay cached.
     pub(crate) fn publish(&self, ctx: &SignedTrustContext, data: &Data) {
         let prefix = ndn_cert::rdr_prefix(ctx.namespace());
         let bypassed = self.lock_bypassed();
@@ -313,8 +322,20 @@ impl PublishedContexts {
             face = self.face_id.0,
             "publishing trust context (RDR)"
         );
-        let mut list = self.list.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        *list = Arc::new(with_version(&list, ctx, data));
+        let newest_changed = {
+            // Swapped under `bypassed` so a bypass ending meanwhile sees the
+            // namespace and routes it back here.
+            let mut list = self.list.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let before = list.iter().find(|c| c.prefix == prefix).map(|c| c.newest);
+            *list = Arc::new(with_version(&list, ctx, data));
+            // A namespace new to the publisher may still have a pointer
+            // cached from the fetch that brought it here.
+            before.is_none_or(|newest| ctx.version() > newest)
+        };
+        drop(bypassed);
+        if newest_changed {
+            forget_cached_metadata(&self.engine, ctx.namespace());
+        }
     }
 
     /// While the returned guard lives, Interests under `namespace`'s
@@ -338,6 +359,59 @@ impl PublishedContexts {
 
     fn lock_bypassed(&self) -> std::sync::MutexGuard<'_, HashMap<Name, usize>> {
         self.bypassed.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Evict `namespace`'s trust-context metadata
+/// (`<ns>/32=trust-context/32=metadata/...`) from this node's own Content
+/// Store, returning once it is gone. Done when this node publishes a newer
+/// version (its old pointer is superseded) and before it asks the network
+/// for the newest version (refresh, adoption by fetch): a pointer it cached
+/// from an earlier fetch satisfies MustBeFresh for up to
+/// [`METADATA_FRESHNESS`] and would otherwise answer the question locally
+/// with a version it already holds.
+pub(crate) fn forget_cached_metadata(engine: &ForwarderEngine, namespace: &Name) {
+    let metadata = ndn_cert::rdr_metadata_name(namespace);
+    let evicted = evict_now(engine.cs().as_ref(), &metadata);
+    tracing::debug!(
+        target: "security",
+        metadata = %metadata,
+        evicted,
+        "trust-context metadata dropped from the content store"
+    );
+}
+
+/// Evict everything under `prefix` from `cs` and return once it is gone.
+/// Every in-tree store (LRU, sharded, sqlite, fjall) does its work under a
+/// synchronous lock and completes on the first poll; a store that does
+/// suspend is driven to completion on this thread (inside `block_in_place`
+/// on a multi-thread runtime), so the caller never returns before the
+/// eviction.
+fn evict_now(cs: &dyn ndn_store::ErasedContentStore, prefix: &Name) -> usize {
+    use std::task::{Context, Poll, Wake, Waker};
+    struct Unpark(std::thread::Thread);
+    impl Wake for Unpark {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let mut eviction = cs.evict_prefix_erased(prefix, None);
+    let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    if let Poll::Ready(evicted) = eviction.as_mut().poll(&mut cx) {
+        return evicted;
+    }
+    let mut drive = || loop {
+        match eviction.as_mut().poll(&mut cx) {
+            Poll::Ready(evicted) => return evicted,
+            Poll::Pending => std::thread::park(),
+        }
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(drive)
+        }
+        _ => drive(),
     }
 }
 
@@ -523,6 +597,117 @@ mod tests {
         assert_eq!(next_face(&engine), upstream, "another fetch still runs");
         drop(second);
         assert_eq!(next_face(&engine), publisher_face);
+        shutdown.shutdown().await;
+    }
+
+    /// A newer version purges the superseded metadata pointer from the
+    /// node's own Content Store before `publish` returns, so the next
+    /// discovery Interest reaches the publisher; the immutable versioned
+    /// contexts stay cached, and adding an older version purges nothing.
+    #[tokio::test]
+    async fn a_newer_version_purges_the_cached_metadata_before_publish_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = ndn_security::SecurityManager::new();
+        let bob = ndn_cert::init_namespace(&mgr, &n("/home/bob")).unwrap();
+        let signer = mgr.get_signer_sync(&bob.anchor_key).unwrap();
+        let content = bob.context.encode_content();
+        let version = |v: u64| {
+            let ctx = SignedTrustContext::decode_content(&content, v).unwrap();
+            let data = ctx.sign_into_data(signer.as_ref()).unwrap();
+            (ctx, data)
+        };
+        let (v1, v2) = (version(1), version(2));
+        ndn_cert::persist_context(dir.path(), &v1.0, &v1.1).unwrap();
+        let (face, publisher) = prepare(dir.path());
+        let (engine, shutdown) = ndn_engine::EngineBuilder::new(ndn_engine::EngineConfig::default())
+            .face(face)
+            .build()
+            .await
+            .unwrap();
+        let published = publisher.spawn(&engine);
+        let cs = engine.cs();
+        let cache = |wire: Bytes| {
+            let name = Arc::new(Name::clone(&Data::decode(wire.clone()).unwrap().name));
+            let meta = ndn_store::CsMeta {
+                stale_at: u64::MAX,
+                revocation_epoch: None,
+            };
+            let cs = Arc::clone(&cs);
+            async move { cs.insert_erased(wire, name, meta).await }
+        };
+        let ns = n("/home/bob");
+        cache(metadata_data(&ns, &v1.0.rdr_name(), 1)).await;
+        cache(v1.1.raw().clone()).await;
+        assert_eq!(cs.len(), 2);
+
+        published.publish(&v2.0, &v2.1);
+        assert_eq!(cs.len(), 1, "the v1 pointer is gone, the v1 context stays");
+
+        cache(metadata_data(&ns, &v2.0.rdr_name(), 2)).await;
+        published.publish(&v1.0, &v1.1);
+        assert_eq!(cs.len(), 2, "an older version leaves the newest pointer cached");
+        shutdown.shutdown().await;
+    }
+
+    /// A refresh asks the network, not this node's Content Store: a pointer
+    /// to the held version cached from an earlier fetch (still fresh) is
+    /// dropped first, so the newer version upstream is found at once.
+    #[tokio::test]
+    async fn a_refresh_is_not_answered_by_this_nodes_cached_metadata() {
+        let (upstream, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mgr = ndn_security::SecurityManager::new();
+        let bob = ndn_cert::init_namespace(&mgr, &n("/home/bob")).unwrap();
+        let signer = mgr.get_signer_sync(&bob.anchor_key).unwrap();
+        let content = bob.context.encode_content();
+        let version = |v: u64| {
+            let ctx = SignedTrustContext::decode_content(&content, v).unwrap();
+            let data = ctx.sign_into_data(signer.as_ref()).unwrap();
+            (ctx, data)
+        };
+        let (v1, v2) = (version(1), version(2));
+        ndn_cert::persist_context(upstream.path(), &v2.0, &v2.1).unwrap();
+        let (face, publisher) = prepare(upstream.path());
+        let (engine, shutdown) = ndn_engine::EngineBuilder::new(ndn_engine::EngineConfig::default())
+            .security_profile(ndn_security::SecurityProfile::Disabled)
+            .security(Arc::new(ndn_security::SecurityManager::new()))
+            .face(face)
+            .build()
+            .await
+            .unwrap();
+        let _serving = publisher.spawn(&engine);
+        let ns = n("/home/bob");
+        let stale = metadata_data(&ns, &v1.0.rdr_name(), 1);
+        let name = Arc::new(Name::clone(&Data::decode(stale.clone()).unwrap().name));
+        let fresh = ndn_store::CsMeta {
+            stale_at: u64::MAX,
+            revocation_epoch: None,
+        };
+        engine.cs().insert_erased(stale, name, fresh).await;
+        let keyring = Arc::new(ndn_security::Keyring::new());
+        assert!(keyring.adopt(Arc::new(version(1).0)));
+        let admin = crate::context_adopt::TrustAdmin {
+            engine,
+            keyring,
+            pib_root: device.path().to_path_buf(),
+            publisher: None,
+            signing: None,
+            own_certs: None,
+            dv_keeps_startup_key: false,
+            configured_identity: None,
+            enrolling: tokio::sync::Mutex::new(()),
+            keeping: std::sync::Mutex::new(()),
+            ca: None,
+            context_change: tokio::sync::Mutex::new(()),
+            renewing: tokio::sync::Mutex::new(()),
+            certificates_changed: tokio::sync::Notify::new(),
+            context_sync: None,
+        };
+
+        let results = crate::context_refresh::refresh_contexts(&admin, Some(ns.clone()))
+            .await
+            .unwrap();
+        assert_eq!(results[0].state, ndn_mgmt::RefreshState::Updated, "{}", results[0].detail);
+        assert_eq!(admin.keyring.version_of(&ns), Some(2));
         shutdown.shutdown().await;
     }
 }

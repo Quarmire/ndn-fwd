@@ -87,6 +87,12 @@ async fn fetch_newest(
             RefreshState::Updated | RefreshState::Current | RefreshState::UpstreamOlder => {
                 Ok((r.version, true))
             }
+            RefreshState::Behind => bail!(
+                "{}. A newer version of {namespace} exists than the held v{}: recovering from \
+                 it would fork the namespace; refresh until it is held, then retry",
+                r.detail,
+                r.held_version
+            ),
             RefreshState::Unreachable if from_held => Ok((r.held_version, false)),
             RefreshState::Unreachable => bail!(
                 "{}. Recovering from the held v{} without knowing it is the newest could fork \

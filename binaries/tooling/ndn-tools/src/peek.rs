@@ -1,6 +1,12 @@
 //! `ndn-peek` — fetch a named Data packet (single or segmented) and print
 //! or save the content. Segmented fetch uses ndnputchunks-compatible naming
 //! (CanBePrefix discovery + SegmentNameComponent).
+//!
+//! Exit codes: `0` fetched; `1` any other failure (timeout, Nack, decode,
+//! connection); [`EXIT_REFUSED`] (`3`) the local forwarder refused the Data
+//! that answered (it failed validation) — `refused: <token>` is printed on
+//! stderr, `<token>` one of `chain`, `revoked`, `bad-signature`, `schema`,
+//! `untrusted-root`, `context`, `unverifiable`.
 
 use anyhow::Result;
 use clap::Parser;
@@ -8,12 +14,17 @@ use tokio::sync::mpsc;
 
 use ndn_tools_core::common::ConnectConfig;
 use ndn_tools_core::common::{EventLevel, ToolEvent};
-use ndn_tools_core::peek::{PeekParams, run_peek};
+use ndn_tools_core::peek::{PeekParams, Refused, run_peek};
+
+/// The forwarder refused the answering Data (see the module docs).
+const EXIT_REFUSED: i32 = 3;
 
 #[derive(Parser)]
 #[command(
     name = "ndn-peek",
-    about = "Fetch a named Data packet from the NDN network"
+    about = "Fetch a named Data packet from the NDN network",
+    after_help = "Exit codes: 0 fetched; 1 failed; 3 refused by the local forwarder \
+                  (`refused: <token>` on stderr)"
 )]
 struct Cli {
     name: String,
@@ -72,7 +83,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    run_peek(
+    let result = run_peek(
         PeekParams {
             conn: ConnectConfig {
                 face_socket: cli.face_socket,
@@ -90,5 +101,10 @@ async fn main() -> Result<()> {
         },
         tx,
     )
-    .await
+    .await;
+    if let Some(refused) = result.as_ref().err().and_then(|e| e.downcast_ref::<Refused>()) {
+        eprintln!("refused: {}", refused.refusal.as_str());
+        std::process::exit(EXIT_REFUSED);
+    }
+    result
 }

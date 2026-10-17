@@ -216,11 +216,21 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             .env("NDN_ROOT_PASSPHRASE", ROOT_PASS);
         cx.ok(op, "recovery-kit revoke")?;
         cx.expect_version("root", NS, 4)?;
-        let op = cx
-            .tool("ndn-fwd")
-            .args(["context", "refresh", NS, "-c"])
-            .arg(cx.w.node("phone").cfg_arg());
-        cx.ok(op, "context refresh")?;
+        // A relay or cache between phone and root may still answer with the
+        // previous metadata briefly (`current`/`behind`): refresh again until
+        // phone holds v4, under a deadline.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let op = cx
+                .tool("ndn-fwd")
+                .args(["context", "refresh", NS, "-c"])
+                .arg(cx.w.node("phone").cfg_arg());
+            cx.ok(op, "context refresh")?;
+            if cx.version("phone", NS).is_some_and(|v| v >= 4) || Instant::now() > deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
         cx.expect_version("phone", NS, 4)
     })?;
     sc.step("the revoked kit cannot recover (right passphrase); nothing signed", |cx| {
@@ -301,7 +311,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             Some(rogue),
             Some(&n("/member/phone")),
         )?;
-        cx.fetch_refused("root", &n("/member/phone/rogue"))
+        // The key has no certificate anywhere: root's certificate fetch is
+        // answered NoRoute (phone has none, and routes back only to root), a
+        // definite absence, so the Data is refused as unverifiable at once.
+        cx.fetch_refused("root", &n("/member/phone/rogue"), "unverifiable")
     })?;
     let clean = content(1_000, 32);
     sc.step("control: Data through the shim (not tampering) validates", |cx| {
@@ -319,7 +332,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.publish("phone", &n("/member/phone/viashim/flipped"), &clean, None, None)?;
         let flip = cx.w.shims[0].flip.clone();
         flip.store(true, Ordering::Relaxed);
-        cx.fetch_refused("root", &n("/member/phone/viashim/flipped"))?;
+        cx.fetch_refused("root", &n("/member/phone/viashim/flipped"), "bad-signature")?;
         flip.store(false, Ordering::Relaxed);
         if cx.w.shims[0].flipped.load(Ordering::Relaxed) == 0 {
             return Err("the shim tampered with nothing: the refusal proves nothing".into());

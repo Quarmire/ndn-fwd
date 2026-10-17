@@ -52,10 +52,33 @@ async fn fetch_one(
     decode_reply(raw)
 }
 
+/// The forwarder refused the Data that answered the Interest
+/// (`NackReason::Refused`, sent to local faces only): the Data exists but
+/// failed validation for `refusal`. Carried as the `anyhow` error of
+/// [`run_peek`] so a caller can tell it from a miss (`downcast_ref`).
+#[derive(Debug)]
+pub struct Refused {
+    pub refusal: ndn_packet::Refusal,
+    pub name: Option<Name>,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "refused: {}", self.refusal.as_str())?;
+        match &self.name {
+            Some(name) => write!(f, " for {name}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
 /// Decode a forwarder reply. A bare Data decodes directly; an NDNLPv2
-/// LpPacket is unwrapped via `LpPacket::decode`: a Nack header becomes an
-/// error naming the reason and the nacked Interest, an unfragmented payload
-/// is decoded as Data. Malformed input is an error, never a panic.
+/// LpPacket is unwrapped via `LpPacket::decode`: a refusal Nack becomes a
+/// [`Refused`] error, any other Nack an error naming the reason and the
+/// nacked Interest, an unfragmented payload is decoded as Data. Malformed
+/// input is an error, never a panic.
 fn decode_reply(raw: Bytes) -> Result<Data> {
     if !is_lp_packet(&raw) {
         return Data::decode(raw).map_err(|e| anyhow::anyhow!("decode: {e}"));
@@ -65,6 +88,10 @@ fn decode_reply(raw: Bytes) -> Result<Data> {
         .fragment
         .ok_or_else(|| anyhow::anyhow!("decode: LpPacket carries no fragment"))?;
     if let Some(header) = lp.nack {
+        if let Some(refusal) = header.reason.and_then(|r| r.refusal()) {
+            let name = Interest::decode(fragment).ok().map(|i| Name::clone(&i.name));
+            return Err(Refused { refusal, name }.into());
+        }
         let reason = header
             .reason
             .map_or_else(|| "unspecified".to_string(), |r| format!("{r:?}"));
@@ -448,5 +475,18 @@ mod tests {
 
         let err = decode_reply(Bytes::from_static(&[0x64, 0x05, 0x50, 0xff])).unwrap_err();
         assert!(err.to_string().starts_with("decode LpPacket:"), "{err}");
+    }
+
+    /// A refusal Nack is a typed [`Refused`] carrying the stable token, so
+    /// the binary can exit with its dedicated code.
+    #[test]
+    fn refusal_nack_is_a_typed_refusal() {
+        let name: Name = "/home/bob/doc".parse().unwrap();
+        let reason = NackReason::Refused(ndn_packet::Refusal::Revoked);
+        let wire = encode_lp_nack(reason, &encode_interest(&name, None));
+        let err = decode_reply(wire).unwrap_err();
+        let refused = err.downcast_ref::<Refused>().expect("typed refusal");
+        assert_eq!(refused.refusal, ndn_packet::Refusal::Revoked);
+        assert_eq!(err.to_string(), "refused: revoked for /home/bob/doc");
     }
 }

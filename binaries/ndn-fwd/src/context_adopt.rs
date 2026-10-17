@@ -274,6 +274,9 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
             (Some(publisher), None) => Some(publisher.bypass(&link.namespace)),
             _ => None,
         };
+        if link.context_data.is_none() {
+            crate::context_publisher::forget_cached_metadata(&self.engine, &link.namespace);
+        }
         let adopted =
             ndn_identity::adopt_anchor_link_via_engine(&self.engine, &self.keyring, &link)
                 .await
