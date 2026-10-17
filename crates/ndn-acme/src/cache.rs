@@ -4,11 +4,14 @@ use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
+use crate::self_signed::{create_private_dir, publish_replace};
+
 /// On-disk store for issued ACME certs, keyed by domain.
 ///
 /// Each domain gets a `<domain>.cert.pem` / `<domain>.key.pem` pair under the
-/// cache directory. Contents are plaintext, so the directory must be
-/// operator-protected.
+/// cache directory. Contents are plaintext, so the directory is created `0700`
+/// and entries are written `0600` from creation (on unix; elsewhere they
+/// inherit the directory's ACL).
 #[derive(Debug, Clone)]
 pub struct CertCache {
     dir: PathBuf,
@@ -18,7 +21,8 @@ impl CertCache {
     /// Opens (creating if needed) the cache directory at `dir`.
     pub async fn open(dir: impl AsRef<Path>) -> std::io::Result<Self> {
         let dir = dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir).await?;
+        let d = dir.clone();
+        tokio::task::spawn_blocking(move || create_private_dir(&d)).await??;
         Ok(Self { dir })
     }
 
@@ -45,8 +49,12 @@ impl CertCache {
         cert_pem: &[u8],
         key_pem: &[u8],
     ) -> std::io::Result<()> {
-        fs::write(self.cert_path(domain), cert_pem).await?;
-        fs::write(self.key_path(domain), key_pem).await?;
-        Ok(())
+        let (cert_path, key_path) = (self.cert_path(domain), self.key_path(domain));
+        let (cert_pem, key_pem) = (cert_pem.to_vec(), key_pem.to_vec());
+        tokio::task::spawn_blocking(move || {
+            publish_replace(&cert_path, &cert_pem)?;
+            publish_replace(&key_path, &key_pem)
+        })
+        .await?
     }
 }

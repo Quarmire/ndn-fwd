@@ -79,7 +79,8 @@ async fn export_ecdsa(identity: &str, password: &[u8], out: PathBuf) -> anyhow::
     let bag = SafeBag::encrypt(Bytes::copy_from_slice(&cert_wire), &pkcs8, password)
         .context("SafeBag encrypt")?;
 
-    std::fs::write(&out, bag.encode()).with_context(|| format!("write {}", out.display()))?;
+    ndn_security::secure_fs::write_private(&out, bag.encode())
+        .with_context(|| format!("write {}", out.display()))?;
     println!("identity={identity}");
     println!("cert={cert_name}");
     println!("out={}", out.display());

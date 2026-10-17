@@ -2929,6 +2929,7 @@ dependencies = [
  "clap",
  "ndn-cert",
  "ndn-packet",
+ "ndn-security",
  "ndn-trust-envelope",
  "qrcode",
 ]
@@ -3285,6 +3286,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "getrandom 0.2.17",
+ "libc",
  "ndn-crypto-core",
  "ndn-packet",
  "ndn-tlv",

@@ -233,7 +233,7 @@ fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -287,8 +287,8 @@ fn publish_new(path: &Path, bytes: &[u8]) -> io::Result<bool> {
     published
 }
 
-/// Atomically replaces `path` with `bytes`.
-fn publish_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Atomically replaces `path` with `bytes`, as an owner-only (`0600`) file.
+pub(crate) fn publish_replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = write_private_tmp(path, bytes)?;
     fs::rename(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);

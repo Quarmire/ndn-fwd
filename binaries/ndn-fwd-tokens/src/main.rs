@@ -233,7 +233,9 @@ fn render_qr(url: &str, format: QrFormat, token: &str) -> Result<()> {
                 .min_dimensions(256, 256)
                 .build();
             let path = format!("{token}.svg");
-            std::fs::write(&path, image).with_context(|| format!("write {path}"))?;
+            // The QR carries the invite URL, token included: owner-only.
+            ndn_security::secure_fs::write_private(std::path::Path::new(&path), image)
+                .with_context(|| format!("write {path}"))?;
             println!("(wrote QR to {path})");
         }
     }

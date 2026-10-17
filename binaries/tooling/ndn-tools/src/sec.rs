@@ -333,7 +333,8 @@ fn cmd_export(
     if out == "-" {
         std::io::stdout().write_all(&payload)?;
     } else {
-        std::fs::write(&out, &payload)?;
+        // Passphrase-encrypted, but still private key material: owner-only.
+        ndn_security::secure_fs::write_private(std::path::Path::new(&out), &payload)?;
         eprintln!("Exported {cert_name}");
         eprintln!(
             "  → {out} ({} bytes, {})",
