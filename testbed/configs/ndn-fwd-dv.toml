@@ -23,7 +23,7 @@ face_socket = "/run/ndn-fwd-dv/ndn-fwd-dv.sock"
 [security]
 auto_init = true
 identity  = "/ndn/r-rs"
-profile   = "accept_signed"
+profile   = "accept-signed"
 
 [routing.dv]
 enabled         = true

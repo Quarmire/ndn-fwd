@@ -475,6 +475,13 @@ pub(crate) mod tests {
         let identity: Name = "/home/bob/member/laptop".parse().unwrap();
         assert!(key.has_prefix(&identity));
         assert_eq!(info.issuer, "/home/bob/CA/KEY/ca");
+        let cert: Name = info.certificate.parse().unwrap();
+        assert_eq!(
+            cert.components()[..cert.len() - 1],
+            key.clone().append("NDNCERT").components()[..],
+            "the certificate is named <key>/NDNCERT/<version>"
+        );
+        assert!(cert.components().last().unwrap().as_version().is_some());
         assert!(info.signing_now);
         assert_eq!(info.validity_secs / 86_400, 200, "the CA's cert_validity_days decides");
 

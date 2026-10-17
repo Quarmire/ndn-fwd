@@ -461,7 +461,11 @@ async fn main() -> Result<()> {
         match fwd_config.security.profile.as_str() {
             "disabled" => ndn_security::SecurityProfile::Disabled,
             "accept-signed" => ndn_security::SecurityProfile::AcceptSigned,
-            _ => ndn_security::SecurityProfile::Default,
+            "default" | "" => ndn_security::SecurityProfile::Default,
+            other => anyhow::bail!(
+                "[security] profile = {other:?} is not a security profile: \
+                 use \"default\", \"accept-signed\" or \"disabled\""
+            ),
         }
     };
 
@@ -1009,10 +1013,13 @@ async fn main() -> Result<()> {
     };
 
     // This node's certificates, by name, so a peer validating its Data can
-    // fetch the chain from it (the CA serves the certificates it issued).
+    // fetch the chain from it (the CA serves the certificates it issued):
+    // the PIB's, and the signing key's own (an ephemeral key has no PIB).
+    let signing_key = active_identity.as_ref().map(|identity| identity.current().0);
     let own_certs = own_certs::OwnCertificates::spawn(
         &engine,
         pib.as_deref(),
+        signing_key.as_ref(),
         &trust_keyring,
         cancel.child_token(),
     );

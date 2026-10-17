@@ -16,7 +16,11 @@ use ndn_packet::{
     encode::InterestBuilder,
     lp::{LpPacket, encode_lp_packet, is_lp_packet},
 };
-use ndn_security::{FilePib, VerifyOutcome, verifier::verify_by_sig_type};
+use ndn_security::{
+    FilePib, VerifyOutcome,
+    cert_name::{is_cert_name, key_name_of},
+    verifier::verify_by_sig_type,
+};
 use ndn_transport::{FaceId, Transport};
 
 #[derive(Parser)]
@@ -112,13 +116,16 @@ async fn verify_response(
         bail!("KeyLocator {} is not under {}", key_name, key_prefix);
     }
 
+    // The KeyLocator names the key (or one of its certificates); the anchor
+    // is a certificate of that key (NDN Certificate Format v2).
+    let locator_key = key_name_of(key_name.as_ref());
     let pib = FilePib::open(pib_path)
         .with_context(|| format!("open trust-anchor PIB {}", pib_path.display()))?;
     let anchors = pib.trust_anchors().context("load PIB trust anchors")?;
     let cert = anchors
         .iter()
-        .find(|cert| cert.name.as_ref() == key_name.as_ref())
-        .with_context(|| format!("no PIB trust anchor matching KeyLocator {key_name}"))?;
+        .find(|cert| key_name_of(&cert.name) == locator_key)
+        .with_context(|| format!("no PIB trust anchor for the key KeyLocator {key_name} names"))?;
 
     let outcome = verify_by_sig_type(
         sig_info.sig_type,
@@ -134,8 +141,11 @@ async fn verify_response(
     }
 
     println!(
-        "ok: {:?} signature verified with trust anchor {}",
-        sig_info.sig_type, key_name
+        "ok: {:?} signature verified; KeyLocator {} ({}) resolved to trust anchor {}",
+        sig_info.sig_type,
+        key_name,
+        if is_cert_name(key_name.as_ref()) { "certificate name" } else { "key name" },
+        cert.name
     );
     Ok(())
 }

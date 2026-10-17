@@ -3,13 +3,15 @@
 //! renew_before`).
 //!
 //! Every certificate a namespace CA issued to a device key in this node's PIB
-//! (`keys/*/cert.data`, what `ndn-fwd enroll` stores) is renewed at the CA
+//! (`keys/*/certs/`, what `ndn-fwd enroll` stores) is renewed at the CA
 //! that issued it with [`ndn_identity::renew_via_engine`]: the CA re-certifies
 //! the same key on proof of the current certificate, with no invite
-//! ([`ndn_cert::renewal`]). The new certificate replaces the old one in the
-//! PIB, is cached for validation and served by name
-//! ([`crate::own_certs::OwnCertificates`]); the node keeps signing with the
-//! same key, so nothing else changes.
+//! ([`ndn_cert::renewal`]). The new certificate has a new name
+//! (`<key>/NDNCERT/<version>`); it is stored in the PIB beside the old one
+//! (kept until it expires), cached for validation and served
+//! ([`crate::own_certs::OwnCertificates`]). The node keeps signing with the
+//! same key and KeyLocator (the key name), which verifiers resolve to the
+//! newest valid certificate, so nothing else changes.
 //!
 //! The timer renews a certificate once its remaining validity falls below
 //! `renew_before` (a third of its lifetime by default). A failed attempt is
@@ -306,8 +308,8 @@ mod tests {
     }
 
     /// `ndn-fwd renew` on an enrolled node: the same key gets a new
-    /// certificate from the CA without a token, stored in the PIB in place
-    /// of the old one, and the node keeps signing with that key.
+    /// certificate, under a new name, from the CA without a token; the PIB
+    /// stores it beside the old one, and the node keeps signing with that key.
     #[tokio::test]
     async fn renew_keeps_the_key_and_stores_the_new_certificate() {
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -331,7 +333,9 @@ mod tests {
         let after = stored(device.path(), &key);
         assert!(after.valid_until > before.valid_until, "the PIB holds the new certificate");
         assert_eq!(after.public_key, before.public_key, "for the same key");
+        assert_ne!(after.name, before.name, "a renewed certificate has its own name");
         let pib = FilePib::open(device.path()).unwrap();
+        assert_eq!(pib.valid_cert_wires(&key).unwrap().len(), 2, "the old one is kept until it expires");
         assert_eq!(pib.list_keys().unwrap(), vec![key.clone()], "no new key");
         let (signing_after, _) = node.admin.signing.as_ref().unwrap().current();
         assert_eq!(signing_after, signing_before, "the node keeps signing with the same key");

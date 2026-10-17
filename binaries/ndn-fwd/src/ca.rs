@@ -266,9 +266,9 @@ impl IssuancePolicy for AllIssuance {
 }
 
 /// Load the CA signing identity from the PIB: the certificate at
-/// `<pib>/ca/ca-cert.data` names the key (`<identity>/KEY/<id>`), whose
-/// private half must be in the PIB; the certificate must be signed by the
-/// namespace root anchor.
+/// `<pib>/ca/ca-cert.data` (`<identity>/KEY/<id>/<issuer>/<version>`) names
+/// the key, whose private half must be in the PIB; the certificate must be
+/// signed by the namespace root anchor (the key its KeyLocator names).
 async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain, Certificate)> {
     let pib = FilePib::open(pib_path).map_err(|e| {
         anyhow::anyhow!(
@@ -287,7 +287,8 @@ async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain
         )
     })?;
 
-    let key_name = (*ca_cert.name).clone();
+    let cert_name = (*ca_cert.name).clone();
+    let key_name = ca_cert.key_name();
     if !key_name.has_prefix(&identity.clone().append("KEY")) {
         bail!(
             "[ca] {} certifies {key_name}, which is not a key of identity '{identity}'",
@@ -295,7 +296,7 @@ async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain
         );
     }
     if !ca_cert.is_valid_now() {
-        bail!("[ca] CA certificate {key_name} is expired or not yet valid");
+        bail!("[ca] CA certificate {cert_name} is expired or not yet valid");
     }
     let signer = pib.get_signer(&key_name).map_err(|e| {
         anyhow::anyhow!("[ca] CA key {key_name} not in PIB {}: {e}", pib_path.display())
@@ -308,37 +309,39 @@ async fn load_pib_identity(identity: &Name, pib_path: &Path) -> Result<(KeyChain
     }
 
     let issuer = ca_cert.issuer.clone().ok_or_else(|| {
-        anyhow::anyhow!("[ca] CA certificate {key_name} has no issuer KeyLocator")
+        anyhow::anyhow!("[ca] CA certificate {cert_name} has no issuer KeyLocator")
     })?;
+    // The KeyLocator names the root key (or one certificate of it).
+    let issuer_key = ndn_security::cert_name::key_name_of(&issuer);
     let anchor = match read_cert_wire(&ca_dir.join(ANCHOR_CERT_FILE))? {
         Some(anchor) => anchor,
         None => pib
             .trust_anchors()
             .map_err(|e| anyhow::anyhow!("[ca] reading PIB trust anchors: {e}"))?
             .into_iter()
-            .find(|a| a.name == issuer)
+            .find(|a| a.key_name() == issuer_key)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "[ca] CA certificate {key_name} is issued by {issuer}, which is not a \
+                    "[ca] CA certificate {cert_name} is issued by {issuer}, which is not a \
                      trust anchor in PIB {}",
                     pib_path.display()
                 )
             })?,
     };
-    if anchor.name != issuer {
+    if anchor.key_name() != issuer_key {
         bail!(
-            "[ca] CA certificate {key_name} is issued by {issuer}, not by the anchor {}",
+            "[ca] CA certificate {cert_name} is issued by {issuer}, not by the anchor {}",
             anchor.name
         );
     }
     let (Some(region), Some(sig)) = (&ca_cert.signed_region, &ca_cert.sig_value) else {
-        bail!("[ca] CA certificate {key_name} carries no signature");
+        bail!("[ca] CA certificate {cert_name} carries no signature");
     };
     let verdict =
         ndn_security::verifier::verify_by_sig_type(ca_cert.sig_type, region, sig, &anchor.public_key)
             .await;
     if !matches!(verdict, Ok(ndn_security::VerifyOutcome::Valid)) {
-        bail!("[ca] CA certificate {key_name} is not validly signed by anchor {issuer}");
+        bail!("[ca] CA certificate {cert_name} is not validly signed by anchor {issuer}");
     }
 
     let mgr = SecurityManager::new();
@@ -866,7 +869,7 @@ mod tests {
     }
 
     /// Whether the CA itself (not the engine's content store, hence
-    /// MustBeFresh) answers a cert-fetch for `name`.
+    /// MustBeFresh) answers a cert-fetch for the certificate `name`.
     async fn ca_serves(client: &mut NdncertClient, name: &Name) -> bool {
         let interest = ndn_packet::encode::InterestBuilder::new(name.clone())
             .must_be_fresh()
@@ -875,6 +878,19 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(500), client.express(interest)).await,
             Ok(Ok(_))
         )
+    }
+
+    /// The certificate the CA answers for the key `key` (CanBePrefix, as a
+    /// verifier resolves a key-name KeyLocator with a cold cache).
+    async fn ca_serves_key(client: &mut NdncertClient, key: &Name) -> Option<Name> {
+        let interest = ndn_packet::encode::InterestBuilder::new(key.clone())
+            .can_be_prefix()
+            .must_be_fresh()
+            .build();
+        match tokio::time::timeout(Duration::from_millis(500), client.express(interest)).await {
+            Ok(Ok(data)) => Some((*data.name).clone()),
+            _ => None,
+        }
     }
 
     async fn revoke_as(
@@ -1004,10 +1020,16 @@ mod tests {
         assert!(taken.is_err(), "the name is held by the first key: {taken:?}");
 
         let key = ndn_cert::key_name_of(&phone).unwrap();
+        assert_eq!(ca_serves_key(&mut ca.client, &key).await, Some(phone.clone()), "by key name");
+        let ca_cert = ca_serves_key(&mut ca.client, &ndn_cert::ca_key_name(&"/home/bob".parse().unwrap()))
+            .await
+            .expect("the CA's own certificate by its key name");
+        assert!(ndn_security::cert_name::is_cert_name(&ca_cert), "{ca_cert}");
         let out = ca.state.revoke_issued_under(&key);
         assert_eq!(out.revoked, vec![phone.clone()]);
         assert!(out.not_persisted.is_none());
         assert!(!ca_serves(&mut ca.client, &phone).await, "a revoked cert is not served");
+        assert_eq!(ca_serves_key(&mut ca.client, &key).await, None, "nor by key name");
         assert_eq!(
             dir.path().join(CA_DIR).join("revoked").read_dir().unwrap().count(),
             1,
@@ -1124,7 +1146,8 @@ mod tests {
             .expect("enrollment after restart");
         for issued in [&first, &second] {
             let cert = Certificate::decode(issued).unwrap();
-            assert_eq!(cert.issuer.as_deref(), Some(&*ca_cert.name));
+            // The KeyLocator names the CA's key, not one certificate of it.
+            assert_eq!(cert.issuer.as_deref(), Some(&ca_cert.key_name()));
             assert!(signed_by(issued, &ca_cert.public_key).await);
         }
         let ca_data = ndn_packet::Data::decode(bytes::Bytes::from(
@@ -1236,7 +1259,12 @@ mod tests {
         let phone = enroll(&mut ca.client, "member/phone", "token", token("member-m1"))
             .await
             .expect("member token certifies a member");
-        assert_eq!(phone.name.to_string(), "/home/bob/member/phone/KEY/k1");
+        assert_eq!(
+            ndn_security::cert_name::key_name_of(&phone.name).to_string(),
+            "/home/bob/member/phone/KEY/k1",
+            "a certificate of the requested key: {}",
+            phone.name
+        );
         let guest = enroll(&mut ca.client, "guest/alice", "token", token("member-m2")).await;
         assert!(guest.is_err(), "member token must not certify a guest: {guest:?}");
         let member = enroll(&mut ca.client, "member/tv", "token", token("guest-g1")).await;
@@ -1272,7 +1300,12 @@ mod tests {
         .await
         .expect("an approved admin request enrolls");
         approver.await.unwrap();
-        assert_eq!(issued.name.to_string(), "/home/bob/admin/tablet/KEY/k1");
+        assert_eq!(
+            ndn_security::cert_name::key_name_of(&issued.name).to_string(),
+            "/home/bob/admin/tablet/KEY/k1",
+            "a certificate of the requested key: {}",
+            issued.name
+        );
         ca.stop().await;
     }
 

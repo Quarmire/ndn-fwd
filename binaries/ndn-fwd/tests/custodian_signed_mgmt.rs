@@ -116,15 +116,15 @@ async fn custodian_signed_command_authorized_by_strict_ndn_fwd() {
     );
 }
 
-/// Regression: a SafeBag-style identity has a versioned *certificate* name
+/// A SafeBag-style identity has a versioned *certificate* name
 /// (`…/KEY/<id>/self/v=0`) distinct from its bare *key* name (`…/KEY/<id>`).
-/// The forwarder keys its trust anchor by the cert name, so the signed
-/// command's KeyLocator must name the cert — otherwise the validator returns
-/// "signing certificate not yet resolved" (Pending → 403). This mirrors the
-/// dashboard's `ndn-sec`-exported operator key, which the original test's
-/// `KeyChain` (cert name == key name) didn't exercise.
+/// The forwarder's mgmt trust anchor is that certificate. NDN Certificate
+/// Format v2: a signed command's KeyLocator may name the key (resolved to its
+/// certificate) or the certificate itself, and both are authorized; a
+/// KeyLocator naming another key is not. This mirrors the dashboard's
+/// `ndn-sec`-exported operator key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn custodian_command_keylocator_must_name_the_cert() {
+async fn custodian_command_keylocator_names_the_key_or_its_cert() {
     let dir = tempfile::tempdir().expect("tempdir");
     let anchor_pib = dir.path().join("anchor-pib");
     let sock = dir.path().join("fwd.sock");
@@ -144,18 +144,18 @@ async fn custodian_command_keylocator_must_name_the_cert() {
     assert_ne!(key_name, cert_name, "key and cert names must differ");
 
     let pib = FilePib::new(&anchor_pib).expect("pib");
-    let signer = pib.generate_ed25519(&cert_name).expect("gen key");
+    let signer = pib.generate_ed25519(&key_name).expect("gen key");
     let pubkey = signer.public_key().expect("pubkey");
     let cert_wire = encode_cert_data(&cert_name, &pubkey, &signer, 0, u64::MAX)
         .await
         .expect("self-signed cert");
     let cert = Certificate::decode(&Data::decode(cert_wire).expect("data")).expect("cert");
-    pib.store_cert(&cert_name, &cert).expect("store cert");
-    pib.add_trust_anchor(&cert_name, &cert).expect("anchor");
+    pib.store_cert(&key_name, &cert).expect("store cert");
+    pib.add_trust_anchor(&key_name, &cert).expect("anchor");
 
     // 2. Load the *same* key into a custodian under the bare KEY name (as the
     //    dashboard does from a decrypted SafeBag), advertising the cert name.
-    let pkcs8 = pib.export_pkcs8(&cert_name).expect("pkcs8");
+    let pkcs8 = pib.export_pkcs8(&key_name).expect("pkcs8");
     let op_signer = Ed25519Signer::from_pkcs8_der(&pkcs8, key_name.clone()).expect("op signer");
     let sig_type = op_signer.sig_type();
     let op_pub = op_signer.public_key();
@@ -185,8 +185,8 @@ async fn custodian_command_keylocator_must_name_the_cert() {
         panic!("ndn-fwd never bound its mgmt socket");
     }
 
-    // KeyLocator = bare KEY name → can't resolve to the cert-keyed anchor.
-    let without_cert = {
+    // KeyLocator = bare KEY name → resolves to the key's certificate (the anchor).
+    let by_key = {
         let cs: Arc<dyn Signer> = Arc::new(CustodianSigner::new(
             custodian.clone(),
             key_id.clone(),
@@ -198,7 +198,24 @@ async fn custodian_command_keylocator_must_name_the_cert() {
             .expect("connect")
             .with_signer(cs)
             .strategy_set(
-                &"/test/nocert".parse::<Name>().unwrap(),
+                &"/test/bykey".parse::<Name>().unwrap(),
+                &ndn_strategy::MulticastStrategy::strategy_name(),
+            )
+            .await
+    };
+
+    // KeyLocator = another key of the identity → nothing resolves it.
+    let other_key = {
+        let cs: Arc<dyn Signer> = Arc::new(
+            CustodianSigner::new(custodian.clone(), key_id.clone(), sig_type, op_pub.clone())
+                .with_cert_name("/op/realistic/KEY/k1".parse().unwrap()),
+        );
+        MgmtClient::connect(sock.to_str().unwrap())
+            .await
+            .expect("connect")
+            .with_signer(cs)
+            .strategy_set(
+                &"/test/otherkey".parse::<Name>().unwrap(),
                 &ndn_strategy::MulticastStrategy::strategy_name(),
             )
             .await
@@ -234,16 +251,21 @@ async fn custodian_command_keylocator_must_name_the_cert() {
     let _ = child.wait();
 
     assert!(
-        without_cert.is_err(),
-        "KeyLocator naming only the bare key must NOT resolve to the cert anchor, got {without_cert:?}"
+        by_key.is_ok(),
+        "KeyLocator naming the key must resolve to its certificate, got {by_key:?}"
+    );
+    assert!(
+        other_key.is_err(),
+        "KeyLocator naming another key must NOT be authorized, got {other_key:?}"
     );
     assert!(
         with_cert.is_ok(),
         "KeyLocator naming the cert must be authorized, got {with_cert:?}"
     );
+    // Anchors are indexed by their key (the name `anchor-remove` takes).
     let listing = anchor_list.expect("anchor-list").status_text;
     assert!(
-        listing.contains(&format!("name={cert_name} source=mgmt")),
+        listing.contains(&format!("name={key_name} source=mgmt")),
         "anchor-list must surface the mgmt anchor, got:\n{listing}"
     );
 }

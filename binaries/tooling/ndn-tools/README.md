@@ -104,14 +104,14 @@ reports the forwarder-hop distance.
 ### `ndn-sec` — identity / key / cert management
 
 ```bash
-ndn-sec keygen /ndn/mysite/router1               # mint Ed25519 identity
-ndn-sec certdump /ndn/mysite/router1             # cert in PEM/wire form
-ndn-sec --pib-dir /var/lib/ndn-fwd/pib list
-ndn-sec anchor add /path/to/anchor.cert
+ndn-sec keygen /ndn/mysite/router1               # key /ndn/mysite/router1/KEY/<kid> + self-signed cert <key>/self/<version>
+ndn-sec certdump /ndn/mysite/router1             # key name, current cert name, algorithm, validity
+ndn-sec --pib /var/lib/ndn-fwd/pib list         # each key with its certificates
+ndn-sec anchor add /ndn/mysite/router1           # trust the identity's current certificate
 ```
 
 The PIB directory defaults to `$NDN_PIB` or the platform default;
-override with `--pib-dir <path>`.
+override with `--pib <path>`.
 
 ### `ndn-traffic` — synthetic load
 

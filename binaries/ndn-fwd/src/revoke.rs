@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(now.version(), 2);
         assert!(now.is_revoked(&key));
         assert!(
-            now.is_revoked(&key.clone().append("CA").append_version(9)),
+            now.is_revoked(&key.clone().append("NDNCERT").append_version(9)),
             "every certificate of the key, also one issued later"
         );
         assert!(!now.is_revoked(&"/home/bob/member/tablet/KEY/k".parse().unwrap()));

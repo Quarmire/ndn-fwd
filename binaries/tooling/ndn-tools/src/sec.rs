@@ -8,7 +8,6 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -16,6 +15,7 @@ use bytes::Bytes;
 use clap::{Parser, Subcommand, ValueEnum};
 use ndn_packet::Name;
 use ndn_security::{
+    SecurityManager,
     cert_cache::Certificate,
     pib::{FilePib, name_to_uri},
     safebag::SafeBag,
@@ -219,69 +219,57 @@ fn cmd_keygen(
 ) -> anyhow::Result<()> {
     use ndn_security::Signer as _;
 
-    let key_name = parse_name(name_str)?;
+    let identity = parse_name(name_str)?;
     let pib = FilePib::new(pib_path)?;
 
     if skip_if_exists
         && let Ok(existing_pib) = FilePib::open(pib_path)
-        && find_cert_name(&existing_pib, &key_name).is_some()
+        && find_key_name(&existing_pib, &identity).is_some()
     {
         return Ok(());
     }
 
-    // Cert name: `<identity>/KEY/<keyid>/<issuer>/<version>` per
-    // Certificate Format v2.
-    let cert_name = build_cert_name(&key_name);
+    // Certificate Format v2: the key is `<identity>/KEY/<keyid>` (a random
+    // 8-byte key id, as ndn-cxx and `ndn-fwd` auto_init generate); its
+    // self-signed certificate `<key>/self/<version>`.
+    let key_name = ndn_security::cert_name::new_key_name(&identity);
 
-    // The PIB stores the public key in SPKI-wrapped form for both
-    // algorithms; the SafeBag export path re-signs from this same shape.
-    let (pk, sig_type) = match key_type {
+    // The certificate carries the public key in SPKI form for both
+    // algorithms (Certificate Format v2 §3); `issue_self_signed` signs it
+    // with the key itself.
+    let mgr = SecurityManager::new();
+    let pk = match key_type {
         KeyType::Ed25519 => {
-            let signer = pib.generate_ed25519(&cert_name)?;
-            // Certificate Format v2 §3: SPKI-wrap the raw public key.
-            let raw_pk = signer.public_key_bytes();
-            let mut arr = [0u8; spki::ED25519_KEY_LEN];
-            arr.copy_from_slice(&raw_pk);
-            (
-                spki::wrap_ed25519(&arr),
-                ndn_packet::SignatureType::SignatureEd25519,
-            )
+            let signer = pib.generate_ed25519(&key_name)?;
+            let pk = spki::wrap_ed25519(&signer.public_key_bytes());
+            mgr.install_signer(signer);
+            pk
         }
         KeyType::Ecdsa => {
-            let signer = pib.generate_ecdsa_p256(&cert_name)?;
+            let signer = pib.generate_ecdsa_p256(&key_name)?;
             // `EcdsaP256Signer::public_key()` already returns SPKI DER.
             let pk = signer
                 .public_key()
                 .ok_or_else(|| anyhow::anyhow!("ECDSA signer produced no public key"))?;
-            (pk, ndn_packet::SignatureType::SignatureSha256WithEcdsa)
+            mgr.install_signer(signer);
+            pk
         }
     };
-
-    let now = now_ns();
-    let validity_ns = days * 24 * 3600 * 1_000_000_000;
-    let cert = Certificate {
-        name: Arc::new(cert_name.clone()),
-        public_key: pk.clone(),
-        valid_from: now,
-        valid_until: now.saturating_add(validity_ns),
-        issuer: None,
-        signed_region: None,
-        sig_value: None,
-        sig_type,
-    };
-    pib.store_cert(&cert_name, &cert)?;
+    let cert = mgr.issue_self_signed(&key_name, pk, days * 24 * 3600 * 1_000)?;
+    pib.store_cert(&key_name, &cert)?;
 
     if make_anchor {
-        pib.add_trust_anchor(&cert_name, &cert)?;
+        pib.add_trust_anchor(&key_name, &cert)?;
         println!("Generated key and self-signed certificate for {name_str} (trust anchor).");
     } else {
         println!("Generated key and self-signed certificate for {name_str}.");
     }
 
     println!("  Algorithm  : {}", key_type_label(key_type));
-    println!("  Cert name  : {}", cert_name);
-    println!("  Public key : {}", hex_encode(&pk));
-    println!("  Valid from : {}", format_ns(now));
+    println!("  Key name   : {key_name}");
+    println!("  Cert name  : {}", cert.name);
+    println!("  Public key : {}", hex_encode(&cert.public_key));
+    println!("  Valid from : {}", format_ns(cert.valid_from));
     println!("  Valid until: {}", format_ns(cert.valid_until));
     println!("  PIB        : {}", pib_path.display());
 
@@ -297,7 +285,7 @@ fn cmd_export(
 ) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name = find_cert_name(&pib, &identity).ok_or_else(|| {
+    let key_name = find_key_name(&pib, &identity).ok_or_else(|| {
         anyhow::anyhow!("No key for {name_str}. Run `ndn-sec keygen {name_str}` first.")
     })?;
 
@@ -307,7 +295,7 @@ fn cmd_export(
     }
 
     let wire = pib
-        .export_safebag(&cert_name, password.as_bytes())
+        .export_safebag(&key_name, password.as_bytes())
         .map_err(|e| anyhow::anyhow!("export failed: {e}"))?;
 
     let payload: Vec<u8> = match format {
@@ -335,7 +323,7 @@ fn cmd_export(
     } else {
         // Passphrase-encrypted, but still private key material: owner-only.
         ndn_security::secure_fs::write_private(std::path::Path::new(&out), &payload)?;
-        eprintln!("Exported {cert_name}");
+        eprintln!("Exported {key_name}");
         eprintln!(
             "  → {out} ({} bytes, {})",
             payload.len(),
@@ -363,28 +351,30 @@ fn cmd_import(
         .ok_or_else(|| anyhow::anyhow!("input is neither a raw SafeBag TLV nor base64"))?;
 
     // The embedded certificate names the key, so the operator doesn't have
-    // to restate it.
+    // to restate it: the key is the certificate name without its issuer id
+    // and version.
     let bag = SafeBag::decode(&wire).map_err(|e| anyhow::anyhow!("SafeBag decode: {e}"))?;
     let cert_data = ndn_packet::Data::decode(Bytes::copy_from_slice(&bag.certificate))
         .map_err(|e| anyhow::anyhow!("certificate Data decode: {e:?}"))?;
     let cert =
         Certificate::decode(&cert_data).map_err(|e| anyhow::anyhow!("Certificate decode: {e}"))?;
-    let cert_name = (*cert.name).clone();
+    let key_name = cert.key_name();
 
     let password = resolve_password(password, "Passphrase that decrypts the SafeBag: ", false)?;
 
     let pib = FilePib::new(pib_path)?;
     let stored = pib
-        .store_safebag(&cert_name, &wire, password.as_bytes())
+        .store_safebag(&key_name, &wire, password.as_bytes())
         .map_err(|e| {
             anyhow::anyhow!("import failed (wrong passphrase or unsupported key?): {e}")
         })?;
 
     println!("Imported identity into {}", pib_path.display());
+    println!("  Key name   : {key_name}");
     println!("  Cert name  : {}", stored.name);
 
     if make_anchor {
-        pib.add_trust_anchor(&cert_name, &stored)
+        pib.add_trust_anchor(&key_name, &stored)
             .map_err(|e| anyhow::anyhow!("imported, but anchor-add failed: {e}"))?;
         println!("  Trust anchor: yes");
     }
@@ -470,16 +460,17 @@ fn format_label(f: WireFormat) -> &'static str {
 fn cmd_certdump(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name = find_cert_name(&pib, &identity).ok_or_else(|| {
+    let key_name = find_key_name(&pib, &identity).ok_or_else(|| {
         anyhow::anyhow!("No key for {name_str}. Run `ndn-sec keygen {name_str}` first.")
     })?;
     let cert = pib
-        .get_cert(&cert_name)
+        .get_cert(&key_name)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let expired = cert.valid_until != u64::MAX && cert.valid_until < now_ns();
     println!("Certificate for {name_str}");
-    println!("  Cert name  : {cert_name}");
+    println!("  Key name   : {key_name}");
+    println!("  Cert name  : {}", cert.name);
     println!("  Algorithm  : {}", sig_type_label(cert.sig_type));
     println!("  Public key : {}", hex_encode(&cert.public_key));
     println!("  Valid from : {}", format_ns(cert.valid_from));
@@ -502,14 +493,21 @@ fn cmd_list(pib_path: &PathBuf) -> anyhow::Result<()> {
     }
 
     println!("Keys in {} ({}):", pib_path.display(), keys.len());
-    for name in &keys {
-        let uri = name_to_uri(name);
-        let has_cert = pib.get_cert(name).is_ok();
-        println!(
-            "  {}  {}",
-            uri,
-            if has_cert { "[cert]" } else { "[no cert]" }
-        );
+    for key in &keys {
+        println!("  {}", name_to_uri(key));
+        let mut certs = pib.certs(key).unwrap_or_default();
+        if certs.is_empty() {
+            println!("    [no cert]");
+        }
+        certs.sort_by(|a, b| a.name.cmp(&b.name));
+        for cert in &certs {
+            let expired = cert.valid_until != u64::MAX && cert.valid_until < now_ns();
+            println!(
+                "    cert {}{}",
+                name_to_uri(&cert.name),
+                if expired { "  [EXPIRED]" } else { "" }
+            );
+        }
     }
 
     Ok(())
@@ -518,9 +516,9 @@ fn cmd_list(pib_path: &PathBuf) -> anyhow::Result<()> {
 fn cmd_delete(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name =
-        find_cert_name(&pib, &identity).ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
-    pib.delete_key(&cert_name)?;
+    let key_name =
+        find_key_name(&pib, &identity).ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
+    pib.delete_key(&key_name)?;
     println!("Deleted {name_str} from PIB.");
     Ok(())
 }
@@ -528,13 +526,13 @@ fn cmd_delete(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
 fn cmd_anchor_add(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name = find_cert_name(&pib, &identity).ok_or_else(|| {
+    let key_name = find_key_name(&pib, &identity).ok_or_else(|| {
         anyhow::anyhow!("No certificate for {name_str}. Run `ndn-sec keygen {name_str}` first.")
     })?;
     let cert = pib
-        .get_cert(&cert_name)
+        .get_cert(&key_name)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    pib.add_trust_anchor(&cert_name, &cert)?;
+    pib.add_trust_anchor(&key_name, &cert)?;
     println!("Marked {name_str} as a trust anchor.");
     Ok(())
 }
@@ -542,9 +540,9 @@ fn cmd_anchor_add(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
 fn cmd_anchor_remove(pib_path: &PathBuf, name_str: &str) -> anyhow::Result<()> {
     let identity = parse_name(name_str)?;
     let pib = open_pib(pib_path)?;
-    let cert_name =
-        find_cert_name(&pib, &identity).ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
-    pib.remove_trust_anchor(&cert_name)?;
+    let key_name =
+        find_key_name(&pib, &identity).ok_or_else(|| anyhow::anyhow!("No key for {name_str}."))?;
+    pib.remove_trust_anchor(&key_name)?;
     println!("Removed {name_str} from trust anchors.");
     Ok(())
 }
@@ -596,35 +594,11 @@ fn open_pib(path: &PathBuf) -> anyhow::Result<FilePib> {
     })
 }
 
-/// Build a Certificate Format v2 cert name from an identity name.
-///
-/// Produces `<identity>/KEY/<keyid>/self/<version>` per
-/// ndn-cxx `Certificate::isValidName` (security/certificate.hpp:152-158).
-/// The keyid is derived from the current nanosecond timestamp so successive
-/// keygen calls for the same identity produce distinct cert names.
-fn build_cert_name(identity: &Name) -> Name {
-    let keyid = format!("{:016x}", now_ns());
-    identity
-        .clone()
-        .append("KEY")
-        .append_component(ndn_packet::NameComponent::generic(Bytes::copy_from_slice(
-            keyid.as_bytes(),
-        )))
-        .append_component(ndn_packet::NameComponent::generic(Bytes::from_static(
-            b"self",
-        )))
-        .append_version(0)
-}
-
-/// Find the cert name (e.g. `/ndn/router1/KEY/<id>/self/v=0`) stored in the
-/// PIB for a given identity prefix.  Returns the first matching key name whose
-/// components begin with `identity` followed by a `KEY` component.
-fn find_cert_name(pib: &FilePib, identity: &Name) -> Option<Name> {
-    let key_prefix = identity.clone().append("KEY");
-    pib.list_keys()
-        .ok()?
-        .into_iter()
-        .find(|k| k.has_prefix(&key_prefix))
+/// The key `identity` signs with ([`FilePib::default_key`]: among its keys
+/// under `<identity>/KEY/`, the one with the newest valid certificate).
+/// Covers keys earlier releases stored under a certificate-shaped name.
+fn find_key_name(pib: &FilePib, identity: &Name) -> Option<Name> {
+    pib.default_key(identity).ok().flatten()
 }
 
 /// Parse an NDN URI like `/ndn/router1` into a `Name`.
