@@ -20,7 +20,11 @@
 //! scoped to `/<ns>/<role>`, so it cannot certify any other role. Each role's
 //! certificates last its `[ca] cert_validity_days`, and a device holding a
 //! current certificate of a role in `[ca] renewable_roles` renews it without
-//! an invite (the CA's built-in `renewal` challenge; [`ndn_cert::renewal`]).
+//! an invite (the CA's built-in `renewal` challenge; [`ndn_cert::renewal`]) —
+//! also a certificate an earlier CA of the same identity issued (the CA of a
+//! root device replaced through a recovery kit) when it chains to the
+//! namespace root under the node's trust contexts; the CA then serves that
+//! earlier CA's certificate.
 //!
 //! A `device-approval` challenge holds each request in ONE
 //! [`PendingApprovalStore`], shared by the challenge, the mgmt
@@ -498,6 +502,19 @@ pub(crate) fn spawn(
         .build()
         .map_err(|e| anyhow::anyhow!("[ca] CA build failed: {e}"))?;
     let state = ca.state();
+    // Renewals of certificates an earlier CA of this identity issued are
+    // verified under the node's trust contexts.
+    let keyring = engine
+        .validator()
+        .map(|v| Arc::clone(v.keyring()))
+        .or_else(|| engine.security().map(|mgr| Arc::clone(mgr.keyring())));
+    match keyring {
+        Some(keyring) => state.accept_earlier_ca_certificates(keyring),
+        None => tracing::debug!(
+            target: "ca",
+            "no trust contexts on this node: the CA renews only the certificates it issued"
+        ),
+    }
 
     let producer = Producer::from_handle(prep.handle, prep.prefix.clone());
     let prefix_str = prep.prefix.to_string();

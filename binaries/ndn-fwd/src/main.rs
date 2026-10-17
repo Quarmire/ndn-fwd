@@ -61,6 +61,8 @@ mod own_certs;
 // capabilities). Gated behind the `radio` feature.
 #[cfg(feature = "radio")]
 mod radio_face;
+mod recover;
+mod recovery_kit;
 mod renewal;
 mod revoke;
 mod root_key;
@@ -92,7 +94,8 @@ struct CliArgs {
 /// `--help` text. The parser is deliberately hand-rolled (the daemon stays
 /// dependency-light; only the tooling siblings use clap), so keep this in
 /// sync with the options `parse_args` accepts and the
-/// `init`/`adopt`/`enroll`/`revoke`/`context`/`schema`/`root-key` subcommands
+/// `init`/`adopt`/`enroll`/`revoke`/`context`/`schema`/`root-key`/
+/// `recovery-kit`/`recover` subcommands
 /// `onboard::maybe_run` intercepts.
 fn print_help() {
     println!(
@@ -198,6 +201,53 @@ USAGE:
                                           file is overwritten first). A
                                           software root cannot move onto a
                                           YubiKey (PIV takes no Ed25519 key)
+  ndn-fwd recovery-kit create --format words|file|yubikey [--out <path>]
+                [--kit-passphrase-file <path>] [--kit-pin-file <path>]
+                [--yubikey-slot 9d] [--yubikey-serial <n>]
+                [--touch-policy always|cached|never]
+                [--passphrase-file <path> | --pin-file <path>] [--pib <dir>]
+                                          on the root device: make a recovery
+                                          kit — a separate recovery key added
+                                          as an anchor of the trust context in a
+                                          new version the root signs (the root
+                                          store's passphrase / PIN is asked):
+                                          words (24 BIP39 words shown once),
+                                          file (a SafeBag sealed by a kit
+                                          passphrase, written 0600 to --out) or
+                                          yubikey (P-256 on a second token's PIV
+                                          slot). Kit secrets come from
+                                          NDN_KIT_PASSPHRASE / NDN_KIT_PIN /
+                                          NDN_KIT_WORDS, the --*-file, else the
+                                          terminal
+  ndn-fwd recovery-kit list [--namespace <ns>] [--pib <dir>]
+                                          the anchors of the held trust context:
+                                          root and recovery kits
+  ndn-fwd recovery-kit check words|yubikey|<kit-file> [--namespace <ns>]
+                                          open a kit and confirm its key is a
+                                          recovery anchor of the held context;
+                                          signs nothing
+  ndn-fwd recovery-kit revoke <recovery-key-name>
+                                          on the root device: a new version
+                                          without that recovery anchor, revoking
+                                          its key
+  ndn-fwd recover --kit words|yubikey|<kit-file> --old-root destroyed|compromised
+                [--namespace <ns>] [--device <name>] [--root-store <store>]
+                [-c <config>] [--pib <dir>] [--from-held]
+                                          on a replacement device whose daemon
+                                          holds the namespace's context: fetch
+                                          its newest version, then make this the
+                                          root device — a new root (as init), a
+                                          new CA key and admin identity — with a
+                                          version signed by the kit's recovery
+                                          key, handed to the daemon. destroyed:
+                                          the old root stays an anchor, devices
+                                          keep working and renew with the new
+                                          CA; compromised: the old root, CA and
+                                          admin keys are revoked and devices
+                                          enroll again. --from-held: when no
+                                          other node answers for the namespace,
+                                          recover from the version held (you
+                                          vouch that no newer one exists)
   (all take -c/--config to find [security].pib_path; default ~/.ndn/pib)
 
 OPTIONS:

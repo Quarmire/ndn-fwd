@@ -15,6 +15,11 @@
 //!   stays retrievable by name while the key name resolves to the new one);
 //! - on the root device, the CA's and the device's certificates
 //!   (`ca/ca-cert.data`, `ca/device-cert.data`, written by `ndn-fwd init`);
+//! - the issuer certificates of this node's certificates, kept at
+//!   enrollment and renewal (`issuers/`, [`ndn_cert::issuers`]): after the
+//!   root device that ran the CA was replaced, nobody else may serve the
+//!   earlier CA's certificate, and this node's renewal walks its chain
+//!   through them;
 //! - every valid certificate the engine's key store caches for the key this
 //!   node signs with, PIB-backed or not: an ephemeral identity (no PIB)
 //!   serves its self-signed certificate, so a verifier resolves its
@@ -192,7 +197,8 @@ impl OwnCertificates {
 }
 
 /// The certificate Data the PIB at `pib` stores: every valid certificate of
-/// each key, plus a root device's CA and device certificates.
+/// each key, a root device's CA and device certificates, and the issuer
+/// certificates kept beside the PIB.
 fn stored_certificates(pib: &FilePib) -> Vec<Bytes> {
     let mut certs: Vec<Bytes> = pib
         .list_keys()
@@ -206,6 +212,7 @@ fn stored_certificates(pib: &FilePib) -> Vec<Bytes> {
             certs.push(wire);
         }
     }
+    certs.extend(ndn_cert::issuers::stored_issuer_certs(pib.root()));
     certs
 }
 

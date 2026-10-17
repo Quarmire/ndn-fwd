@@ -3,12 +3,16 @@
 //! renew_before`).
 //!
 //! Every certificate a namespace CA issued to a device key in this node's PIB
-//! (`keys/*/certs/`, what `ndn-fwd enroll` stores) is renewed at the CA
-//! that issued it with [`ndn_identity::renew_via_engine`]: the CA re-certifies
+//! (`keys/*/certs/`, what `ndn-fwd enroll` stores) is renewed at its
+//! namespace's CA with [`ndn_identity::renew_via_engine`]: the CA re-certifies
 //! the same key on proof of the current certificate, with no invite
-//! ([`ndn_cert::renewal`]). The new certificate has a new name
-//! (`<key>/NDNCERT/<version>`); it is stored in the PIB beside the old one
-//! (kept until it expires), cached for validation and served
+//! ([`ndn_cert::renewal`]). The renewal carries the certificate's issuer
+//! chain (walked from what this node kept, [`ndn_cert::issuers`]), so a later
+//! CA of the namespace — after its root device was replaced through a
+//! recovery kit — renews a certificate the earlier CA issued. The new
+//! certificate has a new name (`<key>/NDNCERT/<version>`); it is stored in
+//! the PIB beside the old one (kept until it expires), its issuer chain is
+//! kept, it is cached for validation and served
 //! ([`crate::own_certs::OwnCertificates`]). The node keeps signing with the
 //! same key and KeyLocator (the key name), which verifiers resolve to the
 //! newest valid certificate, so nothing else changes.
@@ -99,16 +103,24 @@ async fn renew_one(admin: &TrustAdmin, held: &Held) -> Result<Certificate, (Rene
     let signer = pib
         .get_signer(&held.key)
         .map_err(|e| failed(format!("the key {} cannot sign: {e}", held.key)))?;
-    let issued = ndn_identity::renew_via_engine(&admin.engine, &admin.keyring, &held.data, signer)
-        .await
-        .map_err(|e| {
-            let state = if e.is_final() {
-                RenewalState::Refused
-            } else {
-                RenewalState::Failed
-            };
-            (state, e.to_string())
-        })?;
+    // The issuer certificates kept in `<pib>/issuers/` answer the walk of the
+    // current certificate's chain first: after a recovery nobody else may serve
+    // the earlier CA's certificate.
+    let kept: Vec<Data> = ndn_cert::issuers::stored_issuer_certs(&admin.pib_root)
+        .into_iter()
+        .filter_map(|wire| Data::decode(wire).ok())
+        .collect();
+    let issued =
+        ndn_identity::renew_via_engine(&admin.engine, &admin.keyring, &held.data, &kept, signer)
+            .await
+            .map_err(|e| {
+                let state = if e.is_final() {
+                    RenewalState::Refused
+                } else {
+                    RenewalState::Failed
+                };
+                (state, e.to_string())
+            })?;
     pib.store_issued_cert(&held.key, issued.data.raw()).map_err(|e| {
         failed(format!(
             "the CA issued {}, but storing it in {} failed ({e}); the current certificate stays \
@@ -117,11 +129,22 @@ async fn renew_one(admin: &TrustAdmin, held: &Held) -> Result<Certificate, (Rene
             admin.pib_root.display()
         ))
     })?;
+    // The new certificate's issuer chain, kept and served as at enrollment.
+    if let Err(e) = ndn_cert::issuers::keep_issuer_certs(&admin.pib_root, &issued.issuers) {
+        tracing::warn!(
+            target: "security",
+            error = %e,
+            "renewed, but the issuer certificates of its chain were not kept"
+        );
+    }
     if let Some(mgr) = admin.engine.security() {
         mgr.cert_cache().insert(issued.cert.clone());
     }
     if let Some(own) = &admin.own_certs {
         own.serve(issued.data.raw().clone());
+        for issuer in &issued.issuers {
+            own.serve(issuer.raw().clone());
+        }
     }
     admin.certificates_changed.notify_one();
     tracing::info!(

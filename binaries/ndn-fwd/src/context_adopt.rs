@@ -2,8 +2,10 @@
 //! (`ndn-fwd adopt`), `security/enroll` (`ndn-fwd enroll`, see
 //! [`crate::enroll`]), `security/revoke` (`ndn-fwd revoke`, see
 //! [`crate::revoke`]), `security/context-refresh` (`ndn-fwd context
-//! refresh`, see [`crate::context_refresh`]), `security/renew` (`ndn-fwd
-//! renew`, see [`crate::renewal`]) and the signing identity
+//! refresh`, see [`crate::context_refresh`]), `security/context-update`
+//! (`ndn-fwd recovery-kit`, `ndn-fwd recover`: a version signed on this
+//! device, see [`crate::context_refresh::apply_update`]), `security/renew`
+//! (`ndn-fwd renew`, see [`crate::renewal`]) and the signing identity
 //! `security/identity-status` reports.
 //!
 //! Adopting: the daemon reads the `ndn-trust://anchor` link and adopts the
@@ -126,9 +128,10 @@ impl TrustAdmin {
     }
 
     /// Store `ctx` (signed Data `data`), already in the keyring, in
-    /// `<pib>/contexts/` and publish it by name, replacing the earlier
-    /// version. Refused (`409`) when the keyring meanwhile holds a newer
-    /// version of the namespace: that one is what is kept.
+    /// `<pib>/contexts/` and publish it by name as the namespace's newest
+    /// version (the versions before it stay stored and served). Refused
+    /// (`409`) when the keyring meanwhile holds a newer version of the
+    /// namespace: that one is what is kept.
     pub(crate) fn keep(
         &self,
         ctx: &SignedTrustContext,
@@ -151,6 +154,32 @@ impl TrustAdmin {
                 ),
             ));
         }
+        self.store_and_publish(ctx, data)
+    }
+
+    /// Store and publish `ctx` (signed Data `data`), a version this node
+    /// went through to reach the one its keyring holds
+    /// (`ndn_cert::ContextUpdate::walked`): kept by its exact name for the
+    /// nodes behind this one, which follow the namespace the same way. The
+    /// stored and published newest version never moves back to it.
+    pub(crate) fn keep_walked(
+        &self,
+        ctx: &SignedTrustContext,
+        data: &Data,
+    ) -> Result<PathBuf, ndn_mgmt::TrustRefusal> {
+        let _keeping = self
+            .keeping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.store_and_publish(ctx, data)
+    }
+
+    /// Under `keeping`.
+    fn store_and_publish(
+        &self,
+        ctx: &SignedTrustContext,
+        data: &Data,
+    ) -> Result<PathBuf, ndn_mgmt::TrustRefusal> {
         let stored = ndn_cert::persist_context(&self.pib_root, ctx, data).map_err(|e| {
             refusal(
                 status::SERVER_ERROR,
@@ -180,7 +209,7 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         let link = AnchorLink::from_uri(&link_uri).map_err(refuse)?;
         // A fetched context must come from the forwarders serving the
         // namespace, not from this node's own publisher (which holds only the
-        // version this node already has).
+        // versions this node already has).
         let bypass = match (&self.publisher, &link.context_data) {
             (Some(publisher), None) => Some(publisher.bypass(&link.namespace)),
             _ => None,
@@ -220,6 +249,13 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         namespace: Option<ndn_packet::Name>,
     ) -> Result<Vec<ndn_mgmt::ContextRefreshInfo>, ndn_mgmt::TrustRefusal> {
         crate::context_refresh::refresh_contexts(self, namespace).await
+    }
+
+    async fn update_context(
+        &self,
+        context_data: bytes::Bytes,
+    ) -> Result<ndn_mgmt::ContextRefreshInfo, ndn_mgmt::TrustRefusal> {
+        crate::context_refresh::apply_update(self, context_data).await
     }
 
     async fn renew(&self) -> Result<Vec<ndn_mgmt::RenewalInfo>, ndn_mgmt::TrustRefusal> {

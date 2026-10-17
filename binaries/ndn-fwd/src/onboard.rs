@@ -52,6 +52,9 @@
 //!   contexts for a newer version now (see [`crate::context_refresh`]).
 //! - `root-key status|move` shows or moves where the root key lives
 //!   ([`crate::root_key`]).
+//! - `recovery-kit create|list|check|revoke` manages the recovery kits of
+//!   the namespace ([`crate::recovery_kit`]); `recover` makes a replacement
+//!   device the root device with one ([`crate::recover`]).
 
 use std::path::PathBuf;
 
@@ -78,6 +81,8 @@ pub async fn maybe_run() -> Option<Result<()>> {
         Some("context") => Some(run_context(&args[2..]).await),
         Some("schema") => Some(crate::schema_cmd::run(&args[2..])),
         Some("root-key") => Some(crate::root_key::run(&args[2..]).await),
+        Some("recovery-kit") => Some(crate::recovery_kit::run(&args[2..]).await),
+        Some("recover") => Some(crate::recover::run(&args[2..]).await),
         _ => None,
     }
 }
@@ -96,6 +101,13 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--yubikey-serial",
     "--touch-policy",
     "--to",
+    "--format",
+    "--out",
+    "--kit",
+    "--old-root",
+    "--kit-passphrase-file",
+    "--kit-pin-file",
+    "--words-file",
 ];
 
 pub(crate) fn flag<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
@@ -147,7 +159,7 @@ fn host_name() -> Option<String> {
 }
 
 /// The default `--device`: the host name, sanitized into a device name.
-fn default_device() -> Result<String> {
+pub(crate) fn default_device() -> Result<String> {
     let host = host_name().unwrap_or_default();
     sanitize_device_name(&host).with_context(|| {
         format!(
@@ -241,6 +253,15 @@ async fn run_init(args: &[String]) -> Result<()> {
         println!("{line}");
     }
     println!("#");
+    println!("# Losing this device would lose the namespace: create a recovery kit now (a");
+    println!("# separate recovery key the namespace trusts, kept offline), e.g.");
+    println!(
+        "#   ndn-fwd recovery-kit create --format words --pib {}",
+        pib_abs.display()
+    );
+    println!("# (--format file --out <path> for a passphrase-sealed file, --format yubikey for a");
+    println!("# second YubiKey; several kits may coexist).");
+    println!("#");
     println!("# Put these lines in ndn-fwd.toml so the daemon signs as this device's");
     println!("# admin identity (certified by the CA) instead of an ephemeral key:");
     println!("[security]");
@@ -278,7 +299,7 @@ const DAEMON_ADOPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// The daemon's management socket: `[management] face_socket` from
 /// `-c/--config`, else the default.
-fn face_socket(args: &[String]) -> Result<String> {
+pub(crate) fn face_socket(args: &[String]) -> Result<String> {
     let cfg = match flag(args, &["-c", "--config"]) {
         Some(path) => {
             let toml =
@@ -491,7 +512,7 @@ async fn run_enroll(args: &[String]) -> Result<()> {
 }
 
 /// The running daemon's management client, or why it is needed.
-async fn daemon(args: &[String], what: &str) -> Result<(ndn_ipc::MgmtClient, String)> {
+pub(crate) async fn daemon(args: &[String], what: &str) -> Result<(ndn_ipc::MgmtClient, String)> {
     let socket = face_socket(args)?;
     let client = ndn_ipc::MgmtClient::connect(&socket).await.map_err(|e| {
         anyhow::anyhow!(
@@ -643,7 +664,9 @@ async fn run_renew(args: &[String]) -> Result<()> {
 }
 
 /// How long the CLI waits for a refresh: per namespace two fetches of at most
-/// the app timeout each, for a handful of namespaces.
+/// the app timeout each, for a handful of namespaces — or the versions a
+/// catch-up walk follows, each answered at once by a node that holds it (or
+/// Nacked by one that serves the namespace without it).
 const DAEMON_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 async fn run_context(args: &[String]) -> Result<()> {
@@ -687,6 +710,10 @@ async fn run_context(args: &[String]) -> Result<()> {
             ndn_mgmt::RefreshState::Current => "current",
             ndn_mgmt::RefreshState::UpstreamOlder => "upstream-older",
             ndn_mgmt::RefreshState::Source => "source",
+            ndn_mgmt::RefreshState::Unreachable => {
+                failed = true;
+                "unreachable"
+            }
             ndn_mgmt::RefreshState::Failed => {
                 failed = true;
                 "failed"

@@ -142,6 +142,28 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             println!("root_store     = {}", store.kind());
             println!("location       = {}", store.location());
             println!("unlock         = {}", store.unlock_kind().as_str());
+            match ndn_cert::read_stored_context(&pib_dir, store.namespace()) {
+                Ok(Some((ctx, _))) => {
+                    let kits = ctx
+                        .keys_with_role(ndn_security::KeyRole::RECOVERY_ANCHOR)
+                        .count();
+                    println!(
+                        "recovery_kits  = {kits} (recovery anchors of the held context v{})",
+                        ctx.version()
+                    );
+                    if kits == 0 {
+                        println!(
+                            "# No recovery kit: losing this device loses the namespace. Create \
+                             one: ndn-fwd recovery-kit create --format words|file|yubikey"
+                        );
+                    }
+                }
+                Ok(None) => println!(
+                    "recovery_kits  = ? (no stored trust context of {})",
+                    store.namespace()
+                ),
+                Err(e) => println!("recovery_kits  = ? (stored trust context unreadable: {e})"),
+            }
             if store.kind() == RootStoreKind::File {
                 println!();
                 println!(

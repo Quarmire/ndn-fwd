@@ -1,34 +1,38 @@
 //! Publication of the node's stored trust contexts by name, following the RDR
 //! convention, so a device holding only an anchor fingerprint can fetch a
-//! context (`ndn_cert::fetch_context`) and pin it (`ndn_cert::adopt_with_tofu`).
+//! context (`ndn_cert::fetch_context`) and adopt it with its expected
+//! fingerprint (`ndn_cert::adopt_with_tofu`), and a node holding an older
+//! version can follow the namespace version by version
+//! (`ndn_cert::follow_versions`).
 //!
-//! For every context in `<pib>/contexts/` (`ndn-fwd init` stores the root device's
-//! own there, `ndn-fwd adopt` the adopted ones), re-verified on read — a file
-//! that fails is not published:
+//! For every namespace in `<pib>/contexts/` (`ndn-fwd init` stores the root
+//! device's own there, `ndn-fwd adopt` the adopted ones, and every version
+//! the node held is kept beside the newest, `ndn_cert::context_store`),
+//! re-verified on read — a file that fails is not published:
 //!
-//! - `/<ns>/32=trust-context/v=<N>` (exact) → the stored signed Data,
-//!   byte-identical; it is never re-signed, so its root signature is what the
-//!   fetcher pins.
+//! - `/<ns>/32=trust-context/v=<N>` (exact) → the stored signed Data of
+//!   version `N`, byte-identical, for every version held; it is never
+//!   re-signed, so its signature is what the fetcher checks.
 //! - `/<ns>/32=trust-context/32=metadata` → RDR metadata Data
 //!   `/<ns>/32=trust-context/32=metadata/v=<N>/seg=0` whose Content is the
-//!   versioned Name alone, FreshnessPeriod [`METADATA_FRESHNESS`],
+//!   newest versioned Name alone, FreshnessPeriod [`METADATA_FRESHNESS`],
 //!   DigestSha256 (see [`metadata_data`] for why it is not signed).
 //! - anything else under the prefix → Nack(NoRoute), so a fetch of a version
 //!   this node does not hold fails at once instead of timing out.
 //!
 //! One in-process face carries all of it, with one FIB entry
-//! `/<ns>/32=trust-context` per context — more specific than a `[ca]`
-//! entry `/<ns>`, so longest-prefix match routes here. The store holds one file
-//! (the newest adopted version) per namespace, so "newest stored version" is
-//! that file's. The store is read at startup; a context the running daemon
-//! adopts (`security/context-adopt`), makes (`security/revoke` on the root
-//! device) or fetches as an update (`security/context-refresh`, the periodic
-//! refresh) is added with [`PublishedContexts::publish`], replacing any older
-//! version of the same namespace, and served at once — which is how an update
-//! travels on to the nodes downstream of this one.
+//! `/<ns>/32=trust-context` per namespace — more specific than a `[ca]`
+//! entry `/<ns>`, so longest-prefix match routes here. The store is read at
+//! startup; a version the running daemon adopts (`security/context-adopt`),
+//! makes (`security/revoke` on the root device, `security/context-update`)
+//! or fetches as an update (`security/context-refresh`, the periodic
+//! refresh, with the versions it walked through) is added with
+//! [`PublishedContexts::publish`] and served at once — which is how an
+//! update travels on to the nodes downstream of this one. The metadata names
+//! the newest version held; an older one added later is served by name only.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -50,28 +54,44 @@ pub(crate) const CONTEXT_FACE_ID: u64 = 0xFFFF_0005;
 /// `ndn_app::rdr` (the same 1 s for objects it publishes).
 const METADATA_FRESHNESS: Duration = Duration::from_secs(1);
 
-/// One published context: the names it answers and the wires it answers with.
-#[derive(Debug)]
+/// One published namespace: the names it answers and the wires it answers
+/// with.
+#[derive(Debug, Clone)]
 struct Published {
     prefix: Name,
     metadata_name: Name,
-    versioned: Name,
-    /// The stored signed Data, verbatim.
-    context: Bytes,
-    /// The RDR metadata Data pointing at `versioned`.
+    /// The newest version held: what the metadata names.
+    newest: u64,
+    /// The RDR metadata Data pointing at the newest version.
     metadata: Bytes,
+    /// Every version held, by version: the stored signed Data, verbatim.
+    versions: BTreeMap<u64, Bytes>,
 }
 
 impl Published {
     fn new(ctx: &SignedTrustContext, data: &Data) -> Self {
-        let versioned = ctx.rdr_name();
         Self {
             prefix: ndn_cert::rdr_prefix(ctx.namespace()),
             metadata_name: ndn_cert::rdr_metadata_name(ctx.namespace()),
-            metadata: metadata_data(ctx.namespace(), &versioned, ctx.version()),
-            versioned,
-            context: data.raw().clone(),
+            newest: ctx.version(),
+            metadata: metadata_data(ctx.namespace(), &ctx.rdr_name(), ctx.version()),
+            versions: BTreeMap::from([(ctx.version(), data.raw().clone())]),
         }
+    }
+
+    /// Serve version `ctx` (signed Data `data`) too; the metadata names it
+    /// when it is the newest held.
+    fn add(&mut self, ctx: &SignedTrustContext, data: &Data) {
+        self.versions.insert(ctx.version(), data.raw().clone());
+        if ctx.version() >= self.newest {
+            self.newest = ctx.version();
+            self.metadata = metadata_data(ctx.namespace(), &ctx.rdr_name(), ctx.version());
+        }
+    }
+
+    /// `<ns>/32=trust-context/v=<newest>`.
+    fn newest_name(&self) -> Name {
+        self.prefix.clone().append_version(self.newest)
     }
 }
 
@@ -87,10 +107,11 @@ pub(crate) struct ContextPublisher {
     contexts: Vec<Published>,
 }
 
-/// Read the context store under `pib_root` and build the replies. Returns the
-/// face to attach before build. The face exists even when nothing is stored
-/// yet, so a context adopted at runtime can be published (an unreadable
-/// store is logged, like the keyring load beside it).
+/// Read the context store under `pib_root` — each namespace's newest
+/// version and every version kept beside it — and build the replies.
+/// Returns the face to attach before build. The face exists even when
+/// nothing is stored yet, so a context adopted at runtime can be published
+/// (an unreadable store is logged, like the keyring load beside it).
 pub(crate) fn prepare(pib_root: &Path) -> (InProcFace, ContextPublisher) {
     let stored = match ndn_cert::read_stored_contexts(pib_root) {
         Ok(stored) => stored,
@@ -99,17 +120,39 @@ pub(crate) fn prepare(pib_root: &Path) -> (InProcFace, ContextPublisher) {
             Vec::new()
         }
     };
+    let not_published = |path: &Path, e: &dyn std::fmt::Display| {
+        tracing::warn!(
+            target: "security",
+            path = %path.display(),
+            error = %e,
+            "not publishing stored trust context"
+        )
+    };
     let mut contexts = Vec::with_capacity(stored.len());
     for (path, result) in stored {
-        match result {
-            Ok((ctx, data)) => contexts.push(Published::new(&ctx, &data)),
-            Err(e) => tracing::warn!(
-                target: "security",
-                path = %path.display(),
-                error = %e,
-                "not publishing stored trust context"
+        let (ctx, data) = match result {
+            Ok(stored) => stored,
+            Err(e) => {
+                not_published(&path, &e);
+                continue;
+            }
+        };
+        let mut published = Published::new(&ctx, &data);
+        match ndn_cert::read_stored_versions(pib_root, ctx.namespace()) {
+            Ok(versions) => {
+                for (path, result) in versions {
+                    match result {
+                        Ok((ctx, data)) => published.add(&ctx, &data),
+                        Err(e) => not_published(&path, &e),
+                    }
+                }
+            }
+            Err(e) => not_published(
+                &ndn_cert::context_versions_dir(pib_root, ctx.namespace()),
+                &e,
             ),
         }
+        contexts.push(published);
     }
     if contexts.is_empty() {
         tracing::info!(
@@ -161,30 +204,27 @@ fn metadata_data(namespace: &Name, versioned: &Name, version: u64) -> Bytes {
 /// for a Nack.
 fn answer<'a>(contexts: &'a [Published], name: &Name) -> Option<&'a Bytes> {
     contexts.iter().find_map(|c| {
-        if *name == c.versioned {
-            Some(&c.context)
-        } else if *name == c.metadata_name {
-            Some(&c.metadata)
-        } else {
-            None
+        if *name == c.metadata_name {
+            return Some(&c.metadata);
         }
+        // Exactly `<ns>/32=trust-context/v=<N>`.
+        if name.len() != c.prefix.len() + 1 || !name.has_prefix(&c.prefix) {
+            return None;
+        }
+        let version = name.components().last()?.as_version()?;
+        c.versions.get(&version)
     })
 }
 
-/// `current` with `added` in place of any entry for the same namespace.
-fn with_context(current: &[Published], added: Published) -> Vec<Published> {
-    let mut next: Vec<Published> = current
-        .iter()
-        .filter(|c| c.prefix != added.prefix)
-        .map(|c| Published {
-            prefix: c.prefix.clone(),
-            metadata_name: c.metadata_name.clone(),
-            versioned: c.versioned.clone(),
-            context: c.context.clone(),
-            metadata: c.metadata.clone(),
-        })
-        .collect();
-    next.push(added);
+/// `current` with version `ctx` (signed Data `data`) added to its
+/// namespace's entry, or as a new entry for a namespace not published yet.
+fn with_version(current: &[Published], ctx: &SignedTrustContext, data: &Data) -> Vec<Published> {
+    let prefix = ndn_cert::rdr_prefix(ctx.namespace());
+    let mut next = current.to_vec();
+    match next.iter_mut().find(|c| c.prefix == prefix) {
+        Some(entry) => entry.add(ctx, data),
+        None => next.push(Published::new(ctx, data)),
+    }
     next
 }
 
@@ -238,7 +278,8 @@ fn log_published(engine: &ForwarderEngine, c: &Published, face_id: FaceId) {
     tracing::info!(
         target: "security",
         prefix = %c.prefix,
-        context = %c.versioned,
+        context = %c.newest_name(),
+        versions = c.versions.len(),
         face = face_id.0,
         "publishing trust context (RDR)"
     );
@@ -256,19 +297,24 @@ pub(crate) struct PublishedContexts {
 }
 
 impl PublishedContexts {
-    /// Serve `ctx` (signed Data `data`) from now on, replacing an earlier
-    /// version of the same namespace.
+    /// Serve version `ctx` (signed Data `data`) from now on, beside the
+    /// versions of its namespace served already; the metadata names it when
+    /// it is the newest.
     pub(crate) fn publish(&self, ctx: &SignedTrustContext, data: &Data) {
-        let added = Published::new(ctx, data);
+        let prefix = ndn_cert::rdr_prefix(ctx.namespace());
         let bypassed = self.lock_bypassed();
-        if bypassed.contains_key(&added.prefix) {
-            // Routed toward the publisher again when the fetch ends.
-            tracing::info!(target: "security", context = %added.versioned, "publishing trust context (RDR)");
-        } else {
-            log_published(&self.engine, &added, self.face_id);
+        if !bypassed.contains_key(&prefix) {
+            // Else routed toward the publisher again when the fetch ends.
+            self.engine.fib().add_nexthop(&prefix, self.face_id, 0);
         }
+        tracing::info!(
+            target: "security",
+            context = %ctx.rdr_name(),
+            face = self.face_id.0,
+            "publishing trust context (RDR)"
+        );
         let mut list = self.list.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        *list = Arc::new(with_context(&list, added));
+        *list = Arc::new(with_version(&list, ctx, data));
     }
 
     /// While the returned guard lives, Interests under `namespace`'s
@@ -395,36 +441,57 @@ mod tests {
         assert!(published(dir.path()).is_empty());
     }
 
-    /// A context adopted at runtime is served at once and replaces the entry
-    /// of its namespace (one per namespace), leaving others alone.
+    /// Every version a node held is served by its exact name — from the
+    /// store at start and as versions are added at runtime — so nodes behind
+    /// it can follow the namespace version by version; the metadata names
+    /// the newest, and adding an older version (one walked through) never
+    /// moves it back. Each namespace keeps its own entry.
     #[test]
-    fn adopted_context_replaces_its_namespace_entry() {
+    fn every_version_held_is_served_and_the_metadata_names_the_newest() {
         let dir = tempfile::tempdir().unwrap();
-        let bob = stored(dir.path(), "/home/bob");
+        let mgr = ndn_security::SecurityManager::new();
+        let bob = ndn_cert::init_namespace(&mgr, &n("/home/bob")).unwrap();
+        let signer = mgr.get_signer_sync(&bob.anchor_key).unwrap();
+        let content = bob.context.encode_content();
+        let version = |v: u64| {
+            let ctx = SignedTrustContext::decode_content(&content, v).unwrap();
+            let data = ctx.sign_into_data(signer.as_ref()).unwrap();
+            (ctx, data)
+        };
+        let newest_named = |contexts: &[Published]| {
+            let wire = answer(contexts, &ndn_cert::rdr_metadata_name(&n("/home/bob"))).unwrap();
+            let meta = Data::decode(wire.clone()).unwrap();
+            ndn_cert::context_pointer(&n("/home/bob"), meta.content().unwrap()).unwrap()
+        };
+        let (v1, v2, v3) = (version(1), version(2), version(3));
+        for (ctx, data) in [&v1, &v2] {
+            ndn_cert::persist_context(dir.path(), ctx, data).unwrap();
+        }
+
+        let start = published(dir.path());
+        for (ctx, data) in [&v1, &v2] {
+            assert_eq!(answer(&start, &ctx.rdr_name()), Some(data.raw()));
+        }
+        assert_eq!(newest_named(&start), v2.0.rdr_name());
+
+        let added = with_version(&start, &v3.0, &v3.1);
+        assert_eq!(answer(&added, &v3.0.rdr_name()), Some(v3.1.raw()));
+        assert_eq!(newest_named(&added), v3.0.rdr_name());
+        let again = with_version(&added, &v1.0, &v1.1);
+        assert_eq!(newest_named(&again), v3.0.rdr_name(), "an older version never moves it back");
+        for (ctx, data) in [&v1, &v2, &v3] {
+            assert_eq!(answer(&again, &ctx.rdr_name()), Some(data.raw()));
+        }
+
         let alice = ndn_cert::init_namespace(&ndn_security::SecurityManager::new(), &n("/home/alice"))
             .unwrap();
-        let other_bob =
-            ndn_cert::init_namespace(&ndn_security::SecurityManager::new(), &n("/home/bob")).unwrap();
-        let start = published(dir.path());
-        let added = with_context(&start, Published::new(&alice.context, &alice.context_data));
-        assert_eq!(added.len(), 2);
+        let both = with_version(&again, &alice.context, &alice.context_data);
+        assert_eq!(both.len(), 2);
         assert_eq!(
-            answer(&added, &alice.context.rdr_name()),
+            answer(&both, &alice.context.rdr_name()),
             Some(alice.context_data.raw())
         );
-        assert_eq!(
-            answer(&added, &bob.context.rdr_name()),
-            Some(bob.context_data.raw())
-        );
-        let replaced = with_context(
-            &added,
-            Published::new(&other_bob.context, &other_bob.context_data),
-        );
-        assert_eq!(replaced.len(), 2);
-        assert_eq!(
-            answer(&replaced, &other_bob.context.rdr_name()),
-            Some(other_bob.context_data.raw())
-        );
+        assert_eq!(newest_named(&both), v3.0.rdr_name());
     }
 
     /// While the node adopts a namespace by fetching, Interests for its

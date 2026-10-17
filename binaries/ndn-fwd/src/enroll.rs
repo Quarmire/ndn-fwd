@@ -6,12 +6,14 @@
 //! leaves it), lets [`ndn_identity::enroll_with_invite_via_engine`] adopt the
 //! namespace's trust context if it is not held and obtain a certificate from
 //! the namespace's CA with the invite's token, stores the issued certificate
-//! beside the key, and makes the identity the PIB's default — loaded at every
-//! start unless `[security] identity` names another one (the config file is
-//! never edited). The running daemon then signs its management responses and
-//! discovery records with the new key from the next packet on. DV routing in
-//! the `static`/`lvs` trust modes keeps the key it started with (neighbours
-//! list it in their `trusted_keys`) until the next start.
+//! beside the key (and the issuer certificates of its chain under
+//! `<pib>/issuers`, [`ndn_cert::issuers`]), and makes the identity the PIB's
+//! default — loaded at every start unless `[security] identity` names another
+//! one (the config file is never edited). The running daemon then signs its
+//! management responses and discovery records with the new key from the next
+//! packet on. DV routing in the `static`/`lvs` trust modes keeps the key it
+//! started with (neighbours list it in their `trusted_keys`) until the next
+//! start.
 //!
 //! A failed enrollment leaves the previous state: the new key (and anything
 //! stored for it) is deleted and the default identity is only changed as the
@@ -232,6 +234,18 @@ pub(crate) async fn enroll(
         ));
     }
 
+    // The certificate's issuer chain, kept beside the PIB: it is served with
+    // this node's certificates and sent with a renewal, so a later CA of the
+    // namespace can verify the chain once nobody else serves this CA's
+    // certificate (`ndn_cert::issuers`).
+    if let Err(e) = ndn_cert::issuers::keep_issuer_certs(&admin.pib_root, &issued.issuers) {
+        tracing::warn!(
+            target: "security",
+            error = %e,
+            "enrolled, but the issuer certificates of its chain were not kept"
+        );
+    }
+
     // The live daemon: the engine's key store holds the identity (so an app
     // asking the engine to sign as it can), and — unless the config pins
     // another identity — this key signs the daemon's own packets from now on.
@@ -239,9 +253,13 @@ pub(crate) async fn enroll(
         mgr.register_signer(key.clone(), Arc::clone(&signer));
         mgr.cert_cache().insert(issued.cert.clone());
     }
-    // Peers validating this node's Data can fetch the certificate from it.
+    // Peers validating this node's Data can fetch the certificate, and its
+    // issuers, from it.
     if let Some(own) = &admin.own_certs {
         own.serve(issued.data.raw().clone());
+        for issuer in &issued.issuers {
+            own.serve(issuer.raw().clone());
+        }
     }
     // The renewal timer schedules the new certificate's renewal.
     admin.certificates_changed.notify_one();
