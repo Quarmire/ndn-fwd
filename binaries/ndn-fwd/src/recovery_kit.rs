@@ -189,12 +189,17 @@ fn held(pib_dir: &Path, namespace: &Name) -> Result<(SignedTrustContext, Data)> 
     })
 }
 
-/// This PIB's root store and the context it is the root of.
-fn root_device(pib: &FilePib, pib_dir: &Path) -> Result<(RootStore, SignedTrustContext, Data)> {
+/// This PIB's root store and the context it is the root of. `work` says what
+/// is done only on the root device, for the refusal on any other device.
+pub(crate) fn root_device(
+    pib: &FilePib,
+    pib_dir: &Path,
+    work: &str,
+) -> Result<(RootStore, SignedTrustContext, Data)> {
     let store = RootStore::open(pib)?.with_context(|| {
         format!(
-            "{} holds no namespace root: recovery kits are made and revoked on the root device \
-             (where `ndn-fwd init` ran, or a device that ran `ndn-fwd recover`)",
+            "{} holds no namespace root: {work} on the root device (where `ndn-fwd init` ran, \
+             or a device that ran `ndn-fwd recover`)",
             pib_dir.display()
         )
     })?;
@@ -430,7 +435,8 @@ async fn create(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
     let pib =
         FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) = root_device(&pib, &pib_dir)?;
+    let (store, ctx, held_data) =
+        root_device(&pib, &pib_dir, "recovery kits are made and revoked")?;
     let namespace = store.namespace().clone();
     let purpose = format!("Creating a recovery kit for {namespace}");
 
@@ -692,7 +698,8 @@ async fn revoke(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
     let pib =
         FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) = root_device(&pib, &pib_dir)?;
+    let (store, ctx, held_data) =
+        root_device(&pib, &pib_dir, "recovery kits are made and revoked")?;
     let namespace = store.namespace().clone();
     if !ctx.has_key_role(&key, KeyRole::RECOVERY_ANCHOR) {
         bail!(

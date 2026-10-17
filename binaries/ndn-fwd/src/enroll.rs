@@ -20,15 +20,19 @@
 //! last step, after the certificate is stored.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ndn_cert::roles::parse_device_key;
 use ndn_cert::{InviteEnrollError, InviteLink, new_device_key_name};
-use ndn_mgmt::{EnrollOutcome, EnrollRequest, EnrolledInfo, TrustRefusal};
+use ndn_mgmt::{
+    ContextRefreshInfo, EnrollOutcome, EnrollRequest, EnrolledInfo, RefreshState, TrustRefusal,
+};
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::{Data, Name};
 use ndn_security::{Certificate, FilePib, Signer, SignedTrustContext};
 
 use crate::context_adopt::{TrustAdmin, refusal};
+use crate::context_refresh::refresh_contexts;
 
 fn status_of(e: &InviteEnrollError) -> u64 {
     use InviteEnrollError as E;
@@ -87,6 +91,18 @@ struct Certified {
     revoked: Option<Name>,
 }
 
+impl Certified {
+    /// `<key> (valid until <ISO 8601>)`.
+    fn still_valid(&self) -> String {
+        format!("{} (valid until {})", self.key, iso(self.valid_until))
+    }
+
+    /// `<key> (revoked: <name>)` when the trust context revokes its chain.
+    fn unusable(&self) -> Option<String> {
+        Some(format!("{} (revoked: {})", self.key, self.revoked.as_ref()?))
+    }
+}
+
 /// Device keys in `namespace` this PIB holds a currently valid certificate
 /// for, each with what revokes its chain, if anything. Issuer certificates
 /// come from those kept under `<pib>/issuers` ([`ndn_cert::issuers`]), else
@@ -123,6 +139,67 @@ fn certified_in(admin: &TrustAdmin, pib: &FilePib, namespace: &Name) -> Vec<Cert
         .collect();
     held.sort_by(|a, b| a.key.cmp(&b.key));
     held
+}
+
+/// [`certified_in`] without `key` (the key just enrolled).
+fn held_besides(admin: &TrustAdmin, pib: &FilePib, namespace: &Name, key: &Name) -> Vec<Certified> {
+    let mut held = certified_in(admin, pib, namespace);
+    held.retain(|c| &c.key != key);
+    held
+}
+
+/// How long enrollment waits for the check of its namespace's trust
+/// context: the metadata fetch and the newest version's fetch. A longer
+/// catch-up across several versions (after a recovery) is left to `ndn-fwd
+/// context refresh`, and the enrollment reports that it judged against the
+/// version held.
+pub(crate) fn context_check_budget() -> Duration {
+    ndn_app::DEFAULT_TIMEOUT * 2
+}
+
+/// Check the held trust context of `namespace` for a newer version through
+/// the daemon's refresh path ([`refresh_contexts`]: adopted only under the
+/// continuity rule, then stored and published), so certificates are judged
+/// against the newest version reachable. `None` when the context is not
+/// held. Best effort: whatever the outcome, the held version stays in force,
+/// and the result says which version the judgement used.
+async fn check_context(admin: &TrustAdmin, namespace: &Name) -> Option<ContextRefreshInfo> {
+    let held = admin.keyring.version_of(namespace)?;
+    let not_checked = |detail: String| ContextRefreshInfo {
+        namespace: namespace.to_string(),
+        state: RefreshState::Failed,
+        held_version: held,
+        version: held,
+        revoked: Vec::new(),
+        detail,
+    };
+    let budget = context_check_budget();
+    // Dropping the refresh at the deadline is safe: it adopts, stores and
+    // publishes only after its last fetch, with no await in between.
+    match tokio::time::timeout(budget, refresh_contexts(admin, Some(namespace.clone()))).await {
+        Ok(Ok(mut results)) => results.pop(),
+        Ok(Err(e)) => Some(not_checked(e.reason)),
+        Err(_) => Some(not_checked(format!(
+            "no newer version was confirmed within {}s (following several versions takes \
+             longer); `ndn-fwd context refresh {namespace}` completes the check",
+            budget.as_secs()
+        ))),
+    }
+}
+
+/// The clause a refusal adds when the check of the trust context did not
+/// confirm the version held is the newest: the judgement used that version.
+fn judged_on_held(check: &ContextRefreshInfo) -> String {
+    match check.state {
+        RefreshState::Updated | RefreshState::Current | RefreshState::Source => String::new(),
+        RefreshState::UpstreamOlder | RefreshState::Unreachable | RefreshState::Failed => {
+            format!(
+                " (judged against the trust context v{} this node holds; whether a newer \
+                 version revokes it could not be checked: {})",
+                check.version, check.detail
+            )
+        }
+    }
 }
 
 /// The first name on `cert`'s chain that `ctx` revokes: each certificate
@@ -189,32 +266,29 @@ pub(crate) async fn enroll(
         )
     })?;
     let previous_identity = pib.get_default_identity().ok().flatten();
-    let (unusable, held): (Vec<Certified>, Vec<Certified>) =
-        certified_in(admin, &pib, &invite.namespace)
-            .into_iter()
-            .partition(|c| c.revoked.is_some());
-    let still_valid: Vec<String> = held
-        .iter()
-        .map(|c| format!("{} (valid until {})", c.key, iso(c.valid_until)))
+    // Judge the certificates held against the namespace's newest trust
+    // context, not a possibly stale held one: a newer version may revoke one.
+    let mut context_check = check_context(admin, &invite.namespace).await;
+    let held: Vec<Certified> = certified_in(admin, &pib, &invite.namespace)
+        .into_iter()
+        .filter(|c| c.revoked.is_none())
         .collect();
     if !held.is_empty() && !request.force {
+        let still_valid: Vec<String> = held.iter().map(Certified::still_valid).collect();
         return Err(refusal(
             409,
             format!(
-                "this node already holds a certificate in {}: {}. To enroll another key anyway, \
-                 run again with --force and another --device name (the CA certifies a new key \
-                 for a device name it already certified only once that certificate is revoked \
-                 or an admin approves the new key); the certificate this node holds stays valid \
-                 until it expires or is revoked",
+                "this node already holds a certificate in {}: {}{}. To enroll another key \
+                 anyway, run again with --force and another --device name (the CA certifies a \
+                 new key for a device name it already certified only once that certificate is \
+                 revoked or an admin approves the new key); the certificate this node holds \
+                 stays valid until it expires or is revoked",
                 invite.namespace,
-                still_valid.join(", ")
+                still_valid.join(", "),
+                context_check.as_ref().map(judged_on_held).unwrap_or_default()
             ),
         ));
     }
-    let unusable: Vec<String> = unusable
-        .iter()
-        .filter_map(|c| Some(format!("{} (revoked: {})", c.key, c.revoked.as_ref()?)))
-        .collect();
 
     let key = new_device_key_name(&identity);
     let generated = pib.generate_ed25519(&key).map_err(|e| {
@@ -364,6 +438,16 @@ pub(crate) async fn enroll(
             false
         }
     };
+    // The other certificates this node holds in the namespace, judged
+    // against the context held now: the one checked above, or the one the
+    // enrollment adopted (checked here when there is something to judge).
+    let mut others = held_besides(admin, &pib, &invite.namespace, &key);
+    if context_check.is_none() && !others.is_empty() {
+        context_check = check_context(admin, &invite.namespace).await;
+        others = held_besides(admin, &pib, &invite.namespace, &key);
+    }
+    let (unusable, still_valid): (Vec<Certified>, Vec<Certified>) =
+        others.into_iter().partition(|c| c.revoked.is_some());
     tracing::info!(
         target: "security",
         identity = %identity,
@@ -389,8 +473,9 @@ pub(crate) async fn enroll(
         previous_identity: previous_identity.map(|n| n.to_string()),
         signing_now,
         at_next_start,
-        still_valid,
-        unusable,
+        still_valid: still_valid.iter().map(Certified::still_valid).collect(),
+        unusable: unusable.iter().filter_map(Certified::unusable).collect(),
+        context_check,
     }))
 }
 
@@ -414,12 +499,16 @@ pub(crate) mod tests {
         pub(crate) context_data: ndn_packet::Data,
         /// The root device's CA, on the same engine.
         pub(crate) ca: Arc<ndn_cert::CaState>,
+        /// The root device's trust-context publisher, on the same engine: it
+        /// answers the node's refreshes.
+        pub(crate) root_contexts: crate::context_publisher::PublishedContexts,
         pub(crate) shutdown: ShutdownHandle,
     }
 
     /// One engine carrying the root device's CA (PIB `root_dev`, tokens `tokens`) and
-    /// the enrolling node's trust-admin backend (PIB `device`, holding the root device's
-    /// trust context already, signing with an ephemeral key).
+    /// trust-context publisher, and the enrolling node's trust-admin backend (PIB
+    /// `device`, holding the root device's trust context already, signing with an
+    /// ephemeral key).
     pub(crate) async fn node(root_dev: &Path, device: &Path, tokens: &[&str]) -> Node {
         let ns: Name = "/home/bob".parse().unwrap();
         let pib = FilePib::new(root_dev).unwrap();
@@ -445,15 +534,18 @@ pub(crate) mod tests {
             ..CaTomlConfig::default()
         };
         let (faces, ca) = crate::ca::prepare(&cfg, root_dev).await.unwrap();
+        let (context_face, publisher) = crate::context_publisher::prepare(root_dev);
         let mut builder = EngineBuilder::new(EngineConfig::default())
             .security_profile(ndn_security::SecurityProfile::Disabled)
-            .security(Arc::new(SecurityManager::new()));
+            .security(Arc::new(SecurityManager::new()))
+            .face(context_face);
         for face in faces {
             builder = builder.face(face);
         }
         let (engine, shutdown) = builder.build().await.unwrap();
         engine.fib().add_nexthop(&ca.prefix, ca.face_id, 0);
         let ca = crate::ca::spawn(ca, &cfg, &engine).unwrap().state;
+        let root_contexts = publisher.spawn(&engine);
 
         let keyring = Arc::new(Keyring::new());
         let fingerprint = ndn_cert::anchor_fingerprint(&persisted.init.anchor);
@@ -480,11 +572,13 @@ pub(crate) mod tests {
                 context_change: tokio::sync::Mutex::new(()),
                 renewing: tokio::sync::Mutex::new(()),
                 certificates_changed: tokio::sync::Notify::new(),
+                context_sync: None,
             },
             fingerprint,
             context_data: ndn_packet::Data::decode(persisted.init.context_data.raw().clone())
                 .unwrap(),
             ca,
+            root_contexts,
             shutdown,
         }
     }
@@ -655,6 +749,59 @@ pub(crate) mod tests {
             assert_eq!(held[0].key.to_string(), info.key);
             assert_eq!(held[0].revoked.as_ref(), Some(&revoked), "revoking {revoked}");
         }
+        node.shutdown.shutdown().await;
+    }
+
+    /// Enrollment judges the certificates the node holds against the
+    /// namespace's newest trust context, not the stale one it holds: when a
+    /// version the node has not fetched yet revokes its key, that key is
+    /// listed as unusable (never "still valid") and does not block enrolling
+    /// another — and the node holds the newer version afterwards.
+    #[tokio::test]
+    async fn held_certificates_are_judged_against_the_newest_context() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-m1", "member-m2"]).await;
+        let ns: Name = "/home/bob".parse().unwrap();
+        let EnrollOutcome::Enrolled(first) =
+            enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
+                .await
+                .expect("first enrollment");
+        let laptop: Name = first.key.parse().unwrap();
+        let held = node.admin.keyring.version_of(&ns).unwrap();
+
+        // The root device revokes the laptop's key in a new version; the
+        // node has not fetched it.
+        let root = ndn_cert::RootStore::open(&FilePib::open(root_dev.path()).unwrap())
+            .unwrap()
+            .unwrap()
+            .signer(None)
+            .await
+            .unwrap();
+        let bump = ndn_cert::bump_context_revoking(
+            root.as_ref(),
+            &node.context_data,
+            std::slice::from_ref(&laptop),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        node.root_contexts.publish(&bump.context, &bump.data);
+        assert_eq!(node.admin.keyring.version_of(&ns), Some(held));
+        // The first enrollment's check left the publisher's metadata (v1) in
+        // the shared engine's Content Store; it stops satisfying MustBeFresh
+        // after its FreshnessPeriod (1 s), as on any forwarder in between.
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+
+        let EnrollOutcome::Enrolled(second) =
+            enroll(&node.admin, request(&node, "member", "member-m2", "tab", false))
+                .await
+                .expect("the only certificate held is revoked by the newest version");
+        assert!(second.still_valid.is_empty(), "{:?}", second.still_valid);
+        assert_eq!(second.unusable.len(), 1, "{:?}", second.unusable);
+        assert!(second.unusable[0].starts_with(&first.key));
+        let check = second.context_check.expect("the held context was checked");
+        assert_eq!(check.state, RefreshState::Updated, "{}", check.detail);
+        assert_eq!(node.admin.keyring.version_of(&ns), Some(bump.context.version()));
         node.shutdown.shutdown().await;
     }
 }

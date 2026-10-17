@@ -48,6 +48,7 @@ mod active_identity;
 mod context_adopt;
 mod context_publisher;
 mod context_refresh;
+mod context_sync;
 mod ca;
 mod enroll;
 mod face_provision;
@@ -157,21 +158,20 @@ USAGE:
                                           <device> only once the old certificate
                                           is revoked or an admin approves it, so
                                           pick another --device otherwise
-  ndn-fwd revoke <device-identity | key-name | cert-name> [-c <config>]
-                [--passphrase-file <path> | --pin-file <path>]
-                                          on the root device: revoke the device's
-                                          key(s) at this node's CA (its
-                                          certificates are no longer served and
-                                          the device name is free for a new
-                                          key) and in a new, root-signed version
-                                          of the namespace's trust context,
-                                          which the daemon stores and publishes;
-                                          other nodes refuse the key once they
-                                          hold that version. A sealed-file or
-                                          yubikey-piv root asks for its
-                                          passphrase / PIN here and sends it to
-                                          the daemon over the local management
-                                          socket for this one signature
+  ndn-fwd revoke <device-identity | key-name | cert-name> [--pib <dir>]
+                [-c <config>] [--passphrase-file <path> | --pin-file <path>]
+                                          on the root device: sign, here, a new
+                                          version of the namespace's trust
+                                          context that revokes the device's
+                                          key(s), and hand it to the daemon,
+                                          which stores and publishes it; its CA
+                                          then no longer serves their
+                                          certificates and the device name is
+                                          free for a new key. Other nodes refuse
+                                          the key once they hold that version.
+                                          A sealed-file or yubikey-piv root asks
+                                          for its passphrase / PIN here; it
+                                          never leaves this command
   ndn-fwd renew [-c <config>]             renew, now, the certificates the
                                           namespace CA issued to this node:
                                           same key, no invite (the daemon also
@@ -1087,8 +1087,8 @@ async fn main() -> Result<()> {
     let published_contexts = context_publisher.map(|publisher| publisher.spawn(&engine));
 
     // The CA's device-approval store (if it offers that challenge), shared
-    // with the mgmt `ca` module below, and its state, which `security/revoke`
-    // administers.
+    // with the mgmt `ca` module below, and its state, which follows every
+    // trust-context version the daemon keeps (`TrustAdmin::keep`).
     let running_ca = match ca_spawn {
         Some(spawn) => {
             // `/<prefix>` covers `/<prefix>/CA/*` and cert-fetch for the
@@ -1134,10 +1134,15 @@ async fn main() -> Result<()> {
     // PIB (a namespace made before root stores), say so and how to seal it.
     root_key::warn_if_unprotected(&pib_root(&fwd_config));
 
-    // `security/context-adopt` / `enroll` / `revoke` / `context-refresh`:
-    // adopt a trust context (stored beside the PIB and published by name),
-    // enroll with an invite, revoke a device (root device), refresh held
-    // contexts at runtime; `security/identity-status` reports
+    // `[security] context_sync`: every held namespace's sync group (see
+    // `context_sync`), fed each version the backend keeps.
+    let (context_sync, context_sync_groups) =
+        context_sync::prepare(fwd_config.security.context_sync, &pib_root(&fwd_config)).unzip();
+    // `security/context-adopt` / `enroll` / `context-refresh` /
+    // `context-update`: adopt a trust context (stored beside the PIB and
+    // published by name), enroll with an invite, refresh held contexts, take
+    // a version signed by a CLI on this device (`revoke`, `recovery-kit`,
+    // `recover`) at runtime; `security/identity-status` reports
     // `active_identity`.
     let trust_admin = Arc::new(context_adopt::TrustAdmin {
         engine: engine.clone(),
@@ -1155,12 +1160,16 @@ async fn main() -> Result<()> {
         context_change: tokio::sync::Mutex::new(()),
         renewing: tokio::sync::Mutex::new(()),
         certificates_changed: tokio::sync::Notify::new(),
+        context_sync,
     });
     context_refresh::spawn_periodic(
         Arc::clone(&trust_admin),
         fwd_config.security.context_refresh_secs,
         cancel.clone(),
     );
+    if let Some(groups) = context_sync_groups {
+        groups.spawn(Arc::clone(&trust_admin), cancel.child_token());
+    }
     // Renew this node's certificates before they expire (`[security]
     // renew_before`); `ndn-fwd renew` renews now.
     renewal::spawn_periodic(
@@ -1262,8 +1271,8 @@ async fn main() -> Result<()> {
             control_surfaces: radio_control_surfaces,
             security_is_ephemeral,
             // None when [security.mgmt].trust_anchor_pib is unset. With
-            // require_signed_commands=true and no validator, every command
-            // is rejected (fail-secure).
+            // require_signed_commands=true and no validator, only local
+            // operators on the Unix socket (peer credentials) are accepted.
             command_validator: mgmt_validator,
             // None rejects /localhop/nfd/... with STATUS 403 (equivalent
             // to NFD's `m_isLocalhopEnabled = false`).

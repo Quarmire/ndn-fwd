@@ -24,7 +24,7 @@
 //! `/<ns>/32=trust-context` per namespace — more specific than a `[ca]`
 //! entry `/<ns>`, so longest-prefix match routes here. The store is read at
 //! startup; a version the running daemon adopts (`security/context-adopt`),
-//! makes (`security/revoke` on the root device, `security/context-update`)
+//! takes from a CLI on the root device (`security/context-update`)
 //! or fetches as an update (`security/context-refresh`, the periodic
 //! refresh, with the versions it walked through) is added with
 //! [`PublishedContexts::publish`] and served at once — which is how an

@@ -82,7 +82,7 @@ pub async fn maybe_run() -> Option<Result<()>> {
         "init" => Some(run_init(&args[2..]).await),
         "adopt" => Some(run_adopt(&args[2..]).await),
         "enroll" => Some(run_enroll(&args[2..]).await),
-        "revoke" => Some(run_revoke(&args[2..]).await),
+        "revoke" => Some(crate::revoke::run(&args[2..]).await),
         "renew" => Some(run_renew(&args[2..]).await),
         "context" => Some(run_context(&args[2..]).await),
         "schema" => Some(crate::schema_cmd::run(&args[2..])),
@@ -161,7 +161,7 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
         positionals: 1,
     }),
     ("revoke", None, ArgSpec {
-        values: &["-c", "--config", "--passphrase-file", "--pin-file"],
+        values: &["--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
         repeatable: &[],
         switches: &[],
         positionals: 1,
@@ -590,11 +590,13 @@ fn adopt_offline(
     Ok(())
 }
 
-/// How long the CLI waits for the daemon to enroll: the longest the daemon's
-/// enrollment can take (every exchange timing out), plus a margin for the
-/// key generation and storing.
+/// How long the CLI waits for the daemon to enroll: the check of the held
+/// trust context, then the longest the daemon's enrollment can take (every
+/// exchange timing out), plus a margin for the key generation and storing.
 fn daemon_enroll_timeout() -> std::time::Duration {
-    ndn_identity::enroll_via_engine_budget() + std::time::Duration::from_secs(5)
+    crate::enroll::context_check_budget()
+        + ndn_identity::enroll_via_engine_budget()
+        + std::time::Duration::from_secs(5)
 }
 
 async fn run_enroll(args: &[String]) -> Result<()> {
@@ -704,6 +706,27 @@ async fn run_enroll(args: &[String]) -> Result<()> {
              (the key enrolled now takes its place)"
         );
     }
+    if let Some(check) = &info.context_check {
+        use ndn_mgmt::RefreshState as S;
+        match check.state {
+            S::Updated => println!(
+                "# Trust context {} was checked before enrolling: {}",
+                check.namespace, check.detail
+            ),
+            S::Current | S::Source => {}
+            S::UpstreamOlder | S::Unreachable | S::Failed => {
+                if !info.still_valid.is_empty() || !info.unusable.is_empty() {
+                    println!(
+                        "# The certificates above are judged against the trust context v{} \
+                         this node holds: whether a newer version revokes one could not be \
+                         checked ({}). Run `ndn-fwd context refresh {}` once the namespace is \
+                         reachable.",
+                        check.version, check.detail, check.namespace
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -717,84 +740,6 @@ pub(crate) async fn daemon(args: &[String], what: &str) -> Result<(ndn_ipc::Mgmt
         )
     })?;
     Ok((client, socket))
-}
-
-/// How long the CLI waits for the daemon to revoke (local work only: the
-/// CA store, the PIB, the context store — and, for a YubiKey root, the
-/// operator's touch).
-const DAEMON_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-async fn run_revoke(args: &[String]) -> Result<()> {
-    let target = *positionals(args).first().context(
-        "revoke requires a device identity (/<ns>/<role>/<device>), a key name \
-         (<identity>/KEY/<id>) or a certificate name",
-    )?;
-    let name: Name = target
-        .parse()
-        .map_err(|e| anyhow::anyhow!("revoke refused: {target:?} is not an NDN name: {e}"))?;
-    let (client, socket) = daemon(args, "revoke").await?;
-    // A sealed or hardware root is unlocked for this one signature: its
-    // passphrase / PIN is asked here and travels with the command over the
-    // local management socket.
-    let unlock = match crate::root_key::daemon_root_unlock(&client).await {
-        Some(kind) => crate::root_key::operator_secret(
-            args,
-            kind,
-            &format!("Revoking {name} signs a new trust context version"),
-            false,
-        )?,
-        None => None,
-    };
-    let resp = client
-        .security_revoke(
-            &name,
-            unlock.map(|s| ndn_mgmt_wire::UnlockSecret::new(s.expose().to_vec())),
-            DAEMON_REVOKE_TIMEOUT,
-        )
-        .await
-        .with_context(|| format!("ask the daemon at {socket} to revoke"))?;
-    if !resp.is_ok() {
-        bail!("revoke refused by the daemon ({}): {}", resp.status_code, resp.status_text);
-    }
-    let info: ndn_mgmt::RevokedInfo = serde_json::from_str(&resp.status_text)
-        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
-    println!("# ndn-fwd revoke (by the running daemon at {socket})");
-    println!("namespace        = {}", info.namespace);
-    for key in &info.keys {
-        println!("revoked_key      = {key}");
-    }
-    for cert in &info.ca_revoked {
-        println!("ca_revoked       = {cert} (no longer served by the CA)");
-    }
-    if let Some(e) = &info.ca_not_persisted {
-        println!("ca_not_persisted = {e} (holds until the CA restarts)");
-    }
-    if info.version > info.previous_version {
-        println!(
-            "trust_context    = v{} -> v{} (signed by the root, stored and {})",
-            info.previous_version,
-            info.version,
-            if info.published {
-                "published"
-            } else {
-                "not published: [security] serve_contexts = false"
-            }
-        );
-        if let Some(stored) = &info.stored {
-            println!("stored           = {stored}");
-        }
-    } else {
-        println!(
-            "trust_context    = v{} (already revokes every key named; no new version)",
-            info.version
-        );
-    }
-    println!();
-    println!("# This node and its CA refuse the key now. Every other node refuses it once it");
-    println!("# holds v{}: it fetches it at its next refresh ([security]", info.version);
-    println!("# context_refresh_secs, default 300 s), or at once with `ndn-fwd context refresh`.");
-    println!("# The device name is free to enroll again with a new key.");
-    Ok(())
 }
 
 /// How long the CLI waits for the daemon to renew: one renewal's exchanges

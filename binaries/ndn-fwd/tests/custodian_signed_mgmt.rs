@@ -1,8 +1,10 @@
 //! Live integration test: a mgmt command signed through a CustodianRegistry
 //! (CustodianSigner over an InPageCustodian) is authorized by a real ndn-fwd
-//! that requires signed commands, while an unsigned (DigestSha256) command is
-//! rejected. This closes the "route mgmt signing through a custodian" loop
-//! end-to-end against a running forwarder.
+//! that requires signed commands, while a command signed by a key outside its
+//! trust anchors is rejected — even from the daemon's own user, whose unsigned
+//! commands the socket's peer credentials would authorize. This closes the
+//! "route mgmt signing through a custodian" loop end-to-end against a running
+//! forwarder.
 //!
 //! The operator identity is created as a FilePib (its self-signed cert is
 //! ndn-fwd's mgmt trust anchor); the *same* key is loaded into the in-page
@@ -90,14 +92,20 @@ async fn custodian_signed_command_authorized_by_strict_ndn_fwd() {
             .await
     };
 
-    // 5. Unsigned (default DigestSha256) command → must be rejected.
+    // 5. Signed by an untrusted key → must be rejected: a signature names a
+    //    signer, and that claim is verified even for a local operator.
     let rejected = {
+        let intruder: Arc<dyn Signer> = Arc::new(Ed25519Signer::from_seed(
+            &[7u8; 32],
+            "/intruder/KEY/k1".parse().unwrap(),
+        ));
         let client = MgmtClient::connect(sock.to_str().unwrap())
             .await
-            .expect("connect (unsigned)");
+            .expect("connect (untrusted)")
+            .with_signer(intruder);
         client
             .strategy_set(
-                &"/test/unsigned".parse::<Name>().unwrap(),
+                &"/test/untrusted".parse::<Name>().unwrap(),
                 &ndn_strategy::MulticastStrategy::strategy_name(),
             )
             .await
@@ -112,7 +120,7 @@ async fn custodian_signed_command_authorized_by_strict_ndn_fwd() {
     );
     assert!(
         rejected.is_err(),
-        "unsigned command must be rejected by the strict validator, got {rejected:?}"
+        "a command signed by an untrusted key must be rejected, got {rejected:?}"
     );
 }
 

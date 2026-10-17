@@ -26,32 +26,38 @@
 //! version stays in force, and a missed refresh only delays an update.
 //!
 //! A version made on this device by a CLI that signs offline — `ndn-fwd
-//! recovery-kit` on the root device, `ndn-fwd recover` on a replacement — is
-//! handed over with `security/context-update` ([`apply_update`]) and adopted
-//! under the same continuity rule as a fetched one.
+//! revoke` and `ndn-fwd recovery-kit` on the root device, `ndn-fwd recover`
+//! on a replacement — is handed over with `security/context-update`
+//! ([`apply_update`]) and adopted under the same continuity rule as a
+//! fetched one.
+//!
+//! With `[security] context_sync` a version also arrives pushed over the
+//! namespace's sync group ([`crate::context_sync`]), adopted under the same
+//! rule and kept by the same [`keep_update`].
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use ndn_cert::{ContextRefresh, RootStore};
+use ndn_cert::{ContextRefresh, ContextUpdate, RootStore};
 use ndn_mgmt::{ContextRefreshInfo, RefreshState, TrustRefusal};
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::{Data, Name};
 use ndn_security::{FilePib, SignedTrustContext};
 use tokio_util::sync::CancellationToken;
 
-use crate::context_adopt::{TrustAdmin, refusal};
+use crate::context_adopt::{Kept, TrustAdmin, refusal};
 
 /// The first periodic check runs this soon after start (or after one period,
 /// if shorter), so a node that was off catches up without waiting a period.
 const FIRST_CHECK_AFTER: Duration = Duration::from_secs(30);
 
-/// Whether this node is the root device of `ctx`'s namespace — its root
-/// store holds the key of one of `ctx`'s anchors — which makes new versions
-/// rather than fetching them. Public keys only; the root stays locked.
-fn holds_root_key(admin: &TrustAdmin, ctx: &SignedTrustContext) -> bool {
-    let Ok(pib) = FilePib::open(&admin.pib_root) else {
+/// Whether the node using the PIB at `pib_root` is the root device of
+/// `ctx`'s namespace — its root store holds the key of one of `ctx`'s
+/// anchors — which makes new versions rather than fetching them. Public
+/// keys only; the root stays locked.
+pub(crate) fn holds_root_key(pib_root: &std::path::Path, ctx: &SignedTrustContext) -> bool {
+    let Ok(pib) = FilePib::open(pib_root) else {
         return false;
     };
     RootStore::open(&pib)
@@ -96,7 +102,7 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
         revoked,
         detail,
     };
-    if holds_root_key(admin, held) {
+    if holds_root_key(&admin.pib_root, held) {
         return info(
             RefreshState::Source,
             held_version,
@@ -141,32 +147,8 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
         Ok(ContextRefresh::Updated(update)) => {
             let version = update.context.version();
             let revoked: Vec<String> = update.revoked.iter().map(Name::to_string).collect();
-            // Kept by name for the nodes behind this one; a failure to store
-            // one is logged and does not undo the adoption.
-            for step in &update.walked {
-                if let Err(e) = admin.keep_walked(&step.context, &step.data) {
-                    tracing::warn!(
-                        target: "security",
-                        namespace = %namespace,
-                        version = step.context.version(),
-                        error = %e.reason,
-                        "could not keep a trust-context version walked through"
-                    );
-                }
-            }
-            let stored = admin.keep(&update.context, &update.data);
+            let kept = keep_update(admin, &update, Adopted::ByRefresh);
             let walked: Vec<u64> = update.walked.iter().map(|s| s.context.version()).collect();
-            tracing::info!(
-                target: "security",
-                namespace = %namespace,
-                previous = update.previous,
-                version,
-                walked = ?walked,
-                signer = %update.signer.name,
-                revoked = ?revoked,
-                stored = stored.is_ok(),
-                "adopted trust-context update"
-            );
             let through = match walked.as_slice() {
                 [] => String::new(),
                 walked => format!(
@@ -179,13 +161,22 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
                 ),
             };
             let from = walked.last().copied().unwrap_or(update.previous);
-            let detail = match stored {
-                Ok(path) => format!(
-                    "adopted v{version} (signed by {}, an anchor of v{from}){through}; stored {}{}",
-                    update.signer.name,
-                    path.display(),
-                    publication(admin)
-                ),
+            let detail = match &kept {
+                Ok(k) => match &k.stored {
+                    Ok(path) => format!(
+                        "adopted v{version} (signed by {}, an anchor of v{from}){through}; stored \
+                         {}{}{}",
+                        update.signer.name,
+                        path.display(),
+                        publication(admin),
+                        k.ca_detail()
+                    ),
+                    Err(e) => format!(
+                        "adopted v{version}{through} for this run, but {}{}",
+                        e.reason,
+                        k.ca_detail()
+                    ),
+                },
                 Err(e) => format!("adopted v{version}{through} for this run, but {}", e.reason),
             };
             info(RefreshState::Updated, version, revoked, detail)
@@ -204,6 +195,56 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
             info(state, held_version, Vec::new(), e.to_string())
         }
     }
+}
+
+/// How an update reached this node, for the log.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Adopted {
+    /// A refresh fetched it from upstream.
+    ByRefresh,
+    /// It was pushed over the namespace's sync group.
+    OverSync,
+}
+
+/// Keep `update`, adopted into the keyring by a refresh or from the
+/// namespace's sync group: store and publish every version walked through,
+/// then the newest — so this node comes back with it after a restart and
+/// the nodes behind it can follow the same versions by name. A failure to
+/// store one is logged and does not undo the adoption; what became of the
+/// newest is returned ([`TrustAdmin::keep`]).
+pub(crate) fn keep_update(
+    admin: &TrustAdmin,
+    update: &ContextUpdate,
+    how: Adopted,
+) -> Result<Kept, TrustRefusal> {
+    let namespace = update.context.namespace();
+    for step in &update.walked {
+        if let Err(e) = admin.keep_walked(&step.context, &step.data) {
+            tracing::warn!(
+                target: "security",
+                namespace = %namespace,
+                version = step.context.version(),
+                error = %e.reason,
+                "could not keep a trust-context version walked through"
+            );
+        }
+    }
+    let kept = admin.keep(&update.context, &update.data);
+    let walked: Vec<u64> = update.walked.iter().map(|s| s.context.version()).collect();
+    let revoked: Vec<String> = update.revoked.iter().map(Name::to_string).collect();
+    tracing::info!(
+        target: "security",
+        namespace = %namespace,
+        how = ?how,
+        previous = update.previous,
+        version = update.context.version(),
+        walked = ?walked,
+        signer = %update.signer.name,
+        revoked = ?revoked,
+        stored = matches!(&kept, Ok(Kept { stored: Ok(_), .. })),
+        "adopted trust-context update"
+    );
+    kept
 }
 
 /// `security/context-update`: adopt `wire` (a signed trust-context Data) as
@@ -299,7 +340,7 @@ pub(crate) async fn apply_update(
         version = context.version(),
         signer = %signer.name,
         revoked = ?revoked,
-        stored = kept.is_ok(),
+        stored = kept.as_ref().is_ok_and(|k| k.stored.is_ok()),
         "adopted trust-context version made on this device"
     );
     let adopted = format!(
@@ -315,7 +356,15 @@ pub(crate) async fn apply_update(
         version: context.version(),
         revoked,
         detail: match kept {
-            Ok(stored) => format!("{adopted}; stored {}{}", stored.display(), publication(admin)),
+            Ok(kept) => match &kept.stored {
+                Ok(stored) => format!(
+                    "{adopted}; stored {}{}{}",
+                    stored.display(),
+                    publication(admin),
+                    kept.ca_detail()
+                ),
+                Err(e) => format!("{adopted}, but {}{}", e.reason, kept.ca_detail()),
+            },
             Err(e) => format!("{adopted}, but {}", e.reason),
         },
     })
@@ -519,6 +568,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            context_sync: None,
         };
 
         let results = refresh_contexts(&admin, Some(ns.clone())).await.unwrap();
@@ -580,6 +630,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            context_sync: None,
         };
 
         let results = refresh_contexts(&admin, Some(ns.clone())).await.unwrap();

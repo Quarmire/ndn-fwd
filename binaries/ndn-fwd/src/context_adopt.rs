@@ -1,12 +1,16 @@
 //! The running daemon's trust-admin backend: `security/context-adopt`
 //! (`ndn-fwd adopt`), `security/enroll` (`ndn-fwd enroll`, see
-//! [`crate::enroll`]), `security/revoke` (`ndn-fwd revoke`, see
-//! [`crate::revoke`]), `security/context-refresh` (`ndn-fwd context
+//! [`crate::enroll`]), `security/context-refresh` (`ndn-fwd context
 //! refresh`, see [`crate::context_refresh`]), `security/context-update`
-//! (`ndn-fwd recovery-kit`, `ndn-fwd recover`: a version signed on this
-//! device, see [`crate::context_refresh::apply_update`]), `security/renew`
-//! (`ndn-fwd renew`, see [`crate::renewal`]) and the signing identity
-//! `security/identity-status` reports.
+//! (`ndn-fwd revoke`, `ndn-fwd recovery-kit`, `ndn-fwd recover`: a version
+//! signed on this device, see [`crate::context_refresh::apply_update`]),
+//! `security/renew` (`ndn-fwd renew`, see [`crate::renewal`]) and the
+//! signing identity `security/identity-status` reports.
+//!
+//! Every version this node keeps, by whichever path it was adopted, is also
+//! followed by its namespace CA if it runs one ([`TrustAdmin::keep`],
+//! [`crate::revoke::ca_follow`]): the CA stops serving every certificate the
+//! version revokes.
 //!
 //! Adopting: the daemon reads the `ndn-trust://anchor` link and adopts the
 //! trust context it names with [`ndn_identity::adopt_anchor_link_via_engine`]
@@ -20,7 +24,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ndn_cert::{AdoptError, AnchorLink, CaState, LinkAdoption};
+use ndn_cert::{AdoptError, AnchorLink, CaRevocation, CaState, LinkAdoption};
 use ndn_engine::ForwarderEngine;
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::Data;
@@ -55,13 +59,14 @@ pub(crate) struct TrustAdmin {
     /// adoptions of one namespace the disk and the publisher end up with the
     /// version the keyring holds, never an older one.
     pub(crate) keeping: std::sync::Mutex<()>,
-    /// This node's CA (`[ca]`), which `security/revoke` revokes at; `None`
-    /// when the node runs none.
+    /// This node's CA (`[ca]`); `None` when the node runs none. It follows
+    /// every version of its namespace's trust context this node keeps
+    /// ([`TrustAdmin::keep`]).
     pub(crate) ca: Option<Arc<CaState>>,
-    /// One context change made or handed over on this node at a time (a
-    /// revocation, a `security/context-update`), so neither works from a
-    /// version the other is replacing. A refresh takes no lock: it adopts
-    /// only if the version it fetched against is still held.
+    /// One context change handed over on this node at a time
+    /// (`security/context-update`), so none works from a version another is
+    /// replacing. A refresh takes no lock: it adopts only if the version it
+    /// fetched against is still held.
     pub(crate) context_change: tokio::sync::Mutex<()>,
     /// One certificate renewal at a time (`security/renew` and the renewal
     /// timer).
@@ -69,6 +74,11 @@ pub(crate) struct TrustAdmin {
     /// Woken whenever this node's certificates change (an enrollment, a
     /// renewal), so the renewal timer reads them again.
     pub(crate) certificates_changed: tokio::sync::Notify,
+    /// The namespaces' sync groups (`[security] context_sync`): every
+    /// version this node keeps is handed to it, so the groups follow the
+    /// namespaces held and the root device puts each new version into its
+    /// namespace's group. `None` when off.
+    pub(crate) context_sync: Option<crate::context_sync::ContextSync>,
 }
 
 pub(crate) fn refusal(status_code: u64, reason: impl Into<String>) -> ndn_mgmt::TrustRefusal {
@@ -97,6 +107,42 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What [`TrustAdmin::keep`] did with a version this node adopted.
+pub(crate) struct Kept {
+    /// Where it is stored, or why storing it failed (it holds for this run,
+    /// and is gone after a restart).
+    pub(crate) stored: Result<PathBuf, ndn_mgmt::TrustRefusal>,
+    /// What this node's CA of the namespace stopped serving because the
+    /// version revokes it; `None` when the node runs no CA of it.
+    pub(crate) ca: Option<CaRevocation>,
+}
+
+impl Kept {
+    /// The CA's part, worded to end an answer's detail; empty when the CA
+    /// had nothing to stop serving.
+    pub(crate) fn ca_detail(&self) -> String {
+        let Some(ca) = &self.ca else {
+            return String::new();
+        };
+        let mut detail = String::new();
+        if !ca.revoked.is_empty() {
+            let names: Vec<String> = ca.revoked.iter().map(ToString::to_string).collect();
+            detail = format!(
+                "; this node's CA no longer serves {} (the version revokes their keys) and \
+                 their device names are free for a new key",
+                names.join(", ")
+            );
+        }
+        if let Some(e) = &ca.not_persisted {
+            detail.push_str(&format!(
+                "; the CA could not record that in its store ({e}): it holds for this run, and \
+                 the CA follows the stored trust context again when the daemon starts"
+            ));
+        }
+        detail
+    }
+}
+
 impl TrustAdmin {
     /// Keep a context adopted into the keyring: store it in `<pib>/contexts/`
     /// and publish it by name. Refused (`409`) when the keyring meanwhile
@@ -107,7 +153,7 @@ impl TrustAdmin {
         expected_fingerprint: &[u8; 32],
     ) -> Result<ndn_mgmt::AdoptedContextInfo, ndn_mgmt::TrustRefusal> {
         let ctx = &adopted.context;
-        let stored = self.keep(ctx, &adopted.data)?;
+        let stored = self.keep(ctx, &adopted.data)?.stored?;
         tracing::info!(
             target: "security",
             namespace = %ctx.namespace(),
@@ -128,16 +174,19 @@ impl TrustAdmin {
         })
     }
 
-    /// Store `ctx` (signed Data `data`), already in the keyring, in
-    /// `<pib>/contexts/` and publish it by name as the namespace's newest
-    /// version (the versions before it stay stored and served). Refused
-    /// (`409`) when the keyring meanwhile holds a newer version of the
-    /// namespace: that one is what is kept.
+    /// Keep `ctx` (signed Data `data`), already in the keyring: this node's
+    /// CA of its namespace stops serving every certificate it revokes
+    /// ([`crate::revoke::ca_follow`]), and it is stored in `<pib>/contexts/`
+    /// and published by name as the namespace's newest version (the versions
+    /// before it stay stored and served). Refused (`409`) when the keyring
+    /// meanwhile holds a newer version of the namespace: that one is what is
+    /// kept (and followed). A failure to store it is reported in
+    /// [`Kept::stored`]: the version holds for this run all the same.
     pub(crate) fn keep(
         &self,
         ctx: &SignedTrustContext,
         data: &Data,
-    ) -> Result<PathBuf, ndn_mgmt::TrustRefusal> {
+    ) -> Result<Kept, ndn_mgmt::TrustRefusal> {
         let _keeping = self
             .keeping
             .lock()
@@ -155,7 +204,14 @@ impl TrustAdmin {
                 ),
             ));
         }
-        self.store_and_publish(ctx, data)
+        let ca = self
+            .ca
+            .as_deref()
+            .and_then(|ca| crate::revoke::ca_follow(ca, ctx));
+        Ok(Kept {
+            stored: self.store_and_publish(ctx, data),
+            ca,
+        })
     }
 
     /// Store and publish `ctx` (signed Data `data`), a version this node
@@ -195,6 +251,9 @@ impl TrustAdmin {
         })?;
         if let Some(publisher) = &self.publisher {
             publisher.publish(ctx, data);
+        }
+        if let Some(sync) = &self.context_sync {
+            sync.kept(ctx, data);
         }
         Ok(stored)
     }
@@ -236,13 +295,6 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         request: ndn_mgmt::EnrollRequest,
     ) -> Result<ndn_mgmt::EnrollOutcome, ndn_mgmt::TrustRefusal> {
         crate::enroll::enroll(self, request).await
-    }
-
-    async fn revoke(
-        &self,
-        request: ndn_mgmt::RevokeRequest,
-    ) -> Result<ndn_mgmt::RevokedInfo, ndn_mgmt::TrustRefusal> {
-        crate::revoke::revoke(self, request).await
     }
 
     async fn refresh_contexts(

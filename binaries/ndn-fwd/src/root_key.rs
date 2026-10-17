@@ -7,14 +7,13 @@
 //!   keychain is reachable (the default; refused with advice when none is),
 //!   `sealed-file` (a passphrase, asked twice), `yubikey-piv` (generated on
 //!   the token; PIN), or `file` (plaintext; tests and development).
-//! - **Unlocking** (`revoke`): the CLI learns the store kind from the
-//!   daemon's `security/identity-status` (`root_unlock=`), asks for the
-//!   passphrase / PIN — `NDN_ROOT_PASSPHRASE` / `NDN_ROOT_PIN`, else
-//!   `--passphrase-file` / `--pin-file`, else the terminal without echo, never
-//!   the command line — and sends it with the command over the local
-//!   management socket (peer-credential gated, refused over `/localhop`), in
-//!   the command's ApplicationParameters. The daemon unlocks the root for that
-//!   one signature and drops it.
+//! - **Unlocking** (`revoke`, `recovery-kit create|revoke`): the CLI opens the
+//!   root store of the PIB itself and asks for the passphrase / PIN —
+//!   `NDN_ROOT_PASSPHRASE` / `NDN_ROOT_PIN`, else `--passphrase-file` /
+//!   `--pin-file`, else the terminal without echo, never the command line.
+//!   The root signs the one new trust-context version there and is dropped;
+//!   the daemon receives only the signed version (`security/context-update`),
+//!   never the secret.
 //! - **Moving** (`root-key move --to`): offline on the PIB; safe while the
 //!   daemon runs, which reads the store's descriptor per operation.
 
@@ -251,7 +250,6 @@ pub(crate) fn status_info(pib_root: &Path) -> Option<ndn_mgmt::RootStoreInfo> {
     Some(ndn_mgmt::RootStoreInfo {
         kind: store.kind().to_string(),
         key: store.key_name().clone(),
-        unlock: store.unlock_kind().as_str().to_string(),
     })
 }
 
@@ -273,18 +271,4 @@ pub(crate) fn warn_if_unprotected(pib_root: &Path) {
         Ok(_) => {}
         Err(e) => tracing::warn!(target: "security", error = %e, "cannot read the root store"),
     }
-}
-
-/// What the daemon's root store needs to unlock (`root_unlock=` in
-/// `security/identity-status`), `None` when it is no root device or does
-/// not say.
-pub(crate) async fn daemon_root_unlock(client: &ndn_ipc::MgmtClient) -> Option<RootUnlockKind> {
-    let resp = client.security_identity_status().await.ok()?;
-    if !resp.is_ok() {
-        return None;
-    }
-    resp.status_text
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("root_unlock="))
-        .and_then(|kind| kind.parse().ok())
 }

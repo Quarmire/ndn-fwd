@@ -502,14 +502,20 @@ pub(crate) fn spawn(
         .build()
         .map_err(|e| anyhow::anyhow!("[ca] CA build failed: {e}"))?;
     let state = ca.state();
-    // Renewals of certificates an earlier CA of this identity issued are
-    // verified under the node's trust contexts.
+    // The node's trust contexts: the CA stops serving what the held version
+    // of its namespace's context revokes (one adopted while it did not run,
+    // e.g. stored for this start by `ndn-fwd revoke`), and renewals of
+    // certificates an earlier CA of this identity issued are verified under
+    // them.
     let keyring = engine
         .validator()
         .map(|v| Arc::clone(v.keyring()))
         .or_else(|| engine.security().map(|mgr| Arc::clone(mgr.keyring())));
     match keyring {
-        Some(keyring) => state.accept_earlier_ca_certificates(keyring),
+        Some(keyring) => {
+            crate::revoke::ca_follow_held(&state, &keyring);
+            state.accept_earlier_ca_certificates(keyring);
+        }
         None => tracing::debug!(
             target: "ca",
             "no trust contexts on this node: the CA renews only the certificates it issued"

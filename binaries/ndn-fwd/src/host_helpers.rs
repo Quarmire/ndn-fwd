@@ -57,20 +57,22 @@ fn load_anchor_only_validator(
     Ok(validator)
 }
 
-/// `None` when `trust_anchor_pib` is unset. Returns an error (startup
-/// failure) if the PIB is unreachable or empty — operators must either
-/// populate it or set `require_signed_commands = false`. The resulting
-/// validator is anchor-only (see [`load_anchor_only_validator`]).
+/// `None` when `trust_anchor_pib` is unset: commands are then authenticated
+/// only by the local socket's peer credentials. Returns an error (startup
+/// failure) if the PIB is unreachable or empty. The resulting validator is
+/// anchor-only (see [`load_anchor_only_validator`]).
 pub fn load_mgmt_validator(
     cfg: &ndn_config::MgmtSecurityConfig,
 ) -> Result<Option<Arc<ndn_security::Validator>>> {
     let Some(pib_path) = &cfg.trust_anchor_pib else {
         if cfg.require_signed_commands {
-            tracing::warn!(
+            tracing::info!(
                 target: "security",
-                "[security.mgmt] require_signed_commands=true but no trust_anchor_pib set; \
-                 all management commands will be rejected. \
-                 Add trust_anchor_pib or set require_signed_commands=false for dev mode."
+                "[security.mgmt] no trust_anchor_pib set: management commands are accepted \
+                 only on the local Unix socket from the daemon's user, root, or members of \
+                 `[security] trust_admin_groups`; commands from other users or other faces \
+                 need a signature from a key under trust_anchor_pib and are refused until \
+                 one is set."
             );
         }
         return Ok(None);
