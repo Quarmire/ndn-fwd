@@ -1,252 +1,39 @@
-//! Serve this node's own certificates.
+//! Serve this node's own certificates: [`ndn_namespace::publish::OwnCertificates`]
+//! over what the PIB stores —
 //!
-//! A validator that meets Data this node signed follows its KeyLocator (the
-//! key name, `/<id>/KEY/<key-id>`) and fetches the newest valid certificate
-//! under it with CanBePrefix. The namespace CA serves every certificate it
-//! issued, but only where routing reaches the CA; by NDN convention a
-//! producer also makes its own certificate retrievable, so a relay that
-//! routes a device's prefix toward the device resolves the chain there as
-//! well. This serves, on one in-process face with a FIB entry per key name:
-//!
-//! - every valid certificate the PIB stores beside a key
-//!   (`keys/*/certs/`, what `ndn-fwd enroll` stores), and one that
-//!   `security/enroll` or a renewal ([`crate::renewal`]) adds while the
-//!   daemon runs (a renewed certificate has its own name, so the old one
-//!   stays retrievable by name while the key name resolves to the new one);
+//! - every valid certificate the PIB stores beside a key (`keys/*/certs/`,
+//!   what `ndn-fwd enroll` stores);
 //! - on the root device, the CA's and the device's certificates
 //!   (`ca/ca-cert.data`, `ca/device-cert.data`, written by `ndn-fwd init`);
 //! - the issuer certificates of this node's certificates, kept at
-//!   enrollment and renewal (`issuers/`, [`ndn_cert::issuers`]): after the
-//!   root device that ran the CA was replaced, nobody else may serve the
-//!   earlier CA's certificate, and this node's renewal walks its chain
-//!   through them;
-//! - every valid certificate the engine's key store caches for the key this
-//!   node signs with, PIB-backed or not: an ephemeral identity (no PIB)
-//!   serves its self-signed certificate, so a verifier resolves its
-//!   KeyLocator by fetching it here.
+//!   enrollment and renewal (`issuers/`, [`ndn_cert::issuers`]);
 //!
-//! An Interest naming one certificate exactly gets that certificate; a
-//! CanBePrefix Interest gets the newest valid certificate under its name
-//! (else the newest one, so an expired certificate reads as expired rather
-//! than missing). A certificate that a held trust context revokes (its key,
-//! or the certificate itself) is not served, and is withdrawn once a context
-//! version revoking it is adopted.
+//! and every valid certificate the engine's key store caches for the key
+//! this node signs with (an ephemeral identity has no PIB).
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::Arc;
 
 use bytes::Bytes;
-use ndn_app::Producer;
 use ndn_engine::ForwarderEngine;
-use ndn_face::local::InProcFace;
-use ndn_packet::{Data, Interest, NackReason, Name};
-use ndn_security::cert_name::key_name_of;
-use ndn_security::{Certificate, FilePib, Keyring, SecurityManager};
-use ndn_transport::FaceId;
+use ndn_packet::Name;
+use ndn_security::{FilePib, Keyring};
 use tokio_util::sync::CancellationToken;
 
-/// The certificates this node serves, by certificate name.
-pub(crate) struct OwnCertificates {
-    engine: ForwarderEngine,
-    face_id: FaceId,
-    certs: RwLock<HashMap<Name, Served>>,
-}
+pub(crate) use ndn_namespace::publish::OwnCertificates;
 
-struct Served {
-    cert: Certificate,
-    wire: Bytes,
-}
-
-impl OwnCertificates {
-    /// Serve the certificates stored in `pib` (none without a PIB) and the
-    /// ones the engine's key store caches for `signing_key` (the key the node
-    /// signs with) that `keyring` does not revoke, now and as long as
-    /// `cancel` runs, and withdraw each one a context adopted later revokes.
-    pub(crate) fn spawn(
-        engine: &ForwarderEngine,
-        pib: Option<&FilePib>,
-        signing_key: Option<&Name>,
-        keyring: &Keyring,
-        cancel: CancellationToken,
-    ) -> Arc<Self> {
-        let face_id = engine.faces().alloc_id();
-        let (face, handle) = InProcFace::new(face_id, 64);
-        engine.add_face(face, cancel);
-        let own = Arc::new(Self {
-            engine: engine.clone(),
-            face_id,
-            certs: RwLock::new(HashMap::new()),
-        });
-        let running = signing_key
-            .zip(engine.security())
-            .map(|(key, mgr)| running_certificates(&mgr, key))
-            .unwrap_or_default();
-        for wire in pib.map(stored_certificates).unwrap_or_default().into_iter().chain(running) {
-            match Data::decode(wire.clone()) {
-                Ok(cert) if keyring.context_for(&cert.name).is_revoked(&cert.name) => {
-                    tracing::info!(
-                        target: "security",
-                        certificate = %cert.name,
-                        "not serving a certificate the held trust context revokes"
-                    );
-                }
-                Ok(_) => own.serve(wire),
-                Err(e) => tracing::warn!(
-                    target: "security",
-                    error = %e,
-                    "not serving an undecodable stored certificate"
-                ),
-            }
-        }
-        let weak = Arc::downgrade(&own);
-        keyring.on_revocation(move |ctx, _| {
-            if let Some(own) = weak.upgrade() {
-                own.withdraw_where(|name| ctx.is_revoked(name));
-            }
-        });
-        let served = Arc::downgrade(&own);
-        let producer = Producer::from_handle(handle, Name::root());
-        tokio::spawn(async move {
-            let result = producer
-                .serve(|interest, responder| {
-                    let reply = served.upgrade().and_then(|own| own.answer(&interest));
-                    async move {
-                        let _ = match reply {
-                            Some(wire) => responder.respond_bytes(wire).await,
-                            None => responder.nack(NackReason::NoRoute).await,
-                        };
-                    }
-                })
-                .await;
-            if let Err(e) = result {
-                tracing::error!(target: "security", error = %e, "certificate server exited");
-            }
-        });
-        own
-    }
-
-    /// Serve the certificate Data `wire` from now on, beside the other
-    /// certificates of its key. A certificate already served under its name
-    /// (the PIB, the `ca/` files and the running signer can each hold the
-    /// same one) is served once: no second entry, FIB route or log line.
-    pub(crate) fn serve(&self, wire: Bytes) {
-        let cert = match Data::decode(wire.clone())
-            .map_err(|e| e.to_string())
-            .and_then(|data| Certificate::decode(&data).map_err(|e| e.to_string()))
-        {
-            Ok(cert) => cert,
-            Err(e) => {
-                tracing::warn!(target: "security", error = %e, "not serving an undecodable certificate");
-                return;
-            }
-        };
-        let name = (*cert.name).clone();
-        let key = key_name_of(&name);
-        {
-            // The route is added under the lock `withdraw_where` removes it
-            // under, so the two never interleave.
-            let mut certs = self.certs.write().unwrap_or_else(PoisonError::into_inner);
-            if certs.contains_key(&name) {
-                return;
-            }
-            if !certs.keys().any(|served| key_name_of(served) == key) {
-                self.engine.fib().add_nexthop(&key, self.face_id, 0);
-            }
-            certs.insert(name.clone(), Served { cert, wire });
-        }
-        tracing::info!(target: "security", certificate = %name, "serving this node's certificate");
-    }
-
-    fn withdraw_where(&self, revoked: impl Fn(&Name) -> bool) {
-        let mut certs = self.certs.write().unwrap_or_else(PoisonError::into_inner);
-        let mut withdrawn = Vec::new();
-        certs.retain(|name, _| {
-            if !revoked(name) {
-                return true;
-            }
-            tracing::info!(
-                target: "security",
-                certificate = %name,
-                "revoked: no longer serving this node's certificate"
-            );
-            withdrawn.push(key_name_of(name));
-            false
-        });
-        for key in withdrawn {
-            if !certs.keys().any(|name| key_name_of(name) == key) {
-                self.engine.fib().remove_nexthop(&key, self.face_id);
-            }
-        }
-    }
-
-    /// The certificate `interest` asks for: by exact name, or with
-    /// CanBePrefix the newest valid certificate under it (else the newest).
-    fn answer(&self, interest: &Interest) -> Option<Bytes> {
-        let certs = self.certs.read().unwrap_or_else(PoisonError::into_inner);
-        if let Some(served) = certs.get(interest.name.as_ref()) {
-            return Some(served.wire.clone());
-        }
-        if !interest.selectors().can_be_prefix {
-            return None;
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
-        certs
-            .iter()
-            .filter(|(name, _)| name.has_prefix(&interest.name))
-            .max_by(|(a, x), (b, y)| {
-                (x.cert.is_valid_at(now), x.cert.valid_from, *a)
-                    .cmp(&(y.cert.is_valid_at(now), y.cert.valid_from, *b))
-            })
-            .map(|(_, served)| served.wire.clone())
-    }
-
-    /// The newest certificate valid now this node serves under `name` (a
-    /// key name or a certificate name).
-    pub(crate) fn certificate(&self, name: &Name) -> Option<Certificate> {
-        let certs = self.certs.read().unwrap_or_else(PoisonError::into_inner);
-        newest_valid(&certs, name).map(|served| served.cert.clone())
-    }
-
-    /// This node's certificate of `key` and the issuer certificates it
-    /// serves after it, nearest first, up to a self-signed one or one it
-    /// does not serve: what a link hello carries, so the other device can
-    /// validate it without fetching anything. Empty when it serves no valid
-    /// certificate of `key`.
-    pub(crate) fn chain_of(&self, key: &Name) -> Vec<Bytes> {
-        let certs = self.certs.read().unwrap_or_else(PoisonError::into_inner);
-        let mut chain: Vec<Bytes> = Vec::new();
-        let mut next = Some(key.clone());
-        while let Some(key) = next.take()
-            && chain.len() < 8
-            && let Some(served) = newest_valid(&certs, &key)
-        {
-            if chain.contains(&served.wire) {
-                break;
-            }
-            chain.push(served.wire.clone());
-            next = served
-                .cert
-                .issuer
-                .as_deref()
-                .map(key_name_of)
-                .filter(|issuer| *issuer != key);
-        }
-        chain
-    }
-}
-
-fn newest_valid<'a>(certs: &'a HashMap<Name, Served>, name: &Name) -> Option<&'a Served> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos() as u64);
-    certs
-        .iter()
-        .filter(|(n, served)| n.has_prefix(name) && served.cert.is_valid_at(now))
-        .max_by(|(a, x), (b, y)| (x.cert.valid_from, *a).cmp(&(y.cert.valid_from, *b)))
-        .map(|(_, served)| served)
+/// Serve the certificates stored in `pib` (none without a PIB) and the
+/// ones the engine's key store caches for `signing_key`, as
+/// [`OwnCertificates::spawn`] does.
+pub(crate) fn spawn(
+    engine: &ForwarderEngine,
+    pib: Option<&FilePib>,
+    signing_key: Option<&Name>,
+    keyring: &Keyring,
+    cancel: CancellationToken,
+) -> Arc<OwnCertificates> {
+    let stored = pib.map(stored_certificates).unwrap_or_default();
+    OwnCertificates::spawn(engine, stored, signing_key, keyring, cancel)
 }
 
 /// The certificate Data the PIB at `pib` stores: every valid certificate of
@@ -267,18 +54,6 @@ fn stored_certificates(pib: &FilePib) -> Vec<Bytes> {
     }
     certs.extend(ndn_cert::issuers::stored_issuer_certs(pib.root()));
     certs
-}
-
-/// The certificate Data the engine's key store caches for `key`: every
-/// valid one (an ephemeral identity's self-signed certificate, or one
-/// issued for a PIB key).
-fn running_certificates(mgr: &SecurityManager, key: &Name) -> Vec<Bytes> {
-    mgr.cert_cache()
-        .all(key)
-        .iter()
-        .filter(|cert| cert.is_valid_now())
-        .filter_map(Certificate::data_wire)
-        .collect()
 }
 
 fn read_if_present(path: &Path) -> Option<Bytes> {
@@ -304,6 +79,7 @@ mod tests {
     use ndn_app::{EngineAppExt, ShutdownHandle};
     use ndn_engine::{EngineBuilder, EngineConfig};
     use ndn_packet::encode::InterestBuilder;
+    use ndn_packet::Data;
     use ndn_security::{CertCache, SecurityProfile, Validator};
 
     use super::*;
@@ -328,7 +104,7 @@ mod tests {
             .unwrap();
         // Answers come from the server, not the content store.
         engine.cs().set_serve(false);
-        let own = OwnCertificates::spawn(&engine, Some(pib), None, keyring, cancel.child_token());
+        let own = spawn(&engine, Some(pib), None, keyring, cancel.child_token());
         (engine, shutdown, own)
     }
 
@@ -457,7 +233,7 @@ mod tests {
             .unwrap();
         engine.cs().set_serve(false);
         let cancel = CancellationToken::new();
-        let _own = OwnCertificates::spawn(&engine, None, Some(kc.key_name()), &keyring, cancel.child_token());
+        let _own = spawn(&engine, None, Some(kc.key_name()), &keyring, cancel.child_token());
 
         let served = fetch(&engine, kc.key_name(), &cancel).await.expect("served by key name");
         let cert_name = kc.cert_name().expect("a self-signed certificate");

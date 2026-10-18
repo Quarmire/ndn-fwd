@@ -1,5 +1,4 @@
-//! `ndn-fwd revoke <device | key | certificate>` on the root device, and how
-//! a namespace CA follows the revocations of its trust context.
+//! `ndn-fwd revoke <device | key | certificate>` on the root device.
 //!
 //! **The revocation is a new version of the trust context.** The CLI opens
 //! the root store of the root device's PIB (the PIB of the daemon it hands
@@ -8,175 +7,45 @@
 //! name designates (a key or certificate name: its key; a device identity:
 //! every key the namespace CA certified for it, read from the CA store in
 //! the PIB), that none is the root's or the CA's, and that the held version
-//! does not revoke them all already. Only then is the root unlocked — a
-//! `sealed-file` root with its passphrase, a `yubikey-piv` root with its PIN,
-//! asked here; an `os-keyring` root through the keychain — to sign version
-//! `N+1`, which lists the keys as revoked ([`ndn_cert::bump_context_revoking`]).
-//! The signer is dropped (a software key zeroed) right after. The secret
-//! never leaves the CLI: the daemon receives only the signed version
-//! (`security/context-update`), which it adopts under the continuity rule,
-//! stores and publishes ([`crate::recovery_kit::hand_over`]); with no daemon
-//! listening it is stored for the daemon's next start. Every node's validator
-//! refuses a chain through a revoked key — any certificate of it, also ones
-//! issued later — once it holds that version, which other nodes fetch with
-//! their next refresh ([`crate::context_refresh`]).
+//! does not revoke them all already ([`ndn_cert::plan_revocation`]). Only
+//! then is the root unlocked — a `sealed-file` root with its passphrase, a
+//! `yubikey-piv` root with its PIN, asked here; an `os-keyring` root through
+//! the keychain — to sign version `N+1`, which lists the keys as revoked
+//! ([`ndn_cert::bump_context_revoking`]). The signer is dropped (a software
+//! key zeroed) right after. The secret never leaves the CLI: the daemon
+//! receives only the signed version (`security/context-update`), which it
+//! adopts under the continuity rule, stores and publishes
+//! ([`crate::recovery_kit::hand_over`]); with no daemon listening it is
+//! stored for the daemon's next start. Every node's validator refuses a
+//! chain through a revoked key — any certificate of it, also ones issued
+//! later — once it holds that version, which other nodes fetch with their
+//! next refresh ([`crate::context_refresh`]).
 //!
-//! **The CA follows the signed version** ([`ca_follow`]), never a separate
-//! request: whenever the daemon keeps a version of its namespace's context —
-//! handed over, refreshed, adopted by link ([`TrustAdmin::keep`]) — and when
-//! its CA starts ([`ca_follow_held`]), the CA stops serving every certificate
-//! it issued that the version revokes, records that in its store
-//! (`<pib>/ca/revoked/`), never certifies such a key again, and the device
-//! name the key held is free for a new key (one key per device name).
-//!
-//! [`TrustAdmin::keep`]: crate::context_adopt::TrustAdmin::keep
+//! **The CA follows the signed version**
+//! ([`ndn_cert::CaState::follow_context`]), never a separate request:
+//! whenever the daemon keeps a version of its namespace's context — handed
+//! over, refreshed, adopted by link ([`ndn_namespace::keep`]) — and when its
+//! CA starts ([`ndn_cert::CaState::follow_held`]), the CA stops serving
+//! every certificate it issued that the version revokes, records that in its
+//! store (`<pib>/ca/revoked/`), never certifies such a key again, and the
+//! device name the key held is free for a new key (one key per device name).
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use ndn_cert::namespace::CA_DIR;
-use ndn_cert::{CaRevocation, CaState, CaStore, FileCaStore, RootStore, key_name_of};
-use ndn_packet::{Data, Name};
-use ndn_security::{FilePib, Keyring, SignedTrustContext};
+use ndn_cert::RevocationPlan;
+use ndn_packet::Name;
+use ndn_security::FilePib;
 
 use crate::onboard::{face_socket, pib_dir, positionals};
-use crate::recovery_kit::{NotTaken, ensure_daemon_pib, hand_over, root_device};
+use crate::recovery_kit::{NotTaken, ensure_daemon_pib, hand_over};
 
-/// Make `ca` follow `ctx`, a version of a trust context this node holds now:
-/// when `ca` is the CA of its namespace (identity `<ns>/CA`), it stops
-/// serving every certificate it issued that `ctx` revokes, and records that
-/// in its store. Idempotent: certificates revoked already are skipped, so
-/// following the same version again changes nothing. `None` when `ca` is not
-/// the CA of `ctx`'s namespace.
-pub(crate) fn ca_follow(ca: &CaState, ctx: &SignedTrustContext) -> Option<CaRevocation> {
-    let ca_identity = ctx.namespace().clone().append("CA");
-    let key = ca.signing_key_name()?;
-    if !(key.has_prefix(&ca_identity) && key.len() == ca_identity.len() + 2) {
-        return None;
-    }
-    let mut followed = CaRevocation::default();
-    for revoked in ctx.revocations() {
-        let out = ca.revoke_issued_under(revoked);
-        followed.revoked.extend(out.revoked);
-        if followed.not_persisted.is_none() {
-            followed.not_persisted = out.not_persisted;
-        }
-    }
-    if !followed.revoked.is_empty() {
-        tracing::info!(
-            target: "ca",
-            namespace = %ctx.namespace(),
-            version = ctx.version(),
-            revoked = ?followed.revoked.iter().map(Name::to_string).collect::<Vec<_>>(),
-            "the trust context revokes certificates this CA issued: no longer served, and \
-             their device names are free for a new key"
-        );
-    }
-    if let Some(e) = &followed.not_persisted {
-        tracing::warn!(
-            target: "ca",
-            namespace = %ctx.namespace(),
-            version = ctx.version(),
-            error = %e,
-            "could not record a revocation in the CA store: it holds for this run, and the CA \
-             follows the stored trust context again at the next start"
-        );
-    }
-    Some(followed)
-}
-
-/// Make `ca` follow every trust context `keyring` holds ([`ca_follow`]): at
-/// the CA's start, for versions adopted while it did not run — one stored
-/// for the next start by a CLI that found no daemon, or a revocation its
-/// store could not record.
-pub(crate) fn ca_follow_held(ca: &CaState, keyring: &Keyring) {
-    for ctx in keyring.contexts() {
-        ca_follow(ca, &ctx);
-    }
-}
-
-/// The key names `name` designates: itself (or the key of a certificate
-/// name), else every key the namespace CA of the PIB `pib_dir` certified for
-/// the device identity `name`.
-fn keys_to_revoke(pib_dir: &Path, name: &Name) -> Result<Vec<Name>> {
-    if let Some(key) = key_name_of(name) {
-        return Ok(vec![key]);
-    }
-    let ca_dir = pib_dir.join(CA_DIR);
-    let issued = if ca_dir.is_dir() {
-        FileCaStore::open(&ca_dir)
-            .and_then(|store| store.load())
-            .with_context(|| format!("read the CA store {}", ca_dir.display()))?
-            .issued
-    } else {
-        Vec::new()
-    };
-    let mut keys: Vec<Name> = Vec::new();
-    for (cert, _) in issued {
-        let Some(key) = cert.parse::<Name>().ok().as_ref().and_then(key_name_of) else {
-            continue;
-        };
-        // `<identity>/KEY/<k>`: only keys of exactly this identity, not of
-        // names below it.
-        if key.has_prefix(name) && key.len() == name.len() + 2 && !keys.contains(&key) {
-            keys.push(key);
-        }
-    }
-    if keys.is_empty() {
-        bail!(
-            "the namespace CA of {} issued no certificate for {name}, so there is no key to \
-             revoke under that name; pass the device identity as enrolled \
-             (/<namespace>/<role>/<device>), or a key name (<identity>/KEY/<key-id>) to revoke \
-             a key this CA did not certify. Nothing was signed",
-            pib_dir.display()
-        );
-    }
-    Ok(keys)
-}
-
-/// What `ndn-fwd revoke` signs, decided before the root is unlocked.
-struct Plan {
-    store: RootStore,
-    held: SignedTrustContext,
-    held_data: Data,
-    /// The key names the command names.
-    keys: Vec<Name>,
-    /// Those the held version does not revoke yet; empty when it revokes all.
-    adding: Vec<Name>,
-}
-
-/// Every check that needs no key: this PIB is the root device of the
-/// namespace containing `name`, and `name` designates keys that may be
-/// revoked — never the root's (every key chains to it) nor the CA's.
-fn plan(pib_dir: &Path, name: &Name) -> Result<Plan> {
+/// Every check that needs no key ([`ndn_cert::plan_revocation`]) on the PIB
+/// at `pib_dir`.
+fn plan(pib_dir: &Path, name: &Name) -> Result<RevocationPlan> {
     let pib =
         FilePib::open(pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, held, held_data) = root_device(&pib, pib_dir, "devices are revoked")?;
-    let namespace = held.namespace().clone();
-    if !name.has_prefix(&namespace) {
-        bail!(
-            "{name} is not in {namespace}, the namespace whose root this device holds; nothing \
-             was signed"
-        );
-    }
-    let ca_identity = namespace.clone().append("CA");
-    if name.has_prefix(&ca_identity) {
-        bail!(
-            "refusing to revoke {name}: it is the namespace CA, and every device certificate of \
-             {namespace} chains to it. Replacing the CA (a compromised relay) is not built yet; \
-             revoke the devices one by one instead. Nothing was signed"
-        );
-    }
-    let keys = keys_to_revoke(pib_dir, name)?;
-    let adding = ndn_cert::revocations_to_add(&held, &keys)
-        .map_err(|e| anyhow::anyhow!("{e}; nothing was signed"))?;
-    Ok(Plan {
-        store,
-        held,
-        held_data,
-        keys,
-        adding,
-    })
+    Ok(ndn_cert::plan_revocation(&pib, name)?)
 }
 
 /// Before the root is unlocked: refuse when the daemon listening on the
@@ -215,10 +84,13 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("revoke refused: {target:?} is not an NDN name: {e}"))?;
     let pib_dir = pib_dir(args)?;
-    let Plan {
-        store,
-        held,
-        held_data,
+    let RevocationPlan {
+        root:
+            ndn_cert::RootDevice {
+                store,
+                context: held,
+                data: held_data,
+            },
         keys,
         adding,
     } = plan(&pib_dir, &name)?;
@@ -294,10 +166,12 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
 mod tests {
     use std::sync::Arc;
 
+    use ndn_cert::CaState;
     use ndn_mgmt::EnrollOutcome;
+    use ndn_security::Keyring;
 
     use super::*;
-    use crate::context_adopt::TrustAdmin;
+    use crate::context_adopt::{TrustAdmin, TrustAdminParts};
     use crate::enroll::tests::{Node, node, request};
 
     /// A daemon on `engine` holding the contexts stored in `pib`, with `ca`.
@@ -308,7 +182,7 @@ mod tests {
     ) -> TrustAdmin {
         let keyring = Arc::new(Keyring::new());
         ndn_cert::load_persisted_contexts(pib, &keyring).unwrap();
-        TrustAdmin {
+        TrustAdmin::new(TrustAdminParts {
             engine,
             keyring,
             pib_root: pib.to_path_buf(),
@@ -317,15 +191,9 @@ mod tests {
             own_certs: None,
             dv_keeps_startup_key: false,
             configured_identity: None,
-            enrolling: tokio::sync::Mutex::new(()),
-            keeping: std::sync::Mutex::new(()),
             ca,
-            context_change: tokio::sync::Mutex::new(()),
-            renewing: tokio::sync::Mutex::new(()),
-            certificates_changed: tokio::sync::Notify::new(),
-            requests_changed: tokio::sync::Notify::new(),
             context_sync: None,
-        }
+        })
     }
 
     /// An enrolled device: its identity, key and certificate.
@@ -345,8 +213,8 @@ mod tests {
     /// designates, signed by the root as `ndn-fwd revoke` signs it.
     async fn revocation(root_dev: &Path, name: &Name) -> ndn_cert::ContextBump {
         let plan = plan(root_dev, name).unwrap();
-        let root = plan.store.signer(None).await.unwrap();
-        ndn_cert::bump_context_revoking(root.as_ref(), &plan.held_data, &plan.keys)
+        let root = plan.root.store.signer(None).await.unwrap();
+        ndn_cert::bump_context_revoking(root.as_ref(), &plan.root.data, &plan.keys)
             .await
             .unwrap()
             .unwrap()
@@ -361,7 +229,7 @@ mod tests {
         let node = node(root_dev.path(), device.path(), &["member-a"]).await;
         let (identity, key, _) = enrolled(&node, "member-a").await;
 
-        let held = node.admin.keyring.contexts().pop().unwrap();
+        let held = node.admin.ns.keyring().contexts().pop().unwrap();
         ndn_cert::persist_context(device.path(), &held, &node.context_data).unwrap();
         assert!(
             plan(device.path(), &identity).is_err(),
@@ -401,7 +269,7 @@ mod tests {
 
         let bump = revocation(root_dev.path(), &identity).await;
         let daemon = admin(
-            node.admin.engine.clone(),
+            node.admin.ns.engine().clone(),
             root_dev.path(),
             Some(Arc::clone(&node.ca)),
         );
@@ -409,7 +277,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((info.held_version, info.version), (1, 2));
-        assert!(daemon.keyring.contexts().pop().unwrap().is_revoked(&key));
+        assert!(daemon.ns.keyring().contexts().pop().unwrap().is_revoked(&key));
         assert!(
             node.ca.get_served_cert(&certificate).is_none(),
             "the CA stops serving it"
@@ -446,7 +314,7 @@ mod tests {
         let (identity, _, certificate) = enrolled(&node, "member-a").await;
         let bump = revocation(root_dev, &identity).await;
 
-        let held = node.admin.keyring.contexts().pop().unwrap();
+        let held = node.admin.ns.keyring().contexts().pop().unwrap();
         ndn_cert::persist_context(relay, &held, &node.context_data).unwrap();
         ndn_cert::persist_context(upstream, &bump.context, &bump.data).unwrap();
         let (face, publisher) = crate::context_publisher::prepare(upstream);
@@ -485,7 +353,7 @@ mod tests {
 
         let keyring = Keyring::new();
         ndn_cert::load_persisted_contexts(root_dev.path(), &keyring).unwrap();
-        ca_follow_held(&node.ca, &keyring);
+        node.ca.follow_held(&keyring);
         assert!(node.ca.get_served_cert(&certificate).is_none());
         node.shutdown.shutdown().await;
     }

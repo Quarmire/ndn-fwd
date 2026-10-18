@@ -14,7 +14,7 @@
 //!    nothing answers at all (the lost root device was the only other node
 //!    reachable), `--from-held` recovers from the version held: the
 //!    operator vouches that no newer one exists. A version that answers and
-//!    is refused still stops it.
+//!    is refused still stops it ([`ndn_namespace::admin::fetch_newest`]).
 //! 2. **The kit.** Its key must be a recovery anchor of that version (and
 //!    the version must verify under its own anchors), else nothing is
 //!    signed. A mistyped word list is refused by its checksum. A YubiKey
@@ -46,8 +46,10 @@ use anyhow::{Context, Result, bail};
 use ndn_cert::{
     OldRoot, anchor_fingerprint, kit_anchor, read_stored_context, recover_namespace_in_pib,
 };
-use ndn_mgmt::RefreshState;
+use ndn_mgmt::ContextRefreshInfo;
 use ndn_mgmt_wire::control_response::status;
+use ndn_namespace::admin::{Newest, NewestSource, fetch_newest};
+use ndn_namespace::hex;
 use ndn_packet::Name;
 use ndn_security::FilePib;
 use ndn_trust_envelope::TrustEnvelope;
@@ -58,109 +60,72 @@ use crate::recovery_kit::{KitSpec, NotTaken, hand_over, open_kit};
 /// How long the CLI waits for the daemon to fetch the newest version.
 const DAEMON_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// The daemon at `socket`: refreshes and adopts the namespace for
+/// [`fetch_newest`] (`security/context-refresh`, `security/context-adopt`).
+struct Daemon<'a> {
+    client: &'a ndn_ipc::MgmtClient,
+    socket: &'a str,
 }
 
-/// Make the daemon hold the newest version of `namespace`, fetched by name;
-/// returns that version, and whether a node confirmed it is the newest
-/// (`false` only when nothing answered and `from_held` accepts the held one).
-async fn fetch_newest(
-    client: &ndn_ipc::MgmtClient,
-    socket: &str,
-    namespace: &Name,
-    kit_fingerprint: Option<[u8; 32]>,
-    from_held: bool,
-) -> Result<(u64, bool)> {
-    let resp = client
-        .security_context_refresh(Some(namespace), DAEMON_FETCH_TIMEOUT)
-        .await
-        .with_context(|| format!("ask the daemon at {socket} for the newest version"))?;
-    if resp.is_ok() {
-        let results: Vec<ndn_mgmt::ContextRefreshInfo> = serde_json::from_str(&resp.status_text)
+#[async_trait::async_trait]
+impl NewestSource for Daemon<'_> {
+    type Error = anyhow::Error;
+
+    async fn refresh(&self, namespace: &Name) -> Result<Option<ContextRefreshInfo>> {
+        let socket = self.socket;
+        let resp = self
+            .client
+            .security_context_refresh(Some(namespace), DAEMON_FETCH_TIMEOUT)
+            .await
+            .with_context(|| format!("ask the daemon at {socket} for the newest version"))?;
+        if resp.is_ok() {
+            let results: Vec<ContextRefreshInfo> = serde_json::from_str(&resp.status_text)
+                .with_context(|| {
+                    format!("unreadable answer from the daemon: {}", resp.status_text)
+                })?;
+            return results
+                .into_iter()
+                .next()
+                .context("the daemon answered no refresh result")
+                .map(Some);
+        }
+        if resp.status_code != status::NOT_FOUND {
+            bail!(
+                "the daemon at {socket} could not refresh {namespace} ({}): {}",
+                resp.status_code,
+                resp.status_text
+            );
+        }
+        Ok(None)
+    }
+
+    async fn adopt(&self, namespace: &Name, fingerprint: &[u8; 32]) -> Result<u64> {
+        let link = TrustEnvelope::Anchor {
+            namespace: Some(namespace.to_string()),
+            fingerprint: Some(*fingerprint),
+            version: None,
+            context_data: None,
+            context_content: None,
+        }
+        .to_uri();
+        let resp = self
+            .client
+            .security_context_adopt(&link, DAEMON_FETCH_TIMEOUT)
+            .await
+            .with_context(|| format!("ask the daemon at {} to adopt {namespace}", self.socket))?;
+        if !resp.is_ok() {
+            bail!(
+                "this device holds no trust context for {namespace}, and adopting it with the \
+                 kit's expected fingerprint failed ({}): {}. Adopt it with the namespace's anchor \
+                 link (`ndn-fwd adopt`), then retry",
+                resp.status_code,
+                resp.status_text
+            );
+        }
+        let info: ndn_mgmt::AdoptedContextInfo = serde_json::from_str(&resp.status_text)
             .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
-        let r = results
-            .into_iter()
-            .next()
-            .context("the daemon answered no refresh result")?;
-        return match r.state {
-            RefreshState::Updated | RefreshState::Current | RefreshState::UpstreamOlder => {
-                Ok((r.version, true))
-            }
-            RefreshState::Behind => bail!(
-                "{}. A newer version of {namespace} exists than the held v{}: recovering from \
-                 it would fork the namespace; refresh until it is held, then retry",
-                r.detail,
-                r.held_version
-            ),
-            RefreshState::Unreachable if from_held => Ok((r.held_version, false)),
-            RefreshState::Unreachable => bail!(
-                "{}. Recovering from the held v{} without knowing it is the newest could fork \
-                 the namespace: \
-                 give this device a face and a route toward a relay or member that holds it, \
-                 then retry. If no other node holding {namespace} exists or can be reached, \
-                 and you know no version newer than v{} was made, retry with --from-held",
-                r.detail,
-                r.held_version,
-                r.held_version
-            ),
-            RefreshState::Source => bail!(
-                "this device holds the root of {namespace} (`ndn-fwd root-key status`): it is \
-                 the root device, nothing to recover"
-            ),
-            RefreshState::Failed => bail!(
-                "could not get the newest trust context of {namespace} by name ({}). Recovering \
-                 from v{} without knowing it is the newest would fork the namespace: make sure \
-                 this device reaches the namespace (a face and a route toward a relay or member \
-                 that holds it), then retry",
-                r.detail,
-                r.held_version
-            ),
-        };
+        Ok(info.version)
     }
-    if resp.status_code != status::NOT_FOUND {
-        bail!(
-            "the daemon at {socket} could not refresh {namespace} ({}): {}",
-            resp.status_code,
-            resp.status_text
-        );
-    }
-    // Not held. A context fetched with nothing to check it against could be
-    // a forgery that lists the kit's (public) anchor; the recovery key would
-    // then sign it and every node would adopt it. Only a file kit carries
-    // the namespace's expected fingerprint.
-    let Some(fingerprint) = kit_fingerprint else {
-        bail!(
-            "this device's daemon holds no trust context for {namespace}. Adopt it first with \
-             the namespace's anchor link (`ndn-fwd adopt <ndn-trust://anchor/…>`, the link \
-             `ndn-fwd init` printed), so the version recovered from is authenticated, then \
-             retry"
-        );
-    };
-    let link = TrustEnvelope::Anchor {
-        namespace: Some(namespace.to_string()),
-        fingerprint: Some(fingerprint),
-        version: None,
-        context_data: None,
-        context_content: None,
-    }
-    .to_uri();
-    let resp = client
-        .security_context_adopt(&link, DAEMON_FETCH_TIMEOUT)
-        .await
-        .with_context(|| format!("ask the daemon at {socket} to adopt {namespace}"))?;
-    if !resp.is_ok() {
-        bail!(
-            "this device holds no trust context for {namespace}, and adopting it with the kit's \
-             expected fingerprint failed ({}): {}. Adopt it with the namespace's anchor link \
-             (`ndn-fwd adopt`), then retry",
-            resp.status_code,
-            resp.status_text
-        );
-    }
-    let info: ndn_mgmt::AdoptedContextInfo = serde_json::from_str(&resp.status_text)
-        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
-    Ok((info.version, true))
 }
 
 pub(crate) async fn run(args: &[String]) -> Result<()> {
@@ -202,8 +167,14 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     let (client, socket) = crate::onboard::daemon(args, "recover").await?;
     crate::recovery_kit::ensure_daemon_pib(&client, &socket, &pib_dir).await?;
     let from_held = args.iter().any(|a| a == "--from-held");
-    let (newest, confirmed) =
-        fetch_newest(&client, &socket, &namespace, kit_fingerprint, from_held).await?;
+    let daemon = Daemon {
+        client: &client,
+        socket: &socket,
+    };
+    let Newest {
+        version: newest,
+        confirmed,
+    } = fetch_newest(&daemon, &namespace, kit_fingerprint, from_held).await?;
     let (held, held_data) = read_stored_context(&pib_dir, &namespace)?.with_context(|| {
         format!(
             "the daemon holds {namespace} v{newest} but {} has no stored copy; is -c/--pib the \

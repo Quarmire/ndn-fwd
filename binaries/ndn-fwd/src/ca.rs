@@ -48,18 +48,18 @@ use ndn_app::Producer;
 use ndn_cert::approval::{ApprovalStore, DEVICE_APPROVAL};
 use ndn_cert::challenge::device_approval::DeviceApprovalChallenge;
 use ndn_cert::namespace::{ANCHOR_CERT_FILE, CA_CERT_FILE, CA_DIR};
-use ndn_cert::roles::{Role, role_prefix, token_expiry, token_role};
+use ndn_cert::roles::Role;
 use ndn_cert::{
-    ApprovalPolicy, CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore,
-    IssuanceContext, IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge,
-    RequireAttestationKind, RolePolicy, SingleKeyIdentity, TokenChallenge, TokenStore,
+    AllIssuance, ApprovalPolicy, CaStore, ChallengeHandler, ChallengeSlot, EmailChallenge,
+    EmailSender, FileCaStore, IssuancePolicy, NopChallenge, PinChallenge, PolicyError,
+    PolicyInput, RequireAttestationKind, RolePolicy, TokenChallenge, TokenStore,
 };
 use ndn_config::CaTomlConfig;
 use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_identity::NdncertCa;
 use ndn_packet::Name;
-use ndn_security::{Certificate, FilePib, KeyChain, LinkPolicy, SecurityManager, SignedTrustContext, Validator};
+use ndn_security::{Certificate, FilePib, KeyChain, SecurityManager, SignedTrustContext, Validator};
 use ndn_transport::FaceId;
 
 pub(crate) const CA_FACE_ID: u64 = 0xFFFF_0002;
@@ -150,14 +150,7 @@ pub(crate) async fn prepare(
     let approval_policy = match &namespace {
         Some(ns) => {
             let held = newest_context(pib_path, ns)?;
-            if let Some(ctx) = &held {
-                check_link_policy(cfg, ctx)?;
-            }
-            let advertised = held.and_then(|ctx| {
-                let policy = ApprovalPolicy::from_hint(ctx.enrollment_hint()?)?;
-                Some((ctx.version(), policy))
-            });
-            Some(approval_policy(cfg, advertised)?)
+            Some(policy_input(cfg).enforced_policy(held.as_ref())?)
         }
         None => None,
     };
@@ -220,152 +213,19 @@ fn newest_context(pib_path: &Path, namespace: &Name) -> Result<Option<SignedTrus
         .map(|(ctx, _)| ctx))
 }
 
-/// Refuses `[ca] link_roles` / `relay_roles` / `enrollment_links` that
-/// disagree with the link policy of the namespace's trust context `ctx`:
-/// devices admit links by the context, so `[ca]` only states it again
-/// here; `ndn-fwd schema update -c <config>` is what changes it.
-pub(crate) fn check_link_policy(cfg: &CaTomlConfig, ctx: &SignedTrustContext) -> Result<()> {
-    let held = ctx.link_policy();
-    let Some(configured) = configured_link_policy(cfg, &held)? else {
-        return Ok(());
-    };
-    if same_link_policy(&configured, &held) {
-        return Ok(());
+/// What `[ca] approval_roles` / `approval_requires_invite` / `link_roles` /
+/// `relay_roles` / `enrollment_links` state. A namespace CA enforces what
+/// its trust context advertises and refuses to start when they state
+/// another policy ([`PolicyInput::enforced_policy`]); `ndn-fwd init` and
+/// `ndn-fwd schema update -c <config>` write them into the context.
+pub(crate) fn policy_input(cfg: &CaTomlConfig) -> PolicyInput {
+    PolicyInput {
+        approval_roles: cfg.approval_roles.clone(),
+        approval_requires_invite: cfg.approval_requires_invite,
+        link_roles: cfg.link_roles.clone(),
+        relay_roles: cfg.relay_roles.clone(),
+        enrollment_links: cfg.enrollment_links,
     }
-    let quoted = |roles: &[String]| {
-        roles.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().join(", ")
-    };
-    bail!(
-        "[ca] link_roles / relay_roles / enrollment_links disagree with the namespace's trust \
-         context (v{}), which states: {}. Devices admit links by the context, so the CA does \
-         not start with another policy: to change it, run `ndn-fwd schema update -c <config>` \
-         on the root device (a narrowing needs --accept-narrowing); to keep it, set \
-         link_roles = [{}], relay_roles = [{}] and enrollment_links = {} in [ca], or remove \
-         the keys",
-        ctx.version(),
-        held.describe(),
-        quoted(&held.roles),
-        quoted(&held.relay_roles),
-        held.enrollment_links
-    );
-}
-
-/// Whether two link policies admit the same (role lists compared as sets).
-pub(crate) fn same_link_policy(a: &LinkPolicy, b: &LinkPolicy) -> bool {
-    let set = |roles: &[String]| {
-        let mut roles = roles.to_vec();
-        roles.sort();
-        roles.dedup();
-        roles
-    };
-    set(&a.roles) == set(&b.roles)
-        && set(&a.relay_roles) == set(&b.relay_roles)
-        && a.enrollment_links == b.enrollment_links
-}
-
-/// The link policy `[ca] link_roles` / `relay_roles` / `enrollment_links`
-/// state, each unset key taken from `base` (the held context's policy, or
-/// the default for a new namespace); `None` when none is set. Refuses an
-/// unknown role, and a relay role that may not link.
-pub(crate) fn configured_link_policy(
-    cfg: &CaTomlConfig,
-    base: &LinkPolicy,
-) -> Result<Option<LinkPolicy>> {
-    if cfg.link_roles.is_none() && cfg.relay_roles.is_none() && cfg.enrollment_links.is_none() {
-        return Ok(None);
-    }
-    let roles = |key: &str, roles: &Option<Vec<String>>, base: &[String]| -> Result<Vec<String>> {
-        let Some(roles) = roles else {
-            return Ok(base.to_vec());
-        };
-        let mut parsed = Vec::with_capacity(roles.len());
-        for r in roles {
-            let role = r
-                .parse::<Role>()
-                .map_err(|e| anyhow::anyhow!("[ca] {key}: {e}"))?;
-            let role = role.as_str().to_string();
-            if !parsed.contains(&role) {
-                parsed.push(role);
-            }
-        }
-        Ok(parsed)
-    };
-    let policy = LinkPolicy {
-        roles: roles("link_roles", &cfg.link_roles, &base.roles)?,
-        relay_roles: roles("relay_roles", &cfg.relay_roles, &base.relay_roles)?,
-        enrollment_links: cfg.enrollment_links.unwrap_or(base.enrollment_links),
-    };
-    if let Some(role) = policy.relay_roles.iter().find(|r| !policy.allows_link(r)) {
-        bail!(
-            "[ca] relay_roles names {role:?}, but link_roles ({}) does not let {role} devices \
-             link, so none could relay: add {role:?} to link_roles, or remove it from \
-             relay_roles",
-            policy.roles.join(", ")
-        );
-    }
-    Ok(Some(policy))
-}
-
-/// The approval policy a namespace CA enforces: what its trust context
-/// advertises (`advertised`: its version and policy). `[ca]
-/// approval_roles` / `approval_requires_invite` only state it again, and
-/// the CA refuses to start when they disagree — the devices read the
-/// policy from the context. A context that advertises none (made before
-/// the hint carried it) takes the `[ca]` keys, else the default.
-pub(crate) fn approval_policy(
-    cfg: &CaTomlConfig,
-    advertised: Option<(u64, ApprovalPolicy)>,
-) -> Result<ApprovalPolicy> {
-    let configured = configured_policy(cfg)?;
-    let Some((version, advertised)) = advertised else {
-        return Ok(configured.unwrap_or_default());
-    };
-    let sorted = |roles: &[Role]| {
-        let mut roles = roles.to_vec();
-        roles.sort_by_key(|r| r.as_str());
-        roles.dedup();
-        roles
-    };
-    let disagrees = configured.is_some_and(|c| {
-        (cfg.approval_roles.is_some() && sorted(&c.roles) != sorted(&advertised.roles))
-            || (cfg.approval_requires_invite.is_some() && c.invite_also != advertised.invite_also)
-    });
-    if disagrees {
-        let roles: Vec<String> = advertised.roles.iter().map(|r| format!("{:?}", r.as_str())).collect();
-        bail!(
-            "[ca] approval_roles / approval_requires_invite disagree with the namespace's trust \
-             context (v{version}), which advertises: {}. Devices read the policy from the \
-             context, so the CA enforces exactly that: set approval_roles = [{}] and \
-             approval_requires_invite = {} in [ca], or remove both keys",
-            advertised.describe(),
-            roles.join(", "),
-            advertised.invite_also
-        );
-    }
-    Ok(advertised)
-}
-
-/// The policy `[ca] approval_roles` / `approval_requires_invite` state;
-/// `None` when neither is set. Refuses an unknown role.
-pub(crate) fn configured_policy(cfg: &CaTomlConfig) -> Result<Option<ApprovalPolicy>> {
-    if cfg.approval_roles.is_none() && cfg.approval_requires_invite.is_none() {
-        return Ok(None);
-    }
-    let defaults = ApprovalPolicy::default();
-    let roles = match &cfg.approval_roles {
-        Some(roles) => roles
-            .iter()
-            .map(|r| {
-                r.parse::<Role>()
-                    .map_err(|e| anyhow::anyhow!("[ca] approval_roles: {e}"))
-            })
-            .collect::<Result<Vec<Role>>>()?,
-        None => defaults.roles,
-    };
-    Ok(Some(ApprovalPolicy {
-        roles,
-        invite_also: cfg.approval_requires_invite.unwrap_or(defaults.invite_also),
-    }))
 }
 
 /// `[ca].prefix` is the CA namespace; `NdncertCa` appends `/CA` itself
@@ -424,31 +284,6 @@ fn namespace_of(identity: &Name) -> Option<Name> {
     let (last, parent) = comps.split_last()?;
     (last.value.as_ref() == b"CA" && !parent.is_empty())
         .then(|| Name::from_components(parent.iter().cloned()))
-}
-
-/// Issues only when every policy issues, at the shortest validity offered;
-/// an identity is held to one key when any policy holds it so.
-struct AllIssuance(Vec<Box<dyn IssuancePolicy>>);
-
-impl IssuancePolicy for AllIssuance {
-    fn decide(&self, ctx: &IssuanceContext<'_>) -> IssuanceDecision {
-        let mut validity = ctx.max_validity;
-        for policy in &self.0 {
-            match policy.decide(ctx) {
-                IssuanceDecision::Issue { validity: v } => validity = validity.min(v),
-                deny @ IssuanceDecision::Deny(_) => return deny,
-            }
-        }
-        IssuanceDecision::Issue { validity }
-    }
-
-    fn single_key_identity(&self, key_name: &Name) -> Option<SingleKeyIdentity> {
-        self.0.iter().find_map(|p| p.single_key_identity(key_name))
-    }
-
-    fn offers_renewal(&self) -> bool {
-        self.0.iter().any(|p| p.offers_renewal())
-    }
 }
 
 /// Load the CA signing identity from the PIB: the certificate at
@@ -684,7 +519,7 @@ pub(crate) fn spawn(
     match issuance.len() {
         0 => {}
         1 => builder = builder.issuance(issuance.remove(0)),
-        _ => builder = builder.issuance(Box::new(AllIssuance(issuance))),
+        _ => builder = builder.issuance(Box::new(AllIssuance::new(issuance))),
     }
 
     let mut ca = builder
@@ -702,7 +537,7 @@ pub(crate) fn spawn(
         .or_else(|| engine.security().map(|mgr| Arc::clone(mgr.keyring())));
     match &keyring {
         Some(keyring) => {
-            crate::revoke::ca_follow_held(&state, keyring);
+            state.follow_held(keyring);
             state.accept_earlier_ca_certificates(Arc::clone(keyring));
         }
         None => tracing::debug!(
@@ -751,7 +586,8 @@ pub(crate) fn spawn(
 /// entry feeds one [`TokenStore`] behind one `token` challenge; with a CA
 /// `store` (PIB mode), redemptions persist in it so a redeemed token is
 /// refused after a restart. Role-carrying tokens are scoped under
-/// `token_ns` ([`add_tokens`]).
+/// `token_ns` ([`TokenStore::add_invite_tokens`]). The offer order is
+/// [`ndn_cert::challenge_order`]'s.
 ///
 /// `approval`: the namespace and approval policy of a namespace CA, which
 /// offers `device-approval` whether listed or not when the policy names
@@ -785,36 +621,33 @@ fn build_challenges(
              `tokens = [...]`"
         )
     };
+    let order = ndn_cert::challenge_order(
+        configured.iter().map(|c| c.kind.as_str()),
+        approval.map(|(_, policy)| policy),
+    );
 
-    // Slots in offer order; the token and device-approval handlers are
-    // built once every entry is read.
-    enum Slot {
-        Built(Box<dyn ChallengeHandler>),
-        Token,
-        Approval,
-    }
-    let mut slots = Vec::new();
+    // Every entry read in config order; the token and device-approval
+    // handlers are built once every entry is read.
+    let mut built: Vec<Option<Box<dyn ChallengeHandler>>> = Vec::with_capacity(configured.len());
     let mut tokens: Option<TokenStore> = None;
     for c in &configured {
-        match c.kind.as_str() {
+        built.push(match c.kind.as_str() {
             "token" => {
                 if tokens.is_none() {
                     tokens = Some(token_store(store)?);
-                    slots.push(Slot::Token);
                 }
-                add_tokens(tokens.as_ref().expect("set above"), &c.tokens, token_ns, namespace_ca)?;
+                tokens
+                    .as_ref()
+                    .expect("set above")
+                    .add_invite_tokens(&c.tokens, token_ns, namespace_ca)?;
+                None
             }
-            DEVICE_APPROVAL => {
-                if !slots.iter().any(|s| matches!(s, Slot::Approval)) {
-                    slots.push(Slot::Approval);
-                }
-            }
-            _ => slots.push(Slot::Built(build_challenge(c)?)),
-        }
+            DEVICE_APPROVAL => None,
+            _ => Some(build_challenge(c)?),
+        });
     }
-    if let Some((namespace, policy)) = approval
-        && !policy.roles.is_empty()
-        && !slots.iter().any(|s| matches!(s, Slot::Approval))
+    if order.approval_unlisted
+        && let Some((namespace, policy)) = approval
     {
         tracing::info!(
             target: "ca",
@@ -823,33 +656,29 @@ fn build_challenges(
              namespace's trust context advertises {}",
             policy.describe()
         );
-        slots.push(Slot::Approval);
     }
 
     let mut approvals = None;
-    let mut handlers = Vec::with_capacity(slots.len());
+    let mut handlers = Vec::with_capacity(order.slots.len());
     let mut approval_store = Some(approval_store);
-    for slot in slots {
+    for slot in order.slots {
         handlers.push(match slot {
-            Slot::Built(handler) => handler,
-            Slot::Token => Box::new(TokenChallenge::new(
+            ChallengeSlot::Configured(i) => built[i].take().expect("built in config order"),
+            ChallengeSlot::Token => Box::new(TokenChallenge::new(
                 tokens.clone().expect("a token slot has its store"),
             )),
-            Slot::Approval => {
+            ChallengeSlot::DeviceApproval => {
                 let open = approval_store.take().expect("one device-approval slot");
                 let store = open()?;
                 let mut challenge = DeviceApprovalChallenge::new(store.clone());
                 if let Some((namespace, policy)) = approval
-                    && policy.invite_also
-                    && !policy.roles.is_empty()
+                    && policy.needs_invite()
                 {
                     let Some(tokens) = &tokens else {
-                        bail!(
-                            "[ca] the namespace's trust context advertises {}, but [ca] offers \
-                             no token challenge to redeem the invites: add a [[ca.challenge]] \
-                             entry with kind = \"token\" and the invite tokens",
-                            policy.describe()
-                        );
+                        return Err(PolicyError::InviteWithoutToken {
+                            advertised: policy.clone(),
+                        }
+                        .into());
                     };
                     challenge = challenge.requiring_invite(
                         namespace.clone(),
@@ -873,52 +702,6 @@ fn token_store(store: Option<&Arc<FileCaStore>>) -> Result<TokenStore> {
             .map_err(|e| anyhow::anyhow!("[ca] loading redeemed tokens: {e}")),
         None => Ok(TokenStore::new()),
     }
-}
-
-/// Add `tokens` to `store`. A token naming a role (`member-…`, `guest-…`,
-/// as `ndn-fwd-tokens new --role` mints them) is scoped to
-/// `<token_ns>/<role>`: it certifies only names under that prefix. Other
-/// tokens are unscoped, except on a namespace CA (`namespace_ca`).
-///
-/// On a namespace CA the issuance policy admits a token only for a member or a
-/// guest, after the challenge has consumed it. So every token is scoped
-/// there: the scope check refuses a request the policy would refuse
-/// *before* the token is spent. Unscoped tokens are scoped to
-/// `/<ns>/member` (the only role the policy grants them), and `admin-…` /
-/// `node-…` tokens, which could never issue anything, are refused here.
-fn add_tokens(
-    store: &TokenStore,
-    tokens: &[String],
-    token_ns: &Name,
-    namespace_ca: bool,
-) -> Result<()> {
-    for token in tokens {
-        let role = match token_role(token) {
-            Some(role @ (Role::Admin | Role::Node)) if namespace_ca => bail!(
-                "[ca] token '{token}' names the {role} role, but a namespace CA never issues \
-                 {role} certificates on a token alone; remove it from the config. A {role} \
-                 device asks with `ndn-fwd enroll <anchor link> --role {role}` and an admin \
-                 approves it (`ndn-fwd approvals approve <code>`)"
-            ),
-            None if namespace_ca => Some(Role::Member),
-            role => role,
-        };
-        // A token minted with `ndn-fwd-tokens new --ttl` carries its expiry:
-        // redeemable until then, measured from now (past: refused).
-        let ttl = token_expiry(token).map(|at| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            std::time::Duration::from_secs(at.saturating_sub(now))
-        });
-        store.add_scoped(
-            token.clone(),
-            ttl,
-            role.map(|role| role_prefix(token_ns, role)),
-        );
-    }
-    Ok(())
 }
 
 /// A challenge other than `token` and `device-approval` (built by
@@ -1586,18 +1369,6 @@ mod tests {
         ca.stop().await;
     }
 
-    /// On a namespace CA an admin or node token could never issue anything, so the
-    /// CA refuses to start with one instead of letting requests spend it.
-    #[test]
-    fn namespace_ca_refuses_admin_and_node_tokens() {
-        let ns: Name = "/home/bob".parse().unwrap();
-        for t in ["admin-a1", "node-n1"] {
-            let tokens = [t.to_string()];
-            assert!(add_tokens(&TokenStore::new(), &tokens, &ns, true).is_err(), "{t}");
-            assert!(add_tokens(&TokenStore::new(), &tokens, &ns, false).is_ok(), "{t}");
-        }
-    }
-
     /// A namespace CA enforces the approval policy its trust context
     /// advertises: it offers `device-approval` although `[ca]` lists only
     /// tokens, and refuses to start when `[ca]` states another policy.
@@ -1631,7 +1402,7 @@ mod tests {
         let mut cfg = namespace_cfg(vec![challenge("token", &["invite-1"])]);
         cfg.link_roles = Some(vec!["admin".into(), "node".into()]);
         cfg.enrollment_links = Some(false);
-        let link = configured_link_policy(&cfg, &LinkPolicy::default()).unwrap().unwrap();
+        let (approval, link) = policy_input(&cfg).new_namespace_policies().unwrap();
         let ns: Name = "/home/bob".parse().unwrap();
         let pib = FilePib::new(dir.path()).unwrap();
         ndn_cert::init_namespace_in_pib_with(
@@ -1640,13 +1411,13 @@ mod tests {
             "desk",
             false,
             &ndn_cert::NewRootStore::File,
-            &ApprovalPolicy::default(),
+            &approval,
             &link,
         )
         .await
         .unwrap();
         let (ctx, _) = ndn_cert::read_stored_context(dir.path(), &ns).unwrap().unwrap();
-        let expected = LinkPolicy {
+        let expected = ndn_security::LinkPolicy {
             roles: vec!["admin".into(), "node".into()],
             relay_roles: vec!["node".into()],
             enrollment_links: false,
@@ -1657,11 +1428,5 @@ mod tests {
         cfg.link_roles = Some(Vec::new());
         let err = prepare(&cfg, dir.path()).await.err().expect("a disagreeing [ca] is refused");
         assert!(err.to_string().contains("ndn-fwd schema update -c <config>"), "{err}");
-
-        cfg.link_roles = Some(vec!["admin".into()]);
-        cfg.relay_roles = Some(vec!["node".into()]);
-        assert!(configured_link_policy(&cfg, &LinkPolicy::default()).is_err(), "a relay that may not link");
-        cfg.link_roles = Some(vec!["robot".into()]);
-        assert!(configured_link_policy(&cfg, &LinkPolicy::default()).is_err(), "an unknown role");
     }
 }

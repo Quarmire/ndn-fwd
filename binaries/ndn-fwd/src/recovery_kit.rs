@@ -26,9 +26,12 @@ use ndn_cert::context_update::ContextBump;
 use ndn_cert::recovery::{DEFAULT_KIT_SLOT, KIT_PASSPHRASE_ENV, KIT_PIN_ENV, KIT_WORDS_ENV};
 use ndn_cert::{
     FileKit, KitFormat, RecoverySeed, RootSecret, RootStore, SlotGuard, YubikeyKit,
-    add_recovery_anchor, anchor_fingerprint, kit_anchor, read_secret, read_stored_context,
+    add_recovery_anchor, anchor_fingerprint, held_context, kit_anchor, read_secret,
     recovery_anchor, remove_recovery_anchor, seal_file_kit,
 };
+use ndn_mgmt::ContextRefreshInfo;
+use ndn_namespace::admin::{ContextUpdateSink, HandedOver, SinkError};
+use ndn_namespace::{PibContextStore, hex};
 use ndn_packet::{Data, Name};
 use ndn_security::{FilePib, KeyRole, SignedTrustContext, Signer};
 
@@ -148,7 +151,7 @@ pub(crate) async fn open_kit(
 }
 
 /// The namespace a command acts on: `--namespace`, else the one a file kit
-/// names, else the only context this PIB holds.
+/// names, else the only context this PIB holds ([`ndn_cert::kit_namespace`]).
 pub(crate) fn kit_namespace(
     args: &[String],
     spec: Option<&KitSpec>,
@@ -159,107 +162,50 @@ pub(crate) fn kit_namespace(
             .parse()
             .map_err(|e| anyhow::anyhow!("--namespace {ns:?} is not an NDN name: {e}"));
     }
-    if let Some(KitSpec::File(path)) = spec {
-        return Ok(FileKit::read(path)?.namespace);
-    }
-    let held: Vec<Name> = ndn_cert::read_stored_contexts(pib_dir)?
-        .into_iter()
-        .filter_map(|(_, r)| r.ok().map(|(ctx, _)| ctx.namespace().clone()))
-        .collect();
-    match held.as_slice() {
-        [one] => Ok(one.clone()),
-        [] => bail!(
-            "{} holds no trust context; pass --namespace <ns>",
-            pib_dir.display()
-        ),
-        _ => bail!(
-            "{} holds several trust contexts; pass --namespace <ns>",
-            pib_dir.display()
-        ),
-    }
+    let kit_file = match spec {
+        Some(KitSpec::File(path)) => Some(path.as_path()),
+        _ => None,
+    };
+    Ok(ndn_cert::kit_namespace(kit_file, pib_dir)?)
 }
 
-/// The context this PIB holds for `namespace`, as stored.
-fn held(pib_dir: &Path, namespace: &Name) -> Result<(SignedTrustContext, Data)> {
-    read_stored_context(pib_dir, namespace)?.with_context(|| {
-        format!(
-            "{} holds no trust context for {namespace} (adopt it first: ndn-fwd adopt <link>)",
-            pib_dir.display()
-        )
-    })
-}
-
-/// This PIB's root store and the context it is the root of. `work` says what
-/// is done only on the root device, for the refusal on any other device.
+/// This PIB's root store and the context it is the root of
+/// ([`ndn_cert::root_device`]). `work` says what is done only on the root
+/// device, for the refusal on any other device.
 pub(crate) fn root_device(
     pib: &FilePib,
-    pib_dir: &Path,
     work: &str,
 ) -> Result<(RootStore, SignedTrustContext, Data)> {
-    let store = RootStore::open(pib)?.with_context(|| {
-        format!(
-            "{} holds no namespace root: {work} on the root device (where `ndn-fwd init` ran, \
-             or a device that ran `ndn-fwd recover`)",
-            pib_dir.display()
-        )
-    })?;
-    let (ctx, data) = held(pib_dir, store.namespace())?;
-    if !store.holds_anchor_of(&ctx) {
-        bail!(
-            "the root key {} of this PIB is not an anchor of the held trust context of {} (v{}): \
-             this is no longer the root device of the namespace",
-            store.key_name(),
-            store.namespace(),
-            ctx.version()
-        );
+    let ndn_cert::RootDevice {
+        store,
+        context,
+        data,
+    } = ndn_cert::root_device(pib, work)?;
+    Ok((store, context, data))
+}
+
+/// Why a version handed to the daemon ([`hand_over`]) was not taken:
+/// [`ndn_namespace::admin::NotTaken`].
+pub(crate) type NotTaken = ndn_namespace::admin::NotTaken<anyhow::Error>;
+
+/// The running daemon that uses `pib_dir`, on its socket: takes the
+/// versions made here (`security/context-update`).
+struct Daemon<'a> {
+    socket: &'a str,
+    pib_dir: &'a Path,
+}
+
+#[async_trait::async_trait]
+impl ContextUpdateSink for Daemon<'_> {
+    type Error = anyhow::Error;
+
+    fn peer(&self) -> String {
+        format!("the daemon at {}", self.socket)
     }
-    Ok((store, ctx, data))
-}
 
-/// Why a version handed to the daemon ([`hand_over`]) was not taken.
-pub(crate) enum NotTaken {
-    /// Nothing was handed over, or the daemon answered that it did not
-    /// adopt it: nothing changed there, so what was made for the version
-    /// may be undone.
-    Refused(anyhow::Error),
-    /// Handed over, and no answer says what became of it: the daemon may
-    /// still adopt it, so nothing made for it may be undone.
-    Unknown(anyhow::Error),
-}
-
-/// How many transport failures in a row, other than a wait without an
-/// answer, end a hand-over as [`NotTaken::Unknown`].
-const HAND_OVER_FAILURES: usize = 2;
-
-/// Hand a version signed here to the running daemon that uses `pib_dir`,
-/// which adopts it by the continuity rule, stores and publishes it. With no
-/// daemon listening on the socket, store it in `pib_dir` for the daemon's
-/// next start. Returns what happened.
-///
-/// The outcome comes from the daemon's answer, never from a timeout: a
-/// request it does not answer in time (it may be busy with another change
-/// of the namespace) is made again with the same version, which it answers
-/// once that version is decided — taken (`200`, also when it took it
-/// already) or refused. A daemon that stopped meanwhile left on disk what
-/// it took.
-pub(crate) async fn hand_over(
-    args: &[String],
-    pib_dir: &Path,
-    bump: &ContextBump,
-) -> Result<String, NotTaken> {
-    let version = bump.context.version();
-    let socket = crate::onboard::face_socket(args).map_err(NotTaken::Refused)?;
-    let mut sent = false;
-    let mut failures = 0;
-    loop {
-        let unsure = |e: anyhow::Error| {
-            if sent {
-                NotTaken::Unknown(e)
-            } else {
-                NotTaken::Refused(e)
-            }
-        };
-        let client = match ndn_ipc::MgmtClient::connect(&socket).await {
+    async fn hand_over(&self, data: &Data) -> Result<ContextRefreshInfo, SinkError<anyhow::Error>> {
+        let socket = self.socket;
+        let client = match ndn_ipc::MgmtClient::connect(socket).await {
             Ok(client) => client,
             Err(ndn_ipc::ForwarderError::Io(e))
                 if matches!(
@@ -267,83 +213,77 @@ pub(crate) async fn hand_over(
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
                 ) =>
             {
-                return keep_for_next_start(pib_dir, bump, &socket).map_err(unsure);
+                return Err(SinkError::NotRunning);
             }
             Err(e) => {
-                return Err(unsure(anyhow::anyhow!(
+                return Err(SinkError::NotReached(anyhow::anyhow!(
                     "cannot use the daemon's socket {socket} ({e}): run this as a user the \
                      daemon accepts, or pass -c with the config of the daemon that uses {}",
-                    pib_dir.display()
+                    self.pib_dir.display()
                 )));
             }
         };
-        ensure_daemon_pib(&client, &socket, pib_dir)
+        ensure_daemon_pib(&client, socket, self.pib_dir)
             .await
-            .map_err(unsure)?;
-        sent = true;
-        let failure = match client
-            .security_context_update(bump.data.raw().clone(), DAEMON_UPDATE_TIMEOUT)
+            .map_err(SinkError::NotReached)?;
+        match client
+            .security_context_update(data.raw().clone(), DAEMON_UPDATE_TIMEOUT)
             .await
         {
             Ok(resp) if resp.is_ok() => {
-                let info: ndn_mgmt::ContextRefreshInfo = serde_json::from_str(&resp.status_text)
-                    .map_err(|e| {
-                        NotTaken::Unknown(anyhow::anyhow!(
-                            "the daemon at {socket} answered for v{version} unreadably ({e}): {}",
-                            resp.status_text
-                        ))
-                    })?;
-                return Ok(format!("the daemon at {socket} {}", info.detail));
+                serde_json::from_str(&resp.status_text).map_err(|e| SinkError::Unreadable {
+                    error: e.to_string(),
+                    answer: resp.status_text.clone(),
+                })
             }
-            Ok(resp) => {
-                return Err(NotTaken::Refused(anyhow::anyhow!(
-                    "the daemon at {socket} did not take v{version} ({}): {}",
-                    resp.status_code,
-                    resp.status_text
-                )));
-            }
+            Ok(resp) => Err(SinkError::Refused {
+                status_code: resp.status_code,
+                reason: resp.status_text,
+            }),
             Err(ndn_ipc::ForwarderError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
-                eprintln!(
-                    "# no answer yet from the daemon at {socket} on v{version} (another change \
-                     of the namespace may be running there); asking again with the same version"
-                );
-                failures = 0;
-                continue;
+                Err(SinkError::NoAnswer)
             }
-            Err(e) => e,
-        };
-        failures += 1;
-        if failures >= HAND_OVER_FAILURES {
-            return Err(NotTaken::Unknown(anyhow::anyhow!(
-                "handing v{version} to the daemon at {socket} failed without an answer \
-                 ({failure})"
-            )));
+            Err(e) => Err(SinkError::Failed(e.into())),
         }
+    }
+
+    fn no_answer_yet(&self, version: u64) {
+        eprintln!(
+            "# no answer yet from the daemon at {} on v{version} (another change of the \
+             namespace may be running there); asking again with the same version",
+            self.socket
+        );
     }
 }
 
-/// No daemon listens on `socket`: keep `bump` in `pib_dir` for the next
-/// start — unless a daemon took it before it stopped (it is stored already).
-fn keep_for_next_start(pib_dir: &Path, bump: &ContextBump, socket: &str) -> Result<String> {
-    let version = bump.context.version();
-    let stored = ndn_cert::read_stored_versions(pib_dir, bump.context.namespace())?
-        .into_iter()
-        .find_map(|(path, read)| {
-            read.ok()
-                .is_some_and(|(_, data)| data.raw() == bump.data.raw())
-                .then_some(path)
-        });
-    let path = match stored {
-        Some(path) => path,
-        None => ndn_cert::persist_context(pib_dir, &bump.context, &bump.data)?,
+/// Hand a version signed here to the running daemon that uses `pib_dir`,
+/// which adopts it by the continuity rule, stores and publishes it; with no
+/// daemon listening on the socket, store it in `pib_dir` for the daemon's
+/// next start ([`ndn_namespace::admin::hand_over`]: the same version again
+/// while unanswered, undo only on a refusal). Returns what happened.
+pub(crate) async fn hand_over(
+    args: &[String],
+    pib_dir: &Path,
+    bump: &ContextBump,
+) -> Result<String, NotTaken> {
+    let socket = crate::onboard::face_socket(args).map_err(NotTaken::Refused)?;
+    let daemon = Daemon {
+        socket: &socket,
+        pib_dir,
     };
-    Ok(format!(
-        "no daemon listens at {socket}: v{version} is stored in {}; (re)start the daemon that \
-         uses {} so it loads, adopts and publishes it (one running with another socket keeps \
-         the version before until it restarts)",
-        path.display(),
-        pib_dir.display()
-    ))
+    let store = PibContextStore::new(pib_dir);
+    Ok(
+        match ndn_namespace::admin::hand_over(&daemon, &store, bump).await? {
+            HandedOver::Taken(info) => format!("the daemon at {socket} {}", info.detail),
+            HandedOver::Stored { location } => format!(
+                "no daemon listens at {socket}: v{} is stored in {location}; (re)start the daemon \
+                 that uses {} so it loads, adopts and publishes it (one running with another \
+                 socket keeps the version before until it restarts)",
+                bump.context.version(),
+                pib_dir.display()
+            ),
+        },
+    )
 }
 
 /// The PIB directory a daemon reports (`security/identity-status`,
@@ -395,10 +335,6 @@ pub(crate) async fn ensure_daemon_pib(
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// `ndn-fwd recovery-kit …`.
 pub(crate) async fn run(args: &[String]) -> Result<()> {
     match positionals(args).first().copied() {
@@ -435,8 +371,7 @@ async fn create(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
     let pib =
         FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) =
-        root_device(&pib, &pib_dir, "recovery kits are made and revoked")?;
+    let (store, ctx, held_data) = root_device(&pib, "recovery kits are made and revoked")?;
     let namespace = store.namespace().clone();
     let purpose = format!("Creating a recovery kit for {namespace}");
 
@@ -664,7 +599,7 @@ async fn check(args: &[String]) -> Result<()> {
         )?);
     let pib_dir = pib_dir(args)?;
     let namespace = kit_namespace(args, Some(&spec), &pib_dir)?;
-    let (ctx, _) = held(&pib_dir, &namespace)?;
+    let (ctx, _) = held_context(&pib_dir, &namespace)?;
     let (signer, _) = open_kit(
         args,
         &spec,
@@ -698,8 +633,7 @@ async fn revoke(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
     let pib =
         FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) =
-        root_device(&pib, &pib_dir, "recovery kits are made and revoked")?;
+    let (store, ctx, held_data) = root_device(&pib, "recovery kits are made and revoked")?;
     let namespace = store.namespace().clone();
     if !ctx.has_key_role(&key, KeyRole::RECOVERY_ANCHOR) {
         bail!(

@@ -40,13 +40,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use ndn_cert::{ApprovalPolicy, RootStore, SchemaChange, load_persisted_contexts, namespace_schema};
+use ndn_cert::{RootStore, SchemaUpdatePlan, load_persisted_contexts};
 use ndn_config::{CaTomlConfig, ForwarderConfig};
 use ndn_packet::{Data, Name};
-use ndn_security::{
-    EnrollmentHint, FilePib, Keyring, LinkPolicy, LvsModel, SchemaBlob, SchemaFormat,
-    SignedTrustContext,
-};
+use ndn_security::{FilePib, Keyring, LvsModel, SchemaFormat, SignedTrustContext};
 
 use crate::onboard::{flag, pib_dir, positionals};
 use crate::recovery_kit::{NotTaken, hand_over, root_device};
@@ -211,16 +208,9 @@ struct UpdatePlan {
     store: RootStore,
     held: SignedTrustContext,
     held_data: Data,
-    /// The current generated schema of the namespace.
-    schema: Vec<SchemaBlob>,
-    /// The enrollment policy the namespace's CA enforces, and the hint
-    /// stating it that the new version carries.
-    policy: ApprovalPolicy,
-    hint: EnrollmentHint,
-    /// The link policy `[ca]` states when it differs from the held one;
-    /// `None`: the held one is carried.
-    link: Option<LinkPolicy>,
-    change: SchemaChange,
+    /// The schema, enrollment policy and hint, and link policy of the next
+    /// version, and what they change ([`ndn_cert::plan_schema_update`]).
+    update: SchemaUpdatePlan,
 }
 
 /// The `[ca]` section of `-c`, else the defaults.
@@ -235,32 +225,17 @@ fn ca_config(args: &[String]) -> Result<CaTomlConfig> {
     Ok(cfg.ca)
 }
 
-/// The enrollment policy the namespace's CA enforces under `held`, and the
-/// hint the next version carries for it: `held`'s own hint when it
-/// advertises a policy (refused, as the CA's start refuses, when `[ca]` of
-/// `-c` states another); else — a context made before the hint carried the
-/// policy — the policy the CA enforces for it ([`crate::ca::approval_policy`]:
-/// `[ca] approval_roles` / `approval_requires_invite`, else the default).
-fn enrollment(args: &[String], held: &SignedTrustContext) -> Result<(ApprovalPolicy, EnrollmentHint)> {
-    let cfg = ca_config(args)?;
-    if let Some(hint) = held.enrollment_hint()
-        && let Some(policy) = ApprovalPolicy::from_hint(hint)
-    {
-        let policy = crate::ca::approval_policy(&cfg, Some((held.version(), policy)))?;
-        return Ok((policy, hint.clone()));
-    }
-    let policy = crate::ca::approval_policy(&cfg, None)?;
-    let hint = policy.to_hint();
-    Ok((policy, hint))
-}
-
 /// Every check that needs no key: this PIB is the root device of the
 /// namespace (`--namespace`, when given, names it), and the update does not
-/// narrow what devices may do unless `--accept-narrowing`.
+/// narrow what devices may do unless `--accept-narrowing`. The enrollment
+/// hint is the held version's own when it advertises a policy (refused, as
+/// the CA's start refuses, when `[ca]` of `-c` states another), else the
+/// policy the CA enforces for it; the link policy is `[ca]`'s when it
+/// differs from the held one ([`ndn_cert::plan_schema_update`]).
 fn plan_update(pib_dir: &Path, args: &[String]) -> Result<UpdatePlan> {
     let pib =
         FilePib::open(pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, held, held_data) = root_device(&pib, pib_dir, "a namespace's schema is updated")?;
+    let (store, held, held_data) = root_device(&pib, "a namespace's schema is updated")?;
     let namespace = held.namespace().clone();
     if let Some(raw) = flag(args, &["--namespace"]) {
         let asked = parse_name(raw, "--namespace")?;
@@ -273,29 +248,14 @@ fn plan_update(pib_dir: &Path, args: &[String]) -> Result<UpdatePlan> {
             );
         }
     }
-    let schema = namespace_schema(&namespace)
-        .map_err(|e| {
-            anyhow::anyhow!("cannot generate the schema of {namespace}: {e}. Nothing was signed")
-        })?
-        .blobs();
-    let (policy, hint) = enrollment(args, &held).context("nothing was signed")?;
-    // The link policy `[ca]` of `-c` states (unset keys: the held one's);
-    // `None` carries the held policy verbatim.
-    let link = crate::ca::configured_link_policy(&ca_config(args)?, &held.link_policy())
-        .context("nothing was signed")?
-        .filter(|link| !crate::ca::same_link_policy(link, &held.link_policy()));
+    let stated = crate::ca::policy_input(&ca_config(args).context("nothing was signed")?);
     let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
-    let change = ndn_cert::schema_change(&held, &schema, &hint, link.as_ref(), accept_narrowing)
-        .map_err(|e| anyhow::anyhow!("{e}. Nothing was signed"))?;
+    let update = ndn_cert::plan_schema_update(&held, &stated, accept_narrowing)?;
     Ok(UpdatePlan {
         store,
         held,
         held_data,
-        schema,
-        policy,
-        hint,
-        link,
-        change,
+        update,
     })
 }
 
@@ -318,11 +278,14 @@ async fn update(args: &[String]) -> Result<()> {
         store,
         held,
         held_data,
-        schema,
-        policy,
-        hint,
-        link,
-        change,
+        update:
+            SchemaUpdatePlan {
+                schema,
+                policy,
+                hint,
+                link,
+                change,
+            },
     } = plan_update(&pib_dir, args)?;
     let namespace = held.namespace().clone();
     if change.is_empty() {
@@ -442,13 +405,19 @@ async fn update(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use ndn_cert::{ApprovalPoll, ApprovalRecord, ApproverError, Decision, RefusalKind};
+    use ndn_cert::{
+        ApprovalPoll, ApprovalPolicy, ApprovalRecord, ApproverError, Decision, RefusalKind,
+        namespace_schema,
+    };
     use ndn_mgmt::EnrollOutcome;
     use ndn_packet::encode::DataBuilder;
-    use ndn_security::{CertCache, Certificate, Ed25519Signer, Signer, ValidationResult, Validator};
+    use ndn_security::{
+        CertCache, Certificate, Ed25519Signer, EnrollmentHint, SchemaBlob, Signer,
+        ValidationResult, Validator,
+    };
 
     use super::*;
-    use crate::context_adopt::TrustAdmin;
+    use crate::context_adopt::{TrustAdmin, TrustAdminParts};
     use crate::enroll::tests::{Node, node, request};
 
     fn ns() -> Name {
@@ -482,14 +451,14 @@ mod tests {
     /// running CA validates decisions and listings under, holding the
     /// contexts stored in `root_dev`.
     fn root_daemon(node: &Node, root_dev: &Path) -> TrustAdmin {
-        let engine = node.admin.engine.clone();
+        let engine = node.admin.ns.engine().clone();
         let keyring = engine
             .validator()
             .map(|v| Arc::clone(v.keyring()))
             .or_else(|| engine.security().map(|mgr| Arc::clone(mgr.keyring())))
             .expect("the CA's keyring");
         load_persisted_contexts(root_dev, &keyring).unwrap();
-        TrustAdmin {
+        TrustAdmin::new(TrustAdminParts {
             engine,
             keyring,
             pib_root: root_dev.to_path_buf(),
@@ -498,15 +467,9 @@ mod tests {
             own_certs: None,
             dv_keeps_startup_key: false,
             configured_identity: None,
-            enrolling: tokio::sync::Mutex::new(()),
-            keeping: std::sync::Mutex::new(()),
             ca: Some(Arc::clone(&node.ca)),
-            context_change: tokio::sync::Mutex::new(()),
-            renewing: tokio::sync::Mutex::new(()),
-            certificates_changed: tokio::sync::Notify::new(),
-            requests_changed: tokio::sync::Notify::new(),
             context_sync: None,
-        }
+        })
     }
 
     /// The admin device `ndn-fwd init` made on the root device: its key and
@@ -554,7 +517,7 @@ mod tests {
             ndn_cert::new_device_key_name(&relay),
         ));
         let poll = ndn_identity::poll_approval_via_engine(
-            &node.admin.engine,
+            node.admin.ns.engine(),
             keyring,
             &ns(),
             &ns(),
@@ -615,34 +578,34 @@ mod tests {
             .unwrap();
 
         let (admin, chain) = admin_device(root_dev.path());
-        let (engine, ns) = (&daemon.engine, ns());
-        let record = pending(&node, &daemon.keyring).await;
+        let (engine, keyring, ns) = (daemon.ns.engine(), daemon.ns.keyring(), ns());
+        let record = pending(&node, keyring).await;
         let deny = Decision::Deny {
             reason: "not my relay".into(),
         };
         let list = || {
-            ndn_identity::fetch_pending_via_engine(engine, &daemon.keyring, &ns, &ns, &admin, &chain)
+            ndn_identity::fetch_pending_via_engine(engine, keyring, &ns, &ns, &admin, &chain)
         };
         assert_unauthorized(&list().await);
         assert_unauthorized(
             &ndn_identity::push_decision_via_engine(
-                engine, &daemon.keyring, &ns, &record, &deny, &admin, &chain,
+                engine, keyring, &ns, &record, &deny, &admin, &chain,
             )
             .await,
         );
         assert!(node.approvals.get(&record.request_id).unwrap().is_pending());
-        assert!(produces(&node, &daemon.keyring, device.path(), &phone_key).await);
+        assert!(produces(&node, keyring, device.path(), &phone_key).await);
 
         let plan = plan_update(root_dev.path(), &[]).unwrap();
-        assert_eq!(plan.change.added.len(), 2, "{:?}", plan.change.added);
-        assert!(plan.change.removed.is_empty());
-        assert_eq!(plan.policy, ApprovalPolicy::default(), "what the CA enforces");
+        assert_eq!(plan.update.change.added.len(), 2, "{:?}", plan.update.change.added);
+        assert!(plan.update.change.removed.is_empty());
+        assert_eq!(plan.update.policy, ApprovalPolicy::default(), "what the CA enforces");
         let update = ndn_cert::bump_context_schema(
             root.as_ref(),
             &plan.held_data,
-            &plan.schema,
-            &plan.hint,
-            plan.link.as_ref(),
+            &plan.update.schema,
+            &plan.update.hint,
+            plan.update.link.as_ref(),
             false,
         )
         .await
@@ -656,13 +619,13 @@ mod tests {
         let listed = list().await.unwrap();
         assert!(listed.iter().any(|r| r.request_id == record.request_id));
         let denied = ndn_identity::push_decision_via_engine(
-            engine, &daemon.keyring, &ns, &record, &deny, &admin, &chain,
+            engine, keyring, &ns, &record, &deny, &admin, &chain,
         )
         .await
         .unwrap();
         assert!(!denied.is_pending(), "{denied:?}");
-        assert!(produces(&node, &daemon.keyring, device.path(), &phone_key).await);
-        assert!(plan_update(root_dev.path(), &[]).unwrap().change.is_empty());
+        assert!(produces(&node, keyring, device.path(), &phone_key).await);
+        assert!(plan_update(root_dev.path(), &[]).unwrap().update.change.is_empty());
         node.shutdown.shutdown().await;
     }
 }

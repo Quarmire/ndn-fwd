@@ -62,6 +62,7 @@ mod links;
 mod monitors;
 mod onboard;
 mod own_certs;
+mod pib_vault;
 // The named-radio medium face: `[[face]] kind="radio"` (one face over N radio
 // capabilities). Gated behind the `radio` feature.
 #[cfg(feature = "radio")]
@@ -1166,7 +1167,7 @@ async fn main() -> Result<()> {
     // fetch the chain from it (the CA serves the certificates it issued):
     // the PIB's, and the signing key's own (an ephemeral key has no PIB).
     let signing_key = active_identity.as_ref().map(|identity| identity.current().0);
-    let own_certs = own_certs::OwnCertificates::spawn(
+    let own_certs = own_certs::spawn(
         &engine,
         pib.as_deref(),
         signing_key.as_ref(),
@@ -1200,7 +1201,7 @@ async fn main() -> Result<()> {
     // a version signed by a CLI on this device (`revoke`, `recovery-kit`,
     // `recover`) at runtime; `security/identity-status` reports
     // `active_identity`.
-    let trust_admin = Arc::new(context_adopt::TrustAdmin {
+    let trust_admin = Arc::new(context_adopt::TrustAdmin::new(context_adopt::TrustAdminParts {
         engine: engine.clone(),
         keyring: trust_keyring,
         pib_root: pib_root(&fwd_config),
@@ -1210,22 +1211,16 @@ async fn main() -> Result<()> {
         dv_keeps_startup_key: fwd_config.routing.dv.enabled
             && matches!(fwd_config.routing.dv.trust.mode.as_str(), "static" | "lvs"),
         configured_identity: fwd_config.security.identity.clone(),
-        enrolling: tokio::sync::Mutex::new(()),
-        keeping: std::sync::Mutex::new(()),
         ca: ca_state,
-        context_change: tokio::sync::Mutex::new(()),
-        renewing: tokio::sync::Mutex::new(()),
-        certificates_changed: tokio::sync::Notify::new(),
-        requests_changed: tokio::sync::Notify::new(),
         context_sync,
-    });
+    }));
     context_refresh::spawn_periodic(
         Arc::clone(&trust_admin),
         fwd_config.security.context_refresh_secs,
         cancel.clone(),
     );
     if let Some(groups) = context_sync_groups {
-        groups.spawn(Arc::clone(&trust_admin), cancel.child_token());
+        groups.spawn(Arc::clone(&trust_admin.ns), cancel.child_token());
     }
     // Renew this node's certificates before they expire (`[security]
     // renew_before`); `ndn-fwd renew` renews now.

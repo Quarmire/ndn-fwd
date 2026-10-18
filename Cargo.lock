@@ -2987,8 +2987,10 @@ dependencies = [
  "ndn-face-webtransport",
  "ndn-identity",
  "ndn-ipc",
+ "ndn-link",
  "ndn-mgmt",
  "ndn-mgmt-wire",
+ "ndn-namespace",
  "ndn-observability",
  "ndn-packet",
  "ndn-phy-wifi",
@@ -3091,6 +3093,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndn-link"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "ndn-cert",
+ "ndn-face-quic",
+ "ndn-packet",
+ "ndn-security",
+ "ndn-transport",
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "ndn-mgmt"
 version = "0.1.0"
 dependencies = [
@@ -3128,6 +3146,29 @@ dependencies = [
  "ndn-foundation-types",
  "ndn-tlv",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ndn-namespace"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "ndn-app",
+ "ndn-cert",
+ "ndn-engine",
+ "ndn-face",
+ "ndn-identity",
+ "ndn-mgmt-wire",
+ "ndn-packet",
+ "ndn-security",
+ "ndn-store",
+ "ndn-strategy",
+ "ndn-sync",
+ "ndn-transport",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

@@ -58,7 +58,7 @@ bluetooth   = ["dep:ndn-face-bluetooth"]
 webtransport = ["dep:ndn-face-webtransport", "dep:ndn-acme", "dep:rustls-pemfile", "dep:sha2"]
 # QUIC links between devices (NDNLPv2 over datagrams, the devices' NDN keys
 # as TLS raw public keys).
-quic        = ["dep:ndn-face-quic"]
+quic        = ["dep:ndn-face-quic", "dep:ndn-link"]
 # Browser-as-peer WebRTC datachannel faces + signaling-relay listener.
 # Pulls in the full webrtc stack (DTLS/SCTP/ICE/SRTP), so it is opt-in.
 webrtc      = ["dep:ndn-face-webrtc", "dep:ndn-rtc-signaling-relay"]
@@ -108,6 +108,7 @@ ndn-face-bluetooth = { workspace = true, optional = true }
 ndn-face-afxdp  = { workspace = true, optional = true }
 ndn-face-webtransport = { workspace = true, optional = true }
 ndn-face-quic         = { workspace = true, optional = true }
+ndn-link              = { workspace = true, optional = true }
 ndn-acme              = { workspace = true, optional = true }
 rustls-pemfile        = { workspace = true, optional = true }
 sha2                  = { version = "0.10", optional = true }
@@ -117,6 +118,7 @@ ndn-security     = { workspace = true, features = ["custodian"] }
 ndn-cert         = { workspace = true }
 ndn-trust-envelope = { workspace = true }
 ndn-identity     = { workspace = true }
+ndn-namespace    = { workspace = true }
 ndn-face-webrtc  = { workspace = true, optional = true }
 ndn-rtc-signaling-relay = { workspace = true, optional = true }
 dashmap          = { workspace = true }

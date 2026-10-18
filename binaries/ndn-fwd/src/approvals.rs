@@ -3,41 +3,22 @@
 //! backend of the mgmt `ca list-approvals / approve / deny` verbs
 //! ([`DaemonApprovals`]).
 //!
-//! The same command works on the CA host and on a remote admin device; the
-//! daemon picks the path per namespace by whether it runs that namespace's
-//! CA ([`ndn_cert::approval`]):
-//!
-//! - **this node runs the CA**: the CA's durable records are read and
-//!   decided directly. The approver recorded is the local operator the
-//!   kernel attests on the management socket (`uid 1000 (alice)`); the
-//!   issued certificate's attestation names them and claims no signature.
-//! - **this node is an admin device of a namespace whose CA runs
-//!   elsewhere** (its PIB holds a current, unrevoked admin certificate of
-//!   the namespace): the pending list is fetched from `<ca>/CA/PENDING`
-//!   with an Interest signed by the admin key, and a decision is a Data
-//!   `<requester key>/ndncert-approve|deny/<request id>` signed by the admin
-//!   key — an approval carries the verification code shown, a denial its
-//!   reason — pushed to `<ca>/CA/APPROVAL` with the admin certificate's
-//!   chain. The CA validates it under the namespace's trust context and
-//!   records the admin key with the signed Data as evidence.
-//!
-//! A request is named by its request id or its six-digit verification code,
-//! which the requesting device shows too: comparing the two is the check
-//! that it is the right device.
+//! The same command works on the CA host and on a remote admin device: the
+//! daemon lists and decides with [`ndn_namespace::approver`] — its own CA's
+//! records, decided by the local operator the kernel attests on the
+//! management socket (`uid 1000 (alice)`), and the pending requests of the
+//! namespaces whose CA runs elsewhere, decided with the admin keys its PIB
+//! holds.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
-use ndn_cert::roles::{Role, parse_device_key};
-use ndn_cert::{ApprovalRecord, ApprovalStore, ApproverError, Decision, RefusalKind};
-use ndn_mgmt::{ApprovalMgmtBackend, TrustRefusal, approval_refusal, approval_row};
+use ndn_cert::{ApprovalStore, Decision};
+use ndn_mgmt::{ApprovalMgmtBackend, TrustRefusal, approval_row};
 use ndn_mgmt_wire::{ApprovalListing, PendingApproval};
-use ndn_mgmt_wire::control_response::status;
-use ndn_packet::{Data, Name};
-use ndn_security::{Certificate, FilePib, Signer};
+use ndn_namespace::approver::{self, AdminCredential};
 
-use crate::context_adopt::{TrustAdmin, refusal};
+use crate::context_adopt::TrustAdmin;
 
 /// The daemon's `ca` mgmt backend: its own CA's records (`local`, when it
 /// runs a CA that takes approval requests) and, as an admin device, the
@@ -52,120 +33,25 @@ impl DaemonApprovals {
         Self { local, admin }
     }
 
-    /// Nothing to approve on this node, and how to change that.
-    fn nothing_here() -> TrustRefusal {
-        refusal(
-            status::NOT_FOUND,
-            "this node neither runs a CA that takes approval requests nor holds a current admin \
-             certificate of a namespace whose CA runs elsewhere: there is nothing to approve \
-             here. Run `ndn-fwd approvals` on the namespace's root device (its CA host) or on \
-             an admin device; a device becomes one with `ndn-fwd enroll <anchor link> --role \
-             admin`, approved by an admin",
+    /// The PIB's admin keys of namespaces whose CA is not this node's own.
+    fn credentials(&self) -> Result<Vec<AdminCredential>, TrustRefusal> {
+        approver::admin_credentials(
+            &self.admin.ns,
+            self.admin.vault.as_ref(),
+            self.local.as_ref().map(|s| s.ca_prefix()),
         )
-    }
-
-    /// The pending requests at `cred`'s CA.
-    async fn fetch(&self, cred: &AdminCredential) -> Result<Vec<ApprovalRecord>, ApproverError> {
-        ndn_identity::fetch_pending_via_engine(
-            &self.admin.engine,
-            &self.admin.keyring,
-            &cred.namespace,
-            &cred.ca_prefix,
-            &cred.signer,
-            &cred.chain,
-        )
-        .await
-    }
-}
-
-/// A refused remote listing or decision, with what to do.
-fn approver_refusal(cred: &AdminCredential, e: ApproverError) -> TrustRefusal {
-    match e {
-        ApproverError::Refused(r) => {
-            let mut r = approval_refusal(r);
-            r.reason = format!("the CA {} refused: {}", cred.ca_prefix, r.reason);
-            r
-        }
-        ApproverError::CaUnreachable { .. } => refusal(504, e.to_string()),
-        ApproverError::BadAnswer(_) => refusal(502, e.to_string()),
-        ApproverError::Signing(_) => refusal(status::SERVER_ERROR, e.to_string()),
-    }
-}
-
-/// The listing note for a namespace whose CA could not be asked: why, and
-/// what to do. The refusal (status and reason) is what `list` answers when
-/// no namespace at all could be listed.
-fn unlisted(cred: &AdminCredential, e: ApproverError) -> (TrustRefusal, String) {
-    let ns = &cred.namespace;
-    let unreachable = match &e {
-        ApproverError::CaUnreachable { detail, .. } => Some(detail.clone()),
-        _ => None,
-    };
-    let r = approver_refusal(cred, e);
-    let note = match unreachable {
-        Some(detail) => format!(
-            "{ns}: unreachable ({detail}); its requests are not shown — retry when it is up"
-        ),
-        None => format!("{ns}: not listed ({}); its requests are not shown", r.reason),
-    };
-    (r, note)
-}
-
-/// Merge this node's own CA's rows (`local`, `None` when it runs no CA) with
-/// what each administered namespace's CA answered: the rows that could be
-/// listed, and a note for each namespace that could not. Refused only when
-/// nothing at all could be listed — a CA host keeps seeing its own queue
-/// while another namespace's CA is down.
-fn merge_listing(
-    local: Option<Vec<PendingApproval>>,
-    remote: Vec<Result<Vec<PendingApproval>, (TrustRefusal, String)>>,
-) -> Result<ApprovalListing, TrustRefusal> {
-    let mut listed = local.is_some();
-    let mut listing = ApprovalListing { rows: local.unwrap_or_default(), notes: Vec::new() };
-    let mut first_failure = None;
-    for answer in remote {
-        match answer {
-            Ok(rows) => {
-                listed = true;
-                listing.rows.extend(rows);
-            }
-            Err((r, note)) => {
-                first_failure.get_or_insert(r.status_code);
-                listing.notes.push(note);
-            }
-        }
-    }
-    match first_failure {
-        Some(code) if !listed => Err(refusal(
-            code,
-            format!(
-                "could not list the pending requests of any namespace this node administers: {}",
-                listing.notes.join("; ")
-            ),
-        )),
-        _ => Ok(listing),
     }
 }
 
 #[async_trait::async_trait]
 impl ApprovalMgmtBackend for DaemonApprovals {
     async fn list(&self) -> Result<ApprovalListing, TrustRefusal> {
-        let creds = admin_credentials(&self.admin, self.local.as_ref().map(|s| s.ca_prefix()))?;
-        if self.local.is_none() && creds.is_empty() {
-            return Err(Self::nothing_here());
-        }
-        let local = self
-            .local
-            .as_ref()
-            .map(|store| store.records().iter().map(approval_row).collect());
-        let mut remote = Vec::with_capacity(creds.len());
-        for cred in &creds {
-            remote.push(match self.fetch(cred).await {
-                Ok(records) => Ok(records.iter().map(approval_row).collect()),
-                Err(e) => Err(unlisted(cred, e)),
-            });
-        }
-        merge_listing(local, remote)
+        let listing =
+            approver::list(&self.admin.ns, self.local.as_ref(), || self.credentials()).await?;
+        Ok(ApprovalListing {
+            rows: listing.records.iter().map(approval_row).collect(),
+            notes: listing.notes,
+        })
     }
 
     async fn decide(
@@ -174,191 +60,17 @@ impl ApprovalMgmtBackend for DaemonApprovals {
         decision: Decision,
         operator: String,
     ) -> Result<PendingApproval, TrustRefusal> {
-        // This node's own CA first: its local operator decides.
-        let mut local_miss = None;
-        if let Some(store) = &self.local {
-            match store.find_pending(&target) {
-                Ok(_) => {
-                    return store
-                        .decide_locally(&target, decision, &operator)
-                        .map(|r| approval_row(&r))
-                        .map_err(approval_refusal);
-                }
-                Err(r) if r.kind == RefusalKind::NotFound => local_miss = Some(r),
-                Err(r) => return Err(approval_refusal(r)),
-            }
-        }
-        let creds = admin_credentials(&self.admin, self.local.as_ref().map(|s| s.ca_prefix()))?;
-        if creds.is_empty() {
-            return Err(match local_miss {
-                Some(miss) => approval_refusal(miss),
-                None => Self::nothing_here(),
-            });
-        }
-        // The namespaces this node administers: ask each CA what is pending.
-        let mut found: Vec<(&AdminCredential, ApprovalRecord)> = Vec::new();
-        let mut failed = Vec::new();
-        for cred in &creds {
-            match self.fetch(cred).await {
-                Ok(records) => match ndn_cert::approval::find_pending_in(&records, &target) {
-                    Ok(record) => found.push((cred, record)),
-                    Err(r) if r.kind == RefusalKind::NotFound => {}
-                    Err(r) => return Err(approver_refusal(cred, ApproverError::Refused(r))),
-                },
-                Err(e) => failed.push(approver_refusal(cred, e)),
-            }
-        }
-        let (cred, record) = match found.len() {
-            1 => found.remove(0),
-            0 => {
-                let mut reason = format!(
-                    "no pending request shows {target:?} at {}: check the code on the new \
-                     device against `ndn-fwd approvals list` (a request that expired or was \
-                     decided is not pending)",
-                    if self.local.is_some() {
-                        "this node's CA or at the CAs of the namespaces it administers"
-                    } else {
-                        "the CAs of the namespaces this node administers"
-                    }
-                );
-                let mut code = status::NOT_FOUND;
-                if let Some(first) = failed.first() {
-                    code = first.status_code;
-                    let reasons: Vec<&str> = failed.iter().map(|r| r.reason.as_str()).collect();
-                    reason.push_str(&format!("; not every CA could be asked: {}", reasons.join("; ")));
-                }
-                return Err(refusal(code, reason));
-            }
-            _ => {
-                let at: Vec<String> = found.iter().map(|(c, r)| format!("{} ({})", r.request_id, c.ca_prefix)).collect();
-                return Err(refusal(
-                    409,
-                    format!(
-                        "requests in several namespaces show {target:?}: {}; decide by request id",
-                        at.join(", ")
-                    ),
-                ));
-            }
-        };
-        tracing::info!(
-            target: "security",
-            operator = %operator,
-            admin_key = %cred.key,
-            request = %record.request_id,
-            ca = %cred.ca_prefix,
-            decision = ?decision,
-            "deciding a request at the namespace's CA with this device's admin key"
-        );
-        ndn_identity::push_decision_via_engine(
-            &self.admin.engine,
-            &self.admin.keyring,
-            &cred.namespace,
-            &record,
-            &decision,
-            &cred.signer,
-            &cred.chain,
+        approver::decide(
+            &self.admin.ns,
+            self.local.as_ref(),
+            || self.credentials(),
+            &target,
+            decision,
+            &operator,
         )
         .await
         .map(|r| approval_row(&r))
-        .map_err(|e| approver_refusal(cred, e))
     }
-}
-
-/// An admin key of this node in a namespace whose CA runs elsewhere.
-struct AdminCredential {
-    namespace: Name,
-    /// The CA that issued the admin certificate (`/<ns>` for `/<ns>/CA`).
-    ca_prefix: Name,
-    key: Name,
-    signer: Arc<dyn Signer>,
-    /// The admin certificate, then the issuer certificates kept for its
-    /// chain (`<pib>/issuers`): what the CA walks to the namespace root.
-    chain: Vec<Bytes>,
-}
-
-/// This node's admin keys, one per namespace (the newest valid
-/// certificate): a device key `/<ns>/admin/<device>/KEY/…` of a namespace
-/// whose trust context this node holds, with a current certificate the
-/// context does not revoke, issued by a CA other than `local_ca` (this
-/// node's own, decided locally).
-fn admin_credentials(
-    admin: &TrustAdmin,
-    local_ca: Option<&Name>,
-) -> Result<Vec<AdminCredential>, TrustRefusal> {
-    let unreadable = |e: ndn_security::PibError| {
-        refusal(
-            status::SERVER_ERROR,
-            format!(
-                "cannot read the PIB {} for this node's admin keys: {e}",
-                admin.pib_root.display()
-            ),
-        )
-    };
-    let pib = match FilePib::open(&admin.pib_root) {
-        Ok(pib) => pib,
-        Err(ndn_security::PibError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Vec::new());
-        }
-        Err(e) => return Err(unreadable(e)),
-    };
-    let namespaces: Vec<Name> = admin
-        .keyring
-        .contexts()
-        .iter()
-        .map(|c| c.namespace().clone())
-        .collect();
-    let kept: Vec<Bytes> = ndn_cert::issuers::stored_issuer_certs(&admin.pib_root);
-    let mut out: Vec<(u64, AdminCredential)> = Vec::new();
-    for key in pib.list_keys().map_err(unreadable)? {
-        let Some(namespace) = namespaces.iter().find(|ns| {
-            parse_device_key(ns, &key).is_some_and(|d| d.role == Role::Admin)
-        }) else {
-            continue;
-        };
-        let Some(wire) = pib.get_issued_cert(&key).map_err(unreadable)? else {
-            continue;
-        };
-        let Some((data, cert)) = Data::decode(wire)
-            .ok()
-            .and_then(|d| Certificate::decode(&d).ok().map(|c| (d, c)))
-        else {
-            continue;
-        };
-        if !cert.is_valid_now() {
-            continue;
-        }
-        let context = admin.keyring.context_for(&cert.name);
-        if context.is_revoked(&cert.name) {
-            continue;
-        }
-        let Some(ca_prefix) = ndn_cert::issuing_ca_prefix(&cert) else {
-            continue;
-        };
-        if local_ca == Some(&ca_prefix) {
-            continue;
-        }
-        let signer: Arc<dyn Signer> = match pib.get_signer(&key) {
-            Ok(signer) => signer,
-            Err(e) => {
-                tracing::warn!(target: "security", key = %key, error = %e, "an admin certificate's key cannot sign; it decides nothing");
-                continue;
-            }
-        };
-        let chain = ndn_cert::approval::admin_chain(&data, &cert, &kept);
-        let candidate = AdminCredential {
-            namespace: namespace.clone(),
-            ca_prefix,
-            key,
-            signer,
-            chain,
-        };
-        match out.iter_mut().find(|(_, c)| c.namespace == candidate.namespace) {
-            Some(slot) if slot.0 < cert.valid_from => *slot = (cert.valid_from, candidate),
-            Some(_) => {}
-            None => out.push((cert.valid_from, candidate)),
-        }
-    }
-    Ok(out.into_iter().map(|(_, c)| c).collect())
 }
 
 /// How long the CLI waits for the daemon: on an admin device it asks each
@@ -495,45 +207,6 @@ async fn decide(args: &[String], approve: bool, target: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn row(id: &str, namespace: &str) -> PendingApproval {
-        PendingApproval {
-            request_id: id.into(),
-            key_name: format!("{namespace}/node/relay/KEY/k"),
-            namespace: namespace.into(),
-            code: "482 913".into(),
-            state: "pending".into(),
-            ..Default::default()
-        }
-    }
-
-    fn unreachable(ns: &str) -> (TrustRefusal, String) {
-        (
-            refusal(504, "no answer"),
-            format!("{ns}: unreachable (no answer); its requests are not shown — retry when it is up"),
-        )
-    }
-
-    #[test]
-    fn list_shows_local_rows_when_remote_unreachable() {
-        // A CA host that also administers /work: /work's CA is down, its
-        // own queue still lists, with a note naming what is missing.
-        let listing = merge_listing(Some(vec![row("1a", "/home")]), vec![Err(unreachable("/work"))])
-            .expect("the local CA's rows are listed");
-        assert_eq!(listing.rows, vec![row("1a", "/home")]);
-        assert_eq!(listing.notes, vec![unreachable("/work").1]);
-
-        // An admin device: one CA answers, another is down.
-        let listing = merge_listing(None, vec![Ok(vec![row("2b", "/home")]), Err(unreachable("/work"))])
-            .expect("the reachable namespace's rows are listed");
-        assert_eq!(listing.rows, vec![row("2b", "/home")]);
-        assert_eq!(listing.notes.len(), 1);
-
-        // Nothing could be listed: refused, saying which and why.
-        let r = merge_listing(None, vec![Err(unreachable("/work"))]).unwrap_err();
-        assert_eq!(r.status_code, 504);
-        assert!(r.reason.contains("/work: unreachable"), "{}", r.reason);
-    }
 
     #[test]
     fn approve_accepts_code_as_listed() {

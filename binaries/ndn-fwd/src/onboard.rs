@@ -66,14 +66,14 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use ndn_cert::roles::{Role, device_identity, sanitize_device_name};
+use ndn_cert::roles::{Role, sanitize_device_name};
 use ndn_cert::{
-    AnchorLink, ApprovalPolicy, InviteLink, adopt_envelope_into_store, anchor_fingerprint,
-    init_namespace_in_pib_with,
+    AnchorLink, EnrollTarget, PolicyInput, adopt_envelope_into_store,
+    anchor_fingerprint, init_namespace_in_pib_with,
 };
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
-use ndn_security::{FilePib, LinkPolicy};
+use ndn_security::FilePib;
 use ndn_trust_envelope::TrustEnvelope;
 
 /// Inspect `argv`; if it names an onboarding subcommand, run it and return
@@ -424,20 +424,17 @@ async fn run_init(args: &[String]) -> Result<()> {
     // link and relay: `[ca]` of `-c`, else the defaults. The context
     // advertises both (the link policy always stated), and the CA enforces
     // exactly what the context advertises.
-    let (approval, link) = match flag(args, &["-c", "--config"]) {
+    let stated = match flag(args, &["-c", "--config"]) {
         Some(path) => {
             let toml = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
             let cfg: ForwarderConfig = toml
                 .parse()
                 .with_context(|| format!("parse config {path}"))?;
-            (
-                crate::ca::configured_policy(&cfg.ca)?.unwrap_or_default(),
-                crate::ca::configured_link_policy(&cfg.ca, &LinkPolicy::default())?
-                    .unwrap_or_default(),
-            )
+            crate::ca::policy_input(&cfg.ca)
         }
-        None => (ApprovalPolicy::default(), LinkPolicy::default()),
+        None => PolicyInput::default(),
     };
+    let (approval, link) = stated.new_namespace_policies()?;
     // Where the root goes, and its passphrase / PIN — asked now, never
     // taken from the command line.
     let root = crate::root_key::new_root_store(args)?;
@@ -671,7 +668,7 @@ fn adopt_offline(
 /// exchanges or the first request for an admin's approval), plus a margin
 /// for the key generation and storing.
 fn daemon_enroll_timeout() -> std::time::Duration {
-    crate::enroll::context_check_budget()
+    ndn_namespace::enroll::context_check_budget()
         + ndn_identity::enroll_via_engine_budget().max(
             ndn_app::DEFAULT_TIMEOUT * 2 + ndn_identity::poll_via_engine_budget(),
         )
@@ -686,33 +683,9 @@ fn enroll_target(uri: &str, role: Option<&str>, device: &str) -> Result<(Name, N
                 .map_err(|e| anyhow::anyhow!("enroll refused: --role {r:?}: {e}"))
         })
         .transpose()?;
-    if let Ok(invite) = InviteLink::from_uri(uri) {
-        let identity = match role {
-            Some(role) if role != invite.role => device_identity(&invite.namespace, role, device)
-                .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?,
-            _ => invite
-                .device_identity(device)
-                .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?,
-        };
-        return Ok((invite.namespace, identity));
-    }
-    let anchor = AnchorLink::from_uri(uri).map_err(|e| {
-        anyhow::anyhow!(
-            "enroll refused: the link is neither an invite (`ndn-fwd-tokens new` prints one) nor \
-             the namespace's anchor link (`ndn-fwd init` prints it as anchor_uri): {e}"
-        )
-    })?;
-    let Some(role) = role else {
-        bail!(
-            "enroll refused: an anchor link names no role; add --role admin or --role node (a \
-             role {} certifies on an admin's approval), or enroll a member or guest with an \
-             invite link",
-            anchor.namespace
-        );
-    };
-    let identity = device_identity(&anchor.namespace, role, device)
+    let target = EnrollTarget::of_link(uri, role, device)
         .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?;
-    Ok((anchor.namespace, identity))
+    Ok((target.namespace, target.identity))
 }
 
 async fn run_enroll(args: &[String]) -> Result<()> {
