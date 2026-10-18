@@ -7,8 +7,10 @@
 //! Every minted token carries its role (`member-<hex>`, `guest-<hex>`): the CA
 //! scopes it to `<namespace>/<role>`, so it can only certify a device of that
 //! role, and the invite names that prefix as the invitee's identity
-//! namespace. Admin and relay (`node` role) certificates are never issued on a token —
-//! they need an admin's device approval. With `--ttl` a token also carries its
+//! namespace. Admin and relay (`node` role) certificates are never issued on a
+//! token alone — they need an admin's approval (`ndn-fwd enroll <anchor link>
+//! --role admin` on the new device, `ndn-fwd approvals approve <code>` on an
+//! admin device). With `--ttl` a token also carries its
 //! expiry (`…-until<unix-secs>`): the CA refuses it after that, and so does
 //! the invitee's `ndn-fwd enroll` before contacting the CA.
 
@@ -67,15 +69,16 @@ fn invite_role(role: InviteRole) -> Result<Role> {
         InviteRole::Guest => Ok(Role::Guest),
         InviteRole::Admin => bail!(
             "--role admin: an invite token never admits an admin device — the CA issues \
-             admin certificates only on an admin's device approval: have the new device \
-             enroll as <namespace>/admin/<device> with the device-approval challenge and \
-             approve it on an admin device (`ca approve` on the CA host)"
+             admin certificates only on an admin's approval: on the new device run \
+             `ndn-fwd enroll <anchor link> --role admin` (anchor_uri from `ndn-fwd init`), \
+             then compare its verification code and run `ndn-fwd approvals approve <code>` \
+             on an admin device"
         ),
         InviteRole::Node => bail!(
             "--role node: an invite token never admits a relay — the CA issues node-role \
-             certificates only on an admin's device approval: have the relay enroll as \
-             <namespace>/node/<name> with the device-approval challenge and approve it on \
-             an admin device (`ca approve` on the CA host)"
+             certificates only on an admin's approval: on the relay run `ndn-fwd enroll \
+             <anchor link> --role node` (anchor_uri from `ndn-fwd init`), then compare its \
+             verification code and run `ndn-fwd approvals approve <code>` on an admin device"
         ),
     }
 }

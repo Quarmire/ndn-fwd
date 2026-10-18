@@ -46,7 +46,7 @@ OPTIONS:
   -h, --help          this help
 
 SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
-           recovery-compromised, negatives
+           recovery-compromised, negatives, approval
 ";
 
 #[derive(Clone, Debug, Default)]

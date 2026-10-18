@@ -1,37 +1,63 @@
-//! The running daemon's side of `ndn-fwd enroll <invite>`: the
-//! `security/enroll` management verb.
+//! The running daemon's side of `ndn-fwd enroll`: the `security/enroll` and
+//! `security/enroll-status` management verbs, and the status watch that
+//! finishes an enrollment the moment an admin approves it.
 //!
 //! The daemon owns every piece of state: it generates the device key
 //! `/<ns>/<role>/<device>/KEY/<id>` in its own PIB (the private key never
-//! leaves it), lets [`ndn_identity::enroll_with_invite_via_engine`] adopt the
-//! namespace's trust context if it is not held and obtain a certificate from
-//! the namespace's CA with the invite's token, stores the issued certificate
-//! beside the key (and the issuer certificates of its chain under
-//! `<pib>/issuers`, [`ndn_cert::issuers`]), and makes the identity the PIB's
-//! default — loaded at every start unless `[security] identity` names another
-//! one (the config file is never edited). The running daemon then signs its
-//! management responses and discovery records with the new key from the next
-//! packet on. DV routing in the `static`/`lvs` trust modes keeps the key it
-//! started with (neighbours list it in their `trusted_keys`) until the next
-//! start.
+//! leaves it), adopts the namespace's trust context if it is not held (the
+//! link names the expected fingerprint of its root), obtains a certificate
+//! from the namespace's CA, stores it beside the key (and the issuer
+//! certificates of its chain under `<pib>/issuers`, [`ndn_cert::issuers`]),
+//! and makes the identity the PIB's default — loaded at every start unless
+//! `[security] identity` names another one (the config file is never
+//! edited). The running daemon then signs its management responses and
+//! discovery records with the new key from the next packet on. DV routing in
+//! the `static`/`lvs` trust modes keeps the key it started with (neighbours
+//! list it in their `trusted_keys`) until the next start.
+//!
+//! How the certificate is obtained is the namespace's policy, read from its
+//! trust context ([`ndn_cert::ApprovalPolicy`]):
+//!
+//! - a role it certifies **by invite** (member, guest by default): an
+//!   `ndn-trust://invite` link's token is redeemed in one exchange
+//!   ([`ndn_identity::enroll_with_invite_via_engine`]);
+//! - a role it certifies **on an admin's approval** (admin, node by
+//!   default): the request opens a durable record at the CA
+//!   ([`ndn_cert::approval`]) and answers `pending` with the request id and
+//!   the verification code, computed from this node's own key. The daemon
+//!   keeps an outgoing request record under `<pib>/requests/`
+//!   ([`ndn_cert::RequestStore`]) and keeps one held status Interest
+//!   outstanding at the CA for it ([`spawn_status_watch`]), across restarts
+//!   of either side, until the record resolves: approved — the CA answers
+//!   at once and the certificate is issued and installed with no further
+//!   action; denied or expired — the record says why and what to do, and
+//!   the key is deleted. With an invite link too when the namespace
+//!   requires one beside the approval.
 //!
 //! A failed enrollment leaves the previous state: the new key (and anything
 //! stored for it) is deleted and the default identity is only changed as the
 //! last step, after the certificate is stored.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ndn_cert::roles::parse_device_key;
-use ndn_cert::{InviteEnrollError, InviteLink, new_device_key_name};
+use ndn_cert::roles::{Role, parse_device_identity, parse_device_key};
+use ndn_cert::{
+    AnchorLink, ApprovalEnrollError, ApprovalPoll, ApprovalPolicy, InviteEnrollError, InviteLink,
+    IssuedCertificate, OutgoingRequest, OutgoingState, RequestStatus, RequestStore,
+    anchor_fingerprint, new_device_key_name,
+};
 use ndn_mgmt::{
-    ContextRefreshInfo, EnrollOutcome, EnrollRequest, EnrolledInfo, RefreshState, TrustRefusal,
+    AdoptedContextInfo, ContextRefreshInfo, EnrollOutcome, EnrollRequest, EnrolledInfo,
+    PendingEnrollInfo, RefreshState, TrustRefusal,
 };
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::{Data, Name};
 use ndn_security::{Certificate, FilePib, Signer, SignedTrustContext};
+use tokio_util::sync::CancellationToken;
 
-use crate::context_adopt::{TrustAdmin, refusal};
+use crate::context_adopt::{TrustAdmin, hex, refusal};
 use crate::context_refresh::refresh_contexts;
 
 fn status_of(e: &InviteEnrollError) -> u64 {
@@ -245,6 +271,131 @@ fn discard(pib: &FilePib, key: &Name) {
     }
 }
 
+/// The link `ndn-fwd enroll` was given.
+enum EnrollLink {
+    /// `ndn-trust://invite`: a token of the namespace's CA.
+    Invite(InviteLink),
+    /// `ndn-trust://anchor`: the namespace and its root's expected
+    /// fingerprint, for a role it certifies on an admin's approval.
+    Anchor(AnchorLink),
+}
+
+impl EnrollLink {
+    fn parse(uri: &str) -> Result<Self, TrustRefusal> {
+        if let Ok(invite) = InviteLink::from_uri(uri) {
+            return Ok(Self::Invite(invite));
+        }
+        if let Ok(anchor) = AnchorLink::from_uri(uri) {
+            return Ok(Self::Anchor(anchor));
+        }
+        // Report the invite's own reason: an invite is the common case.
+        let e = InviteLink::from_uri(uri).err().map(|e| e.to_string()).unwrap_or_default();
+        Err(refusal(
+            status::BAD_PARAMS,
+            format!(
+                "the link is neither an invite nor an anchor link ({e}): give an \
+                 ndn-trust://invite link (`ndn-fwd-tokens new` prints one) or, for a role the \
+                 namespace certifies on an admin's approval, its ndn-trust://anchor link \
+                 (`ndn-fwd init` prints it as anchor_uri)"
+            ),
+        ))
+    }
+
+    fn namespace(&self) -> &Name {
+        match self {
+            Self::Invite(invite) => &invite.namespace,
+            Self::Anchor(anchor) => &anchor.namespace,
+        }
+    }
+
+    fn expected_fingerprint(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Invite(invite) => invite.expected_fingerprint,
+            Self::Anchor(anchor) => Some(anchor.expected_fingerprint),
+        }
+    }
+}
+
+/// Hold the trust context of the namespace `link` names: adopt it (and keep
+/// it) when it is not held — the link must name its root's expected
+/// fingerprint — else check the held one is signed by the root the link
+/// expects. `Some`: the context adopted now.
+async fn ensure_context(
+    admin: &TrustAdmin,
+    link: &EnrollLink,
+) -> Result<Option<AdoptedContextInfo>, TrustRefusal> {
+    let namespace = link.namespace();
+    if let Some(held) = held_context(admin, namespace) {
+        let Some(expected) = link.expected_fingerprint() else {
+            return Ok(None);
+        };
+        let fingerprints: Vec<[u8; 32]> = held
+            .anchors()
+            .iter()
+            .map(|a| anchor_fingerprint(a.value()))
+            .collect();
+        if fingerprints.contains(&expected) {
+            return Ok(None);
+        }
+        return Err(refusal(
+            status::UNAUTHORIZED,
+            format!(
+                "the trust context this node holds for {namespace} is signed by a different \
+                 root (fingerprint {}) than the link expects ({}): check where the link came \
+                 from; this node keeps the context it holds",
+                fingerprints.first().map(|f| hex(f)).unwrap_or_default(),
+                hex(&expected)
+            ),
+        ));
+    }
+    let from_invite;
+    let anchor = match link {
+        EnrollLink::Anchor(anchor) => anchor,
+        EnrollLink::Invite(invite) => {
+            let Some(expected_fingerprint) = invite.expected_fingerprint else {
+                let e = InviteEnrollError::NoExpectedFingerprint {
+                    namespace: namespace.to_string(),
+                };
+                return Err(refusal(status_of(&e), e.to_string()));
+            };
+            from_invite = AnchorLink {
+                namespace: namespace.clone(),
+                expected_fingerprint,
+                min_version: None,
+                context_data: None,
+            };
+            &from_invite
+        }
+    };
+    admin.adopt_link(anchor).await.map(Some)
+}
+
+/// The trust context this node holds for `namespace`.
+fn held_context(admin: &TrustAdmin, namespace: &Name) -> Option<Arc<SignedTrustContext>> {
+    admin
+        .keyring
+        .contexts()
+        .into_iter()
+        .find(|c| c.namespace() == namespace)
+}
+
+/// What enrollment in `namespace` needs an admin's approval for: what its
+/// held trust context advertises (the default for a context made before
+/// the hint carried it).
+fn namespace_policy(admin: &TrustAdmin, namespace: &Name) -> ApprovalPolicy {
+    held_context(admin, namespace)
+        .map(|ctx| ApprovalPolicy::of_context(&ctx))
+        .unwrap_or_default()
+}
+
+/// The prefix of the CA of `namespace` its held trust context names, else
+/// the namespace itself.
+fn ca_prefix_of(admin: &TrustAdmin, namespace: &Name) -> Name {
+    held_context(admin, namespace)
+        .map(|ctx| ndn_cert::approval::ca_prefix_of(&ctx))
+        .unwrap_or_else(|| namespace.clone())
+}
+
 pub(crate) async fn enroll(
     admin: &TrustAdmin,
     request: EnrollRequest,
@@ -255,12 +406,71 @@ pub(crate) async fn enroll(
             "another enrollment is running on this node; wait for it to finish",
         ));
     };
-    let invite = InviteLink::from_uri(&request.invite_uri)
-        .map_err(|e| refusal(status_of(&e), e.to_string()))?;
-    let device = device_of(&invite, &request.identity)?;
-    let identity = invite
-        .device_identity(device)
-        .map_err(|e| refusal(status_of(&e), e.to_string()))?;
+    let link = EnrollLink::parse(&request.link_uri)?;
+    let namespace = link.namespace().clone();
+    let identity = request.identity.clone();
+    let Some(device) = parse_device_identity(&namespace, &identity) else {
+        return Err(refusal(
+            status::BAD_PARAMS,
+            format!(
+                "the identity to enroll, {identity}, is not /<namespace>/<role>/<device> in the \
+                 namespace {namespace} the link names (roles: admin, member, node, guest; a \
+                 device name of letters, digits, '-', '_', '.')"
+            ),
+        ));
+    };
+    // The device name the invite admits, before anything is fetched.
+    if let EnrollLink::Invite(invite) = &link
+        && device.role == invite.role
+    {
+        device_of(invite, &identity)?;
+    }
+
+    let adopted_context = ensure_context(admin, &link).await?;
+    let policy = namespace_policy(admin, &namespace);
+    let by_approval = policy.roles.contains(&device.role);
+    let invite = match (&link, by_approval) {
+        (EnrollLink::Invite(invite), false) if invite.role == device.role => Some(invite),
+        (_, true) => None,
+        (EnrollLink::Invite(invite), false) => {
+            return Err(refusal(
+                status::BAD_PARAMS,
+                format!(
+                    "the invite admits a {} device, not a {} device; {namespace} certifies {} \
+                     devices by invite: ask for a {} invite (`ndn-fwd-tokens new --role {}`)",
+                    invite.role, device.role, device.role, device.role, device.role
+                ),
+            ));
+        }
+        (EnrollLink::Anchor(_), false) => {
+            return Err(refusal(
+                status::BAD_PARAMS,
+                format!(
+                    "{namespace} certifies {} devices by invite, not on an admin's approval \
+                     ({}): ask an admin for an invite (`ndn-fwd-tokens new --role {}` on the \
+                     root device) and run `ndn-fwd enroll <invite link>`",
+                    device.role,
+                    policy.describe(),
+                    device.role
+                ),
+            ));
+        }
+    };
+    let token = match (&link, by_approval && policy.invite_also) {
+        (EnrollLink::Invite(invite), true) => Some(invite.token.clone()),
+        (EnrollLink::Anchor(_), true) => {
+            return Err(refusal(
+                status::BAD_PARAMS,
+                format!(
+                    "{namespace} certifies a {role} device only on an invite AND an admin's \
+                     approval: ask an admin for an invite and run `ndn-fwd enroll <invite link> \
+                     --role {role}`",
+                    role = device.role
+                ),
+            ));
+        }
+        _ => None,
+    };
 
     let pib = FilePib::new(&admin.pib_root).map_err(|e| {
         refusal(
@@ -271,8 +481,8 @@ pub(crate) async fn enroll(
     let previous_identity = pib.get_default_identity().ok().flatten();
     // Judge the certificates held against the namespace's newest trust
     // context, not a possibly stale held one: a newer version may revoke one.
-    let mut context_check = check_context(admin, &invite.namespace).await;
-    let held: Vec<Certified> = certified_in(admin, &pib, &invite.namespace)
+    let context_check = check_context(admin, &namespace).await;
+    let held: Vec<Certified> = certified_in(admin, &pib, &namespace)
         .into_iter()
         .filter(|c| c.revoked.is_none())
         .collect();
@@ -281,55 +491,88 @@ pub(crate) async fn enroll(
         return Err(refusal(
             409,
             format!(
-                "this node already holds a certificate in {}: {}{}. To enroll another key \
-                 anyway, run again with --force and another --device name (the CA certifies a \
-                 new key for a device name it already certified only once that certificate is \
-                 revoked or an admin approves the new key); the certificate this node holds \
+                "this node already holds a certificate in {namespace}: {}{}. To enroll another \
+                 key anyway, run again with --force and another --device name (the CA certifies \
+                 a new key for a device name it already certified only once that certificate \
+                 is revoked or an admin approves the new key); the certificate this node holds \
                  stays valid until it expires or is revoked",
-                invite.namespace,
                 still_valid.join(", "),
                 context_check.as_ref().map(judged_on_held).unwrap_or_default()
             ),
         ));
     }
 
-    let key = new_device_key_name(&identity);
+    let enrolling = Enrolling {
+        namespace,
+        identity,
+        previous_identity,
+        adopted_context,
+        context_check,
+    };
+    match invite {
+        Some(invite) => enroll_by_invite(admin, &pib, invite, enrolling).await,
+        None => {
+            let ca_prefix = match &link {
+                EnrollLink::Invite(invite) => invite.ca_prefix.clone(),
+                EnrollLink::Anchor(_) => ca_prefix_of(admin, &enrolling.namespace),
+            };
+            enroll_by_approval(admin, &pib, &ca_prefix, device.role, token, enrolling).await
+        }
+    }
+}
+
+/// What an enrollment knows before it asks the CA.
+struct Enrolling {
+    namespace: Name,
+    identity: Name,
+    previous_identity: Option<Name>,
+    adopted_context: Option<AdoptedContextInfo>,
+    context_check: Option<ContextRefreshInfo>,
+}
+
+/// Generate the device key for `identity` in the PIB.
+fn generate_key(admin: &TrustAdmin, pib: &FilePib, identity: &Name) -> Result<(Name, Arc<dyn Signer>), TrustRefusal> {
+    let key = new_device_key_name(identity);
     let generated = pib.generate_ed25519(&key).map_err(|e| {
         refusal(
             status::SERVER_ERROR,
             format!("cannot generate the device key in {}: {e}", admin.pib_root.display()),
         )
     })?;
-    let signer: Arc<dyn Signer> = Arc::new(generated);
+    Ok((key, Arc::new(generated)))
+}
+
+async fn enroll_by_invite(
+    admin: &TrustAdmin,
+    pib: &FilePib,
+    invite: &InviteLink,
+    enrolling: Enrolling,
+) -> Result<EnrollOutcome, TrustRefusal> {
+    let identity = &enrolling.identity;
+    let (key, signer) = generate_key(admin, pib, identity)?;
     tracing::info!(
         target: "security",
         key = %key,
         ca = %invite.ca_prefix,
         "enrolling with an invite"
     );
-
-    let enrollment = match ndn_identity::enroll_with_invite_via_engine(
+    let issued = match ndn_identity::enroll_with_invite_via_engine(
         &admin.engine,
         &admin.keyring,
-        &invite,
+        invite,
         Arc::clone(&signer),
     )
     .await
     {
-        Ok(enrollment) => enrollment,
+        Ok(enrollment) => enrollment.issued,
         Err(failure) => {
-            discard(&pib, &key);
+            discard(pib, &key);
             let mut reason = failure.error.to_string();
-            if let (Some(adopted), Some(fp)) = (&failure.adopted, &invite.expected_fingerprint) {
-                // The context passed the fingerprint check on its own; keep
-                // what the keyring already holds across a restart.
-                match admin.keep_adopted(adopted, fp) {
-                    Ok(info) => reason.push_str(&format!(
-                        ". The trust context {} v{} was adopted on the way and stays adopted",
-                        info.namespace, info.version
-                    )),
-                    Err(e) => reason.push_str(&format!(". Also: {}", e.reason)),
-                }
+            if let Some(adopted) = &enrolling.adopted_context {
+                reason.push_str(&format!(
+                    ". The trust context {} v{} was adopted on the way and stays adopted",
+                    adopted.namespace, adopted.version
+                ));
             }
             tracing::warn!(
                 target: "security",
@@ -340,37 +583,213 @@ pub(crate) async fn enroll(
             return Err(refusal(status_of(&failure.error), reason));
         }
     };
+    install(
+        admin,
+        pib,
+        &key,
+        signer,
+        &issued,
+        enrolling,
+        "The token is spent: fix the PIB directory and ask for a new invite",
+    )
+    .await
+    .map(EnrollOutcome::Enrolled)
+}
 
-    // The certificate is issued and the token spent: whatever happens to
-    // the adopted context's copy on disk, keep the certificate.
-    let mut context_warning = None;
-    let adopted_context = match (&enrollment.adopted, &invite.expected_fingerprint) {
-        (Some(adopted), Some(fp)) => match admin.keep_adopted(adopted, fp) {
-            Ok(info) => Some(info),
-            Err(e) => {
-                tracing::warn!(
-                    target: "security",
-                    reason = %e.reason,
-                    "enrolled, but the adopted trust context was not stored"
-                );
-                context_warning = Some(e.reason);
-                None
-            }
+/// The status code a refused approval request is answered with.
+fn approval_status(e: &ApprovalEnrollError) -> u64 {
+    match e {
+        ApprovalEnrollError::CaUnreachable { .. } | ApprovalEnrollError::UntrustedAnswer(_) => 504,
+        ApprovalEnrollError::NameRefused(_) => 409,
+        ApprovalEnrollError::Signing(_) => status::SERVER_ERROR,
+        ApprovalEnrollError::Expired(_) => 410,
+        ApprovalEnrollError::Denied(_)
+        | ApprovalEnrollError::CaRefused(_)
+        | ApprovalEnrollError::IssuedCertificate(_) => status::UNAUTHORIZED,
+    }
+}
+
+/// The `<pib>/requests` store of this node's requests for an admin's
+/// approval.
+fn request_store(admin: &TrustAdmin) -> Result<RequestStore, TrustRefusal> {
+    RequestStore::open(admin.pib_root.join(REQUESTS_DIR)).map_err(|e| {
+        refusal(
+            status::SERVER_ERROR,
+            format!("cannot open this node's request records: {e}"),
+        )
+    })
+}
+
+/// Where the outgoing requests live, beside the PIB.
+const REQUESTS_DIR: &str = "requests";
+
+fn pending_info(
+    request: &OutgoingRequest,
+    adopted_context: Option<AdoptedContextInfo>,
+) -> PendingEnrollInfo {
+    PendingEnrollInfo {
+        identity: request.identity.clone(),
+        key: request.key_name.clone(),
+        namespace: request.namespace.clone(),
+        ca: request.ca_prefix.clone(),
+        request: request.request_id.clone(),
+        code: request.code.clone(),
+        expires: match request.expires_secs {
+            0 => String::new(),
+            secs => ndn_cert::approval::iso_secs(secs),
         },
-        _ => None,
-    };
-    let issued = &enrollment.issued;
+        adopted_context,
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Ask the CA at `ca_prefix` to certify a new key for the identity on an
+/// admin's approval: answered `pending` (the request is recorded under
+/// `<pib>/requests/` and [`spawn_status_watch`] finishes it), or `enrolled` if
+/// the CA issued at once. A request for this identity still pending is
+/// answered as it stands: no second key, no second request.
+async fn enroll_by_approval(
+    admin: &TrustAdmin,
+    pib: &FilePib,
+    ca_prefix: &Name,
+    role: Role,
+    token: Option<String>,
+    enrolling: Enrolling,
+) -> Result<EnrollOutcome, TrustRefusal> {
+    let requests = request_store(admin)?;
+    let identity = enrolling.identity.to_string();
+    let outstanding = requests
+        .outstanding(&identity)
+        .map_err(|e| refusal(status::SERVER_ERROR, format!("cannot read this node's request records: {e}")))?;
+    if let Some(outstanding) = outstanding {
+        return Ok(EnrollOutcome::Pending(pending_info(
+            &outstanding,
+            enrolling.adopted_context,
+        )));
+    }
+    let (key, signer) = generate_key(admin, pib, &enrolling.identity)?;
+    tracing::info!(
+        target: "security",
+        key = %key,
+        ca = %ca_prefix,
+        role = %role,
+        "asking for an admin's approval"
+    );
+    let poll = ndn_identity::poll_approval_via_engine(
+        &admin.engine,
+        &admin.keyring,
+        &enrolling.namespace,
+        ca_prefix,
+        Arc::clone(&signer),
+        None,
+        token.as_deref(),
+    )
+    .await;
+    match poll {
+        Ok(ApprovalPoll::Pending(pending)) => {
+            let record = OutgoingRequest {
+                namespace: enrolling.namespace.to_string(),
+                ca_prefix: ca_prefix.to_string(),
+                identity,
+                key_name: key.to_string(),
+                request_id: pending.request_id,
+                code: pending.code,
+                created_secs: now_secs(),
+                expires_secs: pending.expires_secs,
+                state: OutgoingState::Pending,
+            };
+            if let Err(e) = requests.save(&record) {
+                discard(pib, &key);
+                return Err(refusal(
+                    status::SERVER_ERROR,
+                    format!(
+                        "the CA holds request {} (code {}), but this node could not record it \
+                         ({e}), so it would never finish it: the key was deleted. Fix the PIB \
+                         directory ({}) and ask again; an admin can deny request {}",
+                        record.request_id,
+                        record.code,
+                        admin.pib_root.display(),
+                        record.request_id
+                    ),
+                ));
+            }
+            // Its status Interest goes out now.
+            admin.requests_changed.notify_one();
+            tracing::info!(
+                target: "security",
+                key = %key,
+                request = %record.request_id,
+                code = %record.code,
+                "waiting for an admin's approval; the daemon finishes the enrollment once approved"
+            );
+            Ok(EnrollOutcome::Pending(pending_info(
+                &record,
+                enrolling.adopted_context,
+            )))
+        }
+        Ok(ApprovalPoll::Issued(issued)) => install(
+            admin,
+            pib,
+            &key,
+            signer,
+            &issued,
+            enrolling,
+            "The approval is used: fix the PIB directory, ask again (`ndn-fwd enroll`) and have \
+             an admin approve the new request",
+        )
+        .await
+        .map(EnrollOutcome::Enrolled),
+        Err(e) => {
+            discard(pib, &key);
+            tracing::warn!(
+                target: "security",
+                identity = %enrolling.identity,
+                error = %e,
+                "request for an admin's approval refused; nothing was kept for the new key"
+            );
+            Err(refusal(approval_status(&e), e.to_string()))
+        }
+    }
+}
+
+/// Keep the certificate the CA issued for `key` (generated for
+/// `enrolling.identity`) and select it: PIB (the identity becomes its
+/// default), issuer chain, the engine's key store and validation cache,
+/// served by name, the renewal timer told, the node's signer switched
+/// unless the config names another identity. `kept_failed`: what to do
+/// when storing it fails (the key is then deleted).
+async fn install(
+    admin: &TrustAdmin,
+    pib: &FilePib,
+    key: &Name,
+    signer: Arc<dyn Signer>,
+    issued: &IssuedCertificate,
+    enrolling: Enrolling,
+    kept_failed: &str,
+) -> Result<EnrolledInfo, TrustRefusal> {
+    let Enrolling {
+        namespace,
+        identity,
+        previous_identity,
+        adopted_context,
+        mut context_check,
+    } = enrolling;
     let kept = pib
-        .store_issued_cert(&key, issued.data.raw())
+        .store_issued_cert(key, issued.data.raw())
         .and_then(|_| pib.set_default_identity(&identity));
     if let Err(e) = kept {
-        discard(&pib, &key);
+        discard(pib, key);
         return Err(refusal(
             status::SERVER_ERROR,
             format!(
                 "the CA issued {}, but storing it in {} failed ({e}); nothing was kept and the \
-                 previous identity stays selected. The token is spent: fix the PIB directory and \
-                 ask for a new invite",
+                 previous identity stays selected. {kept_failed}",
                 issued.cert.name,
                 admin.pib_root.display()
             ),
@@ -407,12 +826,6 @@ pub(crate) async fn enroll(
     // The renewal timer schedules the new certificate's renewal.
     admin.certificates_changed.notify_one();
     let mut at_next_start = Vec::new();
-    if let Some(reason) = context_warning {
-        at_next_start.push(format!(
-            "the trust context for {} is held for this run only: {reason}",
-            invite.namespace
-        ));
-    }
     if admin.dv_keeps_startup_key {
         at_next_start.push(format!(
             "DV routing: it keeps signing with the key this node started with (DV `static`/`lvs` \
@@ -442,12 +855,13 @@ pub(crate) async fn enroll(
         }
     };
     // The other certificates this node holds in the namespace, judged
-    // against the context held now: the one checked above, or the one the
-    // enrollment adopted (checked here when there is something to judge).
-    let mut others = held_besides(admin, &pib, &invite.namespace, &key);
+    // against the context held now: the one checked before asking, or the
+    // one adopted on the way (checked here when there is something to
+    // judge).
+    let mut others = held_besides(admin, pib, &namespace, key);
     if context_check.is_none() && !others.is_empty() {
-        context_check = check_context(admin, &invite.namespace).await;
-        others = held_besides(admin, &pib, &invite.namespace, &key);
+        context_check = check_context(admin, &namespace).await;
+        others = held_besides(admin, pib, &namespace, key);
     }
     let (unusable, still_valid): (Vec<Certified>, Vec<Certified>) =
         others.into_iter().partition(|c| c.revoked.is_some());
@@ -459,7 +873,7 @@ pub(crate) async fn enroll(
         signing_now,
         "enrolled; the PIB's default identity is now this one"
     );
-    Ok(EnrollOutcome::Enrolled(EnrolledInfo {
+    Ok(EnrolledInfo {
         identity: identity.to_string(),
         key: key.to_string(),
         certificate: issued.cert.name.to_string(),
@@ -479,7 +893,361 @@ pub(crate) async fn enroll(
         still_valid: still_valid.iter().map(Certified::still_valid).collect(),
         unusable: unusable.iter().filter_map(Certified::unusable).collect(),
         context_check,
-    }))
+    })
+}
+
+/// `security/enroll-status`: this node's requests for an admin's approval,
+/// oldest first.
+pub(crate) fn enroll_status(admin: &TrustAdmin) -> Result<Vec<OutgoingRequest>, TrustRefusal> {
+    request_store(admin)?
+        .list()
+        .map_err(|e| refusal(status::SERVER_ERROR, format!("cannot read this node's request records: {e}")))
+}
+
+/// The first pause after the CA could not be asked (or answered a status
+/// early); it doubles up to [`RETRY_MAX`] while that goes on.
+const RETRY_FIRST: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// Finish this node's requests for an admin's approval, until `cancel`:
+/// each pending record under `<pib>/requests/` is watched by its own task
+/// ([`watch`]) — at start (a request made before a restart resumes) and as
+/// soon as `security/enroll` records a new one
+/// ([`TrustAdmin::requests_changed`]).
+pub(crate) fn spawn_status_watch(admin: Arc<TrustAdmin>, cancel: CancellationToken) {
+    tokio::spawn(async move {
+        // Per request key: its watch task.
+        let mut watching: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+        loop {
+            watching.retain(|_, task| !task.is_finished());
+            let listed = request_store(&admin).and_then(|store| {
+                store
+                    .list()
+                    .map_err(|e| refusal(status::SERVER_ERROR, e.to_string()))
+            });
+            let read_again = match listed {
+                Ok(list) => {
+                    for request in list.into_iter().filter(|r| r.state == OutgoingState::Pending) {
+                        if !watching.contains_key(&request.key_name) {
+                            let task = tokio::spawn(watch(
+                                Arc::clone(&admin),
+                                request.key_name.clone(),
+                                cancel.child_token(),
+                            ));
+                            watching.insert(request.key_name, task);
+                        }
+                    }
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "security",
+                        error = %e.reason,
+                        "cannot read this node's requests for an admin's approval; reading them \
+                         again in {}s",
+                        RETRY_MAX.as_secs()
+                    );
+                    Some(RETRY_MAX)
+                }
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = admin.requests_changed.notified() => {}
+                _ = tokio::time::sleep(read_again.unwrap_or(RETRY_MAX)), if read_again.is_some() => {}
+            }
+        }
+    });
+}
+
+/// Wait for the CA's decision on this node's request for `key_name`, until
+/// it ends or `cancel`: one held status Interest outstanding at a time
+/// ([`ndn_identity::request_status_via_engine`], lifetime
+/// [`ndn_cert::approval::STATUS_LIFETIME`]), sent again as soon as the CA
+/// answers pending or the Interest expires. On the CA-signed answer:
+/// approved — the issuance exchange runs at once ([`issue`]); denied or
+/// expired — the record says why (and what to do) and the key is deleted.
+/// An answer that is not the CA's changes nothing. When the CA cannot be
+/// asked, or answers early (it stopped), it asks again after a pause
+/// doubling from [`RETRY_FIRST`] to [`RETRY_MAX`] (logged once per outage)
+/// with short Interests ([`ndn_cert::approval::STATUS_PROBE_LIFETIME`])
+/// until the CA holds one again.
+async fn watch(admin: Arc<TrustAdmin>, key_name: String, cancel: CancellationToken) {
+    use ndn_cert::approval::{STATUS_LIFETIME, STATUS_PROBE_LIFETIME, status_hold};
+    let mut retry = RETRY_FIRST;
+    let mut unreachable = false;
+    let mut probing = false;
+    loop {
+        // The record as kept now: another task may have ended it.
+        let current = request_store(&admin).and_then(|store| {
+            let found = store
+                .list()
+                .map_err(|e| refusal(status::SERVER_ERROR, e.to_string()))?
+                .into_iter()
+                .find(|r| r.key_name == key_name);
+            Ok((store, found))
+        });
+        let (store, mut request) = match current {
+            Ok((store, Some(request))) if request.state == OutgoingState::Pending => (store, request),
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(target: "security", key = %key_name, error = %e.reason, "cannot read a request record; reading it again in {}s", RETRY_MAX.as_secs());
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(RETRY_MAX) => continue,
+                }
+            }
+        };
+        let id = request.request_id.clone();
+        let (Ok(namespace), Ok(ca_prefix)) =
+            (request.namespace.parse::<Name>(), request.ca_prefix.parse::<Name>())
+        else {
+            request.state = OutgoingState::Failed {
+                reason: "the request record names no valid namespace or CA; ask again \
+                         (`ndn-fwd enroll`)"
+                    .into(),
+            };
+            record(&store, &request);
+            return;
+        };
+        let lifetime = if probing { STATUS_PROBE_LIFETIME } else { STATUS_LIFETIME };
+        let asked = std::time::Instant::now();
+        let status = tokio::select! {
+            _ = cancel.cancelled() => return,
+            status = ndn_identity::request_status_via_engine(
+                &admin.engine,
+                &admin.keyring,
+                &namespace,
+                &ca_prefix,
+                &id,
+                &request.key_name,
+                lifetime,
+            ) => status,
+        };
+        if status.is_ok() && unreachable {
+            unreachable = false;
+            tracing::info!(target: "security", request = %id, ca = %ca_prefix, "the CA is reachable again; waiting for its decision");
+        }
+        let pause = match status {
+            Ok(RequestStatus::Pending { expires_secs, .. }) => {
+                if expires_secs != request.expires_secs && expires_secs != 0 {
+                    request.expires_secs = expires_secs;
+                    record(&store, &request);
+                }
+                // The CA answers pending shortly before the Interest
+                // expires. An earlier answer (the CA stopped; a relay's
+                // aggregated Interest of another device answered) is
+                // followed by a pause, growing while they keep coming
+                // early, and short Interests until the CA holds one again.
+                if asked.elapsed() < status_hold(Some(lifetime)) / 2 {
+                    probing = true;
+                    Some(retry)
+                } else {
+                    probing = false;
+                    retry = RETRY_FIRST;
+                    None
+                }
+            }
+            Ok(RequestStatus::Approved { .. }) => match issue(&admin, &store, request).await {
+                Issue::Ended => return,
+                // The status said approved, the exchange says pending (the
+                // CA was replaced in between): wait, never loop fast.
+                Issue::Pending => Some(retry),
+                Issue::Retry(why) => {
+                    tracing::warn!(target: "security", request = %id, error = %why, "approved, but the certificate could not be fetched yet; asking again in {}s", retry.as_secs());
+                    Some(retry)
+                }
+            },
+            Ok(RequestStatus::Denied { reason, .. }) => {
+                end(&admin, &store, request, |reason| OutgoingState::Denied { reason }, &reason);
+                return;
+            }
+            Ok(RequestStatus::Expired { reason, .. }) => {
+                end(&admin, &store, request, |reason| OutgoingState::Expired { reason }, &reason);
+                return;
+            }
+            Err(e @ ApprovalEnrollError::UntrustedAnswer(_)) => {
+                tracing::warn!(target: "security", request = %id, error = %e, "asking again in {}s", retry.as_secs());
+                probing = true;
+                Some(retry)
+            }
+            Err(e) => {
+                if !unreachable {
+                    unreachable = true;
+                    tracing::warn!(
+                        target: "security",
+                        request = %id,
+                        error = %e,
+                        "the CA could not be asked about a request for an admin's approval; asking \
+                         again after a pause growing from {}s to {}s",
+                        RETRY_FIRST.as_secs(),
+                        RETRY_MAX.as_secs()
+                    );
+                }
+                probing = true;
+                Some(retry)
+            }
+        };
+        if let Some(pause) = pause {
+            retry = (retry * 2).min(RETRY_MAX);
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(pause) => {}
+            }
+        }
+    }
+}
+
+/// End `request` on the CA-signed denial or expiry `reason`: its key is
+/// deleted and the record says why (`state`).
+fn end(
+    admin: &TrustAdmin,
+    store: &RequestStore,
+    mut request: OutgoingRequest,
+    state: impl FnOnce(String) -> OutgoingState,
+    reason: &str,
+) {
+    let reason = match (FilePib::open(&admin.pib_root), request.key_name.parse::<Name>()) {
+        (Ok(pib), Ok(key)) => {
+            discard(&pib, &key);
+            format!("{reason}; the key {key} was deleted")
+        }
+        (Err(e), _) => format!(
+            "{reason}; the key {} could not be deleted ({e}): delete it from the PIB",
+            request.key_name
+        ),
+        (_, Err(_)) => reason.to_owned(),
+    };
+    tracing::warn!(target: "security", request = %request.request_id, error = %reason, "request for an admin's approval ended");
+    request.state = state(reason);
+    record(store, &request);
+}
+
+/// What the issuance exchange of an approved request did.
+enum Issue {
+    /// The record ended (issued, or failed / denied / expired with why).
+    Ended,
+    /// The CA still answers pending: keep waiting.
+    Pending,
+    /// The CA could not be asked, or the PIB opened: ask again (why).
+    Retry(String),
+}
+
+/// Run the issuance exchange for `request`, which the CA says is approved:
+/// a fresh NEW → CHALLENGE exchange resuming it
+/// ([`ndn_identity::poll_approval_via_engine`]); the certificate is
+/// installed as `ndn-fwd enroll` would ([`install`]) and the record says
+/// `issued`. A final refusal ends the record (the key is deleted).
+async fn issue(admin: &TrustAdmin, store: &RequestStore, mut request: OutgoingRequest) -> Issue {
+    let id = request.request_id.clone();
+    let parsed = (
+        request.namespace.parse::<Name>(),
+        request.ca_prefix.parse::<Name>(),
+        request.identity.parse::<Name>(),
+        request.key_name.parse::<Name>(),
+    );
+    let (Ok(namespace), Ok(ca_prefix), Ok(identity), Ok(key)) = parsed else {
+        request.state = OutgoingState::Failed {
+            reason: "the request record names no valid namespace, CA, identity or key; ask \
+                     again (`ndn-fwd enroll`)"
+                .into(),
+        };
+        record(store, &request);
+        return Issue::Ended;
+    };
+    let pib = match FilePib::open(&admin.pib_root) {
+        Ok(pib) => pib,
+        Err(e) => return Issue::Retry(format!("cannot open the PIB: {e}")),
+    };
+    let signer: Arc<dyn Signer> = match pib.get_signer(&key) {
+        Ok(signer) => signer,
+        Err(e) => {
+            request.state = OutgoingState::Failed {
+                reason: format!(
+                    "the key {key} of this request is gone from the PIB ({e}); nothing can be \
+                     certified for it: ask again (`ndn-fwd enroll`)"
+                ),
+            };
+            record(store, &request);
+            return Issue::Ended;
+        }
+    };
+    let poll = ndn_identity::poll_approval_via_engine(
+        &admin.engine,
+        &admin.keyring,
+        &namespace,
+        &ca_prefix,
+        Arc::clone(&signer),
+        Some(&id),
+        None,
+    )
+    .await;
+    match poll {
+        Ok(ApprovalPoll::Pending(_)) => Issue::Pending,
+        Ok(ApprovalPoll::Issued(issued)) => {
+            let _one_at_a_time = admin.enrolling.lock().await;
+            let enrolling = Enrolling {
+                namespace,
+                identity,
+                previous_identity: pib.get_default_identity().ok().flatten(),
+                adopted_context: None,
+                context_check: None,
+            };
+            request.state = match install(
+                admin,
+                &pib,
+                &key,
+                signer,
+                &issued,
+                enrolling,
+                "The approval is used: fix the PIB directory, ask again (`ndn-fwd enroll`) and \
+                 have an admin approve the new request",
+            )
+            .await
+            {
+                Ok(info) => {
+                    tracing::info!(
+                        target: "security",
+                        request = %id,
+                        certificate = %info.certificate,
+                        signing_now = info.signing_now,
+                        "an admin approved the request: enrolled"
+                    );
+                    OutgoingState::Issued {
+                        certificate: info.certificate,
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(target: "security", request = %id, error = %e.reason, "approved, but the certificate was not kept");
+                    OutgoingState::Failed { reason: e.reason }
+                }
+            };
+            record(store, &request);
+            Issue::Ended
+        }
+        Err(e) if !e.is_final() => Issue::Retry(e.to_string()),
+        Err(e) => {
+            discard(&pib, &key);
+            let reason = format!("{e}; the key {key} was deleted");
+            tracing::warn!(target: "security", request = %id, error = %reason, "request for an admin's approval ended");
+            request.state = OutgoingState::ended(&e, reason);
+            record(store, &request);
+            Issue::Ended
+        }
+    }
+}
+
+/// Save `request`'s new state (a failure is logged: the record stays as it
+/// was, and is watched again at the next start).
+fn record(store: &RequestStore, request: &OutgoingRequest) {
+    if let Err(e) = store.save(request) {
+        tracing::error!(
+            target: "security",
+            request = %request.request_id,
+            state = request.state.as_str(),
+            error = %e,
+            "could not record a request's new state"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -502,6 +1270,9 @@ pub(crate) mod tests {
         pub(crate) context_data: ndn_packet::Data,
         /// The root device's CA, on the same engine.
         pub(crate) ca: Arc<ndn_cert::CaState>,
+        /// The root device's CA's approval records (its local operator
+        /// decides through them).
+        pub(crate) approvals: ndn_cert::ApprovalStore,
         /// The root device's trust-context publisher, on the same engine: it
         /// answers the node's refreshes.
         pub(crate) root_contexts: crate::context_publisher::PublishedContexts,
@@ -547,7 +1318,11 @@ pub(crate) mod tests {
         }
         let (engine, shutdown) = builder.build().await.unwrap();
         engine.fib().add_nexthop(&ca.prefix, ca.face_id, 0);
-        let ca = crate::ca::spawn(ca, &cfg, &engine).unwrap().state;
+        let running = crate::ca::spawn(ca, &cfg, &engine).unwrap();
+        let (ca, approvals) = (
+            running.state,
+            running.approvals.expect("a namespace CA offers device-approval"),
+        );
         let root_contexts = publisher.spawn(&engine);
 
         let keyring = Arc::new(Keyring::new());
@@ -575,12 +1350,14 @@ pub(crate) mod tests {
                 context_change: tokio::sync::Mutex::new(()),
                 renewing: tokio::sync::Mutex::new(()),
                 certificates_changed: tokio::sync::Notify::new(),
+                requests_changed: tokio::sync::Notify::new(),
                 context_sync: None,
             },
             fingerprint,
             context_data: ndn_packet::Data::decode(persisted.init.context_data.raw().clone())
                 .unwrap(),
             ca,
+            approvals,
             root_contexts,
             shutdown,
         }
@@ -594,7 +1371,7 @@ pub(crate) mod tests {
         force: bool,
     ) -> EnrollRequest {
         EnrollRequest {
-            invite_uri: TrustEnvelope::Invite {
+            link_uri: TrustEnvelope::Invite {
                 ca_prefix: "/home/bob".into(),
                 identity_namespace: format!("/home/bob/{role}"),
                 token: token.into(),
@@ -650,7 +1427,7 @@ pub(crate) mod tests {
         let EnrollOutcome::Enrolled(info) =
             enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
                 .await
-                .expect("enrolls");
+                .expect("enrolls") else { panic!("an invite enrolls at once") };
         let key: Name = info.key.parse().unwrap();
         let identity: Name = "/home/bob/member/laptop".parse().unwrap();
         assert!(key.has_prefix(&identity));
@@ -715,7 +1492,7 @@ pub(crate) mod tests {
         let EnrollOutcome::Enrolled(info) =
             enroll(&node.admin, request(&node, "member", "member-m2", "tab", true))
                 .await
-                .expect("forced enrollment");
+                .expect("forced enrollment") else { panic!("an invite enrolls at once") };
         assert_eq!(info.still_valid.len(), 1);
         assert_eq!(state(&node).0.len(), 2);
         node.shutdown.shutdown().await;
@@ -731,7 +1508,7 @@ pub(crate) mod tests {
         let EnrollOutcome::Enrolled(info) =
             enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
                 .await
-                .expect("enrolls");
+                .expect("enrolls") else { panic!("an invite enrolls at once") };
         let ns: Name = "/home/bob".parse().unwrap();
         let pib = FilePib::open(device.path()).unwrap();
         let held = certified_in(&node.admin, &pib, &ns);
@@ -768,7 +1545,7 @@ pub(crate) mod tests {
         let EnrollOutcome::Enrolled(first) =
             enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
                 .await
-                .expect("first enrollment");
+                .expect("first enrollment") else { panic!("an invite enrolls at once") };
         let laptop: Name = first.key.parse().unwrap();
         let held = node.admin.keyring.version_of(&ns).unwrap();
 
@@ -797,7 +1574,9 @@ pub(crate) mod tests {
         let EnrollOutcome::Enrolled(second) =
             enroll(&node.admin, request(&node, "member", "member-m2", "tab", false))
                 .await
-                .expect("the only certificate held is revoked by the newest version");
+                .expect("the only certificate held is revoked by the newest version") else {
+                panic!("an invite enrolls at once")
+            };
         assert!(second.still_valid.is_empty(), "{:?}", second.still_valid);
         assert_eq!(second.unusable.len(), 1, "{:?}", second.unusable);
         assert!(second.unusable[0].starts_with(&first.key));
@@ -805,5 +1584,136 @@ pub(crate) mod tests {
         assert_eq!(check.state, RefreshState::Updated, "{}", check.detail);
         assert_eq!(node.admin.keyring.version_of(&ns), Some(bump.context.version()));
         node.shutdown.shutdown().await;
+    }
+
+    /// `security/enroll` of `/home/bob/<role>/<device>` with the namespace's
+    /// anchor link (its root's expected fingerprint `fingerprint`).
+    fn approval_request(fingerprint: [u8; 32], role: &str, device: &str, force: bool) -> EnrollRequest {
+        EnrollRequest {
+            link_uri: TrustEnvelope::Anchor {
+                namespace: Some("/home/bob".into()),
+                fingerprint: Some(fingerprint),
+                version: None,
+                context_data: None,
+                context_content: None,
+            }
+            .to_uri(),
+            identity: format!("/home/bob/{role}/{device}").parse().unwrap(),
+            force,
+        }
+    }
+
+    /// The record of `request` once it left `pending`, which must happen
+    /// within `within` — far shorter than a status Interest's lifetime, so
+    /// only the held Interest's answer can have brought the decision.
+    async fn resolved(admin: &TrustAdmin, request: &str, within: Duration) -> OutgoingRequest {
+        assert!(within * 5 < ndn_cert::approval::STATUS_LIFETIME);
+        tokio::time::timeout(within, async {
+            loop {
+                let records = enroll_status(admin).unwrap();
+                let record = records.into_iter().find(|r| r.request_id == request).unwrap();
+                if record.state != OutgoingState::Pending {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the decision reaches the waiting requester at once")
+    }
+
+    /// Enrollment on an admin's approval: `pending` with the code the CA
+    /// shows (asking again answers the same request, no second key). The
+    /// daemon waits on the CA with a held status Interest, resumed from its
+    /// records after a restart; the moment the CA host's operator approves,
+    /// the certificate is installed with no further request. A request made
+    /// while the daemon runs is waited on at once; denied, it is recorded
+    /// with its reason and its key deleted.
+    #[tokio::test]
+    async fn a_decision_reaches_the_waiting_requester_at_once_across_its_restart() {
+        let settle = Duration::from_millis(500);
+        let at_once = Duration::from_secs(3);
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &[]).await;
+        let EnrollOutcome::Pending(pending) =
+            enroll(&node.admin, approval_request(node.fingerprint, "admin", "tablet", false))
+                .await
+                .expect("the request is made")
+        else {
+            panic!("an admin certificate waits for an admin's approval")
+        };
+        let at_ca = node.approvals.pending();
+        assert_eq!(at_ca.len(), 1);
+        assert_eq!((&at_ca[0].request_id, &at_ca[0].code), (&pending.request, &pending.code));
+        let EnrollOutcome::Pending(again) =
+            enroll(&node.admin, approval_request(node.fingerprint, "admin", "tablet", false))
+                .await
+                .expect("asking again")
+        else {
+            panic!("still pending")
+        };
+        assert_eq!((again.request, again.key), (pending.request.clone(), pending.key.clone()));
+        assert_eq!(state(&node).0.len(), 1, "one key for one request");
+
+        let crate::enroll::tests::Node {
+            admin,
+            approvals,
+            fingerprint,
+            shutdown,
+            ..
+        } = node;
+        let admin = Arc::new(admin);
+        // The daemon that made the request stops while its status Interest
+        // is held; the next start resumes from `<pib>/requests/`.
+        let before_restart = CancellationToken::new();
+        spawn_status_watch(Arc::clone(&admin), before_restart.clone());
+        tokio::time::sleep(settle).await;
+        before_restart.cancel();
+        let cancel = CancellationToken::new();
+        spawn_status_watch(Arc::clone(&admin), cancel.clone());
+        tokio::time::sleep(settle).await;
+        approvals
+            .decide_locally(&pending.code, ndn_cert::Decision::Approve, "uid 1000 (alice)")
+            .unwrap();
+        let OutgoingState::Issued { certificate } =
+            resolved(&admin, &pending.request, at_once).await.state
+        else {
+            panic!("approved: issued")
+        };
+        let key: Name = pending.key.parse().unwrap();
+        let pib = FilePib::open(device.path()).unwrap();
+        assert!(certificate.starts_with(&pending.key));
+        assert!(pib.get_issued_cert(&key).unwrap().is_some());
+        assert_eq!(
+            pib.get_default_identity().unwrap(),
+            Some("/home/bob/admin/tablet".parse().unwrap())
+        );
+
+        let EnrollOutcome::Pending(relay) =
+            enroll(&admin, approval_request(fingerprint, "node", "relay", true))
+                .await
+                .expect("the request is made")
+        else {
+            panic!("a node certificate waits for an admin's approval")
+        };
+        tokio::time::sleep(settle).await;
+        approvals
+            .decide_locally(
+                &relay.request,
+                ndn_cert::Decision::Deny {
+                    reason: "not my relay".into(),
+                },
+                "uid 1000 (alice)",
+            )
+            .unwrap();
+        let OutgoingState::Denied { reason } = resolved(&admin, &relay.request, at_once).await.state
+        else {
+            panic!("denied")
+        };
+        assert!(reason.contains("not my relay"), "{reason}");
+        let relay_key: Name = relay.key.parse().unwrap();
+        assert!(!pib.list_keys().unwrap().contains(&relay_key), "the denied key is deleted");
+        cancel.cancel();
+        shutdown.shutdown().await;
     }
 }

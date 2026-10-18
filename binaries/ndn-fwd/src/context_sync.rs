@@ -667,6 +667,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            requests_changed: tokio::sync::Notify::new(),
             context_sync: Some(sync),
         });
         groups.spawn(Arc::clone(&admin), cancel.child_token());
@@ -1128,6 +1129,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            requests_changed: tokio::sync::Notify::new(),
             context_sync: Some(sync),
         };
 

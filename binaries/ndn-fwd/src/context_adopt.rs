@@ -74,6 +74,10 @@ pub(crate) struct TrustAdmin {
     /// Woken whenever this node's certificates change (an enrollment, a
     /// renewal), so the renewal timer reads them again.
     pub(crate) certificates_changed: tokio::sync::Notify,
+    /// Woken when this node records a new request for an admin's approval,
+    /// so the status watch (`enroll::spawn_status_watch`) waits on it at
+    /// once.
+    pub(crate) requests_changed: tokio::sync::Notify,
     /// The namespaces' sync groups (`[security] context_sync`): every
     /// version this node keeps is handed to it, so the groups follow the
     /// namespaces held and the root device puts each new version into its
@@ -257,16 +261,15 @@ impl TrustAdmin {
         }
         Ok(stored)
     }
-}
 
-#[async_trait::async_trait]
-impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
-    async fn adopt(
+    /// Adopt the trust context `link` names (fetching it by name when the
+    /// link carries only the expected fingerprint), then keep it: stored
+    /// beside the PIB and published.
+    pub(crate) async fn adopt_link(
         &self,
-        link_uri: String,
+        link: &AnchorLink,
     ) -> Result<ndn_mgmt::AdoptedContextInfo, ndn_mgmt::TrustRefusal> {
         let refuse = |e: AdoptError| refusal(status_of(&e), e.to_string());
-        let link = AnchorLink::from_uri(&link_uri).map_err(refuse)?;
         // A fetched context must come from the forwarders serving the
         // namespace, not from this node's own publisher (which holds only the
         // versions this node already has).
@@ -277,20 +280,30 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         if link.context_data.is_none() {
             crate::context_publisher::forget_cached_metadata(&self.engine, &link.namespace);
         }
-        let adopted =
-            ndn_identity::adopt_anchor_link_via_engine(&self.engine, &self.keyring, &link)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(
-                        target: "security",
-                        namespace = %link.namespace,
-                        error = %e,
-                        "trust context not adopted"
-                    );
-                    refuse(e)
-                })?;
+        let adopted = ndn_identity::adopt_anchor_link_via_engine(&self.engine, &self.keyring, link)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    target: "security",
+                    namespace = %link.namespace,
+                    error = %e,
+                    "trust context not adopted"
+                );
+                refuse(e)
+            })?;
         drop(bypass);
         self.keep_adopted(&adopted, &link.expected_fingerprint)
+    }
+}
+
+#[async_trait::async_trait]
+impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
+    async fn adopt(
+        &self,
+        link_uri: String,
+    ) -> Result<ndn_mgmt::AdoptedContextInfo, ndn_mgmt::TrustRefusal> {
+        let link = AnchorLink::from_uri(&link_uri).map_err(|e| refusal(status_of(&e), e.to_string()))?;
+        self.adopt_link(&link).await
     }
 
     async fn enroll(
@@ -298,6 +311,10 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         request: ndn_mgmt::EnrollRequest,
     ) -> Result<ndn_mgmt::EnrollOutcome, ndn_mgmt::TrustRefusal> {
         crate::enroll::enroll(self, request).await
+    }
+
+    async fn enroll_status(&self) -> Result<Vec<ndn_cert::OutgoingRequest>, ndn_mgmt::TrustRefusal> {
+        crate::enroll::enroll_status(self)
     }
 
     async fn refresh_contexts(

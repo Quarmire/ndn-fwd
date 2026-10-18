@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{addr, now_unix, parse_utc};
 
+mod approval;
 mod compromised;
 mod destroyed;
 mod lifecycle;
@@ -17,6 +18,7 @@ pub const ALL: &[&str] = &[
     "recovery-destroyed",
     "recovery-compromised",
     "negatives",
+    "approval",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -26,6 +28,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "recovery-destroyed" => destroyed::run(sc),
         "recovery-compromised" => compromised::run(sc),
         "negatives" => negatives::run(sc),
+        "approval" => approval::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

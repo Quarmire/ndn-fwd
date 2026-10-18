@@ -45,6 +45,7 @@ fn build_obs_retention(
 }
 
 mod active_identity;
+mod approvals;
 mod context_adopt;
 mod context_publisher;
 mod context_refresh;
@@ -95,7 +96,7 @@ struct CliArgs {
 /// `--help` text. The parser is deliberately hand-rolled (the daemon stays
 /// dependency-light; only the tooling siblings use clap), so keep this in
 /// sync with the options `parse_args` accepts and the
-/// `init`/`adopt`/`enroll`/`revoke`/`context`/`schema`/`root-key`/
+/// `init`/`adopt`/`enroll`/`approvals`/`revoke`/`context`/`schema`/`root-key`/
 /// `recovery-kit`/`recover` subcommands
 /// `onboard::maybe_run` intercepts.
 fn print_help() {
@@ -110,6 +111,7 @@ USAGE:
                [--passphrase-file <path> | --pin-file <path>]
                [--yubikey-slot 9c] [--yubikey-serial <n>]
                [--touch-policy always|cached|never] [--replace-slot]
+               [-c <config>]
                                           create a namespace on this root
                                           device: its root key in a root store,
                                           and in the PIB its CA identity <ns>/CA,
@@ -118,7 +120,11 @@ USAGE:
                                           CA — device name default: the host
                                           name, sanitized — and a root-signed
                                           trust context carrying the generated
-                                          role schema), print its
+                                          role schema and the enrollment policy
+                                          ([ca] approval_roles /
+                                          approval_requires_invite of -c, else
+                                          admin, node by an admin's approval;
+                                          member, guest by invite), print its
                                           ndn-trust://anchor envelope and the
                                           [security] lines for ndn-fwd.toml,
                                           and exit. <store>: os-keyring (the
@@ -143,21 +149,46 @@ USAGE:
                                           without a daemon an inline context is
                                           verified and stored in <pib>/contexts/
   ndn-fwd enroll <invite-link> [--device <name>] [--force] [-c <config>]
-                                          enroll this node with the CA an
-                                          ndn-trust://invite link names: the
-                                          running daemon generates the key for
+  ndn-fwd enroll <anchor-link> --role admin|node [--device <name>] [--force]
+                 [-c <config>]
+                                          enroll this node with the CA of the
+                                          namespace the link names: the running
+                                          daemon generates the key for
                                           <ns>/<role>/<device> in its PIB
                                           (device default: the host name,
                                           sanitized), adopts the namespace's
-                                          trust context if it holds none, redeems
-                                          the token, stores the certificate and
-                                          makes it the PIB's default identity;
-                                          --force enrolls another key although the
-                                          node already holds a certificate there;
-                                          the CA certifies a new key for the same
-                                          <device> only once the old certificate
-                                          is revoked or an admin approves it, so
-                                          pick another --device otherwise
+                                          trust context if it holds none, and
+                                          — a member or guest — redeems the
+                                          invite's token, or — a role the
+                                          namespace certifies on an admin's
+                                          approval — answers pending with a
+                                          request id and a six-digit
+                                          verification code, then asks the CA
+                                          until an admin decides, across
+                                          restarts; it stores the certificate
+                                          and makes it the PIB's default
+                                          identity. --force enrolls another key
+                                          although the node already holds a
+                                          certificate there; the CA certifies a
+                                          new key for the same <device> only once
+                                          the old certificate is revoked or an
+                                          admin approves it, so pick another
+                                          --device otherwise
+  ndn-fwd enroll --status [-c <config>]   this node's requests for an admin's
+                                          approval: pending, issued, denied (and
+                                          why), expired
+  ndn-fwd approvals list [-c <config>]
+  ndn-fwd approvals approve <request-id | code> [-c <config>]
+  ndn-fwd approvals deny <request-id | code> [--reason <text>] [-c <config>]
+                                          list or decide requests for an admin's
+                                          approval: on the CA host its own
+                                          (recorded as decided by the local
+                                          operator), on an admin device those
+                                          of each namespace it administers
+                                          (signed with its admin key and pushed
+                                          to the namespace's CA); approve only
+                                          when the code matches the one the
+                                          new device shows
   ndn-fwd revoke <device-identity | key-name | cert-name> [--pib <dir>]
                 [-c <config>] [--passphrase-file <path> | --pin-file <path>]
                                           on the root device: sign, here, a new
@@ -198,6 +229,18 @@ USAGE:
                                           say whether <key-name> may sign
                                           <data-name> and which rule decides
                                           (exit status 1 on deny)
+  ndn-fwd schema update [--namespace <ns>] [--accept-narrowing] [-c <config>] [--pib <dir>]
+                                          on the root device: sign, here, a new
+                                          version of the namespace's trust
+                                          context carrying the current
+                                          generated schema (a namespace made by
+                                          an earlier release gains the rules
+                                          added since) and the enrollment
+                                          policy its CA enforces, and hand it
+                                          to the daemon. Prints the rules added
+                                          and removed; refused when a rule
+                                          devices hold would be removed, unless
+                                          --accept-narrowing
   ndn-fwd root-key status [--pib <dir>]   where this root device keeps its
                                           namespace root key
   ndn-fwd root-key move --to <store> [--pib <dir>]
@@ -1086,8 +1129,8 @@ async fn main() -> Result<()> {
 
     let published_contexts = context_publisher.map(|publisher| publisher.spawn(&engine));
 
-    // The CA's device-approval store (if it offers that challenge), shared
-    // with the mgmt `ca` module below, and its state, which follows every
+    // The CA's approval store (if it offers device-approval), shared with
+    // the mgmt `ca` module below, and its state, which follows every
     // trust-context version the daemon keeps (`TrustAdmin::keep`).
     let running_ca = match ca_spawn {
         Some(spawn) => {
@@ -1100,22 +1143,13 @@ async fn main() -> Result<()> {
                 face = spawn.face_id.0,
                 "CA FIB entry installed"
             );
-            if let Some(feed) = &spawn.feed {
-                engine.fib().add_nexthop(&feed.prefix, feed.face_id, 0);
-                tracing::info!(
-                    target: "ca",
-                    prefix = %feed.prefix,
-                    face = feed.face_id.0,
-                    "CA approval-feed FIB entry installed"
-                );
-            }
             Some(ca::spawn(spawn, &fwd_config.ca, &engine)?)
         }
         None => None,
     };
-    let (ca_approvals, ca_state) = match running_ca {
-        Some(running) => (running.approvals, Some(running.state)),
-        None => (None, None),
+    let (ca_approvals, ca_state, ca_status) = match running_ca {
+        Some(running) => (running.approvals, Some(running.state), running.status),
+        None => (None, None, None),
     };
 
     // This node's certificates, by name, so a peer validating its Data can
@@ -1160,6 +1194,7 @@ async fn main() -> Result<()> {
         context_change: tokio::sync::Mutex::new(()),
         renewing: tokio::sync::Mutex::new(()),
         certificates_changed: tokio::sync::Notify::new(),
+        requests_changed: tokio::sync::Notify::new(),
         context_sync,
     });
     context_refresh::spawn_periodic(
@@ -1176,6 +1211,16 @@ async fn main() -> Result<()> {
         Arc::clone(&trust_admin),
         fwd_config.security.renew_before,
         cancel.clone(),
+    );
+    // Finish this node's requests for an admin's approval (`ndn-fwd enroll
+    // --role admin|node`) the moment an admin decides (a held status
+    // Interest at the CA per request), across restarts.
+    enroll::spawn_status_watch(Arc::clone(&trust_admin), cancel.clone());
+    // `ca list-approvals / approve / deny`: this node's CA's requests (its
+    // local operator decides), and as an admin device those of the
+    // namespaces it administers (decided with its admin key).
+    let approval_handler: Arc<dyn mgmt_ndn::ApprovalMgmtBackend> = Arc::new(
+        approvals::DaemonApprovals::new(ca_approvals, Arc::clone(&trust_admin)),
     );
     let trust_context_handler: Arc<dyn mgmt_ndn::TrustAdminMgmtBackend> = trust_admin;
 
@@ -1309,11 +1354,7 @@ async fn main() -> Result<()> {
             #[cfg(not(feature = "webtransport"))]
             webtransport_status_handler: None,
             ble_handler,
-            // The CA's device-approval store (the same one its challenge and
-            // APPROVE-FEED use), so `ca list-approvals / approve / deny` act
-            // on live requests. None when the CA offers no device-approval.
-            approval_handler: ca_approvals
-                .map(|s| Arc::new(s) as Arc<dyn mgmt_ndn::ApprovalMgmtBackend>),
+            approval_handler: Some(approval_handler),
             trust_context_handler: Some(trust_context_handler),
             // Runtime-mutable mgmt-access policy. `policy-set` hot-flips
             // booleans; validator-anchor changes are `pending_restart`
@@ -1420,6 +1461,12 @@ async fn main() -> Result<()> {
     wait_for_shutdown_signal().await?;
 
     tracing::info!(target: "engine", "shutting down");
+    // The CA answers the status Interests it holds while the faces still
+    // forward, so devices waiting on a request ask the restarted CA instead
+    // of waiting out their Interests.
+    if let Some(status) = &ca_status {
+        status.release_held(std::time::Duration::from_secs(1)).await;
+    }
     cancel.cancel();
 
     let _ = ndn_handler_task.await;

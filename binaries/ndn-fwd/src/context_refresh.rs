@@ -654,6 +654,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            requests_changed: tokio::sync::Notify::new(),
             context_sync: None,
         };
 
@@ -716,6 +717,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            requests_changed: tokio::sync::Notify::new(),
             context_sync: None,
         };
 
@@ -782,6 +784,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            requests_changed: tokio::sync::Notify::new(),
             context_sync: None,
         });
         let cancel = CancellationToken::new();

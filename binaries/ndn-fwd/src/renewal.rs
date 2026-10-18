@@ -420,7 +420,7 @@ mod tests {
         let ndn_mgmt::EnrollOutcome::Enrolled(enrolled) =
             crate::enroll::enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
                 .await
-                .expect("enrolls");
+                .expect("enrolls") else { panic!("an invite enrolls at once") };
         let key: Name = enrolled.key.parse().unwrap();
         let (signing_before, _) = node.admin.signing.as_ref().unwrap().current();
         let before = stored(device.path(), &key);
@@ -456,7 +456,7 @@ mod tests {
         let ndn_mgmt::EnrollOutcome::Enrolled(enrolled) =
             crate::enroll::enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
                 .await
-                .expect("enrolls");
+                .expect("enrolls") else { panic!("an invite enrolls at once") };
         let key: Name = enrolled.key.parse().unwrap();
         let before = stored(device.path(), &key);
         node.ca.revoke_issued_under(&key);
@@ -477,7 +477,7 @@ mod tests {
         let ndn_mgmt::EnrollOutcome::Enrolled(enrolled) =
             crate::enroll::enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
                 .await
-                .expect("enrolls");
+                .expect("enrolls") else { panic!("an invite enrolls at once") };
         let key: Name = enrolled.key.parse().unwrap();
         let before = stored(device.path(), &key);
         let crate::enroll::tests::Node {
@@ -519,7 +519,7 @@ mod tests {
         let ndn_mgmt::EnrollOutcome::Enrolled(enrolled) =
             crate::enroll::enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
                 .await
-                .expect("enrolls");
+                .expect("enrolls") else { panic!("an invite enrolls at once") };
         let key: Name = enrolled.key.parse().unwrap();
         let lifetime = Duration::from_secs(enrolled.validity_secs);
         let crate::enroll::tests::Node {

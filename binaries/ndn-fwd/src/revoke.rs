@@ -183,7 +183,7 @@ fn plan(pib_dir: &Path, name: &Name) -> Result<Plan> {
 /// socket uses another PIB (it must not take a version made from this one).
 /// No daemon listening is no refusal: the version is stored for its next
 /// start.
-async fn check_daemon(args: &[String], pib_dir: &Path) -> Result<()> {
+pub(crate) async fn check_daemon(args: &[String], pib_dir: &Path) -> Result<()> {
     let socket = face_socket(args)?;
     match ndn_ipc::MgmtClient::connect(&socket).await {
         Ok(client) => ensure_daemon_pib(&client, &socket, pib_dir)
@@ -323,6 +323,7 @@ mod tests {
             context_change: tokio::sync::Mutex::new(()),
             renewing: tokio::sync::Mutex::new(()),
             certificates_changed: tokio::sync::Notify::new(),
+            requests_changed: tokio::sync::Notify::new(),
             context_sync: None,
         }
     }
@@ -332,7 +333,7 @@ mod tests {
         let EnrollOutcome::Enrolled(e) =
             crate::enroll::enroll(&node.admin, request(node, "member", token, "phone", true))
                 .await
-                .unwrap();
+                .unwrap() else { panic!("an invite enrolls at once") };
         (
             e.identity.parse().unwrap(),
             e.key.parse().unwrap(),

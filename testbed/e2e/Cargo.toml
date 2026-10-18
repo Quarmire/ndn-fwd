@@ -1,6 +1,6 @@
 [package]
 name = "ndn-e2e"
-description = "End-to-end harness: runs real ndn-fwd daemons and CLI binaries through the personal-namespace life cycle (init, adopt, enroll, renew, revoke, recovery) inside a throwaway user+network+PID namespace"
+description = "End-to-end harness: runs real ndn-fwd daemons and CLI binaries through the personal-namespace life cycle (init, adopt, enroll, approve, renew, revoke, recovery) inside a throwaway user+network+PID namespace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,7 +18,15 @@ path = "src/main.rs"
 # whose BIP39 checksum fails, so the refusal it asserts is the checksum's.
 bip39      = { version = "2.2", default-features = false, features = ["std"] }
 serde_json = { workspace = true }
-tokio      = { workspace = true, features = ["rt", "signal", "macros", "time"] }
+tokio      = { workspace = true, features = ["rt", "net", "signal", "macros", "time"] }
+# The `approval` scenario's one fixture: a version of the trust context
+# signed on the root device with the schema namespaces were created with
+# before `#deny`/`#pending` (no CLI signs a chosen schema), handed to the
+# root's daemon as `ndn-fwd revoke` hands its versions over.
+ndn-cert     = { workspace = true }
+ndn-ipc      = { workspace = true }
+ndn-packet   = { workspace = true, features = ["std"] }
+ndn-security = { workspace = true }
 
 [lints]
 workspace = true

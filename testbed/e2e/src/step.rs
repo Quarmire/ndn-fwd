@@ -439,7 +439,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--format", "--out", "--kit", "--keep-kit", "--anchor-fp", "--role", "--ttl", "--ca",
     "--count", "--identity", "--face-socket", "--lifetime", "-p", "-o", "--socket", "--face",
     "--words-file", "--kit-passphrase-file", "--passphrase-file", "--chunk-size",
-    "--freshness", "--timeout", "--bytes",
+    "--freshness", "--timeout", "--bytes", "--reason",
 ];
 
 /// Human inputs and concepts of one command, from its tool, subcommand,
@@ -500,7 +500,34 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
         }
         ("ndn-fwd", Some("enroll")) => {
             add(&mut concepts, "enroll".into());
+            if flags.iter().any(|(f, _)| f == "--status") {
+                add(&mut concepts, "enrollment request status".into());
+            }
             targets_from = 1;
+        }
+        ("ndn-fwd", Some("approvals")) => {
+            let verb = sub.get(1).copied().unwrap_or("");
+            add(&mut concepts, format!("admin's approval ({verb})"));
+            if let Some(t) = sub.get(2) {
+                let digits: String = t.chars().filter(|c| !matches!(c, ' ' | '-')).collect();
+                if digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_digit()) {
+                    add(
+                        &mut inputs,
+                        "verification code (compared with the requesting device's)".into(),
+                    );
+                } else {
+                    add(&mut inputs, format!("request id ({t})"));
+                }
+            }
+            targets_from = usize::MAX;
+        }
+        ("ndn-fwd", Some("schema")) => {
+            let verb = sub.get(1).copied().unwrap_or("");
+            add(&mut concepts, format!("trust schema ({verb})"));
+            if verb == "update" {
+                add(&mut concepts, "trust context version".into());
+            }
+            targets_from = usize::MAX;
         }
         ("ndn-fwd", Some("revoke")) => {
             add(&mut concepts, "revoke".into());
@@ -585,7 +612,13 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
                 &mut inputs,
                 "expected fingerprint (anchor_fp from init/recover)".into(),
             ),
+            "--role" if op.tool == "ndn-fwd" => add(&mut inputs, format!("requested role ({v})")),
             "--role" => add(&mut inputs, format!("invite role ({v})")),
+            "--reason" => add(&mut inputs, "reason for the denial".into()),
+            "--accept-narrowing" => add(
+                &mut inputs,
+                "--accept-narrowing (a schema that allows less)".into(),
+            ),
             "--ttl" => add(&mut inputs, format!("invite lifetime ({v})")),
             "--identity" if op.tool == "ndn-put" => {
                 add(&mut inputs, format!("signing identity ({v})"))

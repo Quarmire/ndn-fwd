@@ -34,13 +34,20 @@
 //!   daemon trusts, stores and publishes it at once. With no daemon, a link
 //!   with the context inline is verified and stored in `<pib>/contexts/`,
 //!   loaded at the next start; a fingerprint-only link needs the daemon.
-//! - `enroll` asks the running daemon to enroll with the CA an invite link
-//!   (`ndn-trust://invite/…`) names, as `<ns>/<role>/<device>` (`--device`,
-//!   default derived from the host name): the daemon generates the key in its
-//!   PIB, adopts the namespace's trust context if it holds none, redeems the
-//!   token and makes the certified identity the PIB's default (see
-//!   [`crate::enroll`]). There is no offline form: the key belongs to the
-//!   daemon and the CA is reached through it.
+//! - `enroll` asks the running daemon to enroll as `<ns>/<role>/<device>`
+//!   (`--device`, default derived from the host name) with the CA of the
+//!   namespace a link names: an invite link (`ndn-trust://invite/…`) for a
+//!   member or guest — the token is redeemed at once — or, with `--role
+//!   admin|node`, the namespace's anchor link (`ndn-trust://anchor/…`) for a
+//!   role it certifies on an admin's approval: the daemon answers `pending`
+//!   with the request id and the verification code to compare with the
+//!   admin's screen, and finishes on its own once an admin approves (see
+//!   [`crate::enroll`]). `enroll --status` lists those requests. There is no
+//!   offline form: the key belongs to the daemon and the CA is reached
+//!   through it.
+//! - `approvals list | approve | deny` decides requests for an admin's
+//!   approval, on the CA host or on an admin device (see
+//!   [`crate::approvals`]).
 //! - `renew` asks the running daemon to renew, now, every certificate the
 //!   namespace CA issued to its keys — the same key, re-certified on proof
 //!   of the current certificate, no invite (see [`crate::renewal`]).
@@ -59,9 +66,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use ndn_cert::roles::sanitize_device_name;
+use ndn_cert::roles::{Role, device_identity, sanitize_device_name};
 use ndn_cert::{
-    AnchorLink, InviteLink, adopt_envelope_into_store, anchor_fingerprint, init_namespace_in_pib,
+    AnchorLink, ApprovalPolicy, InviteLink, adopt_envelope_into_store, anchor_fingerprint,
+    init_namespace_in_pib_with,
 };
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
@@ -80,12 +88,13 @@ pub async fn maybe_run() -> Option<Result<()>> {
     }
     match command {
         "init" => Some(run_init(&args[2..]).await),
+        "approvals" => Some(crate::approvals::run(&args[2..]).await),
         "adopt" => Some(run_adopt(&args[2..]).await),
         "enroll" => Some(run_enroll(&args[2..]).await),
         "revoke" => Some(crate::revoke::run(&args[2..]).await),
         "renew" => Some(run_renew(&args[2..]).await),
         "context" => Some(run_context(&args[2..]).await),
-        "schema" => Some(crate::schema_cmd::run(&args[2..])),
+        "schema" => Some(crate::schema_cmd::run(&args[2..]).await),
         "root-key" => Some(crate::root_key::run(&args[2..]).await),
         "recovery-kit" => Some(crate::recovery_kit::run(&args[2..]).await),
         "recover" => Some(crate::recover::run(&args[2..]).await),
@@ -98,6 +107,8 @@ pub async fn maybe_run() -> Option<Result<()>> {
 pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--namespace",
     "--device",
+    "--role",
+    "--reason",
     "--pib",
     "-c",
     "--config",
@@ -155,10 +166,28 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
         positionals: 1,
     }),
     ("enroll", None, ArgSpec {
-        values: &["--device", "-c", "--config"],
+        values: &["--device", "--role", "-c", "--config"],
         repeatable: &[],
-        switches: &["--force"],
+        switches: &["--force", "--status"],
         positionals: 1,
+    }),
+    ("approvals", Some("list"), ArgSpec {
+        values: &["-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 1,
+    }),
+    ("approvals", Some("approve"), ArgSpec {
+        values: &["-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 2,
+    }),
+    ("approvals", Some("deny"), ArgSpec {
+        values: &["--reason", "-c", "--config"],
+        repeatable: &[],
+        switches: &[],
+        positionals: 2,
     }),
     ("revoke", None, ArgSpec {
         values: &["--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
@@ -189,6 +218,12 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
         repeatable: &[],
         switches: &[],
         positionals: 3,
+    }),
+    ("schema", Some("update"), ArgSpec {
+        values: &["--namespace", "--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
+        repeatable: &[],
+        switches: &["--accept-narrowing"],
+        positionals: 1,
     }),
     ("root-key", Some("status"), ArgSpec {
         values: &["--pib", "-c", "--config"],
@@ -383,13 +418,26 @@ async fn run_init(args: &[String]) -> Result<()> {
     };
     let force = args.iter().any(|a| a == "--force");
     let pib_dir = pib_dir(args)?;
+    // What enrollment needs an admin's approval for: `[ca]` of `-c`, else
+    // the default. The context advertises it, and the CA enforces exactly
+    // what the context advertises.
+    let approval = match flag(args, &["-c", "--config"]) {
+        Some(path) => {
+            let toml = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
+            let cfg: ForwarderConfig = toml
+                .parse()
+                .with_context(|| format!("parse config {path}"))?;
+            crate::ca::configured_policy(&cfg.ca)?.unwrap_or_default()
+        }
+        None => ApprovalPolicy::default(),
+    };
     // Where the root goes, and its passphrase / PIN — asked now, never
     // taken from the command line.
     let root = crate::root_key::new_root_store(args)?;
     let pib =
         FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
 
-    let out = init_namespace_in_pib(&pib, &namespace, &device, force, &root).await?;
+    let out = init_namespace_in_pib_with(&pib, &namespace, &device, force, &root, &approval).await?;
     drop(root);
     let root_dev = &out.init;
     // The daemon may run from another directory: print an absolute path.
@@ -414,7 +462,7 @@ async fn run_init(args: &[String]) -> Result<()> {
         root_dev.context.version()
     );
     println!("schema         = generated namespace schema (see `ndn-fwd schema show`)");
-    println!("enrollment     = token AND device-approval");
+    println!("enrollment     = {}", approval.describe());
     println!("anchor_uri     = {}", root_dev.envelope.to_uri());
     println!(
         "anchor_url     = {}",
@@ -434,11 +482,29 @@ async fn run_init(args: &[String]) -> Result<()> {
     println!("# form (namespace + expected fingerprint + version): the adopting device's");
     println!("# daemon fetches the context by name, so it needs a link and a route to this node.");
     println!("# Adopting lets a peer VERIFY this namespace; producing still needs enrollment as");
-    println!("# {namespace}/<role>/<device>: members and guests by invite token");
-    println!(
-        "# (ndn-fwd-tokens new --ca {namespace} --namespace {namespace} --anchor-fp {anchor_fp}"
-    );
-    println!("#  --role member|guest), admins and relays by device approval.");
+    println!("# {namespace}/<role>/<device> ({}):", approval.describe());
+    let invited: Vec<&str> = [Role::Member, Role::Guest]
+        .into_iter()
+        .filter(|r| !approval.roles.contains(r))
+        .map(|r| r.as_str())
+        .collect();
+    if !invited.is_empty() {
+        println!(
+            "#  - by invite: ndn-fwd-tokens new --ca {namespace} --namespace {namespace} \
+             --anchor-fp {anchor_fp} --role {}",
+            invited.join("|")
+        );
+        println!("#    then `ndn-fwd enroll <invite link>` on the device;");
+    }
+    if !approval.roles.is_empty() {
+        let roles: Vec<&str> = approval.roles.iter().map(|r| r.as_str()).collect();
+        let link = if approval.invite_also { "<invite link>" } else { "<anchor_uri>" };
+        println!(
+            "#  - on an admin's approval: `ndn-fwd enroll {link} --role {}` on the device, then",
+            roles.join("|")
+        );
+        println!("#    compare its code and `ndn-fwd approvals approve <code>` here or on an admin device.");
+    }
     for line in &root_lines[1..] {
         println!("{line}");
     }
@@ -592,27 +658,73 @@ fn adopt_offline(
 
 /// How long the CLI waits for the daemon to enroll: the check of the held
 /// trust context, then the longest the daemon's enrollment can take (every
-/// exchange timing out), plus a margin for the key generation and storing.
+/// exchange timing out — an adoption on the way, then the invite's
+/// exchanges or the first request for an admin's approval), plus a margin
+/// for the key generation and storing.
 fn daemon_enroll_timeout() -> std::time::Duration {
     crate::enroll::context_check_budget()
-        + ndn_identity::enroll_via_engine_budget()
+        + ndn_identity::enroll_via_engine_budget().max(
+            ndn_app::DEFAULT_TIMEOUT * 2 + ndn_identity::poll_via_engine_budget(),
+        )
         + std::time::Duration::from_secs(5)
 }
 
+/// What `ndn-fwd enroll <link>` asks for: the namespace and the identity.
+fn enroll_target(uri: &str, role: Option<&str>, device: &str) -> Result<(Name, Name)> {
+    let role = role
+        .map(|r| {
+            r.parse::<Role>()
+                .map_err(|e| anyhow::anyhow!("enroll refused: --role {r:?}: {e}"))
+        })
+        .transpose()?;
+    if let Ok(invite) = InviteLink::from_uri(uri) {
+        let identity = match role {
+            Some(role) if role != invite.role => device_identity(&invite.namespace, role, device)
+                .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?,
+            _ => invite
+                .device_identity(device)
+                .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?,
+        };
+        return Ok((invite.namespace, identity));
+    }
+    let anchor = AnchorLink::from_uri(uri).map_err(|e| {
+        anyhow::anyhow!(
+            "enroll refused: the link is neither an invite (`ndn-fwd-tokens new` prints one) nor \
+             the namespace's anchor link (`ndn-fwd init` prints it as anchor_uri): {e}"
+        )
+    })?;
+    let Some(role) = role else {
+        bail!(
+            "enroll refused: an anchor link names no role; add --role admin or --role node (a \
+             role {} certifies on an admin's approval), or enroll a member or guest with an \
+             invite link",
+            anchor.namespace
+        );
+    };
+    let identity = device_identity(&anchor.namespace, role, device)
+        .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?;
+    Ok((anchor.namespace, identity))
+}
+
 async fn run_enroll(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "--status") {
+        if let Some(extra) = positionals(args).first() {
+            bail!("`ndn-fwd enroll --status` takes no link (got {extra:?})");
+        }
+        return run_enroll_status(args).await;
+    }
     let uri = *positionals(args).first().context(
-        "enroll requires an <invite link> (an ndn-trust://invite URI or its https mirror, as \
-         `ndn-fwd-tokens new` prints it)",
+        "enroll requires a link: an <invite link> (an ndn-trust://invite URI or its https \
+         mirror, as `ndn-fwd-tokens new` prints it), or the namespace's <anchor link> with \
+         --role admin|node (`ndn-fwd init` prints it as anchor_uri)",
     )?;
-    // Read it here first so a malformed invite is reported without a daemon.
-    let invite = InviteLink::from_uri(uri).map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?;
     let device = match flag(args, &["--device"]) {
         Some(device) => device.to_string(),
         None => default_device()?,
     };
-    let identity = invite
-        .device_identity(&device)
-        .map_err(|e| anyhow::anyhow!("enroll refused: {e}"))?;
+    // Read the link here first so a malformed one is reported without a
+    // daemon.
+    let (namespace, identity) = enroll_target(uri, flag(args, &["--role"]), &device)?;
     let force = args.iter().any(|a| a == "--force");
     let socket = face_socket(args)?;
     let client = ndn_ipc::MgmtClient::connect(&socket).await.map_err(|e| {
@@ -620,8 +732,7 @@ async fn run_enroll(args: &[String]) -> Result<()> {
             "enroll refused: the daemon is not reachable at {socket} ({e}). The running daemon \
              enrolls: it generates the key in its own PIB and reaches the CA through its faces. \
              Start ndn-fwd (with `-c <config>` if it uses another socket), give it a face and a \
-             route for {} toward a forwarder that serves it, and retry",
-            invite.namespace
+             route for {namespace} toward a forwarder that serves it, and retry"
         )
     })?;
     let wait = daemon_enroll_timeout();
@@ -629,11 +740,10 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         Ok(resp) => resp,
         Err(ndn_ipc::ForwarderError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => bail!(
             "no answer from the daemon at {socket} within {}s. It may still complete the \
-             enrollment: check `ndn-ctl status` (signing: identity=…) or the daemon's log \
-             before retrying — once it holds a certificate in {}, enrolling again is refused \
-             as already enrolled",
+             enrollment: check `ndn-fwd enroll --status`, `ndn-ctl status` (signing: \
+             identity=…) or the daemon's log before retrying — once it holds a certificate in \
+             {namespace}, enrolling again is refused as already enrolled",
             wait.as_secs(),
-            invite.namespace
         ),
         Err(e) => {
             return Err(e).with_context(|| format!("ask the daemon at {socket} to enroll"));
@@ -644,12 +754,15 @@ async fn run_enroll(args: &[String]) -> Result<()> {
     }
     let outcome: ndn_mgmt::EnrollOutcome = serde_json::from_str(&resp.status_text)
         .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
-    let ndn_mgmt::EnrollOutcome::Enrolled(info) = outcome;
     println!("# ndn-fwd enroll (by the running daemon at {socket})");
-    match &info.adopted_context {
+    let adopted = match &outcome {
+        ndn_mgmt::EnrollOutcome::Enrolled(info) => &info.adopted_context,
+        ndn_mgmt::EnrollOutcome::Pending(info) => &info.adopted_context,
+    };
+    match adopted {
         Some(ctx) => {
             println!(
-                "trust_context    = adopted {} v{} ({}; root fingerprint {} as the invite \
+                "trust_context    = adopted {} v{} ({}; root fingerprint {} as the link \
                  expects)",
                 ctx.namespace,
                 ctx.version,
@@ -663,16 +776,22 @@ async fn run_enroll(args: &[String]) -> Result<()> {
             println!("context_stored   = {}", ctx.stored);
         }
         None => println!(
-            "trust_context    = {} (already held; signed by the root the invite expects)",
-            invite.namespace
+            "trust_context    = {namespace} (already held; signed by the root the link expects)"
         ),
     }
+    let info = match outcome {
+        ndn_mgmt::EnrollOutcome::Enrolled(info) => info,
+        ndn_mgmt::EnrollOutcome::Pending(pending) => {
+            print_pending(&pending);
+            return Ok(());
+        }
+    };
     println!("identity         = {}", info.identity);
     println!("key              = {} (generated in the daemon's PIB)", info.key);
     println!("certificate      = {}", info.certificate);
     println!(
         "issued_by        = {} (chain checked to the root of {} under its schema)",
-        info.issuer, invite.namespace
+        info.issuer, namespace
     );
     println!(
         "valid_until      = {} ({}, as the CA's policy decides)",
@@ -725,6 +844,69 @@ async fn run_enroll(args: &[String]) -> Result<()> {
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// A `pending` enrollment, as `ndn-fwd enroll` prints it.
+fn print_pending(info: &ndn_mgmt::PendingEnrollInfo) {
+    println!("state            = pending (waiting for an admin's approval)");
+    println!("identity         = {}", info.identity);
+    println!("key              = {} (generated in the daemon's PIB)", info.key);
+    println!("ca               = {}", info.ca);
+    println!("request          = {}", info.request);
+    println!("code             = {}", info.code);
+    if !info.expires.is_empty() {
+        println!("expires          = {}", info.expires);
+    }
+    println!();
+    println!("# On an admin device of {} (or its root device), run", info.namespace);
+    println!("#   ndn-fwd approvals list");
+    println!("# check it shows the code {} for this request, then", info.code);
+    println!("#   ndn-fwd approvals approve {}", info.code.replace(' ', ""));
+    println!("# The daemon waits on the CA for the decision, across restarts, and installs");
+    println!("# the certificate the moment it is approved; `ndn-fwd enroll --status` shows");
+    println!("# where the request stands (a denial says why).");
+}
+
+/// `ndn-fwd enroll --status`: this node's requests for an admin's approval.
+async fn run_enroll_status(args: &[String]) -> Result<()> {
+    let (client, socket) = daemon(args, "enroll --status").await?;
+    let resp = client
+        .security_enroll_status(std::time::Duration::from_secs(10))
+        .await
+        .with_context(|| format!("ask the daemon at {socket} for its requests"))?;
+    if !resp.is_ok() {
+        bail!("enroll --status refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+    }
+    let requests: Vec<ndn_cert::OutgoingRequest> = serde_json::from_str(&resp.status_text)
+        .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
+    println!("# ndn-fwd enroll --status (by the running daemon at {socket})");
+    if requests.is_empty() {
+        println!("# this node made no request for an admin's approval");
+    }
+    for r in &requests {
+        println!();
+        println!("identity  = {}", r.identity);
+        println!("state     = {}", r.state.as_str());
+        println!("ca        = {}", r.ca_prefix);
+        println!("request   = {}", r.request_id);
+        println!("code      = {}", r.code);
+        println!("key       = {}", r.key_name);
+        println!("asked     = {}", ndn_cert::approval::iso_secs(r.created_secs));
+        match &r.state {
+            ndn_cert::OutgoingState::Pending => {
+                if r.expires_secs != 0 {
+                    println!("expires   = {}", ndn_cert::approval::iso_secs(r.expires_secs));
+                }
+            }
+            ndn_cert::OutgoingState::Issued { certificate } => {
+                println!("certificate = {certificate}");
+            }
+            ndn_cert::OutgoingState::Denied { reason }
+            | ndn_cert::OutgoingState::Expired { reason }
+            | ndn_cert::OutgoingState::Failed { reason } => println!("reason    = {reason}"),
         }
     }
     Ok(())

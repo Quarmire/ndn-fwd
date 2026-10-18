@@ -16,8 +16,10 @@ Every token carries the role it admits — `member-<hex>` (default) or
 `<namespace>/<role>`, so a member invite can never certify an admin or a
 guest, and the invite names `<namespace>/<role>` as the invitee's identity
 namespace. `--role admin` and `--role node` are refused: admin devices and
-relays (`node` role) enroll with the `device-approval` challenge and an admin
-approves them.
+relays (`node` role) need an admin's approval — on the new device run
+`ndn-fwd enroll <anchor link> --role admin` (or `node`), then on the CA host
+or an admin device run `ndn-fwd approvals approve <code>` with the code it
+shows.
 
 The CLI does **not** talk to a running `ndn-fwd` — tokens go into
 `[ca].tokens` in the TOML config, and the forwarder picks them
@@ -60,7 +62,7 @@ CLI flags only.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--role` | `member` | `member` or `guest`; `admin`/`node` are refused (device approval only). |
+| `--role` | `member` | `member` or `guest`; `admin`/`node` are refused: `ndn-fwd enroll <anchor link> --role admin`, then `ndn-fwd approvals approve <code>`. |
 | `--count` | `1` | How many tokens to mint. |
 | `--ttl` | none | How long the invite can be redeemed: seconds, or `90m`, `12h`, `7d`. The expiry is written into the token (`…-until<unix-secs>`), so it holds however long the token sits in `[ca].tokens`; the CA refuses the token after it, and `ndn-fwd enroll` refuses the invite before contacting the CA. |
 | `--bytes` | `16` | Token byte length (128 bits → small QR). |

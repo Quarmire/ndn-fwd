@@ -319,6 +319,11 @@ impl World {
     pub fn certs(&self, node: &str) -> Vec<String> {
         certs_in(&self.bins, &self.node(node).pib())
     }
+
+    /// Key names in a PIB, with or without a certificate (`ndn-sec list`).
+    pub fn keys(&self, node: &str) -> Vec<String> {
+        keys_in(&self.bins, &self.node(node).pib())
+    }
 }
 
 impl Drop for World {
@@ -367,6 +372,24 @@ pub fn certs_in(bins: &Bins, pib: &Path) -> Vec<String> {
         .lines()
         .filter_map(|l| l.trim().strip_prefix("cert "))
         .map(|s| s.trim().to_owned())
+        .collect()
+}
+
+pub fn keys_in(bins: &Bins, pib: &Path) -> Vec<String> {
+    if !pib.exists() {
+        return Vec::new();
+    }
+    let out = bins
+        .op("ndn-sec")
+        .arg("--pib")
+        .arg(pib.display().to_string())
+        .arg("list")
+        .run();
+    out.stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('/'))
+        .map(str::to_owned)
         .collect()
 }
 

@@ -14,8 +14,10 @@
 //!
 //! A PIB-backed CA identity `/<ns>/CA` serves the namespace `/<ns>`:
 //! issuance follows the role layout ([`RolePolicy`]) — device keys
-//! `/<ns>/<role>/<device>/KEY/…` only; `admin` and `node` certs need a device
-//! approval, tokens admit members and (guest-scoped) guests. An invite token
+//! `/<ns>/<role>/<device>/KEY/…` only; the roles the namespace's trust
+//! context certifies on an admin's approval (its enrollment hint, default
+//! `admin` and `node`; [`ApprovalPolicy`]) need one, tokens admit members
+//! and (guest-scoped) guests. An invite token
 //! minted with a role (`ndn-fwd-tokens new --role guest` → `guest-<hex>`) is
 //! scoped to `/<ns>/<role>`, so it cannot certify any other role. Each role's
 //! certificates last its `[ca] cert_validity_days`, and a device holding a
@@ -26,38 +28,43 @@
 //! namespace root under the node's trust contexts; the CA then serves that
 //! earlier CA's certificate.
 //!
-//! A `device-approval` challenge holds each request in ONE
-//! [`PendingApprovalStore`], shared by the challenge, the mgmt
-//! `ca list-approvals / approve / deny` backend, and the validated
-//! `/<prefix>/CA/APPROVE-FEED` (approvals checked against the node's trust
-//! contexts).
+//! Enrollment by an admin's approval ([`ndn_cert::approval`]): the
+//! `device-approval` challenge — offered by a namespace CA whether listed or
+//! not — keeps one durable record per requesting key in an
+//! [`ApprovalStore`] persisted under `<pib>/ca/approvals/`, so a pending
+//! request survives a restart of the CA. The same store backs the mgmt `ca
+//! list-approvals / approve / deny` verbs (the CA host's local operator) and
+//! `/<prefix>/CA/APPROVAL` + `/<prefix>/CA/PENDING` (an admin device's signed
+//! decisions, validated under the node's trust contexts). The policy is the
+//! one the namespace's trust context advertises: `[ca] approval_roles` /
+//! `approval_requires_invite`, when set, must agree with it, or the CA
+//! refuses to start.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use ndn_app::{Consumer, Producer};
-use ndn_cert::challenge::device_approval::{DeviceApprovalChallenge, PendingApprovalStore};
+use ndn_app::Producer;
+use ndn_cert::approval::{ApprovalStore, DEVICE_APPROVAL};
+use ndn_cert::challenge::device_approval::DeviceApprovalChallenge;
 use ndn_cert::namespace::{ANCHOR_CERT_FILE, CA_CERT_FILE, CA_DIR};
 use ndn_cert::roles::{Role, role_prefix, token_expiry, token_role};
 use ndn_cert::{
-    CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore, IssuanceContext,
-    IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge, RequireAttestationKind,
-    RolePolicy, SingleKeyIdentity, TokenChallenge, TokenStore,
+    ApprovalPolicy, CaStore, ChallengeHandler, EmailChallenge, EmailSender, FileCaStore,
+    IssuanceContext, IssuanceDecision, IssuancePolicy, NopChallenge, PinChallenge,
+    RequireAttestationKind, RolePolicy, SingleKeyIdentity, TokenChallenge, TokenStore,
 };
 use ndn_config::CaTomlConfig;
 use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
-use ndn_identity::{ApprovalFeed, NdncertCa};
+use ndn_identity::NdncertCa;
 use ndn_packet::Name;
 use ndn_security::{Certificate, FilePib, KeyChain, SecurityManager, Validator};
 use ndn_transport::FaceId;
 
 pub(crate) const CA_FACE_ID: u64 = 0xFFFF_0002;
-const APPROVE_FEED_FACE_ID: u64 = 0xFFFF_0003;
-const APPROVE_SIDE_FACE_ID: u64 = 0xFFFF_0004;
 
-/// Artefacts retained until post-build: the in-process faces' handles, the
+/// Artefacts retained until post-build: the in-process face's handle, the
 /// CA prefix, the signing keychain and the challenge set.
 pub(crate) struct CaSpawn {
     pub handle: InProcHandle,
@@ -65,9 +72,6 @@ pub(crate) struct CaSpawn {
     /// CA namespace; NDNCERT names are `/<prefix>/CA/...` and issued certs
     /// live under it, so one FIB entry covers both.
     pub prefix: Name,
-    /// `/<prefix>/CA/APPROVE-FEED` faces, present with a `device-approval`
-    /// challenge.
-    pub feed: Option<ApproveFeedFaces>,
     keychain: KeyChain,
     /// `/localhop` trust anchor: the namespace root (PIB mode) or the CA's own
     /// self-signed cert (ephemeral mode).
@@ -76,24 +80,21 @@ pub(crate) struct CaSpawn {
     /// `/<ns>/CA` identity): issuance follows its role layout. `None` for an
     /// ephemeral demo CA, which keeps accepting any challenge-passing name.
     namespace: Option<Name>,
+    /// What needs an admin's approval: what the namespace's trust context
+    /// advertises (a namespace CA only).
+    approval_policy: Option<ApprovalPolicy>,
     challenges: Vec<Box<dyn ChallengeHandler>>,
-    approvals: Option<PendingApprovalStore>,
+    approvals: Option<ApprovalStore>,
     store: Option<Arc<FileCaStore>>,
 }
 
-pub(crate) struct ApproveFeedFaces {
-    pub prefix: Name,
-    pub face_id: FaceId,
-    handle: InProcHandle,
-    side: InProcHandle,
-}
-
 /// Validate `[ca]`, load (or, with `ephemeral`, mint) the CA identity and
-/// build the challenge set. Returns the faces to attach to the builder and
+/// build the challenge set. Returns the face to attach to the builder and
 /// the [`CaSpawn`] retained for post-build FIB wiring and the task spawn.
 /// Fails — so the forwarder refuses to start — on a CA with no challenge, a
-/// prefix ending in `/CA`, or a missing / inconsistent PIB identity.
-/// `pib_path` is the configured `[security] pib_path` (unused when
+/// prefix ending in `/CA`, a missing / inconsistent PIB identity, or an
+/// approval policy in `[ca]` that disagrees with the namespace's trust
+/// context. `pib_path` is the configured `[security] pib_path` (unused when
 /// `ephemeral`).
 pub(crate) async fn prepare(
     cfg: &CaTomlConfig,
@@ -146,44 +147,133 @@ pub(crate) async fn prepare(
     // Role-carrying invite tokens are scoped under the namespace (the CA
     // prefix for an ephemeral demo CA); on a namespace CA every token is.
     let token_ns = namespace.clone().unwrap_or_else(|| prefix.clone());
-    let (challenges, approvals) =
-        build_challenges(cfg, store.as_ref(), &token_ns, namespace.is_some())?;
+    let approval_policy = match &namespace {
+        Some(ns) => Some(approval_policy(cfg, advertised_policy(pib_path, ns)?)?),
+        None => None,
+    };
+    let ttl = days(cfg.approval_request_ttl_days);
+    if ttl.is_zero() {
+        bail!(
+            "[ca] approval_request_ttl_days = 0 would expire every request for an admin's \
+             approval at once; set how many days a request waits for a decision (default {})",
+            CaTomlConfig::DEFAULT_APPROVAL_REQUEST_TTL_DAYS
+        );
+    }
+    let approval_store = || match &store {
+        Some(store) => ApprovalStore::with_store(
+            prefix.clone(),
+            namespace.clone(),
+            ttl,
+            Arc::clone(store) as Arc<dyn CaStore>,
+        )
+        .map_err(|e| anyhow::anyhow!("[ca] loading the approval requests: {e}")),
+        None => Ok(ApprovalStore::new(prefix.clone(), namespace.clone(), ttl)),
+    };
+    let (challenges, approvals) = build_challenges(
+        cfg,
+        store.as_ref(),
+        &token_ns,
+        approval_policy.as_ref().map(|p| (namespace.as_ref().unwrap_or(&prefix), p)),
+        approval_store,
+    )?;
 
     let face_id = FaceId(CA_FACE_ID);
     let (face, handle) = InProcFace::new(face_id, 64);
-    let mut faces = vec![face];
-
-    let feed = if approvals.is_some() {
-        let feed_id = FaceId(APPROVE_FEED_FACE_ID);
-        let (feed_face, feed_handle) = InProcFace::new(feed_id, 64);
-        let (side_face, side_handle) = InProcFace::new(FaceId(APPROVE_SIDE_FACE_ID), 64);
-        faces.push(feed_face);
-        faces.push(side_face);
-        Some(ApproveFeedFaces {
-            prefix: prefix.clone().append("CA").append("APPROVE-FEED"),
-            face_id: feed_id,
-            handle: feed_handle,
-            side: side_handle,
-        })
-    } else {
-        None
-    };
 
     Ok((
-        faces,
+        vec![face],
         CaSpawn {
             handle,
             face_id,
             prefix,
-            feed,
             keychain,
             anchor,
             namespace,
+            approval_policy,
             challenges,
             approvals,
             store,
         },
     ))
+}
+
+/// The approval policy the newest stored trust context of `namespace`
+/// advertises (its enrollment hint); `None` when no stored context
+/// advertises one (contexts made before the hint carried it).
+fn advertised_policy(pib_path: &Path, namespace: &Name) -> Result<Option<(u64, ApprovalPolicy)>> {
+    let stored = ndn_cert::read_stored_contexts(pib_path)
+        .map_err(|e| anyhow::anyhow!("[ca] reading the stored trust contexts: {e}"))?;
+    Ok(stored
+        .into_iter()
+        .filter_map(|(_, ctx)| ctx.ok())
+        .filter(|(ctx, _)| ctx.namespace() == namespace)
+        .max_by_key(|(ctx, _)| ctx.version())
+        .and_then(|(ctx, _)| {
+            let policy = ApprovalPolicy::from_hint(ctx.enrollment_hint()?)?;
+            Some((ctx.version(), policy))
+        }))
+}
+
+/// The approval policy a namespace CA enforces: what its trust context
+/// advertises (`advertised`: its version and policy). `[ca]
+/// approval_roles` / `approval_requires_invite` only state it again, and
+/// the CA refuses to start when they disagree — the devices read the
+/// policy from the context. A context that advertises none (made before
+/// the hint carried it) takes the `[ca]` keys, else the default.
+pub(crate) fn approval_policy(
+    cfg: &CaTomlConfig,
+    advertised: Option<(u64, ApprovalPolicy)>,
+) -> Result<ApprovalPolicy> {
+    let configured = configured_policy(cfg)?;
+    let Some((version, advertised)) = advertised else {
+        return Ok(configured.unwrap_or_default());
+    };
+    let sorted = |roles: &[Role]| {
+        let mut roles = roles.to_vec();
+        roles.sort_by_key(|r| r.as_str());
+        roles.dedup();
+        roles
+    };
+    let disagrees = configured.is_some_and(|c| {
+        (cfg.approval_roles.is_some() && sorted(&c.roles) != sorted(&advertised.roles))
+            || (cfg.approval_requires_invite.is_some() && c.invite_also != advertised.invite_also)
+    });
+    if disagrees {
+        let roles: Vec<String> = advertised.roles.iter().map(|r| format!("{:?}", r.as_str())).collect();
+        bail!(
+            "[ca] approval_roles / approval_requires_invite disagree with the namespace's trust \
+             context (v{version}), which advertises: {}. Devices read the policy from the \
+             context, so the CA enforces exactly that: set approval_roles = [{}] and \
+             approval_requires_invite = {} in [ca], or remove both keys",
+            advertised.describe(),
+            roles.join(", "),
+            advertised.invite_also
+        );
+    }
+    Ok(advertised)
+}
+
+/// The policy `[ca] approval_roles` / `approval_requires_invite` state;
+/// `None` when neither is set. Refuses an unknown role.
+pub(crate) fn configured_policy(cfg: &CaTomlConfig) -> Result<Option<ApprovalPolicy>> {
+    if cfg.approval_roles.is_none() && cfg.approval_requires_invite.is_none() {
+        return Ok(None);
+    }
+    let defaults = ApprovalPolicy::default();
+    let roles = match &cfg.approval_roles {
+        Some(roles) => roles
+            .iter()
+            .map(|r| {
+                r.parse::<Role>()
+                    .map_err(|e| anyhow::anyhow!("[ca] approval_roles: {e}"))
+            })
+            .collect::<Result<Vec<Role>>>()?,
+        None => defaults.roles,
+    };
+    Ok(Some(ApprovalPolicy {
+        roles,
+        invite_also: cfg.approval_requires_invite.unwrap_or(defaults.invite_also),
+    }))
 }
 
 /// `[ca].prefix` is the CA namespace; `NdncertCa` appends `/CA` itself
@@ -411,16 +501,18 @@ pub(crate) fn install_localhop_anchor(
     Ok(validator)
 }
 
-/// The CA once spawned: its device-approval store (with a `device-approval`
-/// challenge) for the mgmt `ca` module, and its state, which `ndn-fwd
-/// revoke` administers directly.
+/// The CA once spawned: its approval store (with a `device-approval`
+/// challenge) for the mgmt `ca` module, its state, which `ndn-fwd revoke`
+/// administers directly, and its approval service, whose held status
+/// Interests the daemon answers when it stops
+/// ([`ndn_cert::ApprovalService::release_held`]).
 pub(crate) struct RunningCa {
-    pub approvals: Option<PendingApprovalStore>,
+    pub approvals: Option<ApprovalStore>,
     pub state: Arc<ndn_cert::CaState>,
+    pub status: Option<ndn_cert::ApprovalService>,
 }
 
-/// Must run after the FIB entries for `prefix` (and the APPROVE-FEED prefix)
-/// are in place.
+/// Must run after the FIB entry for `prefix` is in place.
 pub(crate) fn spawn(
     prep: CaSpawn,
     cfg: &CaTomlConfig,
@@ -456,7 +548,8 @@ pub(crate) fn spawn(
 
     let mut issuance: Vec<Box<dyn IssuancePolicy>> = Vec::new();
     if let Some(namespace) = prep.namespace {
-        let policy = role_policy(namespace.clone(), cfg)?;
+        let approval = prep.approval_policy.clone().unwrap_or_default();
+        let policy = role_policy(namespace.clone(), cfg)?.with_approval(approval.clone());
         let terms: Vec<String> = Role::ALL
             .iter()
             .map(|&role| {
@@ -470,9 +563,10 @@ pub(crate) fn spawn(
             target: "ca",
             namespace = %namespace,
             roles = %terms.join(", "),
-            "issuance follows the role layout: <namespace>/<role>/<device>/KEY/...; admin and \
-             node certs need a device approval; a current certificate of a renewable role \
-             renews without an invite",
+            enrollment = %approval.describe(),
+            approval_request_ttl_days = cfg.approval_request_ttl_days,
+            "issuance follows the role layout: <namespace>/<role>/<device>/KEY/...; a current \
+             certificate of a renewable role renews without an invite",
         );
         issuance.push(Box::new(policy));
     }
@@ -484,11 +578,14 @@ pub(crate) fn spawn(
             )
         })?;
         issuance.push(Box::new(
-            RequireAttestationKind::new(prefix, ra.kind.clone()).require_signed(ra.require_signed),
+            RequireAttestationKind::new(prefix, ra.kind.clone())
+                .require_signed(ra.require_signed)
+                .accept_local_operator(ra.accept_local_operator),
         ));
         tracing::info!(
             target: "ca",
             prefix = %ra.prefix, kind = %ra.kind, signed = ra.require_signed,
+            local_operator = ra.accept_local_operator,
             "issuance gated on challenge attestation",
         );
     }
@@ -498,132 +595,198 @@ pub(crate) fn spawn(
         _ => builder = builder.issuance(Box::new(AllIssuance(issuance))),
     }
 
-    let ca = builder
+    let mut ca = builder
         .build()
         .map_err(|e| anyhow::anyhow!("[ca] CA build failed: {e}"))?;
     let state = ca.state();
     // The node's trust contexts: the CA stops serving what the held version
     // of its namespace's context revokes (one adopted while it did not run,
-    // e.g. stored for this start by `ndn-fwd revoke`), and renewals of
+    // e.g. stored for this start by `ndn-fwd revoke`), renewals of
     // certificates an earlier CA of this identity issued are verified under
-    // them.
+    // them, and so are the decisions admin devices push.
     let keyring = engine
         .validator()
         .map(|v| Arc::clone(v.keyring()))
         .or_else(|| engine.security().map(|mgr| Arc::clone(mgr.keyring())));
-    match keyring {
+    match &keyring {
         Some(keyring) => {
-            crate::revoke::ca_follow_held(&state, &keyring);
-            state.accept_earlier_ca_certificates(keyring);
+            crate::revoke::ca_follow_held(&state, keyring);
+            state.accept_earlier_ca_certificates(Arc::clone(keyring));
         }
         None => tracing::debug!(
             target: "ca",
             "no trust contexts on this node: the CA renews only the certificates it issued"
         ),
     }
+    if let Some(store) = &prep.approvals {
+        let keyring = keyring.ok_or_else(|| {
+            anyhow::anyhow!(
+                "[ca] device-approval needs the node's trust contexts to validate the \
+                 decisions admin devices push, but the engine has no security manager"
+            )
+        })?;
+        ca = ca.approvals(store.clone(), keyring);
+    }
 
+    let status = ca.approval_service();
     let producer = Producer::from_handle(prep.handle, prep.prefix.clone());
     let prefix_str = prep.prefix.to_string();
-
-    match (prep.feed, &prep.approvals) {
-        (Some(feed), Some(store)) => {
-            let validator = approval_validator(engine)?;
-            let feed_prefix = feed.prefix.to_string();
-            let approval_feed = ApprovalFeed::validated(store.clone(), validator);
-            let feed_producer = Producer::from_handle(feed.handle, feed.prefix);
-            let side = Consumer::from_handle(feed.side);
-            tokio::spawn(async move {
-                tracing::info!(
-                    target: "ca", prefix = %prefix_str, feed = %feed_prefix,
-                    "NDNCERT CA serving (with device-approval feed)"
-                );
-                if let Err(e) = ca
-                    .serve_with_feed(producer, approval_feed, feed_producer, side)
-                    .await
-                {
-                    tracing::error!(target: "ca", error = %e, "NDNCERT CA exited");
-                }
-            });
+    let approvals = prep.approvals.is_some();
+    tokio::spawn(async move {
+        tracing::info!(
+            target: "ca",
+            prefix = %prefix_str,
+            approvals,
+            "NDNCERT CA serving{}",
+            if approvals { " (and CA/APPROVAL, CA/PENDING, CA/STATUS)" } else { "" }
+        );
+        if let Err(e) = ca.serve(producer).await {
+            tracing::error!(target: "ca", error = %e, "NDNCERT CA exited");
         }
-        _ => {
-            tokio::spawn(async move {
-                tracing::info!(target: "ca", prefix = %prefix_str, "NDNCERT CA serving");
-                if let Err(e) = ca.serve(producer).await {
-                    tracing::error!(target: "ca", error = %e, "NDNCERT CA exited");
-                }
-            });
-        }
-    }
+    });
 
     Ok(RunningCa {
         approvals: prep.approvals,
         state,
+        status,
     })
-}
-
-/// Validator for signed approvals on the APPROVE-FEED: the engine's own
-/// validator (its keyring holds the node's adopted trust contexts) or, when
-/// the data plane runs without one, a validator over the engine security
-/// manager's keyring.
-fn approval_validator(engine: &ForwarderEngine) -> Result<Arc<Validator>> {
-    if let Some(v) = engine.validator() {
-        return Ok(v);
-    }
-    let mgr = engine.security().ok_or_else(|| {
-        anyhow::anyhow!(
-            "[ca] device-approval needs the node's trust contexts to validate approvals, \
-             but the engine has no security manager"
-        )
-    })?;
-    Ok(Arc::new(Validator::with_keyring(
-        Arc::clone(mgr.keyring()),
-        mgr.cert_cache_arc(),
-        None,
-        10,
-    )))
 }
 
 /// Build the CA's challenge set from config: the `[[ca.challenge]]` list
 /// when set, else a `token` challenge from the legacy `tokens`. A CA with
 /// neither has no way to authenticate requesters and is refused; `nop`
-/// (auto-approve) is only offered when listed explicitly. All
-/// `device-approval` entries share one [`PendingApprovalStore`], returned for
-/// the mgmt backend and the APPROVE-FEED. With a CA `store` (PIB mode), token
-/// redemptions persist in it so a redeemed token is refused after a restart.
-/// Role-carrying tokens are scoped under `token_ns` ([`token_challenge`]);
-/// `namespace_ca` marks a namespace CA, whose tokens are all bounded by role.
+/// (auto-approve) is only offered when listed explicitly. Every `token`
+/// entry feeds one [`TokenStore`] behind one `token` challenge; with a CA
+/// `store` (PIB mode), redemptions persist in it so a redeemed token is
+/// refused after a restart. Role-carrying tokens are scoped under
+/// `token_ns` ([`add_tokens`]).
+///
+/// `approval`: the namespace and approval policy of a namespace CA, which
+/// offers `device-approval` whether listed or not when the policy names
+/// roles, with the invite it requires redeemed from the same tokens. The
+/// `device-approval` challenge reads the [`ApprovalStore`] `approval_store`
+/// opens, returned for the mgmt backend and `/CA/APPROVAL`.
 fn build_challenges(
     cfg: &CaTomlConfig,
     store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
-    namespace_ca: bool,
-) -> Result<(Vec<Box<dyn ChallengeHandler>>, Option<PendingApprovalStore>)> {
-    if !cfg.challenges.is_empty() {
-        let mut approvals = None;
-        let handlers = cfg
-            .challenges
-            .iter()
-            .map(|c| build_challenge(c, store, token_ns, namespace_ca, &mut approvals))
-            .collect::<Result<Vec<_>>>()?;
-        return Ok((handlers, approvals));
+    approval: Option<(&Name, &ApprovalPolicy)>,
+    approval_store: impl FnOnce() -> Result<ApprovalStore>,
+) -> Result<(Vec<Box<dyn ChallengeHandler>>, Option<ApprovalStore>)> {
+    let namespace_ca = approval.is_some();
+    let configured: Vec<ndn_config::ChallengeConfig> = if !cfg.challenges.is_empty() {
+        cfg.challenges.clone()
+    } else if !cfg.tokens.is_empty() {
+        vec![ndn_config::ChallengeConfig {
+            kind: "token".into(),
+            tokens: cfg.tokens.clone(),
+            pin: None,
+            max_tries: None,
+            ttl_secs: None,
+            smtp: None,
+        }]
+    } else {
+        bail!(
+            "[ca] no challenge configured, so the CA could not authenticate requesters; \
+             add `[[ca.challenge]]` entries (kind = \"token\" | \"device-approval\" | \
+             \"pin\" | \"email\", or \"nop\" to auto-approve every request in a demo) or \
+             `tokens = [...]`"
+        )
+    };
+
+    // Slots in offer order; the token and device-approval handlers are
+    // built once every entry is read.
+    enum Slot {
+        Built(Box<dyn ChallengeHandler>),
+        Token,
+        Approval,
     }
-    if !cfg.tokens.is_empty() {
-        let challenge = token_challenge(&cfg.tokens, store, token_ns, namespace_ca)?;
-        return Ok((vec![challenge], None));
+    let mut slots = Vec::new();
+    let mut tokens: Option<TokenStore> = None;
+    for c in &configured {
+        match c.kind.as_str() {
+            "token" => {
+                if tokens.is_none() {
+                    tokens = Some(token_store(store)?);
+                    slots.push(Slot::Token);
+                }
+                add_tokens(tokens.as_ref().expect("set above"), &c.tokens, token_ns, namespace_ca)?;
+            }
+            DEVICE_APPROVAL => {
+                if !slots.iter().any(|s| matches!(s, Slot::Approval)) {
+                    slots.push(Slot::Approval);
+                }
+            }
+            _ => slots.push(Slot::Built(build_challenge(c)?)),
+        }
     }
-    bail!(
-        "[ca] no challenge configured, so the CA could not authenticate requesters; \
-         add `[[ca.challenge]]` entries (kind = \"token\" | \"device-approval\" | \
-         \"pin\" | \"email\", or \"nop\" to auto-approve every request in a demo) or \
-         `tokens = [...]`"
-    )
+    if let Some((namespace, policy)) = approval
+        && !policy.roles.is_empty()
+        && !slots.iter().any(|s| matches!(s, Slot::Approval))
+    {
+        tracing::info!(
+            target: "ca",
+            namespace = %namespace,
+            "offering the device-approval challenge although [ca] does not list it: the \
+             namespace's trust context advertises {}",
+            policy.describe()
+        );
+        slots.push(Slot::Approval);
+    }
+
+    let mut approvals = None;
+    let mut handlers = Vec::with_capacity(slots.len());
+    let mut approval_store = Some(approval_store);
+    for slot in slots {
+        handlers.push(match slot {
+            Slot::Built(handler) => handler,
+            Slot::Token => Box::new(TokenChallenge::new(
+                tokens.clone().expect("a token slot has its store"),
+            )),
+            Slot::Approval => {
+                let open = approval_store.take().expect("one device-approval slot");
+                let store = open()?;
+                let mut challenge = DeviceApprovalChallenge::new(store.clone());
+                if let Some((namespace, policy)) = approval
+                    && policy.invite_also
+                    && !policy.roles.is_empty()
+                {
+                    let Some(tokens) = &tokens else {
+                        bail!(
+                            "[ca] the namespace's trust context advertises {}, but [ca] offers \
+                             no token challenge to redeem the invites: add a [[ca.challenge]] \
+                             entry with kind = \"token\" and the invite tokens",
+                            policy.describe()
+                        );
+                    };
+                    challenge = challenge.requiring_invite(
+                        namespace.clone(),
+                        policy.roles.clone(),
+                        tokens.clone(),
+                    );
+                }
+                approvals = Some(store);
+                Box::new(challenge)
+            }
+        });
+    }
+    Ok((handlers, approvals))
 }
 
-/// A `token` challenge over `tokens`, its redemptions persisted in `store`
-/// when one is given. A token naming a role (`member-…`, `guest-…`, as
-/// `ndn-fwd-tokens new --role` mints them) is scoped to `<token_ns>/<role>`:
-/// it certifies only names under that prefix. Other tokens are unscoped,
-/// except on a namespace CA (`namespace_ca`).
+/// The CA's invite tokens, their redemptions persisted in `store` when one
+/// is given.
+fn token_store(store: Option<&Arc<FileCaStore>>) -> Result<TokenStore> {
+    match store {
+        Some(store) => TokenStore::with_store(Arc::clone(store) as Arc<dyn CaStore>)
+            .map_err(|e| anyhow::anyhow!("[ca] loading redeemed tokens: {e}")),
+        None => Ok(TokenStore::new()),
+    }
+}
+
+/// Add `tokens` to `store`. A token naming a role (`member-…`, `guest-…`,
+/// as `ndn-fwd-tokens new --role` mints them) is scoped to
+/// `<token_ns>/<role>`: it certifies only names under that prefix. Other
+/// tokens are unscoped, except on a namespace CA (`namespace_ca`).
 ///
 /// On a namespace CA the issuance policy admits a token only for a member or a
 /// guest, after the challenge has consumed it. So every token is scoped
@@ -631,23 +794,19 @@ fn build_challenges(
 /// *before* the token is spent. Unscoped tokens are scoped to
 /// `/<ns>/member` (the only role the policy grants them), and `admin-…` /
 /// `node-…` tokens, which could never issue anything, are refused here.
-fn token_challenge(
+fn add_tokens(
+    store: &TokenStore,
     tokens: &[String],
-    store: Option<&Arc<FileCaStore>>,
     token_ns: &Name,
     namespace_ca: bool,
-) -> Result<Box<dyn ChallengeHandler>> {
-    let tokens_store = match store {
-        Some(store) => TokenStore::with_store(Arc::clone(store) as Arc<dyn CaStore>)
-            .map_err(|e| anyhow::anyhow!("[ca] loading redeemed tokens: {e}"))?,
-        None => TokenStore::new(),
-    };
+) -> Result<()> {
     for token in tokens {
         let role = match token_role(token) {
             Some(role @ (Role::Admin | Role::Node)) if namespace_ca => bail!(
-                "[ca] token '{token}' names the {role} role, but a namespace_ca CA never issues \
-                 {role} certificates on a token alone; remove it from the config and enroll \
-                 the device with the device-approval challenge (an admin approves it)"
+                "[ca] token '{token}' names the {role} role, but a namespace CA never issues \
+                 {role} certificates on a token alone; remove it from the config. A {role} \
+                 device asks with `ndn-fwd enroll <anchor link> --role {role}` and an admin \
+                 approves it (`ndn-fwd approvals approve <code>`)"
             ),
             None if namespace_ca => Some(Role::Member),
             role => role,
@@ -661,22 +820,18 @@ fn token_challenge(
                 .as_secs();
             std::time::Duration::from_secs(at.saturating_sub(now))
         });
-        tokens_store.add_scoped(
+        store.add_scoped(
             token.clone(),
             ttl,
             role.map(|role| role_prefix(token_ns, role)),
         );
     }
-    Ok(Box::new(TokenChallenge::new(tokens_store)))
+    Ok(())
 }
 
-fn build_challenge(
-    c: &ndn_config::ChallengeConfig,
-    store: Option<&Arc<FileCaStore>>,
-    token_ns: &Name,
-    namespace_ca: bool,
-    approvals: &mut Option<PendingApprovalStore>,
-) -> Result<Box<dyn ChallengeHandler>> {
+/// A challenge other than `token` and `device-approval` (built by
+/// [`build_challenges`] itself).
+fn build_challenge(c: &ndn_config::ChallengeConfig) -> Result<Box<dyn ChallengeHandler>> {
     match c.kind.as_str() {
         "nop" => {
             tracing::warn!(
@@ -686,7 +841,6 @@ fn build_challenge(
             );
             Ok(Box::new(NopChallenge::new()))
         }
-        "token" => token_challenge(&c.tokens, store, token_ns, namespace_ca),
         "pin" => {
             let pin = c
                 .pin
@@ -708,10 +862,6 @@ fn build_challenge(
                 handler = handler.with_max_tries(m);
             }
             Ok(Box::new(handler))
-        }
-        "device-approval" => {
-            let store = approvals.get_or_insert_with(PendingApprovalStore::new).clone();
-            Ok(Box::new(DeviceApprovalChallenge::new(store)))
         }
         other => Err(anyhow::anyhow!(
             "[ca] unsupported challenge kind '{other}' \
@@ -806,7 +956,7 @@ mod tests {
 
     struct RunningCa {
         client: NdncertClient,
-        approvals: Option<PendingApprovalStore>,
+        approvals: Option<ApprovalStore>,
         state: Arc<ndn_cert::CaState>,
         engine: ForwarderEngine,
         shutdown: ShutdownHandle,
@@ -839,13 +989,10 @@ mod tests {
         engine
             .fib()
             .add_nexthop(&spawn_state.prefix, spawn_state.face_id, 0);
-        if let Some(feed) = &spawn_state.feed {
-            engine.fib().add_nexthop(&feed.prefix, feed.face_id, 0);
-        }
         let prefix = spawn_state.prefix.clone();
         let running = spawn(spawn_state, cfg, &engine).expect("CA spawns");
         RunningCa {
-            client: NdncertClient::new(Consumer::from_handle(client_handle), prefix),
+            client: NdncertClient::new(ndn_app::Consumer::from_handle(client_handle), prefix),
             approvals: running.approvals,
             state: running.state,
             engine,
@@ -1194,24 +1341,32 @@ mod tests {
         cfg
     }
 
-    /// Resolve the first pending request (for a name under `/home/bob/<who>`)
-    /// through the mgmt backend the forwarder registers (`approval_handler`).
+    /// Decide the first pending request (for a name under `/home/bob/<who>`)
+    /// by its verification code through the mgmt backend the forwarder
+    /// registers, as the CA host's local operator; the record names them.
     fn resolve_via_mgmt(
-        store: PendingApprovalStore,
+        store: ApprovalStore,
         who: &'static str,
         approve: bool,
     ) -> tokio::task::JoinHandle<()> {
         let mgmt: Arc<dyn ApprovalMgmtBackend> = Arc::new(store);
         tokio::spawn(async move {
             loop {
-                if let Some(req) = mgmt.pending().into_iter().next() {
-                    assert!(req.cert_name.starts_with(&format!("/home/bob/{who}/")));
-                    let done = if approve {
-                        mgmt.approve(&req.id, "approved-via-mgmt")
+                let rows = mgmt.list().await.expect("the CA lists its requests");
+                if let Some(req) = rows.into_iter().find(|r| r.state == "pending") {
+                    assert!(req.key_name.starts_with(&format!("/home/bob/{who}/")));
+                    let decision = if approve {
+                        ndn_cert::Decision::Approve
                     } else {
-                        mgmt.deny(&req.id, "not my device")
+                        ndn_cert::Decision::Deny {
+                            reason: "not my device".into(),
+                        }
                     };
-                    assert!(done);
+                    let row = mgmt
+                        .decide(req.code.clone(), decision, "uid 1000 (alice)".into())
+                        .await
+                        .expect("a pending request is decided");
+                    assert_eq!(row.approver, "the CA host's local operator uid 1000 (alice)");
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1237,6 +1392,7 @@ mod tests {
         approver.await.unwrap();
         assert!(issued.name.to_string().starts_with("/home/bob/tablet"));
         assert!(store.pending().is_empty());
+        assert_eq!(store.records()[0].state.as_str(), "approved");
         ca.stop().await;
     }
 
@@ -1344,8 +1500,33 @@ mod tests {
     fn namespace_ca_refuses_admin_and_node_tokens() {
         let ns: Name = "/home/bob".parse().unwrap();
         for t in ["admin-a1", "node-n1"] {
-            assert!(token_challenge(&[t.to_string()], None, &ns, true).is_err(), "{t}");
-            assert!(token_challenge(&[t.to_string()], None, &ns, false).is_ok(), "{t}");
+            let tokens = [t.to_string()];
+            assert!(add_tokens(&TokenStore::new(), &tokens, &ns, true).is_err(), "{t}");
+            assert!(add_tokens(&TokenStore::new(), &tokens, &ns, false).is_ok(), "{t}");
+        }
+    }
+
+    /// A namespace CA enforces the approval policy its trust context
+    /// advertises: it offers `device-approval` although `[ca]` lists only
+    /// tokens, and refuses to start when `[ca]` states another policy.
+    #[tokio::test]
+    async fn namespace_ca_enforces_the_policy_its_context_advertises() {
+        let dir = tempfile::tempdir().unwrap();
+        write_namespace_pib(dir.path());
+        let mut cfg = namespace_cfg(vec![challenge("token", &["invite-1"])]);
+        let (_, spawn_state) = prepare(&cfg, dir.path()).await.expect("the CA prepares");
+        let kinds: Vec<_> = spawn_state.challenges.iter().map(|c| c.challenge_type()).collect();
+        assert_eq!(kinds, ["token", DEVICE_APPROVAL]);
+        assert_eq!(spawn_state.approval_policy, Some(ApprovalPolicy::default()));
+
+        cfg.approval_roles = Some(vec!["node".into(), "admin".into()]);
+        cfg.approval_requires_invite = Some(false);
+        prepare(&cfg, dir.path()).await.expect("[ca] restating the context's policy");
+        for (roles, invite) in [(vec!["admin".to_string()], false), (vec!["admin".into(), "node".into()], true)] {
+            cfg.approval_roles = Some(roles);
+            cfg.approval_requires_invite = Some(invite);
+            let err = prepare(&cfg, dir.path()).await.err().expect("a disagreeing [ca] is refused");
+            assert!(err.to_string().contains("disagree with the namespace's trust context"), "{err}");
         }
     }
 }
