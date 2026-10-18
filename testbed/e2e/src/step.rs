@@ -35,6 +35,8 @@ pub struct StepRecord {
     pub dur: Duration,
     pub inputs: Vec<String>,
     pub concepts: Vec<String>,
+    /// What the step observed that proves its claim (printed under it).
+    pub evidence: Vec<String>,
 }
 
 pub struct Scenario {
@@ -62,10 +64,11 @@ impl Scenario {
             w: &mut self.world,
             inputs: Vec::new(),
             concepts: Vec::new(),
+            evidence: Vec::new(),
             transcript: String::new(),
         };
         let r = f(&mut cx);
-        let (inputs, concepts, transcript) = (cx.inputs, cx.concepts, cx.transcript);
+        let (inputs, concepts, evidence, transcript) = (cx.inputs, cx.concepts, cx.evidence, cx.transcript);
         let dur = start.elapsed();
         let n = self.steps.len() + 1;
         match r {
@@ -75,12 +78,16 @@ impl Scenario {
                     self.name,
                     dur.as_secs_f64()
                 );
+                for e in &evidence {
+                    println!("    evidence: {e}");
+                }
                 self.steps.push(StepRecord {
                     name: name.to_owned(),
                     status: Status::Pass,
                     dur,
                     inputs,
                     concepts,
+                    evidence,
                 });
                 Ok(v)
             }
@@ -106,6 +113,7 @@ impl Scenario {
                     dur,
                     inputs,
                     concepts,
+                    evidence,
                 });
                 Err(Abort)
             }
@@ -121,6 +129,7 @@ impl Scenario {
             dur: Duration::ZERO,
             inputs: Vec::new(),
             concepts: Vec::new(),
+            evidence: Vec::new(),
         });
     }
 
@@ -145,6 +154,7 @@ impl Scenario {
                     "duration_ms": s.dur.as_millis() as u64,
                     "human_inputs": s.inputs,
                     "concepts": s.concepts,
+                    "evidence": s.evidence,
                 })
             })
             .collect();
@@ -163,6 +173,7 @@ pub struct Cx<'a> {
     pub w: &'a mut World,
     inputs: Vec<String>,
     concepts: Vec<String>,
+    evidence: Vec<String>,
     transcript: String,
 }
 
@@ -215,6 +226,13 @@ impl Cx<'_> {
 
     pub fn note(&mut self, s: &str) {
         self.transcript.push_str(&format!("# {s}\n"));
+    }
+
+    /// An observation that proves the step's claim: noted, and printed
+    /// under the step's PASS/FAIL line and kept in `report.json`.
+    pub fn evidence(&mut self, s: &str) {
+        self.note(s);
+        self.evidence.push(s.to_owned());
     }
 
     pub fn ok(&mut self, op: Op, what: &str) -> StepResult<Out> {

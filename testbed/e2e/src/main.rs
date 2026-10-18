@@ -8,13 +8,15 @@
 //!
 //! Two processes:
 //! - the outer one builds the binaries, then starts `unshare` with a new
-//!   user, network and PID namespace running this binary again with
-//!   `--inner`, and waits (Ctrl-C kills the namespace);
+//!   user, network, mount and PID namespace (its own `/proc`) running this
+//!   binary again with `--inner`, and waits (Ctrl-C kills the namespace);
 //! - the inner one is PID 1 of that namespace: it adds 10.200.0.1-6 to its
-//!   private `lo` and runs the scenarios. When it exits — normally, by panic
-//!   or killed — the kernel kills every process left in the namespace, so no
-//!   daemon outlives a run.
+//!   private `lo` and runs the scenarios (NAT boxes, where a scenario needs
+//!   them, are nested network namespaces: `nat.rs`). When it exits —
+//!   normally, by panic or killed — the kernel kills every process left in
+//!   the namespace, so no daemon outlives a run.
 
+mod nat;
 mod run;
 mod scenarios;
 mod shim;
@@ -46,7 +48,8 @@ OPTIONS:
   -h, --help          this help
 
 SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
-           recovery-compromised, negatives, approval, quic-links
+           recovery-compromised, negatives, approval, quic-links,
+           direct-paths
 ";
 
 #[derive(Clone, Debug, Default)]
@@ -170,7 +173,9 @@ fn outer(args: &Args) -> Result<bool, String> {
     if !works(Command::new("ip").arg("-V")) {
         return Err("`ip` (iproute2) is not on PATH; e.g. `nix-shell -p iproute2`".into());
     }
-    let base = ["--map-root-user", "--net", "--pid", "--fork"];
+    // --mount-proc: /proc of the new PID namespace, so /proc/<pid>/ns/net
+    // of a process started inside names it (nested namespaces, nat.rs).
+    let base = ["--map-root-user", "--net", "--pid", "--mount-proc", "--fork"];
     let foreign_uid = works(
         Command::new("unshare")
             .arg("--map-auto")
@@ -179,8 +184,8 @@ fn outer(args: &Args) -> Result<bool, String> {
     );
     if !foreign_uid && !works(Command::new("unshare").args(base).arg("true")) {
         return Err(
-            "cannot create a user+network+PID namespace (`unshare --map-root-user --net \
-             --pid --fork true` fails): unprivileged user namespaces are disabled here"
+            "cannot create a user+network+mount+PID namespace (`unshare --map-root-user --net \
+             --pid --mount-proc --fork true` fails): unprivileged user namespaces are disabled here"
                 .into(),
         );
     }
@@ -274,7 +279,7 @@ fn inner(args: &Args) -> Result<bool, String> {
     };
     setup_network()?;
     println!(
-        "ndn-e2e: private user+network+PID namespace up; nodes on 10.200.0.1-6 (lo); run dir {}",
+        "ndn-e2e: private user+network+mount+PID namespace up; nodes on 10.200.0.1-6 (lo); run dir {}",
         run_dir.display()
     );
     let selected: Vec<&str> = scenarios::ALL

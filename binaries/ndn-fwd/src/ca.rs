@@ -214,7 +214,7 @@ fn newest_context(pib_path: &Path, namespace: &Name) -> Result<Option<SignedTrus
 }
 
 /// What `[ca] approval_roles` / `approval_requires_invite` / `link_roles` /
-/// `relay_roles` / `enrollment_links` state. A namespace CA enforces what
+/// `relay_roles` / `enrollment_links` / `direct_paths` state. A namespace CA enforces what
 /// its trust context advertises and refuses to start when they state
 /// another policy ([`PolicyInput::enforced_policy`]); `ndn-fwd init` and
 /// `ndn-fwd schema update -c <config>` write them into the context.
@@ -225,6 +225,7 @@ pub(crate) fn policy_input(cfg: &CaTomlConfig) -> PolicyInput {
         link_roles: cfg.link_roles.clone(),
         relay_roles: cfg.relay_roles.clone(),
         enrollment_links: cfg.enrollment_links,
+        direct_paths: cfg.direct_paths,
     }
 }
 
@@ -1402,6 +1403,7 @@ mod tests {
         let mut cfg = namespace_cfg(vec![challenge("token", &["invite-1"])]);
         cfg.link_roles = Some(vec!["admin".into(), "node".into()]);
         cfg.enrollment_links = Some(false);
+        cfg.direct_paths = Some(false);
         let (approval, link) = policy_input(&cfg).new_namespace_policies().unwrap();
         let ns: Name = "/home/bob".parse().unwrap();
         let pib = FilePib::new(dir.path()).unwrap();
@@ -1421,6 +1423,7 @@ mod tests {
             roles: vec!["admin".into(), "node".into()],
             relay_roles: vec!["node".into()],
             enrollment_links: false,
+            direct_paths: false,
         };
         assert_eq!(ctx.stated_link_policy(), Some(&expected));
 

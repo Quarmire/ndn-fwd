@@ -38,6 +38,7 @@ fn relay_peer(key: Option<String>) -> PeerCfg {
         device: Some(n("/node/relay")),
         key,
         endpoint: Some(addr(2)),
+        ..Default::default()
     }
 }
 
@@ -114,22 +115,6 @@ fn fetch_fails(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
         return Err(format!("{name} was delivered at {node}, expected no route to it"));
     }
     Ok(())
-}
-
-/// Fetch `name` at `node` until it is delivered, within `within`: the link
-/// it needs comes up (or becomes a full link) on its own.
-fn fetch_within(cx: &mut Cx<'_>, node: &str, name: &str, expect: &[u8], within: Duration) -> StepResult<()> {
-    let start = Instant::now();
-    loop {
-        match cx.fetch_ok(node, name, expect) {
-            Ok(()) => {
-                cx.note(&format!("{node} fetched {name} after {:.2}s", start.elapsed().as_secs_f64()));
-                return Ok(());
-            }
-            Err(e) if start.elapsed() > within => return Err(format!("after {}s: {e}", within.as_secs())),
-            Err(_) => thread::sleep(Duration::from_millis(250)),
-        }
-    }
 }
 
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {

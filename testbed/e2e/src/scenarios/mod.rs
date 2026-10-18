@@ -1,7 +1,8 @@
 //! The scenarios, and the steps several of them share.
 
 use std::net::Ipv4Addr;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{addr, now_unix, parse_utc};
@@ -9,6 +10,7 @@ use crate::world::{addr, now_unix, parse_utc};
 mod approval;
 mod compromised;
 mod destroyed;
+mod direct_paths;
 mod lifecycle;
 mod negatives;
 mod quic_links;
@@ -21,6 +23,7 @@ pub const ALL: &[&str] = &[
     "negatives",
     "approval",
     "quic-links",
+    "direct-paths",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -32,6 +35,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "negatives" => negatives::run(sc),
         "approval" => approval::run(sc),
         "quic-links" => quic_links::run(sc),
+        "direct-paths" => direct_paths::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }
@@ -262,6 +266,22 @@ pub fn fetch_all(cx: &mut Cx<'_>, nodes: &[&str], name: &str, expect: &[u8]) -> 
         cx.fetch_ok(n, name, expect)?;
     }
     Ok(())
+}
+
+/// Fetch `name` at `node` until it is delivered, within `within`: the link
+/// or path it needs comes up (or becomes a full link) on its own.
+pub fn fetch_within(cx: &mut Cx<'_>, node: &str, name: &str, expect: &[u8], within: Duration) -> StepResult<()> {
+    let start = Instant::now();
+    loop {
+        match cx.fetch_ok(node, name, expect) {
+            Ok(()) => {
+                cx.note(&format!("{node} fetched {name} after {:.2}s", start.elapsed().as_secs_f64()));
+                return Ok(());
+            }
+            Err(e) if start.elapsed() > within => return Err(format!("after {}s: {e}", within.as_secs())),
+            Err(_) => thread::sleep(Duration::from_millis(250)),
+        }
+    }
 }
 
 pub const SHORT: Duration = Duration::from_secs(30);

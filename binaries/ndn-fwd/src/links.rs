@@ -17,7 +17,10 @@ use ndn_config::{FaceConfig, ForwarderConfig, PeerConfig};
 use ndn_engine::ForwarderEngine;
 use ndn_engine::rib::RibRoute;
 use ndn_face_quic::{KeyFingerprint, LinkEndpoint, LinkKeySource, LinkTransportConfig};
-use ndn_link::{ConfiguredEndpoints, FaceSink, LinkHints, LinkSetup, LinkTrust, Links, PeerId, PeerSpec, Route};
+use ndn_link::{
+    AdvertisedCandidates, ConfiguredEndpoints, FaceSink, HostCandidates, LinkHints, LinkSetup, LinkTrust, Links,
+    PeerId, PeerSpec, Route,
+};
 use ndn_packet::Name;
 use ndn_security::{ActiveSigner, Certificate, Keyring};
 use ndn_transport::{Face, FaceId, FacePersistency};
@@ -56,6 +59,7 @@ fn peer_spec(config: &PeerConfig, all: &[PeerConfig]) -> anyhow::Result<PeerSpec
             .transpose()?,
         persistent: config.persistent,
         reliability: config.reliability,
+        direct: config.direct,
     })
 }
 
@@ -139,7 +143,8 @@ fn hints() -> LinkHints {
 
 /// Start this device's links: listen when `[[face]] kind = "quic"` is
 /// configured (and not `listen = false`), dial each `[[peer]]` with an
-/// endpoint. `None` when the config has neither.
+/// endpoint, punch direct paths to each `[[peer]]` reached through a relay.
+/// `None` when the config has neither.
 pub(crate) fn spawn(
     engine: &ForwarderEngine,
     keyring: Arc<Keyring>,
@@ -149,7 +154,7 @@ pub(crate) fn spawn(
     cancel: CancellationToken,
 ) -> anyhow::Result<Option<Arc<Links>>> {
     let socket = config.faces.iter().find_map(|f| match f {
-        FaceConfig::Quic { bind, listen } => Some((bind.clone(), *listen)),
+        FaceConfig::Quic { bind, listen, advertise } => Some((bind.clone(), *listen, advertise.clone())),
         _ => None,
     });
     if socket.is_none() && config.peers.is_empty() {
@@ -173,8 +178,21 @@ pub(crate) fn spawn(
         .map(|p| peer_spec(p, &config.peers))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let transport = LinkTransportConfig::default();
+    let advertised = match &socket {
+        Some((_, _, advertise)) => advertise
+            .iter()
+            .map(|a| {
+                std::net::ToSocketAddrs::to_socket_addrs(a.as_str())
+                    .with_context(|| format!("[[face]] kind = \"quic\": advertise {a:?} does not resolve"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect(),
+        None => Vec::new(),
+    };
     let socket = socket
-        .map(|(bind, listen)| {
+        .map(|(bind, listen, _)| {
             let addr: SocketAddr = bind
                 .parse()
                 .with_context(|| format!("[[face]] kind = \"quic\": bind {bind:?}"))?;
@@ -203,6 +221,10 @@ pub(crate) fn spawn(
             }),
             faces: Arc::new(EngineFaces(engine.clone())),
             paths: Arc::new(ConfiguredEndpoints),
+            candidates: vec![
+                Arc::new(HostCandidates::default()),
+                Arc::new(AdvertisedCandidates(advertised)),
+            ],
             socket,
             transport,
             hints: hints(),

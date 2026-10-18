@@ -59,6 +59,9 @@ mod installs;
 // QUIC links: `[[peer]]` and `[[face]] kind = "quic"`.
 #[cfg(feature = "quic")]
 mod links;
+// `links/list`: the links' paths and direct-path states.
+#[cfg(feature = "quic")]
+mod links_mgmt;
 mod monitors;
 mod onboard;
 mod own_certs;
@@ -130,9 +133,10 @@ USAGE:
                                           admin, node by an admin's approval;
                                           member, guest by invite) and the link
                                           policy ([ca] link_roles /
-                                          relay_roles / enrollment_links of
-                                          -c, else any role links, node
-                                          relays, enrollment links on), print its
+                                          relay_roles / enrollment_links /
+                                          direct_paths of -c, else any role
+                                          links, node relays, enrollment links
+                                          and direct paths on), print its
                                           ndn-trust://anchor envelope and the
                                           [security] lines for ndn-fwd.toml,
                                           and exit. <store>: os-keyring (the
@@ -1313,7 +1317,8 @@ async fn main() -> Result<()> {
     // The discovery + service management modules live in ndn-discovery now
     // (so ndn-mgmt doesn't depend on the discovery extension); register them
     // here via extra_modules, capturing the discovery handles.
-    let discovery_modules: Vec<Arc<dyn mgmt_ndn::MgmtModule>> = vec![
+    #[cfg_attr(not(feature = "quic"), allow(unused_mut))]
+    let mut extra_modules: Vec<Arc<dyn mgmt_ndn::MgmtModule>> = vec![
         Arc::new(ndn_discovery::mgmt::DiscoveryMgmtModule::new(
             mgmt_discovery_cfg,
         )),
@@ -1322,13 +1327,17 @@ async fn main() -> Result<()> {
             mgmt_discovery_claimed,
         )),
     ];
+    // `links/list` (local operators only): answers even when this daemon
+    // runs no links, saying so.
+    #[cfg(feature = "quic")]
+    extra_modules.push(Arc::new(links_mgmt::LinksMgmtModule::new(links.clone())));
     let ndn_handler_task = tokio::spawn(mgmt_ndn::mount_management(
         &engine,
         cancel.clone(),
         Arc::new(fwd_config.clone()),
         pib.clone(),
         mgmt_ndn::MgmtHandles {
-            extra_modules: discovery_modules,
+            extra_modules,
             face_provisioners: face_provision::face_provisioners(),
             control_surfaces: radio_control_surfaces,
             security_is_ephemeral,

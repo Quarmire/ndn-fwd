@@ -31,6 +31,9 @@ pub struct Op {
     /// Run as uid/gid 1 with no supplementary groups (`setpriv`): a local
     /// user who is neither the daemons' user nor in their groups.
     pub foreign_user: bool,
+    /// Run in this network namespace (`nsenter --net=<path>`): a daemon
+    /// behind a NAT box ([`crate::nat`]).
+    pub netns: Option<PathBuf>,
 }
 
 impl Op {
@@ -42,6 +45,7 @@ impl Op {
             env: Vec::new(),
             timeout: Duration::from_secs(60),
             foreign_user: false,
+            netns: None,
         }
     }
 
@@ -74,6 +78,11 @@ impl Op {
         self
     }
 
+    pub fn in_netns(mut self, netns: PathBuf) -> Self {
+        self.netns = Some(netns);
+        self
+    }
+
     /// The command line, secrets shown by name only.
     pub fn display(&self) -> String {
         let mut s = String::new();
@@ -83,6 +92,9 @@ impl Op {
             } else {
                 s.push_str(&format!("{k}={v} "));
             }
+        }
+        if let Some(ns) = &self.netns {
+            s.push_str(&format!("nsenter --net={} -- ", ns.display()));
         }
         if self.foreign_user {
             s.push_str("setpriv --reuid=1 --regid=1 --clear-groups ");
@@ -100,14 +112,20 @@ impl Op {
     }
 
     fn command(&self) -> Command {
-        let mut c = if self.foreign_user {
-            let mut c = Command::new("setpriv");
-            c.args(["--reuid=1", "--regid=1", "--clear-groups"]);
-            c.arg(&self.program);
-            c
-        } else {
-            Command::new(&self.program)
-        };
+        // nsenter and setpriv exec the next program (no fork), so the
+        // child's PID stays the program's: `Proc::stop` signals it.
+        let mut argv: Vec<std::ffi::OsString> = Vec::new();
+        if let Some(ns) = &self.netns {
+            argv.push("nsenter".into());
+            argv.push(format!("--net={}", ns.display()).into());
+            argv.push("--".into());
+        }
+        if self.foreign_user {
+            argv.extend(["setpriv", "--reuid=1", "--regid=1", "--clear-groups"].map(Into::into));
+        }
+        argv.push(self.program.clone().into());
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]);
         c.args(&self.args);
         for (k, v) in &self.env {
             c.env(k, v);

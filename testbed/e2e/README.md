@@ -11,7 +11,7 @@ wording.
 ## Running
 
 ```sh
-cargo run -p ndn-e2e                        # every scenario, ~2 minutes
+cargo run -p ndn-e2e                        # every scenario, ~2.5 minutes
 cargo run -p ndn-e2e -- --only negatives    # one scenario (repeatable, or a,b)
 cargo run -p ndn-e2e -- --keep              # keep configs, PIBs, logs, report.json
 cargo run -p ndn-e2e -- --list
@@ -32,9 +32,11 @@ harness could not run.
 ## Prerequisites
 
 - Linux with unprivileged user namespaces (`unshare --map-root-user --net
-  --pid --fork true` must work).
-- `unshare`, `setpriv` (util-linux) and `ip` (iproute2) on `PATH`; on NixOS
-  without them: `nix-shell -p util-linux iproute2`.
+  --pid --mount-proc --fork true` must work).
+- `unshare`, `nsenter`, `setpriv` (util-linux), `ip` (iproute2) and `nft`
+  (nftables) on `PATH`; on NixOS without them: `nix-shell -p util-linux
+  iproute2 nftables`. Without `nft` (or `nsenter`) the `direct-paths`
+  scenario is reported SKIP with the reason.
 - For the "another local user" steps: subordinate uids for your user
   (`/etc/subuid`) and `newuidmap`, so `unshare --map-auto` can map uid 1.
   Without them those two steps are reported SKIP with the reason.
@@ -44,8 +46,10 @@ No root, no change to the host's network, no fixed ports on the host.
 ## How it runs
 
 The outer process starts `unshare --map-auto --map-root-user --net --pid
---fork --kill-child` running itself again as PID 1 of a new user, network
-and PID namespace. Inside, `lo` carries 10.200.0.1-6/24. Those are not
+--mount-proc --fork --kill-child` running itself again as PID 1 of a new
+user, network, mount and PID namespace (`--mount-proc` gives it its own
+`/proc`, so `/proc/<pid>/ns/net` names a namespace of a process it
+started). Inside, `lo` carries 10.200.0.1-6/24. Those are not
 loopback addresses (faces to 127.0.0.1 are local and skip validation), so
 every link between daemons is a non-local UDP face and every Data is
 validated. Daemons and producers are stopped after each scenario; when the
@@ -54,12 +58,33 @@ kills every process left in the PID namespace. Ctrl-C kills `unshare`, which
 SIGKILLs the namespace. The run directory (`$TMPDIR/ndn-e2e-*`) is removed
 unless `--keep` is set.
 
+NAT boxes (`src/nat.rs`, used by `direct-paths`) are nested network
+namespaces inside that one, which acts as the internet and routes between
+them (`ip_forward = 1`). Each is held by an `unshare --net sleep infinity`
+process and entered with `nsenter --net=/proc/<pid>/ns/net`. Box k has a
+veth `w<k>` (10.0.k.1/24, harness side) ↔ `wan` (10.0.k.2/24, its public
+address, default route via 10.0.k.1) and a LAN veth `lan` (192.168.k.1/24)
+↔ `eth0` in a device namespace (192.168.k.2/24, default route via
+192.168.k.1). nftables in the box masquerades out of `wan` (`masquerade`:
+port-restricted cone; `masquerade random,fully-random`: symmetric) and drops
+whatever arrives on `wan` unsolicited (`ct state new drop` on input and
+forward; without it an unsolicited packet leaves a conntrack entry that makes
+masquerade pick another port). A node behind a box runs its daemon with
+`nsenter --net=…` in the device namespace, its faces bound to its LAN
+address; the tools stay outside and reach it through its unix socket. The
+public nodes (root, relay) stay on `lo`. Cutting two boxes apart is an
+nftables table in the harness's namespace dropping UDP between their public
+addresses. The rulesets and every command run, with its output, are in
+`<run dir>/direct-paths/nat/` (`--keep`).
+
 Inside the user namespace the daemons run as uid 0 (your uid, mapped). The
 "another local user" steps run the CLI as uid 1 through `setpriv --reuid=1
 --regid=1 --clear-groups`; the daemon's peer-credential check sees a uid
 that is neither its own, root, nor in `trust_admin_groups`.
 
-Each step prints PASS/FAIL with its duration. A failing step prints its
+Each step prints PASS/FAIL with its duration, followed by its `evidence:`
+lines where it records what it observed (addresses, counters, path states;
+also in `report.json`). A failing step prints its
 commands with their output and the tail of every daemon and producer log,
 and ends its scenario. Secrets go through the environment
 (`NDN_ROOT_PASSPHRASE`, `NDN_KIT_PASSPHRASE`, `NDN_KIT_WORDS`) and are never
@@ -76,6 +101,7 @@ printed.
 | `negatives` | Mistyped and swapped words (variants whose BIP39 checksum fails) are refused by `recovery-kit check` and `recover`, and `recover` writes no root store and leaves the held contexts unchanged; the same for a wrong kit passphrase and for a revoked kit with the right passphrase. An invite carrying another namespace's fingerprint, a used invite and an expired invite are refused and leave no certificate. Data signed under the member's name by an unenrolled key is refused at once (`ndn-peek` exits 3 with `refused: unverifiable`, then `refused for now: retry later: …`: the root's certificate fetch is answered NoRoute, so the certificate is known absent; not final, since a certificate absent now may be fetched later); Data with one byte flipped in transit by a UDP shim is refused at once (`ndn-peek` exits 3 with `refused: bad-signature`, then `final: …`; the shim must have flipped something). Another local user is refused `ndn-ctl route add` and `ndn-fwd adopt`. Each refusal has a control under the same setup that succeeds: the right words or passphrase, an unused invite, enrolled Data, the shim not tampering, the operator's own command. |
 | `approval` | Enrollment on an admin's approval: `ndn-fwd enroll <anchor link> --role admin\|node` (by default the namespace certifies admin and node devices on an admin's approval alone). A device asks and is `pending` with a six-digit code, and its `enroll --status` shows the same code; the root device's operator approves by code (`ndn-fwd approvals approve`) and the device's certificate is issued with no further action (its daemon keeps a held status Interest at the CA, answered the moment the decision is recorded; the wait ends on what `enroll --status` shows). A second device asks for admin and a member asks for a node certificate (`--force`); the CA's daemon and the second device's restart, the CA's approval records unchanged byte for byte and the request pending on both sides (the member's held status Interest is lost with the CA's restart; it sends the next one when that one expires, within 30 s). The first device, now a remote admin, lists the request with the code the requester shows and approves it by code: the certificate is issued with no further action, the CA's record names the admin's key, and the new admin's Data validates at the root. The member's own `approvals approve` is refused with a reason and changes nothing (CA records byte for byte, request still pending); the remote admin denies with a reason, and the requester's status shows `denied` with the reason the admin typed, its new key is gone from its PIB, and its member certificate stays. Last, a namespace made before the `#deny`/`#pending` schema rules: a fixture signs, with the root store, a version whose schema lacks those two rules and whose enrollment hint names no approval roles (what `init` made before), and hands it to the root's daemon with `security/context-update` (the one place the harness calls a library, `ndn-cert`: no CLI signs a chosen schema). Every node adopts it; the remote admin's list and deny are refused with a reason and change nothing. `ndn-fwd schema update` on the root device signs the next version, every node adopts it, the remote admin lists the request (same code) and denies it, the requester learns the denial, and the admin's new Data validates at the root and at the remote admin. Expiry is not run here, since the request lifetime is in days (`[ca] approval_request_ttl_days`); `ndn-cert`'s `tests/approval.rs` covers it (`the_requester_learns_a_denial_or_an_expiry`, `an_expired_request_is_neither_listed_nor_decided_and_is_pruned`, `a_held_status_is_answered_when_the_decision_is_recorded`). |
 | `quic-links` | Devices linked over QUIC, identified by their keys. A relay (a `node` device by approval, listening for links) and two devices that reach it over QUIC only, from before they are enrolled: phone (dial-only, `listen = false`, so the relay sees it at its own address) gets an enrollment link that carries nothing but its enrollment (a fetch of the relay's Data is Nacked), enrolls by invite over it, and then fetches that Data over the full link its daemon made by itself; tab does the same on the root device's approval. A 400 KB segmented object validates from phone at tab through the relay, and Data the other way; an unenrolled device holding the namespace gets only an enrollment link, which carries none of the namespace's Data; a dial expecting another key than the relay's links nothing; links come back after the relay, then a device, restart; a revocation the relay adopts closes the revoked device's link and keeps it closed. |
+| `direct-paths` | Direct paths through real NAT (nested network namespaces with nftables masquerade, see How it runs). phone and tab, each behind a port-restricted cone box, link to the relay over QUIC only and enroll by invite; the relay sees each at its box's public address (`ndn-ctl face list`), not its LAN address. phone names tab as a `[[peer]]` reached through the relay; within seconds both show a `path direct` in `ndn-ctl link list` at the other box's public address. tab fetches an 800 KB object from phone and the relay's packet counters on their links grow by less than half the segment count (relayed, each segment costs it four packets). Dropping UDP between the two boxes removes the direct path from both within the 8 s idle timeout; phone's `direct` state is `trying` or `not-possible`, and a fetch goes through the relay (its counters grow by at least the segment count). Allowing it again brings the direct path back by itself (retry with backoff), and a fetch works. car and tv, behind symmetric boxes, get no direct path; car's `direct` state is `not-possible` with the reason, and tv's Data reaches car through the relay. stranger (public, never enrolled, a key of its own outside the namespace, no trust context, accepted by the relay by its key) punches tab: tab's `punches-refused` grows, its `probes-sent` does not, box B forwards no UDP to stranger (an nftables counter stays 0), and stranger's `direct` state is `refused` with the reason. |
 
 ## Touchpoints
 
@@ -100,4 +126,5 @@ changed since a daemon's last start, not written by hand (`step.rs`,
 | `src/world.rs` | Nodes, their generated `ndn-fwd.toml`, daemons, held versions, certificates and their issuers. |
 | `src/step.rs` | Steps, failure reports and touchpoint classification. |
 | `src/shim.rs` | The tampering UDP shim. |
+| `src/nat.rs` | NAT boxes: nested network namespaces, nftables cone or symmetric NAT, cutting two boxes apart. |
 | `src/scenarios/` | One file per scenario, plus shared steps. |

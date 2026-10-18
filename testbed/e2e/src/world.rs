@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::nat::Nat;
 use crate::run::{Op, Proc};
 use crate::shim::Shim;
 
@@ -79,6 +80,11 @@ pub struct PeerCfg {
     pub key: Option<String>,
     /// `endpoint = "10.200.0.<host>:<QUIC_PORT>"`.
     pub endpoint: Option<Ipv4Addr>,
+    /// `relay = "<device or key of another [[peer]]>"`: reach this peer
+    /// through that one (and punch a direct path to it).
+    pub relay: Option<String>,
+    /// `routes = [...]`: prefixes routed to this peer.
+    pub routes: Vec<String>,
 }
 
 impl PeerCfg {
@@ -92,6 +98,13 @@ impl PeerCfg {
         }
         if let Some(ip) = self.endpoint {
             s.push_str(&format!("endpoint = \"{ip}:{QUIC_PORT}\"\n"));
+        }
+        if let Some(r) = &self.relay {
+            s.push_str(&format!("relay = \"{r}\"\n"));
+        }
+        if !self.routes.is_empty() {
+            let routes: Vec<String> = self.routes.iter().map(|r| format!("\"{r}\"")).collect();
+            s.push_str(&format!("routes = [{}]\n", routes.join(", ")));
         }
         s
     }
@@ -108,6 +121,12 @@ impl PeerCfg {
         if let Some(ip) = self.endpoint {
             parts.push(format!("endpoint {ip}:{QUIC_PORT}"));
         }
+        if self.relay.is_some() {
+            parts.push("relay (another [[peer]])".to_owned());
+        }
+        if !self.routes.is_empty() {
+            parts.push(format!("routes {}", self.routes.join(" ")));
+        }
         format!("config: [[peer]] {}", parts.join(", "))
     }
 }
@@ -115,7 +134,12 @@ impl PeerCfg {
 pub struct Node {
     pub name: String,
     pub dir: PathBuf,
+    /// The address its faces bind to: `10.200.0.<n>` on the shared `lo`,
+    /// or its LAN address behind a NAT box.
     pub ip: Ipv4Addr,
+    /// The network namespace its daemon runs in (behind a NAT box); `None`:
+    /// the harness's own.
+    pub netns: Option<PathBuf>,
     pub cfg: NodeCfg,
     pub daemon: Option<Proc>,
     pub started_at: Option<Instant>,
@@ -259,13 +283,16 @@ impl Node {
     }
 }
 
-/// All nodes, producers and shims of one scenario. Dropping it stops them all.
+/// All nodes, producers, shims and NAT boxes of one scenario. Dropping it
+/// stops them all.
 pub struct World {
     pub dir: PathBuf,
     pub bins: Bins,
     pub nodes: BTreeMap<String, Node>,
     pub producers: Vec<(String, Proc)>,
     pub shims: Vec<Shim>,
+    /// NAT boxes, torn down after the daemons in them stop.
+    pub nat: Option<Nat>,
     seq: u32,
 }
 
@@ -278,11 +305,24 @@ impl World {
             nodes: BTreeMap::new(),
             producers: Vec::new(),
             shims: Vec::new(),
+            nat: None,
             seq: 0,
         }
     }
 
     pub fn add(&mut self, name: &str, host: u8, cfg: NodeCfg) {
+        self.insert(name, addr(host), None, cfg);
+    }
+
+    /// A node whose daemon runs on the LAN of NAT box `nat_box` (see
+    /// [`Nat::add_box`]), its faces bound to its LAN address.
+    pub fn add_behind(&mut self, name: &str, nat_box: u8, cfg: NodeCfg) {
+        let b = self.nat.as_ref().expect("add_behind: no NAT boxes").nat_box(nat_box);
+        let (ip, netns) = (b.device_ip, b.device_netns());
+        self.insert(name, ip, Some(netns), cfg);
+    }
+
+    fn insert(&mut self, name: &str, ip: Ipv4Addr, netns: Option<PathBuf>, cfg: NodeCfg) {
         let dir = self.dir.join(name);
         fs::create_dir_all(&dir).expect("node dir");
         self.nodes.insert(
@@ -290,7 +330,8 @@ impl World {
             Node {
                 name: name.to_owned(),
                 dir,
-                ip: addr(host),
+                ip,
+                netns,
                 cfg,
                 daemon: None,
                 started_at: None,
@@ -331,7 +372,11 @@ impl World {
                 .append(true)
                 .open(n.log())
                 .and_then(|mut f| f.write_all(b"----- harness: daemon start -----\n"));
-            self.bins.op("ndn-fwd").arg("-c").arg(n.cfg_arg())
+            let op = self.bins.op("ndn-fwd").arg("-c").arg(n.cfg_arg());
+            match &n.netns {
+                Some(ns) => op.in_netns(ns.clone()),
+                None => op,
+            }
         };
         let (sock, log) = {
             let n = self.node(name);
@@ -412,6 +457,8 @@ impl Drop for World {
             }
         }
         self.shims.clear();
+        // After the daemons: the namespaces they ran in go with the boxes.
+        self.nat = None;
     }
 }
 

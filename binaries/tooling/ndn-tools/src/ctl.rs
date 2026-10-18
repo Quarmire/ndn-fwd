@@ -72,6 +72,11 @@ enum Command {
         #[command(subcommand)]
         action: NeighborsAction,
     },
+    /// Show this device's QUIC links and the paths that reach each device.
+    Link {
+        #[command(subcommand)]
+        action: LinkAction,
+    },
     /// Manage service discovery announcements.
     Service {
         #[command(subcommand)]
@@ -201,6 +206,13 @@ enum CsAction {
 #[derive(Subcommand)]
 enum NeighborsAction {
     /// List all discovered neighbors.
+    List,
+}
+
+#[derive(Subcommand)]
+enum LinkAction {
+    /// List the links: each device's paths (direct, link, relay) and its
+    /// direct-path state.
     List,
 }
 
@@ -454,6 +466,17 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 print_control_response(&resp);
+            }
+        },
+        Command::Link { action } => match action {
+            LinkAction::List => {
+                let listing = mgmt
+                    .link_list(std::time::Duration::from_secs(4))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let mut out = String::new();
+                render_link_list_into(&mut out, &listing);
+                print!("{out}");
             }
         },
         Command::Service { action } => match action {
@@ -1181,6 +1204,58 @@ fn print_control_response(resp: &ControlResponse) {
     }
 }
 
+/// `ndn-ctl link list`, one item per line (scripts parse it):
+/// `key`, `probes-sent`, `punches-refused`, then per link `link <label>`
+/// with indented `key`, `device`, `path …` lines and one `direct …` line.
+fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing) {
+    use std::fmt::Write as _;
+    fn fingerprint(key: &Option<[u8; 32]>) -> String {
+        match key {
+            Some(k) => k.iter().map(|b| format!("{b:02x}")).collect(),
+            None => "-".to_owned(),
+        }
+    }
+    let _ = writeln!(out, "key {}", fingerprint(&listing.key));
+    let _ = writeln!(out, "probes-sent {}", listing.probes_sent);
+    let _ = writeln!(out, "punches-refused {}", listing.punches_refused);
+    for link in &listing.links {
+        let _ = writeln!(out, "link {}", link.label);
+        let _ = writeln!(out, "  key {}", fingerprint(&link.key));
+        match &link.device {
+            Some(d) => {
+                let _ = writeln!(out, "  device {d}");
+            }
+            None => out.push_str("  device -\n"),
+        }
+        for p in &link.paths {
+            let rtt = p
+                .rtt_micros
+                .map(|us| format!("{:.1}", us as f64 / 1000.0))
+                .unwrap_or_else(|| "-".to_owned());
+            let _ = write!(
+                out,
+                "  path {} face={} remote={} rtt-ms={rtt} age-s={}",
+                p.kind,
+                p.face_id,
+                p.remote.as_deref().unwrap_or("-"),
+                p.age_secs,
+            );
+            if let Some(via) = &p.via {
+                let _ = write!(out, " via={via}");
+            }
+            out.push('\n');
+        }
+        let _ = write!(out, "  direct {}", link.direct_state);
+        if let Some(s) = link.retry_in_secs {
+            let _ = write!(out, " retry-in-s={s}");
+        }
+        if !link.direct_text.is_empty() {
+            let _ = write!(out, " {}", link.direct_text);
+        }
+        out.push('\n');
+    }
+}
+
 #[cfg(test)]
 mod ctl_tests {
     use super::*;
@@ -1388,5 +1463,63 @@ mod ctl_tests {
             !out.contains("reassembly:"),
             "spurious reassembly line:\n{out}"
         );
+    }
+
+    #[test]
+    fn link_list_renders_the_contract_format() {
+        use ndn_mgmt_wire::{LinkEntry, LinkListing, LinkPathEntry};
+        let listing = LinkListing {
+            key: Some([0xab; 32]),
+            probes_sent: 40,
+            punches_refused: 1,
+            links: vec![
+                LinkEntry {
+                    label: "phone".into(),
+                    key: Some([0x01; 32]),
+                    device: Some("/home/bob/node/phone".parse().unwrap()),
+                    paths: vec![
+                        LinkPathEntry {
+                            kind: "direct".into(),
+                            face_id: 7,
+                            remote: Some("203.0.113.5:6367".into()),
+                            rtt_micros: Some(12_345),
+                            age_secs: 90,
+                            via: None,
+                        },
+                        LinkPathEntry {
+                            kind: "relay".into(),
+                            face_id: 3,
+                            remote: None,
+                            rtt_micros: None,
+                            age_secs: 3_600,
+                            via: Some("vps".into()),
+                        },
+                    ],
+                    direct_state: "up".into(),
+                    ..Default::default()
+                },
+                LinkEntry {
+                    label: "laptop".into(),
+                    direct_state: "not-possible".into(),
+                    direct_text: "no probe came back".into(),
+                    retry_in_secs: Some(20),
+                    ..Default::default()
+                },
+            ],
+        };
+        let mut out = String::new();
+        render_link_list_into(&mut out, &listing);
+        let expected = format!(
+            "key {}\nprobes-sent 40\npunches-refused 1\n\
+             link phone\n  key {}\n  device /home/bob/node/phone\n\
+             \x20 path direct face=7 remote=203.0.113.5:6367 rtt-ms=12.3 age-s=90\n\
+             \x20 path relay face=3 remote=- rtt-ms=- age-s=3600 via=vps\n\
+             \x20 direct up\n\
+             link laptop\n  key -\n  device -\n\
+             \x20 direct not-possible retry-in-s=20 no probe came back\n",
+            "ab".repeat(32),
+            "01".repeat(32),
+        );
+        assert_eq!(out, expected);
     }
 }
