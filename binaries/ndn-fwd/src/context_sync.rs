@@ -7,7 +7,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ndn_namespace::PibContextStore;
 use ndn_namespace::sync::{ContextSync, Groups};
 
 /// With `[security] context_sync`, the handle for the [`TrustAdmin`] and the
@@ -18,7 +17,7 @@ pub(crate) fn prepare(enabled: bool, pib_root: &Path) -> Option<(ContextSync, Gr
     enabled.then(|| {
         ndn_namespace::sync::prepare(
             ndn_namespace::sync::member_id(pib_root),
-            Arc::new(PibContextStore::new(pib_root)),
+            Arc::new(crate::context_adopt::context_store(pib_root)),
         )
     })
 }

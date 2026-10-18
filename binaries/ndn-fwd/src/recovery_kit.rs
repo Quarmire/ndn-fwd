@@ -31,7 +31,7 @@ use ndn_cert::{
 };
 use ndn_mgmt::ContextRefreshInfo;
 use ndn_namespace::admin::{ContextUpdateSink, HandedOver, SinkError};
-use ndn_namespace::{PibContextStore, hex};
+use ndn_namespace::hex;
 use ndn_packet::{Data, Name};
 use ndn_security::{FilePib, KeyRole, SignedTrustContext, Signer};
 
@@ -40,7 +40,9 @@ use crate::onboard::{flag, pib_dir, positionals};
 /// How long one request waits for the daemon to take a new version (local
 /// work: verify, store, publish — after any other change of the namespace
 /// running there). Without an answer the same version is handed over again;
-/// the answer to that one says what became of it.
+/// the answer to that one says what became of it. After
+/// [`ndn_namespace::admin::HAND_OVER_WAITS`] waits (about five minutes) the
+/// outcome is reported as not known.
 const DAEMON_UPDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A kit named on the command line: `words`, `yubikey`, or a kit file.
@@ -271,7 +273,7 @@ pub(crate) async fn hand_over(
         socket: &socket,
         pib_dir,
     };
-    let store = PibContextStore::new(pib_dir);
+    let store = crate::context_adopt::context_store(pib_dir);
     Ok(
         match ndn_namespace::admin::hand_over(&daemon, &store, bump).await? {
             HandedOver::Taken(info) => format!("the daemon at {socket} {}", info.detail),

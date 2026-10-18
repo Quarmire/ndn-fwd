@@ -484,7 +484,12 @@ async fn run_init(args: &[String]) -> Result<()> {
     };
     println!("anchor_uri_fp  = {}", fingerprint_only.to_uri());
     println!();
-    println!("# Scan anchor_uri as a QR, or share anchor_url. anchor_uri_fp is the short");
+    if root_dev.envelope.to_uri().len() <= ndn_trust_envelope::qr::MAX_TEXT_LEN {
+        println!("# Scan anchor_uri as a QR, or share anchor_url. anchor_uri_fp is the short");
+    } else {
+        println!("# Share anchor_uri or anchor_url as a link. It is too long for one QR code:");
+        println!("# as a QR, show anchor_uri_fp. anchor_uri_fp is the short");
+    }
     println!("# form (namespace + expected fingerprint + version): the adopting device's");
     println!("# daemon fetches the context by name, so it needs a link and a route to this node.");
     println!("# Adopting lets a peer VERIFY this namespace; producing still needs enrollment as");

@@ -84,6 +84,12 @@ impl LinkTrust for DaemonTrust {
                 .and_then(|v| v.cert_cache().get_valid(name))
         })
     }
+
+    fn known_certificate_of_key(&self, fingerprint: &KeyFingerprint) -> Option<Certificate> {
+        self.engine
+            .validator()
+            .and_then(|v| v.cert_cache().get_by_key_digest(&fingerprint.0))
+    }
 }
 
 /// The engine: link faces, and their routes as static RIB routes.

@@ -30,7 +30,7 @@ use ndn_packet::encode::InterestBuilder;
 use ndn_security::custodian::{WireSignRequest, WireSignResponse};
 use ndn_security::verifier::{EcdsaSha256Verifier, Verifier, VerifyOutcome};
 use ndn_security::Certificate;
-use ndn_trust_envelope::{CapDirection, Capability, TrustEnvelope};
+use ndn_trust_envelope::{CAPABILITY_NONCE_LEN, CapDirection, Capability, TrustEnvelope};
 
 /// The operator public key from a `Capability{Grant}` URI: `grant` is the
 /// operator's certificate as signed NDN Data wire.
@@ -62,6 +62,26 @@ fn region_for(name: &str) -> Vec<u8> {
     n.encode_to_tlv().to_vec()
 }
 
+/// A capability request for `namespace` lasting `ttl_secs`, with a fresh
+/// random nonce (`CAPABILITY_NONCE_LEN` bytes) so no two requests are alike
+/// and a granting device can tell a replayed request from a new one. The
+/// namespace is written in its canonical URI form.
+fn request_envelope(namespace: &str, ttl_secs: u64) -> TrustEnvelope {
+    let namespace: Name = namespace
+        .parse()
+        .unwrap_or_else(|_| die(&format!("invalid NDN name: {namespace}")));
+    let mut nonce = [0u8; CAPABILITY_NONCE_LEN];
+    getrandom::getrandom(&mut nonce).unwrap_or_else(|_| die("system RNG unavailable"));
+    TrustEnvelope::Capability(Capability {
+        direction: CapDirection::Request,
+        namespace: namespace.to_string(),
+        scope_patterns: vec![],
+        ttl_secs,
+        nonce: Bytes::copy_from_slice(&nonce),
+        grant: None,
+    })
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -69,15 +89,7 @@ fn main() {
             let ttl: u64 = args[2]
                 .parse()
                 .unwrap_or_else(|_| die("ttl must be a number"));
-            let env = TrustEnvelope::Capability(Capability {
-                direction: CapDirection::Request,
-                namespace: args[1].clone(),
-                scope_patterns: vec![],
-                ttl_secs: ttl,
-                nonce: Bytes::from_static(b"kiosk-nonce-1"),
-                grant: None,
-            });
-            println!("{}", env.to_uri());
+            println!("{}", request_envelope(&args[1], ttl).to_uri());
         }
         Some("pubkey") if args.len() == 2 => {
             println!("{}", B64.encode(operator_pubkey(&args[1])));
@@ -192,4 +204,26 @@ fn main() {
 fn die(msg: &str) -> ! {
     eprintln!("{msg}");
     std::process::exit(2);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nonce_of(envelope: TrustEnvelope) -> Bytes {
+        match TrustEnvelope::from_uri(&envelope.to_uri()).unwrap() {
+            TrustEnvelope::Capability(c) => c.nonce,
+            other => panic!("not a capability: {other:?}"),
+        }
+    }
+
+    /// Each request carries its own random nonce, never a constant.
+    #[test]
+    fn every_request_gets_a_fresh_nonce() {
+        let a = nonce_of(request_envelope("/work/acme/dashboard", 300));
+        let b = nonce_of(request_envelope("/work/acme/dashboard", 300));
+        assert_eq!(a.len(), CAPABILITY_NONCE_LEN);
+        assert_eq!(b.len(), CAPABILITY_NONCE_LEN);
+        assert_ne!(a, b);
+    }
 }

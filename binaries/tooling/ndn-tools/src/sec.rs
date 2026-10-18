@@ -232,7 +232,7 @@ fn cmd_keygen(
     // Certificate Format v2: the key is `<identity>/KEY/<keyid>` (a random
     // 8-byte key id, as ndn-cxx and `ndn-fwd` auto_init generate); its
     // self-signed certificate `<key>/self/<version>`.
-    let key_name = ndn_security::cert_name::new_key_name(&identity);
+    let key_name = ndn_security::cert_name::new_key_name(&identity)?;
 
     // The certificate carries the public key in SPKI form for both
     // algorithms (Certificate Format v2 §3); `issue_self_signed` signs it

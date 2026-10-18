@@ -174,7 +174,14 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     let Newest {
         version: newest,
         confirmed,
-    } = fetch_newest(&daemon, &namespace, kit_fingerprint, from_held).await?;
+    } = fetch_newest(
+        &daemon,
+        &namespace,
+        kit_fingerprint,
+        from_held,
+        &crate::context_adopt::namespace_words(),
+    )
+    .await?;
     let (held, held_data) = read_stored_context(&pib_dir, &namespace)?.with_context(|| {
         format!(
             "the daemon holds {namespace} v{newest} but {} has no stored copy; is -c/--pib the \

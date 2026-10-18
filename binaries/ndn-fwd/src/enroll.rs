@@ -34,7 +34,7 @@ pub(crate) async fn enroll(
 /// `security/enroll-status`: this node's requests for an admin's approval,
 /// oldest first.
 pub(crate) fn enroll_status(admin: &TrustAdmin) -> Result<Vec<OutgoingRequest>, TrustRefusal> {
-    ndn_namespace::enroll::enroll_status(admin.vault.as_ref())
+    ndn_namespace::enroll::enroll_status(admin.vault.as_ref(), admin.ns.words())
 }
 
 /// Finish this node's requests for an admin's approval, until `cancel`

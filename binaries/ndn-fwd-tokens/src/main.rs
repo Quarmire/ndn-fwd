@@ -19,7 +19,6 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use ndn_cert::roles::{Role, role_prefix, role_token, token_expiry, token_role, token_with_expiry};
 use ndn_packet::Name;
 use ndn_trust_envelope::{ANCHOR_FINGERPRINT_LEN, TrustEnvelope};
-use qrcode::QrCode;
 
 #[derive(Parser)]
 #[command(name = "ndn-fwd-tokens", version, about)]
@@ -214,12 +213,17 @@ fn main() -> Result<()> {
 /// so the token stays out of intermediary access logs.
 fn invite_url(args: &InviteArgs, identity_namespace: &str, token: &str) -> Result<String> {
     let anchor_fingerprint = args.anchor_fp.as_deref().map(parse_fp).transpose()?;
+    // Names travel in their canonical URI form (trust-envelope.md §4.4).
+    let ca_prefix: Name = args
+        .ca
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--ca {:?} is not an NDN name: {e}", args.ca))?;
     let envelope = TrustEnvelope::Invite {
-        ca_prefix: args.ca.clone(),
+        ca_prefix: ca_prefix.to_string(),
         identity_namespace: identity_namespace.to_owned(),
         token: token.to_owned(),
         // What is left of the token's own expiry, for readers of the envelope.
-        ttl_secs: token_expiry(token).map(|at| at.saturating_sub(now_secs())),
+        ttl_secs: token_expiry(token)?.map(|at| at.saturating_sub(now_secs())),
         anchor_fingerprint,
     };
     Ok(match &args.domain {
@@ -255,7 +259,7 @@ fn mint_token(bytes: usize) -> Result<String> {
 }
 
 fn render_qr(url: &str, format: QrFormat, token: &str) -> Result<()> {
-    let code = QrCode::new(url.as_bytes()).context("QR encoding")?;
+    let code = ndn_trust_envelope::qr::encode(url).context("QR encoding")?;
     match format {
         QrFormat::Ascii => {
             let s = code
@@ -337,6 +341,6 @@ mod tests {
         };
         let url = invite_url(&args, "/home/bob/member", &token).unwrap();
         let link = ndn_cert::InviteLink::from_uri(&url).unwrap();
-        assert_eq!(link.expires_at_secs, token_expiry(&token));
+        assert_eq!(link.expires_at_secs, token_expiry(&token).unwrap());
     }
 }

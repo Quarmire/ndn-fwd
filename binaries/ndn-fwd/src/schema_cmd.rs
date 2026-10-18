@@ -149,6 +149,11 @@ fn show(args: &[String]) -> Result<()> {
                     println!("{}", line.trim());
                 }
             }
+            SchemaFormat::Unknown(code) => println!(
+                "# schema blob {i}: format {code} ({} bytes), not understood by this node: it \
+                 authorizes nothing here and is carried into the next version unchanged",
+                blob.body.len()
+            ),
         }
     }
     Ok(())
@@ -514,7 +519,7 @@ mod tests {
         let relay: Name = "/home/bob/node/relay".parse().unwrap();
         let key: Arc<dyn Signer> = Arc::new(Ed25519Signer::from_seed(
             &[9; 32],
-            ndn_cert::new_device_key_name(&relay),
+            ndn_cert::new_device_key_name(&relay).unwrap(),
         ));
         let poll = ndn_identity::poll_approval_via_engine(
             node.admin.ns.engine(),

@@ -6,7 +6,6 @@
 use std::path::Path;
 
 use ndn_face::local::InProcFace;
-use ndn_namespace::PibContextStore;
 use ndn_namespace::publish::ContextPublisher;
 use ndn_transport::FaceId;
 
@@ -16,5 +15,8 @@ pub(crate) const CONTEXT_FACE_ID: u64 = 0xFFFF_0005;
 /// the face to attach before build (it exists even when nothing is stored
 /// yet, so a context adopted at runtime can be published).
 pub(crate) fn prepare(pib_root: &Path) -> (InProcFace, ContextPublisher) {
-    ndn_namespace::publish::prepare(&PibContextStore::new(pib_root), FaceId(CONTEXT_FACE_ID))
+    ndn_namespace::publish::prepare(
+        &crate::context_adopt::context_store(pib_root),
+        FaceId(CONTEXT_FACE_ID),
+    )
 }

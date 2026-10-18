@@ -21,7 +21,6 @@ use ndn_packet::Name;
 use ndn_security::{FilePib, SignedTrustContext};
 use ndn_trust_context::{ContextSpec, build_anchor_envelope, build_signed_anchor_envelope};
 use ndn_trust_envelope::TrustEnvelope;
-use qrcode::QrCode;
 
 #[derive(Parser)]
 #[command(name = "ndn-trust-context", version, about)]
@@ -185,7 +184,24 @@ fn main() -> Result<()> {
             let payload = envelope.to_uri();
             println!("{payload}");
             if qr {
-                render_qr(&payload, &qr_format, &namespace)?;
+                let shown = envelope.qr_uri().with_context(|| {
+                    format!(
+                        "the link is {} characters, more than one QR code holds ({})",
+                        payload.len(),
+                        ndn_trust_envelope::qr::MAX_TEXT_LEN
+                    )
+                })?;
+                if shown != payload {
+                    eprintln!(
+                        "note: the link with the context inline is {} characters, more than one \
+                         QR code holds ({}); the QR carries the link by reference (namespace, \
+                         expected fingerprint, version), and the adopting device fetches the \
+                         context by name",
+                        payload.len(),
+                        ndn_trust_envelope::qr::MAX_TEXT_LEN
+                    );
+                }
+                render_qr(&shown, &qr_format, &namespace)?;
             }
         }
         Cmd::Inspect { payload } => {
@@ -256,7 +272,7 @@ fn parse_name(s: &str) -> Result<Name> {
 }
 
 fn render_qr(payload: &str, format: &QrFormat, label: &str) -> Result<()> {
-    let code = QrCode::new(payload.as_bytes()).context("QR encoding (payload too large?)")?;
+    let code = ndn_trust_envelope::qr::encode(payload).context("QR encoding")?;
     match format {
         QrFormat::Ascii => {
             let s = code
