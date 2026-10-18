@@ -1,20 +1,15 @@
 //! Persistent self-signed listener certs.
 //!
-//! A pinning dialer (`quic://host:port?cert=<hex>`, `[[face]] cert_sha256`, a
-//! browser's `serverCertificateHashes`) trusts the SHA-256 of the listener's
-//! leaf certificate. Minting a fresh key + cert on every resolve would break
-//! every paired peer's pin at each restart, so the key (PKCS#8) and cert are
-//! persisted under a state directory and reused:
+//! A pinning dialer (a WebTransport `[[face]] cert_sha256`, a browser's
+//! `serverCertificateHashes`) trusts the SHA-256 of the listener's leaf
+//! certificate. Minting a fresh key + cert on every resolve would break every
+//! paired peer's pin at each restart, so the key (PKCS#8) and cert are
+//! persisted under a state directory and reused. The key is reused forever;
+//! the 13-day cert is re-issued (same key) once it is within a day of expiry.
 //!
-//! - [`SelfSignedProfile::Backbone`]: the same key *and* cert are reused until
-//!   the 10-year cert expires — the pinned leaf hash never changes.
-//! - [`SelfSignedProfile::BrowserPinnable`]: the key is reused forever; the
-//!   13-day cert is re-issued (same key) once it is within a day of expiry.
-//!
-//! Entries are keyed by profile + hostnames, so changing the hostnames mints a
-//! new key and cert. Files are written `0600` (directories `0700`) and
-//! published atomically, so concurrent resolvers sharing a directory converge
-//! on one key.
+//! Entries are keyed by hostnames, so changing the hostnames mints a new key
+//! and cert. Files are written `0600` (directories `0700`) and published
+//! atomically, so concurrent resolvers sharing a directory converge on one key.
 
 use std::fs;
 use std::io::{self, Write};
@@ -23,39 +18,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
-use crate::cert_source::{CertMaterial, SelfSignedDev, SelfSignedProfile};
+use crate::cert_source::{CertMaterial, SelfSignedDev};
 use crate::client::AcmeError;
 
 const DAY_SECS: i64 = 86_400;
 
-impl SelfSignedProfile {
-    /// Validity window of a freshly minted cert.
-    fn validity(self) -> time::Duration {
-        match self {
-            // Chrome's WebTransport `serverCertificateHashes` rejects certs
-            // valid for more than 14 days.
-            SelfSignedProfile::BrowserPinnable => time::Duration::days(13),
-            // A pinned backbone peer trusts the leaf hash, not the expiry.
-            SelfSignedProfile::Backbone => time::Duration::days(3650),
-        }
-    }
+/// Validity of a freshly minted cert. Chrome's WebTransport
+/// `serverCertificateHashes` rejects certs valid for more than 14 days.
+const VALIDITY_DAYS: i64 = 13;
 
-    /// A cached cert is re-issued once fewer than this many seconds remain.
-    fn reissue_margin_secs(self) -> i64 {
-        match self {
-            SelfSignedProfile::BrowserPinnable => DAY_SECS,
-            // Re-issuing changes the pinned hash: only do it once expired.
-            SelfSignedProfile::Backbone => 0,
-        }
-    }
+/// A cached cert is re-issued once fewer than this many seconds remain.
+const REISSUE_MARGIN_SECS: i64 = DAY_SECS;
 
-    fn cache_tag(self) -> &'static str {
-        match self {
-            SelfSignedProfile::BrowserPinnable => "browser",
-            SelfSignedProfile::Backbone => "backbone",
-        }
-    }
-}
+/// Tag in cache file names; kept so certs already on disk keep being reused.
+const CACHE_TAG: &str = "browser";
 
 /// Default directory for persisted self-signed listener certs:
 /// `$XDG_STATE_HOME/ndn-fwd/tls`, else `$HOME/.local/state/ndn-fwd/tls`.
@@ -79,22 +55,15 @@ fn default_cache_dir_from(
 }
 
 /// Resolves a [`SelfSignedDev`] source, reusing the persisted key/cert.
-pub(crate) async fn resolve(
-    src: &SelfSignedDev,
-    profile: SelfSignedProfile,
-) -> Result<CertMaterial, AcmeError> {
+pub(crate) async fn resolve(src: &SelfSignedDev) -> Result<CertMaterial, AcmeError> {
     let hostnames = src.hostnames.clone();
     let dir = src.cache_dir.clone().or_else(default_self_signed_cache_dir);
-    tokio::task::spawn_blocking(move || resolve_blocking(&hostnames, dir.as_deref(), profile))
+    tokio::task::spawn_blocking(move || resolve_blocking(&hostnames, dir.as_deref()))
         .await
         .map_err(|e| AcmeError::Other(format!("self-signed cert task failed: {e}")))?
 }
 
-fn resolve_blocking(
-    hostnames: &[String],
-    dir: Option<&Path>,
-    profile: SelfSignedProfile,
-) -> Result<CertMaterial, AcmeError> {
+fn resolve_blocking(hostnames: &[String], dir: Option<&Path>) -> Result<CertMaterial, AcmeError> {
     let Some(dir) = dir else {
         tracing::warn!(
             target: "ndn_acme",
@@ -103,11 +72,11 @@ fn resolve_blocking(
              hash changes on every restart"
         );
         let key = rcgen::KeyPair::generate()?;
-        let cert_pem = mint_cert(hostnames, &key, profile)?;
+        let cert_pem = mint_cert(hostnames, &key)?;
         return Ok(material(cert_pem, &key));
     };
     create_private_dir(dir)?;
-    let stem = cache_stem(profile, hostnames);
+    let stem = cache_stem(hostnames);
     let key_path = dir.join(format!("{stem}.key.pem"));
     let cert_path = dir.join(format!("{stem}.cert.pem"));
 
@@ -116,20 +85,20 @@ fn resolve_blocking(
 
     let existing = read_optional(&cert_path)?;
     if let Some(pem) = &existing
-        && cert_reusable(pem, &spki, profile)
+        && cert_reusable(pem, &spki)
     {
         tracing::debug!(target: "ndn_acme", path = %cert_path.display(), "reusing persisted self-signed cert");
         return Ok(material(pem.clone(), &key));
     }
 
-    let cert_pem = mint_cert(hostnames, &key, profile)?;
+    let cert_pem = mint_cert(hostnames, &key)?;
     match existing {
         Some(_) => publish_replace(&cert_path, &cert_pem)?,
         None if publish_new(&cert_path, &cert_pem)? => {}
         None => {
             // A concurrent resolver published first; converge on its cert.
             let theirs = fs::read(&cert_path)?;
-            if cert_reusable(&theirs, &spki, profile) {
+            if cert_reusable(&theirs, &spki) {
                 return Ok(material(theirs, &key));
             }
             publish_replace(&cert_path, &cert_pem)?;
@@ -138,7 +107,6 @@ fn resolve_blocking(
     tracing::info!(
         target: "ndn_acme",
         path = %cert_path.display(),
-        ?profile,
         "issued self-signed cert from the persisted key"
     );
     Ok(material(cert_pem, &key))
@@ -151,8 +119,8 @@ fn material(cert_chain_pem: Vec<u8>, key: &rcgen::KeyPair) -> CertMaterial {
     }
 }
 
-/// File-name stem: profile tag + a digest of the (ordered) hostnames.
-fn cache_stem(profile: SelfSignedProfile, hostnames: &[String]) -> String {
+/// File-name stem: cache tag + a digest of the (ordered) hostnames.
+fn cache_stem(hostnames: &[String]) -> String {
     let mut h = Sha256::new();
     for name in hostnames {
         h.update((name.len() as u64).to_be_bytes());
@@ -160,24 +128,20 @@ fn cache_stem(profile: SelfSignedProfile, hostnames: &[String]) -> String {
     }
     let digest = h.finalize();
     let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    format!("self-signed-{}-{hex}", profile.cache_tag())
+    format!("self-signed-{CACHE_TAG}-{hex}")
 }
 
-fn mint_cert(
-    hostnames: &[String],
-    key: &rcgen::KeyPair,
-    profile: SelfSignedProfile,
-) -> Result<Vec<u8>, AcmeError> {
+fn mint_cert(hostnames: &[String], key: &rcgen::KeyPair) -> Result<Vec<u8>, AcmeError> {
     let mut params = rcgen::CertificateParams::new(hostnames.to_vec())?;
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now - time::Duration::hours(1);
-    params.not_after = now + profile.validity();
+    params.not_after = now + time::Duration::days(VALIDITY_DAYS);
     Ok(params.self_signed(key)?.pem().into_bytes())
 }
 
 /// True when `cert_pem` holds a leaf for `spki` that is currently valid and
-/// not within the profile's re-issue margin of expiry.
-fn cert_reusable(cert_pem: &[u8], spki: &[u8], profile: SelfSignedProfile) -> bool {
+/// not within the re-issue margin of expiry.
+fn cert_reusable(cert_pem: &[u8], spki: &[u8]) -> bool {
     use x509_parser::prelude::*;
     let Some(Ok(der)) = rustls_pemfile::certs(&mut &cert_pem[..]).next() else {
         return false;
@@ -191,7 +155,7 @@ fn cert_reusable(cert_pem: &[u8], spki: &[u8], profile: SelfSignedProfile) -> bo
     let now = now_unix();
     let validity = cert.validity();
     validity.not_before.timestamp() <= now
-        && validity.not_after.timestamp() - now > profile.reissue_margin_secs()
+        && validity.not_after.timestamp() - now > REISSUE_MARGIN_SECS
 }
 
 fn now_unix() -> i64 {
@@ -307,8 +271,8 @@ mod tests {
         })
     }
 
-    async fn leaf(src: &CertSource, profile: SelfSignedProfile) -> [u8; 32] {
-        src.resolve(None, profile)
+    async fn leaf(src: &CertSource) -> [u8; 32] {
+        src.resolve(None)
             .await
             .expect("resolve")
             .leaf_sha256()
@@ -318,22 +282,19 @@ mod tests {
     #[tokio::test]
     async fn same_cache_dir_yields_stable_leaf_hash() {
         let dir = tempfile::tempdir().unwrap();
-        for profile in [SelfSignedProfile::Backbone, SelfSignedProfile::BrowserPinnable] {
-            let first = leaf(&source(dir.path(), &["localhost"]), profile).await;
-            let second = leaf(&source(dir.path(), &["localhost"]), profile).await;
-            assert_eq!(first, second, "{profile:?}: pin must survive a re-resolve");
-        }
+        let first = leaf(&source(dir.path(), &["localhost"])).await;
+        let second = leaf(&source(dir.path(), &["localhost"])).await;
+        assert_eq!(first, second, "pin must survive a re-resolve");
     }
 
     #[tokio::test]
     async fn different_hostnames_yield_new_cert() {
         let dir = tempfile::tempdir().unwrap();
-        let p = SelfSignedProfile::Backbone;
-        let a = leaf(&source(dir.path(), &["localhost"]), p).await;
-        let b = leaf(&source(dir.path(), &["localhost", "127.0.0.1"]), p).await;
+        let a = leaf(&source(dir.path(), &["localhost"])).await;
+        let b = leaf(&source(dir.path(), &["localhost", "127.0.0.1"])).await;
         assert_ne!(a, b);
         // Each hostname set keeps its own stable cert.
-        assert_eq!(a, leaf(&source(dir.path(), &["localhost"]), p).await);
+        assert_eq!(a, leaf(&source(dir.path(), &["localhost"])).await);
     }
 
     #[cfg(unix)]
@@ -342,7 +303,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("tls");
-        leaf(&source(&cache, &["localhost"]), SelfSignedProfile::Backbone).await;
+        leaf(&source(&cache, &["localhost"])).await;
         let mut files = 0;
         for entry in fs::read_dir(&cache).unwrap() {
             let entry = entry.unwrap();
@@ -356,14 +317,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_cert_near_expiry_is_reissued_with_same_key() {
+    async fn cert_near_expiry_is_reissued_with_same_key() {
         let dir = tempfile::tempdir().unwrap();
-        let p = SelfSignedProfile::BrowserPinnable;
         let src = source(dir.path(), &["localhost"]);
-        let first = src.resolve(None, p).await.unwrap();
+        let first = src.resolve(None).await.unwrap();
 
         // Overwrite the cached cert with one (same key) expiring in an hour.
-        let stem = cache_stem(p, &["localhost".to_string()]);
+        let stem = cache_stem(&["localhost".to_string()]);
         let key = rcgen::KeyPair::from_pem(
             std::str::from_utf8(&first.private_key_pem).unwrap(),
         )
@@ -375,13 +335,13 @@ mod tests {
         let expiring = params.self_signed(&key).unwrap().pem();
         fs::write(dir.path().join(format!("{stem}.cert.pem")), &expiring).unwrap();
 
-        let second = src.resolve(None, p).await.unwrap();
+        let second = src.resolve(None).await.unwrap();
         assert_eq!(second.private_key_pem, first.private_key_pem, "key kept");
         let st = crate::cert_status(&second.cert_chain_pem).unwrap();
         assert!(st.days_remaining >= 12, "re-issued for the full window");
         assert_ne!(second.cert_chain_pem, expiring.into_bytes());
         // The re-issued cert is itself persisted and reused.
-        assert_eq!(second.leaf_sha256(), leaf(&src, p).await.into());
+        assert_eq!(second.leaf_sha256(), leaf(&src).await.into());
     }
 
     #[test]

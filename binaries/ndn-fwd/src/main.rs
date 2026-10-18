@@ -56,6 +56,9 @@ mod face_provision;
 mod face_setup;
 mod host_helpers;
 mod installs;
+// QUIC links: `[[peer]]` and `[[face]] kind = "quic"`.
+#[cfg(feature = "quic")]
+mod links;
 mod monitors;
 mod onboard;
 mod own_certs;
@@ -124,7 +127,11 @@ USAGE:
                                           ([ca] approval_roles /
                                           approval_requires_invite of -c, else
                                           admin, node by an admin's approval;
-                                          member, guest by invite), print its
+                                          member, guest by invite) and the link
+                                          policy ([ca] link_roles /
+                                          relay_roles / enrollment_links of
+                                          -c, else any role links, node
+                                          relays, enrollment links on), print its
                                           ndn-trust://anchor envelope and the
                                           [security] lines for ndn-fwd.toml,
                                           and exit. <store>: os-keyring (the
@@ -236,11 +243,14 @@ USAGE:
                                           generated schema (a namespace made by
                                           an earlier release gains the rules
                                           added since) and the enrollment
-                                          policy its CA enforces, and hand it
-                                          to the daemon. Prints the rules added
-                                          and removed; refused when a rule
-                                          devices hold would be removed, unless
-                                          --accept-narrowing
+                                          policy its CA enforces, the link
+                                          policy [ca] of -c states (else the
+                                          held one), and hand it to the
+                                          daemon. Prints the rules added and
+                                          removed and the link policy change;
+                                          refused when a rule devices hold
+                                          would be removed or the link policy
+                                          narrows, unless --accept-narrowing
   ndn-fwd root-key status [--pib <dir>]   where this root device keeps its
                                           namespace root key
   ndn-fwd root-key move --to <store> [--pib <dir>]
@@ -1163,6 +1173,18 @@ async fn main() -> Result<()> {
         &trust_keyring,
         cancel.child_token(),
     );
+    // QUIC links (`[[face]] kind = "quic"`, `[[peer]]`): admitted from the
+    // held trust contexts and expected fingerprints, with this node's
+    // certificates in their hello.
+    #[cfg(feature = "quic")]
+    let links = links::spawn(
+        &engine,
+        Arc::clone(&trust_keyring),
+        active_identity.as_ref(),
+        Arc::clone(&own_certs),
+        &fwd_config,
+        cancel.child_token(),
+    )?;
 
     // On a namespace's root device whose root key is still plaintext in the
     // PIB (a namespace made before root stores), say so and how to seal it.
@@ -1466,6 +1488,12 @@ async fn main() -> Result<()> {
     // of waiting out their Interests.
     if let Some(status) = &ca_status {
         status.release_held(std::time::Duration::from_secs(1)).await;
+    }
+    // Tell linked devices this one is going (they dial again when it is
+    // back) while the endpoints still run.
+    #[cfg(feature = "quic")]
+    if let Some(links) = &links {
+        links.shutdown().await;
     }
     cancel.cancel();
 

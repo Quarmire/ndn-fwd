@@ -32,7 +32,7 @@ use bytes::Bytes;
 use ndn_cert::roles::{Role, parse_device_key};
 use ndn_cert::{ApprovalRecord, ApprovalStore, ApproverError, Decision, RefusalKind};
 use ndn_mgmt::{ApprovalMgmtBackend, TrustRefusal, approval_refusal, approval_row};
-use ndn_mgmt_wire::PendingApproval;
+use ndn_mgmt_wire::{ApprovalListing, PendingApproval};
 use ndn_mgmt_wire::control_response::status;
 use ndn_packet::{Data, Name};
 use ndn_security::{Certificate, FilePib, Signer};
@@ -92,38 +92,80 @@ fn approver_refusal(cred: &AdminCredential, e: ApproverError) -> TrustRefusal {
     }
 }
 
+/// The listing note for a namespace whose CA could not be asked: why, and
+/// what to do. The refusal (status and reason) is what `list` answers when
+/// no namespace at all could be listed.
+fn unlisted(cred: &AdminCredential, e: ApproverError) -> (TrustRefusal, String) {
+    let ns = &cred.namespace;
+    let unreachable = match &e {
+        ApproverError::CaUnreachable { detail, .. } => Some(detail.clone()),
+        _ => None,
+    };
+    let r = approver_refusal(cred, e);
+    let note = match unreachable {
+        Some(detail) => format!(
+            "{ns}: unreachable ({detail}); its requests are not shown — retry when it is up"
+        ),
+        None => format!("{ns}: not listed ({}); its requests are not shown", r.reason),
+    };
+    (r, note)
+}
+
+/// Merge this node's own CA's rows (`local`, `None` when it runs no CA) with
+/// what each administered namespace's CA answered: the rows that could be
+/// listed, and a note for each namespace that could not. Refused only when
+/// nothing at all could be listed — a CA host keeps seeing its own queue
+/// while another namespace's CA is down.
+fn merge_listing(
+    local: Option<Vec<PendingApproval>>,
+    remote: Vec<Result<Vec<PendingApproval>, (TrustRefusal, String)>>,
+) -> Result<ApprovalListing, TrustRefusal> {
+    let mut listed = local.is_some();
+    let mut listing = ApprovalListing { rows: local.unwrap_or_default(), notes: Vec::new() };
+    let mut first_failure = None;
+    for answer in remote {
+        match answer {
+            Ok(rows) => {
+                listed = true;
+                listing.rows.extend(rows);
+            }
+            Err((r, note)) => {
+                first_failure.get_or_insert(r.status_code);
+                listing.notes.push(note);
+            }
+        }
+    }
+    match first_failure {
+        Some(code) if !listed => Err(refusal(
+            code,
+            format!(
+                "could not list the pending requests of any namespace this node administers: {}",
+                listing.notes.join("; ")
+            ),
+        )),
+        _ => Ok(listing),
+    }
+}
+
 #[async_trait::async_trait]
 impl ApprovalMgmtBackend for DaemonApprovals {
-    async fn list(&self) -> Result<Vec<PendingApproval>, TrustRefusal> {
+    async fn list(&self) -> Result<ApprovalListing, TrustRefusal> {
         let creds = admin_credentials(&self.admin, self.local.as_ref().map(|s| s.ca_prefix()))?;
         if self.local.is_none() && creds.is_empty() {
             return Err(Self::nothing_here());
         }
-        let mut rows: Vec<PendingApproval> = self
+        let local = self
             .local
-            .iter()
-            .flat_map(|store| store.records())
-            .map(|r| approval_row(&r))
-            .collect();
-        let mut failed = Vec::new();
+            .as_ref()
+            .map(|store| store.records().iter().map(approval_row).collect());
+        let mut remote = Vec::with_capacity(creds.len());
         for cred in &creds {
-            match self.fetch(cred).await {
-                Ok(records) => rows.extend(records.iter().map(approval_row)),
-                Err(e) => failed.push(approver_refusal(cred, e)),
-            }
+            remote.push(match self.fetch(cred).await {
+                Ok(records) => Ok(records.iter().map(approval_row).collect()),
+                Err(e) => Err(unlisted(cred, e)),
+            });
         }
-        if let Some(first) = failed.first() {
-            let reasons: Vec<&str> = failed.iter().map(|r| r.reason.as_str()).collect();
-            return Err(refusal(
-                first.status_code,
-                format!(
-                    "could not list the pending requests of every namespace this node \
-                     administers: {}",
-                    reasons.join("; ")
-                ),
-            ));
-        }
-        Ok(rows)
+        merge_listing(local, remote)
     }
 
     async fn decide(
@@ -333,11 +375,13 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     match positional.first().copied() {
         Some("list") => list(args).await,
         Some(verb @ ("approve" | "deny")) => {
-            let target = positional
-                .get(1)
-                .copied()
-                .with_context(|| format!("`ndn-fwd approvals {verb}` needs the request id or the six-digit code; {usage}"))?;
-            decide(args, verb == "approve", target).await
+            let target = decision_target(&positional[1..]).with_context(|| {
+                format!(
+                    "`ndn-fwd approvals {verb}` needs one request id or the six-digit code as \
+                     `ndn-fwd approvals list` shows it (`482 913` or `482913`); {usage}"
+                )
+            })?;
+            decide(args, verb == "approve", &target).await
         }
         other => bail!("unknown `ndn-fwd approvals` command {other:?}; {usage}"),
     }
@@ -361,16 +405,24 @@ fn daemon_error(what: &str, socket: &str, e: ndn_ipc::ForwarderError) -> anyhow:
 
 async fn list(args: &[String]) -> Result<()> {
     let (client, socket) = crate::onboard::daemon(args, "approvals list").await?;
-    let rows = client
+    let listing = client
         .ca_list_approvals(DAEMON_APPROVALS_TIMEOUT)
         .await
         .map_err(|e| daemon_error("approvals list", &socket, e))?;
     println!("# ndn-fwd approvals (by the running daemon at {socket})");
+    for note in &listing.notes {
+        println!("# {note}");
+    }
+    let rows = &listing.rows;
     let pending = rows.iter().filter(|r| r.state == "pending").count();
     if rows.is_empty() {
-        println!("# no request for an admin's approval");
+        if listing.notes.is_empty() {
+            println!("# no request for an admin's approval");
+        } else {
+            println!("# no request for an admin's approval in the namespaces that could be listed");
+        }
     }
-    for row in &rows {
+    for row in rows {
         println!();
         println!("request   = {}", row.request_id);
         println!("code      = {}", row.code);
@@ -384,6 +436,7 @@ async fn list(args: &[String]) -> Result<()> {
         let until = ndn_cert::approval::iso_secs(row.expires_secs);
         if row.state == "pending" {
             println!("expires   = {until}");
+            println!("approve   = ndn-fwd approvals approve {}", copyable(&row.code));
         } else {
             println!("kept_until = {until}");
         }
@@ -397,10 +450,28 @@ async fn list(args: &[String]) -> Result<()> {
     if pending > 0 {
         println!();
         println!("# Compare the code with the one the new device shows (`ndn-fwd enroll --status`");
-        println!("# there); approve only when they match: `ndn-fwd approvals approve <code>`, or");
-        println!("# `ndn-fwd approvals deny <code> --reason <why>`.");
+        println!("# there); approve only when they match, with the request's `approve` line");
+        println!("# (`ndn-fwd approvals approve <code>`), or `ndn-fwd approvals deny <code>");
+        println!("# --reason <why>`; the code may be typed with or without its space.");
     }
     Ok(())
+}
+
+/// The code as one shell word (`482913`): what the `approve` line prints.
+fn copyable(code: &str) -> String {
+    code.split_whitespace().collect()
+}
+
+/// The request a decision names, from its positional words: a request id
+/// or a code, as one word (`482913`, or quoted `"482 913"`) or as the list
+/// shows it pasted unquoted (`482 913`: two three-digit words).
+fn decision_target(words: &[&str]) -> Option<String> {
+    let three_digits = |w: &str| w.len() == 3 && w.bytes().all(|b| b.is_ascii_digit());
+    match words {
+        [one] => Some((*one).to_owned()),
+        [a, b] if three_digits(a) && three_digits(b) => Some(format!("{a}{b}")),
+        _ => None,
+    }
 }
 
 async fn decide(args: &[String], approve: bool, target: &str) -> Result<()> {
@@ -419,4 +490,65 @@ async fn decide(args: &[String], approve: bool, target: &str) -> Result<()> {
     println!("# ndn-fwd {what} (by the running daemon at {socket})");
     println!("{}", resp.status_text);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(id: &str, namespace: &str) -> PendingApproval {
+        PendingApproval {
+            request_id: id.into(),
+            key_name: format!("{namespace}/node/relay/KEY/k"),
+            namespace: namespace.into(),
+            code: "482 913".into(),
+            state: "pending".into(),
+            ..Default::default()
+        }
+    }
+
+    fn unreachable(ns: &str) -> (TrustRefusal, String) {
+        (
+            refusal(504, "no answer"),
+            format!("{ns}: unreachable (no answer); its requests are not shown — retry when it is up"),
+        )
+    }
+
+    #[test]
+    fn list_shows_local_rows_when_remote_unreachable() {
+        // A CA host that also administers /work: /work's CA is down, its
+        // own queue still lists, with a note naming what is missing.
+        let listing = merge_listing(Some(vec![row("1a", "/home")]), vec![Err(unreachable("/work"))])
+            .expect("the local CA's rows are listed");
+        assert_eq!(listing.rows, vec![row("1a", "/home")]);
+        assert_eq!(listing.notes, vec![unreachable("/work").1]);
+
+        // An admin device: one CA answers, another is down.
+        let listing = merge_listing(None, vec![Ok(vec![row("2b", "/home")]), Err(unreachable("/work"))])
+            .expect("the reachable namespace's rows are listed");
+        assert_eq!(listing.rows, vec![row("2b", "/home")]);
+        assert_eq!(listing.notes.len(), 1);
+
+        // Nothing could be listed: refused, saying which and why.
+        let r = merge_listing(None, vec![Err(unreachable("/work"))]).unwrap_err();
+        assert_eq!(r.status_code, 504);
+        assert!(r.reason.contains("/work: unreachable"), "{}", r.reason);
+    }
+
+    #[test]
+    fn approve_accepts_code_as_listed() {
+        let code = "482 913";
+        let want = ndn_cert::approval::normalize_code(code);
+        assert!(want.is_some());
+        // `code = 482 913` pasted unquoted: two shell words.
+        let words: Vec<&str> = code.split_whitespace().collect();
+        assert_eq!(decision_target(&words).as_deref().and_then(ndn_cert::approval::normalize_code), want);
+        // The `approve` line's form, and the code quoted.
+        assert_eq!(decision_target(&[&copyable(code)]).as_deref().and_then(ndn_cert::approval::normalize_code), want);
+        assert_eq!(decision_target(&[code]).as_deref().and_then(ndn_cert::approval::normalize_code), want);
+        // A request id passes through; anything else is refused, not guessed.
+        assert_eq!(decision_target(&["1a2b3c4d"]).as_deref(), Some("1a2b3c4d"));
+        assert_eq!(decision_target(&["1a2b", "913"]), None);
+        assert_eq!(decision_target(&[]), None);
+    }
 }

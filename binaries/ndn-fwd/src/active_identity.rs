@@ -17,6 +17,9 @@ pub(crate) struct ActiveIdentity {
     signer: Arc<ActiveSigner>,
     /// The startup key when it is an in-memory key minted at startup.
     ephemeral_key: Option<Name>,
+    /// Counts the switches, so a subsystem that acts on a new key (QUIC
+    /// links made again as an enrolled device) learns of each.
+    switched: tokio::sync::watch::Sender<u64>,
 }
 
 impl ActiveIdentity {
@@ -24,6 +27,7 @@ impl ActiveIdentity {
         Self {
             ephemeral_key: ephemeral.then(|| signer.key_name().clone()),
             signer: Arc::new(ActiveSigner::new(signer)),
+            switched: tokio::sync::watch::Sender::new(0),
         }
     }
 
@@ -35,6 +39,13 @@ impl ActiveIdentity {
     /// Sign with `signer` (a persistent PIB key) from the next packet on.
     pub(crate) fn switch_to(&self, signer: Arc<dyn Signer>) {
         self.signer.replace(signer);
+        self.switched.send_modify(|n| *n += 1);
+    }
+
+    /// Changes each time [`switch_to`](Self::switch_to) puts another key in
+    /// place.
+    pub(crate) fn switches(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.switched.subscribe()
     }
 
     /// The key signing now, and whether it is the ephemeral startup key.

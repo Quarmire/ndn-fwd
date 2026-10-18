@@ -403,9 +403,12 @@ impl Cx<'_> {
     /// Fetch `name` through `node`'s daemon: the daemon must refuse the
     /// answering Data for `reason` — `ndn-peek` exits 3 with
     /// `refused: <reason>` (the forwarder's local refusal Nack), well
-    /// before the Interest lifetime; nothing is written.
+    /// before the Interest lifetime, followed by whether that refusal is
+    /// final and its next step; nothing is written.
     pub fn fetch_refused(&mut self, node: &str, name: &str, reason: &str) -> StepResult<()> {
         const EXIT_REFUSED: i32 = 3;
+        let refusal = ndn_packet::Refusal::from_token(reason)
+            .ok_or_else(|| format!("`{reason}` is no refusal token"))?;
         let seq = self.w.next_seq();
         let file = self.w.node(node).dir.join(format!("fetch-{seq}.bin"));
         let op = self
@@ -422,9 +425,14 @@ impl Cx<'_> {
             ));
         }
         let token = format!("refused: {reason}");
-        if out.code != Some(EXIT_REFUSED) || !out.stderr.lines().any(|l| l.trim() == token) {
+        let finality = if refusal.is_final() { "final" } else { "refused for now" };
+        let next = format!("{finality}: {}", refusal.next_step());
+        let mut lines = out.stderr.lines().map(str::trim);
+        let told = lines.by_ref().any(|l| l == token) && lines.next() == Some(next.as_str());
+        if out.code != Some(EXIT_REFUSED) || !told {
             return Err(format!(
-                "{name} at {node}: expected `{token}` (exit {EXIT_REFUSED}), got {}: {}",
+                "{name} at {node}: expected `{token}` then `{next}` (exit {EXIT_REFUSED}), got \
+                 {}: {}",
                 out.status_text(),
                 out.stderr.trim()
             ));

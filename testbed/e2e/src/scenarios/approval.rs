@@ -195,11 +195,14 @@ fn listed(cx: &mut Cx<'_>, node: &str, id: &str, operator: bool) -> StepResult<R
 }
 
 /// `ndn-fwd approvals approve|deny <code> [--reason <why>]` on `node`, the
-/// code typed as the requester's screen shows it.
-fn decide(cx: &Cx<'_>, node: &str, verb: &str, req: &Req, reason: Option<&str>) -> Op {
+/// code pasted unquoted exactly as a screen shows it (`482 913`: two words),
+/// so a list whose code the command refuses fails here.
+fn decide(cx: &Cx<'_>, node: &str, verb: &str, shown: &str, reason: Option<&str>) -> Op {
     let mut op = cx
         .tool("ndn-fwd")
-        .args(["approvals", verb, &digits(&req.code), "-c"])
+        .args(["approvals", verb])
+        .args(shown.split_whitespace())
+        .arg("-c")
         .arg(cx.w.node(node).cfg_arg());
     if let Some(r) = reason {
         op = op.arg("--reason").arg(r);
@@ -300,7 +303,7 @@ fn sign_old_namespace_version(cx: &mut Cx<'_>) -> StepResult<u64> {
         };
         let secret = RootSecret::new(ROOT_PASS.as_bytes().to_vec());
         let root = store.signer(Some(&secret)).await.map_err(err)?;
-        let signed = bump_context_schema(root.as_ref(), &held, &blobs, &hint, true)
+        let signed = bump_context_schema(root.as_ref(), &held, &blobs, &hint, None, true)
             .await
             .map_err(err)?
             .ok_or("the held context carries that schema already")?;
@@ -371,7 +374,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "the root device's operator approves by code; laptop's certificate is issued with no further action",
         |cx| {
             let before = cx.certs("laptop");
-            let op = decide(cx, "root", "approve", &laptop, None);
+            let r = listed(cx, "root", &laptop.id, true)?;
+            let op = decide(cx, "root", "approve", field(&r, "code"), None);
             cx.ok(op, "approvals approve on the CA host")?;
             let r = resolved(cx, "laptop", &laptop.id)?;
             if field(&r, "state") != "issued" {
@@ -421,7 +425,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         if field(&r, "state") != "pending" || digits(field(&r, "code")) != digits(&tablet.code) {
             return Err(format!("laptop lists {r:?}; tablet shows {tablet:?}"));
         }
-        let op = decide(cx, "laptop", "approve", &tablet, None);
+        let op = decide(cx, "laptop", "approve", field(&r, "code"), None);
         cx.ok(op, "approvals approve on the remote admin device").map(|_| ())
     })?;
     sc.step("tablet's certificate is issued with no further action; the CA records laptop's key", |cx| {
@@ -450,7 +454,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     sc.step("phone, a member, cannot decide: its approve is refused and nothing changes", |cx| {
         let before = ca_records(cx);
-        let op = decide(cx, "phone", "approve", &relay, None);
+        // A member cannot list: it types the code its requester shows.
+        let op = decide(cx, "phone", "approve", &relay.code, None);
         refused_with_reason(cx, op, "approvals approve on a member device")?;
         if ca_records(cx) != before {
             return Err("the CA's approval records changed".into());
@@ -466,7 +471,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         Ok(())
     })?;
     sc.step("laptop denies it with a reason; phone learns why and its new key is deleted", |cx| {
-        let op = decide(cx, "laptop", "deny", &relay, Some(DENIAL));
+        let r = listed(cx, "laptop", &relay.id, true)?;
+        let op = decide(cx, "laptop", "deny", field(&r, "code"), Some(DENIAL));
         cx.ok(op, "approvals deny on the remote admin device")?;
         denial_reached(cx, "phone", &relay, &n("/node/relay"), DENIAL)
     })?;
@@ -496,7 +502,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         let before = ca_records(cx);
         let op = list_op(cx, "laptop");
         refused_with_reason(cx, op, "approvals list on the remote admin device")?;
-        let op = decide(cx, "laptop", "deny", &hub, Some(DENIAL_AGAIN));
+        let op = decide(cx, "laptop", "deny", &hub.code, Some(DENIAL_AGAIN));
         refused_with_reason(cx, op, "approvals deny on the remote admin device")?;
         if ca_records(cx) != before {
             return Err("the CA's approval records changed".into());
@@ -528,7 +534,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         if field(&r, "state") != "pending" || digits(field(&r, "code")) != digits(&hub.code) {
             return Err(format!("laptop lists {r:?}; phone shows {hub:?}"));
         }
-        let op = decide(cx, "laptop", "deny", &hub, Some(DENIAL_AGAIN));
+        let op = decide(cx, "laptop", "deny", field(&r, "code"), Some(DENIAL_AGAIN));
         cx.ok(op, "approvals deny on the remote admin device")?;
         denial_reached(cx, "phone", &hub, &n("/node/hub"), DENIAL_AGAIN)
     })?;

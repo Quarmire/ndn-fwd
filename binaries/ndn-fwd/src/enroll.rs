@@ -271,6 +271,28 @@ fn discard(pib: &FilePib, key: &Name) {
     }
 }
 
+/// End this node's pending requests the CA never answered before they
+/// expired ([`RequestStore::expire_overdue`]) and delete their keys from the
+/// PIB, so a new request may go out.
+fn expire_overdue(admin: &TrustAdmin, store: &RequestStore) -> Result<(), TrustRefusal> {
+    let ended = store.expire_overdue().map_err(|e| {
+        refusal(status::SERVER_ERROR, format!("cannot update this node's request records: {e}"))
+    })?;
+    if ended.is_empty() {
+        return Ok(());
+    }
+    let pib = FilePib::open(&admin.pib_root);
+    for r in ended {
+        match (&pib, r.key_name.parse::<Name>()) {
+            (Ok(pib), Ok(key)) => discard(pib, &key),
+            (Err(e), _) => tracing::error!(target: "security", key = %r.key_name, error = %e, "could not open the PIB to delete the key of an expired request: delete it from the PIB"),
+            (_, Err(_)) => {}
+        }
+        tracing::warn!(target: "security", request = %r.request_id, key = %r.key_name, "the CA never answered before the request expired; it ended here and its key was deleted: ask again (`ndn-fwd enroll`)");
+    }
+    Ok(())
+}
+
 /// The link `ndn-fwd enroll` was given.
 enum EnrollLink {
     /// `ndn-trust://invite`: a token of the namespace's CA.
@@ -664,9 +686,11 @@ async fn enroll_by_approval(
 ) -> Result<EnrollOutcome, TrustRefusal> {
     let requests = request_store(admin)?;
     let identity = enrolling.identity.to_string();
-    let outstanding = requests
-        .outstanding(&identity)
-        .map_err(|e| refusal(status::SERVER_ERROR, format!("cannot read this node's request records: {e}")))?;
+    let outstanding = expire_overdue(admin, &requests).and_then(|()| {
+        requests.outstanding(&identity).map_err(|e| {
+            refusal(status::SERVER_ERROR, format!("cannot read this node's request records: {e}"))
+        })
+    })?;
     if let Some(outstanding) = outstanding {
         return Ok(EnrollOutcome::Pending(pending_info(
             &outstanding,
@@ -899,7 +923,9 @@ async fn install(
 /// `security/enroll-status`: this node's requests for an admin's approval,
 /// oldest first.
 pub(crate) fn enroll_status(admin: &TrustAdmin) -> Result<Vec<OutgoingRequest>, TrustRefusal> {
-    request_store(admin)?
+    let store = request_store(admin)?;
+    expire_overdue(admin, &store)?;
+    store
         .list()
         .map_err(|e| refusal(status::SERVER_ERROR, format!("cannot read this node's request records: {e}")))
 }
@@ -997,6 +1023,12 @@ async fn watch(admin: Arc<TrustAdmin>, key_name: String, cancel: CancellationTok
                 }
             }
         };
+        if request.overdue(now_secs()) {
+            if let Err(e) = expire_overdue(&admin, &store) {
+                tracing::warn!(target: "security", key = %key_name, error = %e.reason, "a request past its expiry could not be ended here");
+            }
+            return;
+        }
         let id = request.request_id.clone();
         let (Ok(namespace), Ok(ca_prefix)) =
             (request.namespace.parse::<Name>(), request.ca_prefix.parse::<Name>())
@@ -1053,7 +1085,7 @@ async fn watch(admin: Arc<TrustAdmin>, key_name: String, cancel: CancellationTok
                 // CA was replaced in between): wait, never loop fast.
                 Issue::Pending => Some(retry),
                 Issue::Retry(why) => {
-                    tracing::warn!(target: "security", request = %id, error = %why, "approved, but the certificate could not be fetched yet; asking again in {}s", retry.as_secs());
+                    tracing::warn!(target: "security", request = %id, error = %why, "approved, but the certificate is not kept yet; the key and the request are kept, asking again in {}s", retry.as_secs());
                     Some(retry)
                 }
             },

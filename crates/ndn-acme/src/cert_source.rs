@@ -37,38 +37,12 @@ impl CertMaterial {
     }
 }
 
-/// Validity window applied when minting a *self-signed* cert.
-///
-/// Only [`CertSource::SelfSignedDev`] consults this — `Pem` and `Acme` get
-/// their validity from the file or the CA. It lets one shared cert source serve
-/// both a browser-facing transport and a backbone link without compromising
-/// either (the user asked for "no tradeoffs"):
-///
-/// - WebTransport must stay browser-pinnable, and Chrome rejects a
-///   `serverCertificateHashes` cert valid for more than 14 days.
-/// - A raw-QUIC backbone peer pins the *leaf hash*, not the expiry, so a 13-day
-///   window there only forces needless re-issuance (and a new pin).
-///
-/// Either way the key is persisted (see [`SelfSignedDev::cache_dir`]), so the
-/// pinned leaf hash survives restarts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum SelfSignedProfile {
-    /// Cap validity at 13 days so the cert is usable with Chrome's WebTransport
-    /// `serverCertificateHashes`. The safe default. The persisted key is kept;
-    /// the cert is re-issued from it once within a day of expiry.
-    #[default]
-    BrowserPinnable,
-    /// Long-lived (10 years) — for a pinned backbone/raw-QUIC link where the
-    /// dialer trusts the leaf hash and ignores expiry. The persisted cert is
-    /// reused until it expires, so the pin never changes.
-    Backbone,
-}
-
-/// Self-signed cert (dev, `serverCertificateHashes`, or a pinned backbone);
-/// never a publicly trusted cert.
+/// Self-signed cert (dev or `serverCertificateHashes`); never a publicly
+/// trusted cert. Valid for 13 days, the most Chrome accepts for WebTransport
+/// `serverCertificateHashes`.
 ///
 /// The generated key (PKCS#8) and cert are persisted under
-/// [`cache_dir`](Self::cache_dir), keyed by profile + hostnames, and reused on
+/// [`cache_dir`](Self::cache_dir), keyed by hostnames, and reused on
 /// later resolves so the leaf SHA-256 that dialers pin stays stable across
 /// restarts. Changing `hostnames` mints a new key and cert.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -132,14 +106,9 @@ pub enum CertSource {
 
 impl CertSource {
     /// Runs an ACME order if the cached cert is missing or stale.
-    ///
-    /// `profile` only affects the [`SelfSignedDev`](Self::SelfSignedDev) arm —
-    /// it picks the self-signed validity window and re-issue policy (see
-    /// [`SelfSignedProfile`]). `Pem` and `Acme` ignore it.
     pub async fn resolve(
         &self,
         provider: Option<Arc<dyn DnsProvider>>,
-        profile: SelfSignedProfile,
     ) -> Result<CertMaterial, AcmeError> {
         match self {
             CertSource::Pem { cert_pem, key_pem } => {
@@ -168,7 +137,7 @@ impl CertSource {
                     .await?;
                 Ok(mat)
             }
-            CertSource::SelfSignedDev(s) => crate::self_signed::resolve(s, profile).await,
+            CertSource::SelfSignedDev(s) => crate::self_signed::resolve(s).await,
         }
     }
 }

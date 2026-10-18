@@ -59,7 +59,7 @@ use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_identity::NdncertCa;
 use ndn_packet::Name;
-use ndn_security::{Certificate, FilePib, KeyChain, SecurityManager, Validator};
+use ndn_security::{Certificate, FilePib, KeyChain, LinkPolicy, SecurityManager, SignedTrustContext, Validator};
 use ndn_transport::FaceId;
 
 pub(crate) const CA_FACE_ID: u64 = 0xFFFF_0002;
@@ -148,7 +148,17 @@ pub(crate) async fn prepare(
     // prefix for an ephemeral demo CA); on a namespace CA every token is.
     let token_ns = namespace.clone().unwrap_or_else(|| prefix.clone());
     let approval_policy = match &namespace {
-        Some(ns) => Some(approval_policy(cfg, advertised_policy(pib_path, ns)?)?),
+        Some(ns) => {
+            let held = newest_context(pib_path, ns)?;
+            if let Some(ctx) = &held {
+                check_link_policy(cfg, ctx)?;
+            }
+            let advertised = held.and_then(|ctx| {
+                let policy = ApprovalPolicy::from_hint(ctx.enrollment_hint()?)?;
+                Some((ctx.version(), policy))
+            });
+            Some(approval_policy(cfg, advertised)?)
+        }
         None => None,
     };
     let ttl = days(cfg.approval_request_ttl_days);
@@ -197,10 +207,9 @@ pub(crate) async fn prepare(
     ))
 }
 
-/// The approval policy the newest stored trust context of `namespace`
-/// advertises (its enrollment hint); `None` when no stored context
-/// advertises one (contexts made before the hint carried it).
-fn advertised_policy(pib_path: &Path, namespace: &Name) -> Result<Option<(u64, ApprovalPolicy)>> {
+/// The newest stored trust context of `namespace`; `None` when none is
+/// stored.
+fn newest_context(pib_path: &Path, namespace: &Name) -> Result<Option<SignedTrustContext>> {
     let stored = ndn_cert::read_stored_contexts(pib_path)
         .map_err(|e| anyhow::anyhow!("[ca] reading the stored trust contexts: {e}"))?;
     Ok(stored
@@ -208,10 +217,93 @@ fn advertised_policy(pib_path: &Path, namespace: &Name) -> Result<Option<(u64, A
         .filter_map(|(_, ctx)| ctx.ok())
         .filter(|(ctx, _)| ctx.namespace() == namespace)
         .max_by_key(|(ctx, _)| ctx.version())
-        .and_then(|(ctx, _)| {
-            let policy = ApprovalPolicy::from_hint(ctx.enrollment_hint()?)?;
-            Some((ctx.version(), policy))
-        }))
+        .map(|(ctx, _)| ctx))
+}
+
+/// Refuses `[ca] link_roles` / `relay_roles` / `enrollment_links` that
+/// disagree with the link policy of the namespace's trust context `ctx`:
+/// devices admit links by the context, so `[ca]` only states it again
+/// here; `ndn-fwd schema update -c <config>` is what changes it.
+pub(crate) fn check_link_policy(cfg: &CaTomlConfig, ctx: &SignedTrustContext) -> Result<()> {
+    let held = ctx.link_policy();
+    let Some(configured) = configured_link_policy(cfg, &held)? else {
+        return Ok(());
+    };
+    if same_link_policy(&configured, &held) {
+        return Ok(());
+    }
+    let quoted = |roles: &[String]| {
+        roles.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().join(", ")
+    };
+    bail!(
+        "[ca] link_roles / relay_roles / enrollment_links disagree with the namespace's trust \
+         context (v{}), which states: {}. Devices admit links by the context, so the CA does \
+         not start with another policy: to change it, run `ndn-fwd schema update -c <config>` \
+         on the root device (a narrowing needs --accept-narrowing); to keep it, set \
+         link_roles = [{}], relay_roles = [{}] and enrollment_links = {} in [ca], or remove \
+         the keys",
+        ctx.version(),
+        held.describe(),
+        quoted(&held.roles),
+        quoted(&held.relay_roles),
+        held.enrollment_links
+    );
+}
+
+/// Whether two link policies admit the same (role lists compared as sets).
+pub(crate) fn same_link_policy(a: &LinkPolicy, b: &LinkPolicy) -> bool {
+    let set = |roles: &[String]| {
+        let mut roles = roles.to_vec();
+        roles.sort();
+        roles.dedup();
+        roles
+    };
+    set(&a.roles) == set(&b.roles)
+        && set(&a.relay_roles) == set(&b.relay_roles)
+        && a.enrollment_links == b.enrollment_links
+}
+
+/// The link policy `[ca] link_roles` / `relay_roles` / `enrollment_links`
+/// state, each unset key taken from `base` (the held context's policy, or
+/// the default for a new namespace); `None` when none is set. Refuses an
+/// unknown role, and a relay role that may not link.
+pub(crate) fn configured_link_policy(
+    cfg: &CaTomlConfig,
+    base: &LinkPolicy,
+) -> Result<Option<LinkPolicy>> {
+    if cfg.link_roles.is_none() && cfg.relay_roles.is_none() && cfg.enrollment_links.is_none() {
+        return Ok(None);
+    }
+    let roles = |key: &str, roles: &Option<Vec<String>>, base: &[String]| -> Result<Vec<String>> {
+        let Some(roles) = roles else {
+            return Ok(base.to_vec());
+        };
+        let mut parsed = Vec::with_capacity(roles.len());
+        for r in roles {
+            let role = r
+                .parse::<Role>()
+                .map_err(|e| anyhow::anyhow!("[ca] {key}: {e}"))?;
+            let role = role.as_str().to_string();
+            if !parsed.contains(&role) {
+                parsed.push(role);
+            }
+        }
+        Ok(parsed)
+    };
+    let policy = LinkPolicy {
+        roles: roles("link_roles", &cfg.link_roles, &base.roles)?,
+        relay_roles: roles("relay_roles", &cfg.relay_roles, &base.relay_roles)?,
+        enrollment_links: cfg.enrollment_links.unwrap_or(base.enrollment_links),
+    };
+    if let Some(role) = policy.relay_roles.iter().find(|r| !policy.allows_link(r)) {
+        bail!(
+            "[ca] relay_roles names {role:?}, but link_roles ({}) does not let {role} devices \
+             link, so none could relay: add {role:?} to link_roles, or remove it from \
+             relay_roles",
+            policy.roles.join(", ")
+        );
+    }
+    Ok(Some(policy))
 }
 
 /// The approval policy a namespace CA enforces: what its trust context
@@ -1353,7 +1445,7 @@ mod tests {
         tokio::spawn(async move {
             loop {
                 let rows = mgmt.list().await.expect("the CA lists its requests");
-                if let Some(req) = rows.into_iter().find(|r| r.state == "pending") {
+                if let Some(req) = rows.rows.into_iter().find(|r| r.state == "pending") {
                     assert!(req.key_name.starts_with(&format!("/home/bob/{who}/")));
                     let decision = if approve {
                         ndn_cert::Decision::Approve
@@ -1528,5 +1620,48 @@ mod tests {
             let err = prepare(&cfg, dir.path()).await.err().expect("a disagreeing [ca] is refused");
             assert!(err.to_string().contains("disagree with the namespace's trust context"), "{err}");
         }
+    }
+
+    /// `ndn-fwd init -c` writes the `[ca]` link policy into the context
+    /// (unset keys: the default), and a namespace CA refuses to start when
+    /// `[ca]` states another link policy than its context.
+    #[tokio::test]
+    async fn the_context_carries_the_configured_link_policy_and_the_ca_checks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = namespace_cfg(vec![challenge("token", &["invite-1"])]);
+        cfg.link_roles = Some(vec!["admin".into(), "node".into()]);
+        cfg.enrollment_links = Some(false);
+        let link = configured_link_policy(&cfg, &LinkPolicy::default()).unwrap().unwrap();
+        let ns: Name = "/home/bob".parse().unwrap();
+        let pib = FilePib::new(dir.path()).unwrap();
+        ndn_cert::init_namespace_in_pib_with(
+            &pib,
+            &ns,
+            "desk",
+            false,
+            &ndn_cert::NewRootStore::File,
+            &ApprovalPolicy::default(),
+            &link,
+        )
+        .await
+        .unwrap();
+        let (ctx, _) = ndn_cert::read_stored_context(dir.path(), &ns).unwrap().unwrap();
+        let expected = LinkPolicy {
+            roles: vec!["admin".into(), "node".into()],
+            relay_roles: vec!["node".into()],
+            enrollment_links: false,
+        };
+        assert_eq!(ctx.stated_link_policy(), Some(&expected));
+
+        prepare(&cfg, dir.path()).await.expect("[ca] restating the context's link policy");
+        cfg.link_roles = Some(Vec::new());
+        let err = prepare(&cfg, dir.path()).await.err().expect("a disagreeing [ca] is refused");
+        assert!(err.to_string().contains("ndn-fwd schema update -c <config>"), "{err}");
+
+        cfg.link_roles = Some(vec!["admin".into()]);
+        cfg.relay_roles = Some(vec!["node".into()]);
+        assert!(configured_link_policy(&cfg, &LinkPolicy::default()).is_err(), "a relay that may not link");
+        cfg.link_roles = Some(vec!["robot".into()]);
+        assert!(configured_link_policy(&cfg, &LinkPolicy::default()).is_err(), "an unknown role");
     }
 }

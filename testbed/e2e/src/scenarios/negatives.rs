@@ -313,7 +313,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         )?;
         // The key has no certificate anywhere: root's certificate fetch is
         // answered NoRoute (phone has none, and routes back only to root), a
-        // definite absence, so the Data is refused as unverifiable at once.
+        // definite absence, so the Data is refused as unverifiable at once —
+        // refused for now, not final (`fetch_refused` checks ndn-peek says so).
         cx.fetch_refused("root", &n("/member/phone/rogue"), "unverifiable")
     })?;
     let clean = content(1_000, 32);

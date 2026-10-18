@@ -2844,16 +2844,16 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "ndn-packet",
+ "ndn-security",
+ "ndn-tlv",
  "ndn-transport",
  "quinn",
- "rcgen 0.13.2",
+ "ring",
  "rustls",
- "rustls-pemfile",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "webpki-roots",
 ]
 
 [[package]]

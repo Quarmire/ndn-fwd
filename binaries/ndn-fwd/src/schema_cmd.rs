@@ -44,7 +44,8 @@ use ndn_cert::{ApprovalPolicy, RootStore, SchemaChange, load_persisted_contexts,
 use ndn_config::{CaTomlConfig, ForwarderConfig};
 use ndn_packet::{Data, Name};
 use ndn_security::{
-    EnrollmentHint, FilePib, Keyring, LvsModel, SchemaBlob, SchemaFormat, SignedTrustContext,
+    EnrollmentHint, FilePib, Keyring, LinkPolicy, LvsModel, SchemaBlob, SchemaFormat,
+    SignedTrustContext,
 };
 
 use crate::onboard::{flag, pib_dir, positionals};
@@ -216,6 +217,9 @@ struct UpdatePlan {
     /// stating it that the new version carries.
     policy: ApprovalPolicy,
     hint: EnrollmentHint,
+    /// The link policy `[ca]` states when it differs from the held one;
+    /// `None`: the held one is carried.
+    link: Option<LinkPolicy>,
     change: SchemaChange,
 }
 
@@ -275,8 +279,13 @@ fn plan_update(pib_dir: &Path, args: &[String]) -> Result<UpdatePlan> {
         })?
         .blobs();
     let (policy, hint) = enrollment(args, &held).context("nothing was signed")?;
+    // The link policy `[ca]` of `-c` states (unset keys: the held one's);
+    // `None` carries the held policy verbatim.
+    let link = crate::ca::configured_link_policy(&ca_config(args)?, &held.link_policy())
+        .context("nothing was signed")?
+        .filter(|link| !crate::ca::same_link_policy(link, &held.link_policy()));
     let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
-    let change = ndn_cert::schema_change(&held, &schema, &hint, accept_narrowing)
+    let change = ndn_cert::schema_change(&held, &schema, &hint, link.as_ref(), accept_narrowing)
         .map_err(|e| anyhow::anyhow!("{e}. Nothing was signed"))?;
     Ok(UpdatePlan {
         store,
@@ -285,6 +294,7 @@ fn plan_update(pib_dir: &Path, args: &[String]) -> Result<UpdatePlan> {
         schema,
         policy,
         hint,
+        link,
         change,
     })
 }
@@ -311,6 +321,7 @@ async fn update(args: &[String]) -> Result<()> {
         schema,
         policy,
         hint,
+        link,
         change,
     } = plan_update(&pib_dir, args)?;
     let namespace = held.namespace().clone();
@@ -318,11 +329,12 @@ async fn update(args: &[String]) -> Result<()> {
         println!("# ndn-fwd schema update");
         println!("namespace      = {namespace}");
         println!(
-            "trust_context  = v{} (carries the current schema and enrollment hint already; \
-             nothing signed)",
+            "trust_context  = v{} (carries the current schema, enrollment hint and link policy \
+             already; nothing signed)",
             held.version()
         );
         println!("enrollment     = {}", policy.describe());
+        println!("link_policy    = {}", change.link.describe());
         return Ok(());
     }
     crate::revoke::check_daemon(args, &pib_dir).await?;
@@ -339,13 +351,20 @@ async fn update(args: &[String]) -> Result<()> {
         .context("the root did not unlock; nothing was signed")?;
     drop(unlock);
     let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
-    let signed = ndn_cert::bump_context_schema(root.as_ref(), &held_data, &schema, &hint, accept_narrowing)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}. Nothing was signed"))?
-        .context(
-            "the held trust context carries this schema and enrollment hint already; nothing was \
-             signed",
-        )?;
+    let signed = ndn_cert::bump_context_schema(
+        root.as_ref(),
+        &held_data,
+        &schema,
+        &hint,
+        link.as_ref(),
+        accept_narrowing,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}. Nothing was signed"))?
+    .context(
+        "the held trust context carries this schema, enrollment hint and link policy already; \
+         nothing was signed",
+    )?;
     drop(root);
     let version = signed.bump.context.version();
     let handed = hand_over(args, &pib_dir, &signed.bump)
@@ -390,6 +409,22 @@ async fn update(args: &[String]) -> Result<()> {
         );
     }
     println!("enrollment     = {}", policy.describe());
+    if change.changes_link() {
+        println!(
+            "link_policy    = {} -> {}",
+            change.link_before.describe(),
+            change.link.describe()
+        );
+        if !change.link_narrowed.is_empty() {
+            print_rules("link_narrowed", &change.link_narrowed, '-');
+            println!(
+                "                 (--accept-narrowing: a device relying on it loses its links once \
+                 its node holds v{version})"
+            );
+        }
+    } else {
+        println!("link_policy    = {} (unchanged)", change.link.describe());
+    }
     println!("handed_over    = {handed}");
     println!();
     if change.changes_hint() {
@@ -570,7 +605,8 @@ mod tests {
         // The namespace as an earlier `ndn-fwd init` left it.
         let (_, v1) = ndn_cert::read_stored_context(root_dev.path(), &ns()).unwrap().unwrap();
         let (old_schema, old_hint) = old_generated_schema();
-        let old = ndn_cert::bump_context_schema(root.as_ref(), &v1, &old_schema, &old_hint, true)
+        let old =
+            ndn_cert::bump_context_schema(root.as_ref(), &v1, &old_schema, &old_hint, None, true)
             .await
             .unwrap()
             .unwrap();
@@ -606,6 +642,7 @@ mod tests {
             &plan.held_data,
             &plan.schema,
             &plan.hint,
+            plan.link.as_ref(),
             false,
         )
         .await

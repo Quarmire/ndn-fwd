@@ -43,6 +43,14 @@
 //! runs `context_sync` too; otherwise the devices behind it get updates by
 //! refresh. A version whose fetch failed is fetched again while it is newer
 //! than the held one ([`ndn_identity::context_sync::Retry`]).
+//!
+//! **What the group proves.** The group runs [`SvsConfig::wan`]: its Sync
+//! Interests are not authenticated, so a member name and sequence number
+//! prove nothing. [`ContextSync::verified`] holds, per namespace, only the
+//! newest version whose signed Data a member served and that passed the
+//! continuity rule ([`ndn_identity::context_sync::VerifiedVersion`]): the
+//! only thing that makes a refresh report `behind`, which `ndn-fwd
+//! recover` will not fork from and `ndn-fwd enroll` reports.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -84,13 +92,14 @@ struct KeptVersion {
 pub(crate) struct ContextSync {
     pib_root: PathBuf,
     kept: mpsc::UnboundedSender<KeptVersion>,
-    /// The newest version each namespace's group announced, and by whom.
-    announced: Announced,
+    /// The newest version of each namespace verified from its group, and
+    /// who served it.
+    verified: Verified,
 }
 
-/// By namespace: the newest version its group announced (a member's
-/// sequence number) and the member that announced it.
-type Announced = Arc<std::sync::Mutex<HashMap<Name, (u64, Name)>>>;
+/// By namespace: the newest version whose signed Data a member of its sync
+/// group served and that passed the continuity rule, and that member.
+type Verified = Arc<std::sync::Mutex<HashMap<Name, (u64, Name)>>>;
 
 impl ContextSync {
     /// `ctx` (signed Data `data`) was stored and published: join its
@@ -112,11 +121,12 @@ impl ContextSync {
         }
     }
 
-    /// The newest version of `namespace` its sync group announced, and the
-    /// member that announced it: a version this node knows exists, whether
-    /// or not it obtained it.
-    pub(crate) fn announced(&self, namespace: &Name) -> Option<(u64, Name)> {
-        self.announced
+    /// The newest version of `namespace` verified from its sync group, and
+    /// the member that served it: a version this node knows exists — its
+    /// signed Data passed the continuity rule from the held version or a
+    /// version walked through — whether or not it was adopted.
+    pub(crate) fn verified(&self, namespace: &Name) -> Option<(u64, Name)> {
+        self.verified
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(namespace)
@@ -144,7 +154,7 @@ pub(crate) fn prepare(enabled: bool, pib_root: &Path) -> Option<(ContextSync, Gr
         ContextSync {
             pib_root: pib_root.to_path_buf(),
             kept: tx,
-            announced: Announced::default(),
+            verified: Verified::default(),
         },
         Groups {
             kept: rx,
@@ -309,7 +319,7 @@ impl Group {
             engine.app_consumer(cancel.child_token()),
         )));
         let keeper = Arc::clone(admin);
-        let announced = admin.context_sync.as_ref().map(|s| Arc::clone(&s.announced));
+        let verified = admin.context_sync.as_ref().map(|s| Arc::clone(&s.verified));
         let group_namespace = namespace.clone();
         tokio::spawn(group::run(
             handle,
@@ -320,13 +330,13 @@ impl Group {
                 // `keep_update` logs what became of it.
                 let _ = keep_update(&keeper, update, Adopted::OverSync);
             },
-            move |update| {
-                let Some(announced) = &announced else { return };
-                let mut announced =
-                    announced.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let newest = announced.entry(group_namespace.clone()).or_insert((0, Name::root()));
-                if update.high_seq > newest.0 {
-                    *newest = (update.high_seq, update.name.clone());
+            move |found: &group::VerifiedVersion| {
+                let Some(verified) = &verified else { return };
+                let mut verified =
+                    verified.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let newest = verified.entry(group_namespace.clone()).or_insert((0, Name::root()));
+                if found.version > newest.0 {
+                    *newest = (found.version, found.served_by.clone());
                 }
             },
             retry,
@@ -572,15 +582,19 @@ fn pump(
 }
 
 /// Fetches group Data through this node's forwarder, like any app. A Data
-/// the forwarder refused (it answers the fetch with a refusal at once) is
-/// refused for what it is; anything else is missing for now.
+/// the forwarder refused with a final verdict (it answers the fetch with a
+/// refusal at once) is refused for what it is; anything else — including a
+/// refusal for now (`unverifiable`: the signer's certificate could not be
+/// fetched yet) — is missing for now, and fetched again later.
 struct EngineFetcher(tokio::sync::Mutex<Consumer>);
 
 #[async_trait::async_trait]
 impl ContextFetcher for EngineFetcher {
     async fn fetch_content(&self, name: Name) -> Result<Bytes, ContextFetchError> {
         let data = self.0.lock().await.fetch(name).await.map_err(|e| match e {
-            AppError::Refused { reason } => ContextFetchError::Refused(reason.to_string()),
+            AppError::Refused { reason } if reason.is_final() => {
+                ContextFetchError::Refused(reason.to_string())
+            }
             e => ContextFetchError::Missing(e.to_string()),
         })?;
         data.content()
@@ -1077,11 +1091,11 @@ mod tests {
         down.shutdown().await;
     }
 
-    /// A refresh answered with the version held while the node's sync group
-    /// announced a newer one reports `behind` (naming the announcer), not
-    /// `current`, and changes nothing.
+    /// A refresh answered with the version held while a newer version was
+    /// verified from the node's sync group reports `behind` (naming the
+    /// member that served it), not `current`, and changes nothing.
     #[tokio::test]
-    async fn a_refresh_answered_older_than_announced_is_behind() {
+    async fn a_refresh_answered_older_than_a_verified_version_is_behind() {
         let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
         let (root_dev, upstream, device) = (dirs[0].path(), dirs[1].path(), dirs[2].path());
         let ns: Name = "/home/bob".parse().unwrap();
@@ -1110,7 +1124,7 @@ mod tests {
         )));
         let (sync, _groups) = prepare(true, device).unwrap();
         let member: Name = "/home/bob/member/tab".parse().unwrap();
-        sync.announced
+        sync.verified
             .lock()
             .unwrap()
             .insert(ns.clone(), (2, member.clone()));

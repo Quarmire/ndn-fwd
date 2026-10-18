@@ -73,7 +73,7 @@ use ndn_cert::{
 };
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
-use ndn_security::FilePib;
+use ndn_security::{FilePib, LinkPolicy};
 use ndn_trust_envelope::TrustEnvelope;
 
 /// Inspect `argv`; if it names an onboarding subcommand, run it and return
@@ -181,13 +181,15 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
         values: &["-c", "--config"],
         repeatable: &[],
         switches: &[],
-        positionals: 2,
+        // The verb, then the id or code; a code pasted as listed (`482 913`)
+        // is two words.
+        positionals: 3,
     }),
     ("approvals", Some("deny"), ArgSpec {
         values: &["--reason", "-c", "--config"],
         repeatable: &[],
         switches: &[],
-        positionals: 2,
+        positionals: 3,
     }),
     ("revoke", None, ArgSpec {
         values: &["--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
@@ -418,18 +420,23 @@ async fn run_init(args: &[String]) -> Result<()> {
     };
     let force = args.iter().any(|a| a == "--force");
     let pib_dir = pib_dir(args)?;
-    // What enrollment needs an admin's approval for: `[ca]` of `-c`, else
-    // the default. The context advertises it, and the CA enforces exactly
-    // what the context advertises.
-    let approval = match flag(args, &["-c", "--config"]) {
+    // What enrollment needs an admin's approval for, and which devices may
+    // link and relay: `[ca]` of `-c`, else the defaults. The context
+    // advertises both (the link policy always stated), and the CA enforces
+    // exactly what the context advertises.
+    let (approval, link) = match flag(args, &["-c", "--config"]) {
         Some(path) => {
             let toml = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
             let cfg: ForwarderConfig = toml
                 .parse()
                 .with_context(|| format!("parse config {path}"))?;
-            crate::ca::configured_policy(&cfg.ca)?.unwrap_or_default()
+            (
+                crate::ca::configured_policy(&cfg.ca)?.unwrap_or_default(),
+                crate::ca::configured_link_policy(&cfg.ca, &LinkPolicy::default())?
+                    .unwrap_or_default(),
+            )
         }
-        None => ApprovalPolicy::default(),
+        None => (ApprovalPolicy::default(), LinkPolicy::default()),
     };
     // Where the root goes, and its passphrase / PIN — asked now, never
     // taken from the command line.
@@ -437,7 +444,8 @@ async fn run_init(args: &[String]) -> Result<()> {
     let pib =
         FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
 
-    let out = init_namespace_in_pib_with(&pib, &namespace, &device, force, &root, &approval).await?;
+    let out =
+        init_namespace_in_pib_with(&pib, &namespace, &device, force, &root, &approval, &link).await?;
     drop(root);
     let root_dev = &out.init;
     // The daemon may run from another directory: print an absolute path.
@@ -463,6 +471,7 @@ async fn run_init(args: &[String]) -> Result<()> {
     );
     println!("schema         = generated namespace schema (see `ndn-fwd schema show`)");
     println!("enrollment     = {}", approval.describe());
+    println!("link_policy    = {}", link.describe());
     println!("anchor_uri     = {}", root_dev.envelope.to_uri());
     println!(
         "anchor_url     = {}",

@@ -15,6 +15,8 @@ use crate::run::{Op, Proc};
 use crate::shim::Shim;
 
 pub const PORT: u16 = 6363;
+/// UDP port of the QUIC link listener (`[[face]] kind = "quic"`).
+pub const QUIC_PORT: u16 = 6367;
 
 /// `10.200.0.<n>`: the addresses the namespace's `lo` carries. Not loopback
 /// (127/8), so faces between them are non-local and every Data is validated.
@@ -59,6 +61,55 @@ pub struct NodeCfg {
     pub ca: Option<CaCfg>,
     pub refresh_secs: u64,
     pub context_sync: bool,
+    /// `[[face]] kind = "quic"` on this node's address, [`QUIC_PORT`].
+    pub quic_listen: bool,
+    /// `[[face]] kind = "quic"` with `listen = false` on this node's
+    /// address (port 0): links are dialled from it, none accepted.
+    pub quic_dial_only: bool,
+    /// `[[peer]]` entries: QUIC links this node dials.
+    pub peers: Vec<PeerCfg>,
+}
+
+/// One `[[peer]]`.
+#[derive(Clone, Debug, Default)]
+pub struct PeerCfg {
+    /// `device = "/<ns>/<role>/<device>"`.
+    pub device: Option<String>,
+    /// `key = "<expected fingerprint>"`.
+    pub key: Option<String>,
+    /// `endpoint = "10.200.0.<host>:<QUIC_PORT>"`.
+    pub endpoint: Option<Ipv4Addr>,
+}
+
+impl PeerCfg {
+    fn render(&self) -> String {
+        let mut s = String::from("[[peer]]\n");
+        if let Some(d) = &self.device {
+            s.push_str(&format!("device = \"{d}\"\n"));
+        }
+        if let Some(k) = &self.key {
+            s.push_str(&format!("key = \"{k}\"\n"));
+        }
+        if let Some(ip) = self.endpoint {
+            s.push_str(&format!("endpoint = \"{ip}:{QUIC_PORT}\"\n"));
+        }
+        s
+    }
+
+    /// The touchpoint: what the operator wrote.
+    fn setting(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(d) = &self.device {
+            parts.push(format!("device {d}"));
+        }
+        if self.key.is_some() {
+            parts.push("expected fingerprint (64 hex digits)".to_owned());
+        }
+        if let Some(ip) = self.endpoint {
+            parts.push(format!("endpoint {ip}:{QUIC_PORT}"));
+        }
+        format!("config: [[peer]] {}", parts.join(", "))
+    }
 }
 
 pub struct Node {
@@ -118,6 +169,23 @@ impl Node {
                 self.face_index(link)
             ));
         }
+        // After the UDP faces, so `[[route]]` indices stay as they are.
+        if c.quic_listen {
+            s.push_str(&format!(
+                "[[face]]\nkind = \"quic\"\nbind = \"{}:{QUIC_PORT}\"\n\n",
+                self.ip
+            ));
+        }
+        if c.quic_dial_only {
+            s.push_str(&format!(
+                "[[face]]\nkind = \"quic\"\nbind = \"{}:0\"\nlisten = false\n\n",
+                self.ip
+            ));
+        }
+        for peer in &c.peers {
+            s.push_str(&peer.render());
+            s.push('\n');
+        }
         s.push_str(&format!(
             "[management]\nface_socket = \"{}\"\n\n",
             self.sock().display()
@@ -158,6 +226,15 @@ impl Node {
         }
         for (prefix, link) in &c.routes {
             v.push(format!("config: [[route]] {prefix} -> {link}"));
+        }
+        if c.quic_listen {
+            v.push(format!("config: [[face]] kind = \"quic\" (listen for links on {}:{QUIC_PORT})", self.ip));
+        }
+        if c.quic_dial_only {
+            v.push(format!("config: [[face]] kind = \"quic\" listen = false (dial links from {})", self.ip));
+        }
+        for peer in &c.peers {
+            v.push(peer.setting());
         }
         if let Some(id) = &c.identity {
             v.push(format!(

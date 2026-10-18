@@ -202,6 +202,51 @@ impl OwnCertificates {
             })
             .map(|(_, served)| served.wire.clone())
     }
+
+    /// The newest certificate valid now this node serves under `name` (a
+    /// key name or a certificate name).
+    pub(crate) fn certificate(&self, name: &Name) -> Option<Certificate> {
+        let certs = self.certs.read().unwrap_or_else(PoisonError::into_inner);
+        newest_valid(&certs, name).map(|served| served.cert.clone())
+    }
+
+    /// This node's certificate of `key` and the issuer certificates it
+    /// serves after it, nearest first, up to a self-signed one or one it
+    /// does not serve: what a link hello carries, so the other device can
+    /// validate it without fetching anything. Empty when it serves no valid
+    /// certificate of `key`.
+    pub(crate) fn chain_of(&self, key: &Name) -> Vec<Bytes> {
+        let certs = self.certs.read().unwrap_or_else(PoisonError::into_inner);
+        let mut chain: Vec<Bytes> = Vec::new();
+        let mut next = Some(key.clone());
+        while let Some(key) = next.take()
+            && chain.len() < 8
+            && let Some(served) = newest_valid(&certs, &key)
+        {
+            if chain.contains(&served.wire) {
+                break;
+            }
+            chain.push(served.wire.clone());
+            next = served
+                .cert
+                .issuer
+                .as_deref()
+                .map(key_name_of)
+                .filter(|issuer| *issuer != key);
+        }
+        chain
+    }
+}
+
+fn newest_valid<'a>(certs: &'a HashMap<Name, Served>, name: &Name) -> Option<&'a Served> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    certs
+        .iter()
+        .filter(|(n, served)| n.has_prefix(name) && served.cert.is_valid_at(now))
+        .max_by(|(a, x), (b, y)| (x.cert.valid_from, *a).cmp(&(y.cert.valid_from, *b)))
+        .map(|(_, served)| served)
 }
 
 /// The certificate Data the PIB at `pib` stores: every valid certificate of

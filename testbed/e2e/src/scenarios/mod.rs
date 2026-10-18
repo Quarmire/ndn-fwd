@@ -11,6 +11,7 @@ mod compromised;
 mod destroyed;
 mod lifecycle;
 mod negatives;
+mod quic_links;
 
 pub const ALL: &[&str] = &[
     "lifecycle",
@@ -19,6 +20,7 @@ pub const ALL: &[&str] = &[
     "recovery-compromised",
     "negatives",
     "approval",
+    "quic-links",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -29,6 +31,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "recovery-compromised" => compromised::run(sc),
         "negatives" => negatives::run(sc),
         "approval" => approval::run(sc),
+        "quic-links" => quic_links::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

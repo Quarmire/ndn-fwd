@@ -1,11 +1,12 @@
 //! Extension-transport face provisioners for `faces/create`.
 //!
 //! `ndn-mgmt` is face-agnostic for the extension transports: it builds the
-//! standard ones (UDP/TCP/Ethernet/BLE/SHM) itself but delegates raw QUIC
-//! (`quic://`) and WebTransport (`wts://`) to provisioners the forwarder
-//! registers via [`MgmtHandles::face_provisioners`](ndn_mgmt::MgmtHandles).
-//! Each is gated by the same feature that links its face crate, so a build
-//! without `quic`/`webtransport` registers nothing for those schemes.
+//! standard ones (UDP/TCP/Ethernet/BLE/SHM) itself but delegates WebTransport
+//! (`wts://`) to provisioners the forwarder registers via
+//! [`MgmtHandles::face_provisioners`](ndn_mgmt::MgmtHandles). Each is gated
+//! by the same feature that links its face crate. `quic://` is refused with
+//! the `[[peer]]` config to write instead: a QUIC link is configured by the
+//! device it links to (see `links`).
 
 use std::sync::Arc;
 
@@ -204,7 +205,10 @@ impl FaceProvisioner for ShmProvisioner {
     }
 }
 
-/// `quic://host:port?cert=<sha256hex>` (pin) or `quic://host:port?webpki`.
+/// `quic://…` — refused with what to do instead: a QUIC link is identified
+/// by the other device's key, admitted from the trust data on both sides,
+/// and kept up across restarts, so it is configured as a `[[peer]]`, not
+/// created by address.
 #[cfg(feature = "quic")]
 struct QuicProvisioner;
 
@@ -219,62 +223,12 @@ impl FaceProvisioner for QuicProvisioner {
         &self,
         req: ProvisionRequest<'_>,
     ) -> Result<ProvisionedFace, ProvisionError> {
-        use ndn_face_quic::QuicConnector;
-        use ndn_transport::{ClientTls, FacePersistency, Transport};
-        use tokio_util::sync::CancellationToken;
-
-        let rest = req.uri.strip_prefix("quic://").unwrap_or(req.uri);
-        let (authority, query) = match rest.split_once('?') {
-            Some((a, q)) => (a, Some(q)),
-            None => (rest, None),
-        };
-        let params: Vec<&str> = query.map(|q| q.split('&').collect()).unwrap_or_default();
-        let cert_hex = params.iter().find_map(|kv| kv.strip_prefix("cert="));
-        let webpki = params
-            .iter()
-            .any(|kv| *kv == "webpki" || *kv == "webpki=true");
-
-        let tls = if let Some(hex) = cert_hex {
-            match ndn_config::parse_cert_sha256_hex(hex) {
-                Some(h) => ClientTls::CertHashes(vec![h]),
-                None => {
-                    return Err(ProvisionError::BadParams(format!(
-                        "invalid cert hash (need 64 hex chars): {hex}"
-                    )));
-                }
-            }
-        } else if webpki {
-            ClientTls::WebPki
-        } else {
-            return Err(ProvisionError::BadParams(
-                "quic:// requires ?cert=<64 hex chars> (pin) or ?webpki".into(),
-            ));
-        };
-
-        let connector = QuicConnector::new(tls)
-            .map_err(|e| ProvisionError::Server(format!("QUIC connector: {e}")))?;
-        let face_id = req.engine.faces().alloc_id();
-        // The connector (endpoint) may drop after connect; the face's streams
-        // keep the connection and its I/O driver alive.
-        match connector.connect_authority(face_id, authority).await {
-            Ok(face) => {
-                let local_uri = face.local_uri();
-                req.engine.add_face_with_persistency(
-                    face,
-                    CancellationToken::new(),
-                    FacePersistency::Persistent,
-                );
-                Ok(ProvisionedFace {
-                    face_id,
-                    remote_uri: format!("quic://{authority}"),
-                    local_uri,
-                    persistency: FacePersistency::Persistent,
-                })
-            }
-            Err(e) => Err(ProvisionError::Server(format!(
-                "QUIC face creation failed: {e}"
-            ))),
-        }
+        let endpoint = req.uri.strip_prefix("quic://").unwrap_or(req.uri);
+        Err(ProvisionError::BadParams(format!(
+            "a QUIC link names the device it links to, not only an address: add \
+             [[peer]] device = \"/<namespace>/<role>/<device>\" (or key = \"<its fingerprint>\") \
+             with endpoint = \"{endpoint}\" to this daemon's config and restart it"
+        )))
     }
 }
 

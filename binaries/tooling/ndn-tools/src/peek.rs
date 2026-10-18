@@ -6,7 +6,9 @@
 //! connection); [`EXIT_REFUSED`] (`3`) the local forwarder refused the Data
 //! that answered (it failed validation) — `refused: <token>` is printed on
 //! stderr, `<token>` one of `chain`, `revoked`, `bad-signature`, `schema`,
-//! `untrusted-root`, `context`, `unverifiable`.
+//! `untrusted-root`, `context`, `unverifiable`, followed by a line saying
+//! whether it is final and what to do next. `unverifiable` is refused for
+//! now (the signing certificate could not be fetched): run again later.
 
 use anyhow::Result;
 use clap::Parser;
@@ -104,6 +106,8 @@ async fn main() -> Result<()> {
     .await;
     if let Some(refused) = result.as_ref().err().and_then(|e| e.downcast_ref::<Refused>()) {
         eprintln!("refused: {}", refused.refusal.as_str());
+        let finality = if refused.refusal.is_final() { "final" } else { "refused for now" };
+        eprintln!("{finality}: {}", refused.refusal.next_step());
         std::process::exit(EXIT_REFUSED);
     }
     result

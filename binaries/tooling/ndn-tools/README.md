@@ -80,7 +80,7 @@ Exit codes:
 |---|---|
 | `0` | fetched |
 | `1` | any other failure: timeout, Nack, decode, connection |
-| `3` | the local forwarder **refused** the Data that answered: it failed validation with a final verdict. `refused: <token>` is printed on stderr, `<token>` one of `chain`, `revoked`, `bad-signature`, `schema`, `untrusted-root`, `context`, `unverifiable` (see the ndn-rs security model, "Local refusal") |
+| `3` | the local forwarder **refused** the Data that answered: it failed validation. `refused: <token>` is printed on stderr, `<token>` one of `chain`, `revoked`, `bad-signature`, `schema`, `untrusted-root`, `context`, `unverifiable`, then a line saying whether the refusal is final and what to do next. Every refusal but `unverifiable` is final; `unverifiable` (the signing certificate could not be fetched) is refused for now: run again later (see the ndn-rs security model, "Local refusal") |
 
 ### `ndn-put` — publish from stdin
 

@@ -156,33 +156,37 @@ async fn refresh_one(admin: &TrustAdmin, held: &SignedTrustContext) -> ContextRe
         ndn_identity::refresh_context_via_engine(&admin.engine, &admin.keyring, &namespace).await;
     drop(bypass);
 
-    // A version this node knows exists (its sync group announced it) and
-    // does not hold: an answer naming an older one is stale, not current.
+    // A version this node knows exists (a member of its sync group served
+    // its signed Data and it passed the continuity rule, see
+    // `crate::context_sync`) and does not hold: an answer naming an older
+    // one is stale, not current. A sequence number announced in the group
+    // proves nothing and never counts.
     let known_newer = |answered: u64| {
         let held = admin.keyring.version_of(&namespace).unwrap_or(held_version);
         admin
             .context_sync
             .as_ref()
-            .and_then(|s| s.announced(&namespace))
-            .filter(|(announced, _)| *announced > held && *announced > answered)
+            .and_then(|s| s.verified(&namespace))
+            .filter(|(verified, _)| *verified > held && *verified > answered)
     };
-    let behind = |answered: u64, (announced, by): (u64, Name)| {
+    let behind = |answered: u64, (verified, by): (u64, Name)| {
         tracing::info!(
             target: "security",
             namespace = %namespace,
             answered,
-            announced,
+            verified,
             by = %by,
-            "the refresh got an answer older than a version announced over sync"
+            "the refresh got an answer older than a version verified over sync"
         );
         info(
             RefreshState::Behind,
             held_version,
             Vec::new(),
             format!(
-                "the answer names v{answered}, but v{announced} exists (announced over the \
-                 namespace's sync group by {by}) and is not held: a cache may answer with the \
-                 previous metadata for up to {} s after a new version, or the upstream has not \
+                "the answer names v{answered}, but v{verified} exists (its signed Data, served \
+                 over the namespace's sync group by {by}, follows from the held version under \
+                 the continuity rule) and is not held: a cache may answer with the previous \
+                 metadata for up to {} s after a new version, or the upstream has not \
                  refreshed yet; nothing changed — refresh again",
                 crate::context_publisher::METADATA_FRESHNESS.as_secs()
             ),
