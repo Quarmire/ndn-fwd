@@ -76,9 +76,13 @@ impl ActiveIdentity {
 
     /// Sign the daemon's own packets with `signer` (a persistent PIB key)
     /// from the next packet on: the daemon's first identity, enrolled while
-    /// it ran on its startup key.
+    /// it ran on its startup key. The ephemeral startup key leaves the
+    /// signing identities: nothing is signed with it any more.
     pub(crate) fn replace_node(&self, signer: Arc<dyn Signer>, source: NodeIdentitySource) {
         self.signer.replace(signer);
+        if let Some(ephemeral) = &self.ephemeral_key {
+            self.security.remove_key(ephemeral);
+        }
         *self
             .source
             .lock()

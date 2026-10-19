@@ -117,29 +117,8 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
         .unwrap_or(0);
     let served_prefix = name.clone().append_component(NameComponent::version(ts_us));
 
-    // Size the SHM ring for the largest emitted Data; the SHM face adds
-    // signature and name overhead. Derive from chunk_size when the caller
-    // doesn't override so large segments don't silently overflow the
-    // default slot.
-    let mtu_hint = params.conn.mtu.or(Some(chunk_size));
-    let client = if params.conn.use_shm {
-        ndn_ipc_shm::install();
-        ForwarderClient::connect_with_mtu(&params.conn.face_socket, mtu_hint).await?
-    } else {
-        ForwarderClient::connect_unix_only(&params.conn.face_socket).await?
-    };
-    client.register_prefix(&name).await?;
-
-    let transport = if client.is_shm() { "SHM" } else { "Unix" };
-    let _ = tx.send(ToolEvent::info(format!(
-        "ndn-put: registered {name}  [{transport}]  (ndn-cxx mode, serving under {served_prefix})"
-    ))).await;
-    let _ = tx
-        .send(ToolEvent::info(format!(
-            "ndn-put: {total_bytes} bytes → {seg_count} segment(s) of {chunk_size} B"
-        )))
-        .await;
-
+    // The signer first: a name no key of this device may sign is refused
+    // before the prefix is ever announced.
     let signer: Option<Arc<dyn Signer>> = if let Some(pib_key) = &params.sign_with {
         let s = pib_key.signer_for(&name)?;
         let _ = tx
@@ -174,6 +153,29 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
     } else {
         None
     };
+
+    // Size the SHM ring for the largest emitted Data; the SHM face adds
+    // signature and name overhead. Derive from chunk_size when the caller
+    // doesn't override so large segments don't silently overflow the
+    // default slot.
+    let mtu_hint = params.conn.mtu.or(Some(chunk_size));
+    let client = if params.conn.use_shm {
+        ndn_ipc_shm::install();
+        ForwarderClient::connect_with_mtu(&params.conn.face_socket, mtu_hint).await?
+    } else {
+        ForwarderClient::connect_unix_only(&params.conn.face_socket).await?
+    };
+    client.register_prefix(&name).await?;
+
+    let transport = if client.is_shm() { "SHM" } else { "Unix" };
+    let _ = tx.send(ToolEvent::info(format!(
+        "ndn-put: registered {name}  [{transport}]  (ndn-cxx mode, serving under {served_prefix})"
+    ))).await;
+    let _ = tx
+        .send(ToolEvent::info(format!(
+            "ndn-put: {total_bytes} bytes → {seg_count} segment(s) of {chunk_size} B"
+        )))
+        .await;
 
     let freshness = (params.freshness_ms > 0).then(|| Duration::from_millis(params.freshness_ms));
 
