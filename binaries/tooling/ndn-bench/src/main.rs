@@ -67,9 +67,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    let prefix: Name = prefix_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --name `{prefix_str}`: {e}"))?;
+
     let (_engine, shutdown) = EngineBuilder::new(EngineConfig::default()).build().await?;
 
-    let prefix: Name = prefix_str.parse().unwrap_or_else(|_| Name::root());
     println!(
         "ndn-bench: {} interests, concurrency={}, prefix={}",
         total_interests, concurrency, prefix_str

@@ -159,7 +159,10 @@ async fn run_consumer(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let prefix: Name = cli.prefix.parse().unwrap_or_else(|_| Name::root());
+    let prefix: Name = cli
+        .prefix
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid --prefix `{}`: {e}", cli.prefix))?;
     let echo_mode = cli.mode == "echo";
 
     println!(

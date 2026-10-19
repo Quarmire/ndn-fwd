@@ -37,9 +37,10 @@ fn make_sign_mode(sign_mode: &str, flow_id: &str, ed25519: &Arc<Ed25519Signer>) 
         "none" => FlowSignMode::None,
         "blake3" => FlowSignMode::DigestBlake3,
         "hmac" => {
-            let kn: ndn_packet::Name = format!("/iperf-key/{flow_id}")
-                .parse()
-                .unwrap_or_else(|_| "/iperf-key/unknown".parse().unwrap());
+            // The flow id arrives in the client's Interest: append it as one
+            // component rather than re-parsing it as URI text, which a
+            // malformed id could fail.
+            let kn = ndn_packet::name!("/iperf-key").append(flow_id);
             FlowSignMode::Custom(Arc::new(HmacSha256Signer::new(flow_id.as_bytes(), kn)))
         }
         "ed25519" => FlowSignMode::Custom(Arc::clone(ed25519) as Arc<dyn NdnSigner>),

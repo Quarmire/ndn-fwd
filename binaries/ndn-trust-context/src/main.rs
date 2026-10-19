@@ -268,7 +268,7 @@ fn main() -> Result<()> {
 
 fn parse_name(s: &str) -> Result<Name> {
     s.parse::<Name>()
-        .map_err(|e| anyhow::anyhow!("invalid NDN name `{s}`: {e:?}"))
+        .map_err(|e| anyhow::anyhow!("invalid NDN name `{s}`: {e}"))
 }
 
 fn render_qr(payload: &str, format: &QrFormat, label: &str) -> Result<()> {
