@@ -286,8 +286,8 @@ mod tests {
              PIB at /var/lib/ndn/pib) and ask again; an admin can deny request r1"
         );
         assert_eq!(
-            w.enrolled(),
-            "enrolled; the PIB's default identity is now this one"
+            w.enrolled(true),
+            "enrolled; the PIB's default identity is now this one, the node identity"
         );
         assert_eq!(
             w.request_names_no_ca(),
