@@ -557,12 +557,17 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
             let s = mgmt.status().await.map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut out = String::new();
             render_status_into(&mut out, &s);
-            // The key the forwarder signs its own packets with (it changes
-            // when `ndn-fwd enroll` selects a new identity).
+            // The node identity the forwarder signs its own packets with,
+            // and why, and every identity it signs Data as.
             if let Ok(id) = mgmt.security_identity_status().await
                 && id.is_ok()
             {
                 out.push_str(&format!("signing: {}\n", id.status_text.trim()));
+            }
+            if let Ok(resp) = mgmt.security_memberships().await
+                && resp.is_ok()
+            {
+                render_memberships_into(&mut out, &resp.status_text);
             }
             print!("{out}");
         }
@@ -575,6 +580,49 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The `security/memberships` answer (a JSON list of
+/// `ndn_cert::report::MembershipInfo`) as a "trusted prefixes" table: each
+/// prefix, how this node takes part in it (following, member with its role,
+/// owner), the identity it signs the prefix's Data as and until when.
+fn render_memberships_into(out: &mut String, json: &str) {
+    let Ok(serde_json::Value::Array(list)) = serde_json::from_str(json) else {
+        return;
+    };
+    out.push_str("trusted prefixes:\n");
+    if list.is_empty() {
+        out.push_str("  (none: adopt one with `ndn-fwd adopt` or enroll with `ndn-fwd enroll`)\n");
+    }
+    let field = |m: &serde_json::Value, k: &str| m[k].as_str().unwrap_or_default().to_owned();
+    for m in &list {
+        let relation = field(m, "relation");
+        let role = field(m, "role");
+        let taking_part = if role.is_empty() {
+            relation
+        } else {
+            format!("{relation} ({role})")
+        };
+        let identity = field(m, "identity");
+        let signs = if identity.is_empty() {
+            "verify only".to_owned()
+        } else {
+            let node = if m["node_identity"].as_bool() == Some(true) {
+                ", node identity"
+            } else {
+                ""
+            };
+            format!(
+                "signs as {identity} until {}{node}",
+                field(m, "valid_until")
+            )
+        };
+        out.push_str(&format!(
+            "  {} v{}  {taking_part}  {signs}\n",
+            field(m, "namespace"),
+            m["version"].as_u64().unwrap_or_default()
+        ));
+    }
 }
 
 fn run_security(action: &SecurityAction) -> anyhow::Result<()> {
@@ -1229,7 +1277,9 @@ fn print_params(params: &ndn_config::ControlParameters) {
 
 /// A link command's answer: what was done, or (exit status non-zero) why
 /// nothing was.
-fn link_command_result<E: std::fmt::Display>(resp: Result<ControlResponse, E>) -> anyhow::Result<()> {
+fn link_command_result<E: std::fmt::Display>(
+    resp: Result<ControlResponse, E>,
+) -> anyhow::Result<()> {
     let resp = resp.map_err(|e| anyhow::anyhow!("{e}"))?;
     if !resp.is_ok() {
         anyhow::bail!("{} {}", resp.status_code, resp.status_text);
@@ -1556,7 +1606,9 @@ mod ctl_tests {
 
     #[test]
     fn link_list_renders_the_contract_format() {
-        use ndn_mgmt_wire::{LinkAsleepEntry, LinkEntry, LinkListing, LinkPathEntry, LinkRelayEntry};
+        use ndn_mgmt_wire::{
+            LinkAsleepEntry, LinkEntry, LinkListing, LinkPathEntry, LinkRelayEntry,
+        };
         let listing = LinkListing {
             key: Some([0xab; 32]),
             probes_sent: 40,

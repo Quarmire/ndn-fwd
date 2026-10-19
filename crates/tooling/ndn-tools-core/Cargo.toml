@@ -23,6 +23,7 @@ recv    = []
 [dependencies]
 portable-atomic = { workspace = true }
 ndn-app        = { workspace = true }
+ndn-cert       = { workspace = true }
 ndn-ipc        = { workspace = true }
 ndn-ipc-shm    = { workspace = true }
 ndn-packet     = { workspace = true, features = ["std"] }

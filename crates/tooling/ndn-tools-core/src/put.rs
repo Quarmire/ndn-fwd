@@ -42,30 +42,40 @@ pub struct PutParams {
 #[derive(Debug, Clone)]
 pub struct PibKey {
     pub pib: std::path::PathBuf,
-    /// The identity whose default key signs; `None`: the PIB's default
-    /// identity.
+    /// The identity whose default key signs; `None`: the identity the Data
+    /// name chooses — this device's identity in the trusted prefix covering
+    /// it ([`ndn_security::SecurityManager::signer_for`]).
     pub identity: Option<String>,
 }
 
 impl PibKey {
-    /// The signer: the identity's default key (the newest one when the PIB
-    /// names none).
-    pub fn signer(&self) -> Result<Arc<dyn Signer>> {
+    /// The signer of Data under `name`: the identity's default key, or —
+    /// without `--identity` — the key the name chooses among the PIB's
+    /// identities with a currently valid certificate (never a trusted
+    /// prefix's root or CA key, never another prefix's key). Refused with
+    /// which prefix and what to do when none may sign it.
+    pub fn signer_for(&self, name: &Name) -> Result<Arc<dyn Signer>> {
         let pib = ndn_security::FilePib::open(&self.pib)
             .map_err(|e| anyhow::anyhow!("open PIB {}: {e}", self.pib.display()))?;
-        let identity: Name = match &self.identity {
-            Some(id) => id.parse().map_err(|e| anyhow::anyhow!("identity {id:?}: {e}"))?,
-            None => pib
-                .get_default_identity()
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "the PIB {} has no default identity; pass --identity",
-                        self.pib.display()
-                    )
-                })?,
+        let Some(id) = &self.identity else {
+            let mgr = ndn_security::SecurityManager::new();
+            mgr.load_pib_identities(&pib)
+                .map_err(|e| anyhow::anyhow!("PIB {}: {e}", self.pib.display()))?;
+            // The trusted prefixes the PIB holds tell their root and CA keys
+            // from their device identities.
+            ndn_cert::load_persisted_contexts(&self.pib, mgr.keyring())
+                .map_err(|e| anyhow::anyhow!("PIB {}: {e}", self.pib.display()))?;
+            return mgr.signer_for(name).map_err(|e| {
+                anyhow::anyhow!("{e}; or pass --identity <identity> to sign with its key")
+            });
         };
-        let key = match pib.default_key(&identity).map_err(|e| anyhow::anyhow!("{e}"))? {
+        let identity: Name = id
+            .parse()
+            .map_err(|e| anyhow::anyhow!("identity {id:?}: {e}"))?;
+        let key = match pib
+            .default_key(&identity)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+        {
             Some(key) => key,
             None => pib
                 .identity_keys(&identity)
@@ -131,7 +141,7 @@ pub async fn run_producer(params: PutParams, tx: mpsc::Sender<ToolEvent>) -> Res
         .await;
 
     let signer: Option<Arc<dyn Signer>> = if let Some(pib_key) = &params.sign_with {
-        let s = pib_key.signer()?;
+        let s = pib_key.signer_for(&name)?;
         let _ = tx
             .send(ToolEvent::info(format!(
                 "ndn-put: signing with {} ({:?}) from the PIB {}",

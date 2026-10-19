@@ -37,7 +37,9 @@ struct Cli {
     pib: Option<String>,
 
     /// With `--pib`: the identity whose default key signs (default: the
-    /// PIB's default identity).
+    /// identity the name chooses — this device's identity in the trusted
+    /// prefix covering it; refused, with why, when it only follows that
+    /// prefix or none covers the name).
     #[arg(long, requires = "pib")]
     identity: Option<String>,
 
