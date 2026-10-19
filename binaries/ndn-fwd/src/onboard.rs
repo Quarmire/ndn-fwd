@@ -93,6 +93,7 @@ pub async fn maybe_run() -> Option<Result<()>> {
         "enroll" => Some(run_enroll(&args[2..]).await),
         "revoke" => Some(crate::revoke::run(&args[2..]).await),
         "renew" => Some(run_renew(&args[2..]).await),
+        "node-identity" => Some(crate::node_identity_cmd::run(&args[2..]).await),
         "context" => Some(run_context(&args[2..]).await),
         "schema" => Some(crate::schema_cmd::run(&args[2..]).await),
         "root-key" => Some(crate::root_key::run(&args[2..]).await),
@@ -149,138 +150,293 @@ struct ArgSpec {
 /// it takes. Anything else is refused before it runs, so no argument is
 /// silently ignored.
 const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
-    ("init", None, ArgSpec {
-        values: &[
-            "--namespace", "--device", "--pib", "-c", "--config", "--root-store",
-            "--passphrase-file", "--pin-file", "--yubikey-slot", "--yubikey-serial",
-            "--touch-policy",
-        ],
-        repeatable: &[],
-        switches: &["--force", "--replace-slot"],
-        positionals: 0,
-    }),
-    ("adopt", None, ArgSpec {
-        values: &["--pib", "-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 1,
-    }),
-    ("enroll", None, ArgSpec {
-        values: &["--device", "--role", "-c", "--config"],
-        repeatable: &[],
-        switches: &["--force", "--status"],
-        positionals: 1,
-    }),
-    ("approvals", Some("list"), ArgSpec {
-        values: &["-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 1,
-    }),
-    ("approvals", Some("approve"), ArgSpec {
-        values: &["-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        // The verb, then the id or code; a code pasted as listed (`482 913`)
-        // is two words.
-        positionals: 3,
-    }),
-    ("approvals", Some("deny"), ArgSpec {
-        values: &["--reason", "-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 3,
-    }),
-    ("revoke", None, ArgSpec {
-        values: &["--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 1,
-    }),
-    ("renew", None, ArgSpec {
-        values: &["-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 0,
-    }),
-    ("context", Some("refresh"), ArgSpec {
-        values: &["-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 2,
-    }),
-    ("schema", Some("show"), ArgSpec {
-        values: &["--namespace", "--pib", "-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 1,
-    }),
-    ("schema", Some("explain"), ArgSpec {
-        values: &["--namespace", "--pib", "-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 3,
-    }),
-    ("schema", Some("update"), ArgSpec {
-        values: &["--namespace", "--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
-        repeatable: &[],
-        switches: &["--accept-narrowing"],
-        positionals: 1,
-    }),
-    ("root-key", Some("status"), ArgSpec {
-        values: &["--pib", "-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 1,
-    }),
-    ("root-key", Some("move"), ArgSpec {
-        values: &["--to", "--passphrase-file", "--pin-file", "--pib", "-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 1,
-    }),
-    ("recovery-kit", Some("create"), ArgSpec {
-        values: &[
-            "--format", "--out", "--pib", "-c", "--config", "--passphrase-file", "--pin-file",
-            "--kit-passphrase-file", "--kit-pin-file", "--kit-yubikey-serial",
-            "--kit-yubikey-slot", "--kit-touch-policy",
-        ],
-        repeatable: &[],
-        switches: &["--replace-slot"],
-        positionals: 1,
-    }),
-    ("recovery-kit", Some("list"), ArgSpec {
-        values: &["--namespace", "--pib", "-c", "--config"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 1,
-    }),
-    ("recovery-kit", Some("check"), ArgSpec {
-        values: &[
-            "--namespace", "--pib", "-c", "--config", "--kit-passphrase-file", "--kit-pin-file",
-            "--words-file", "--kit-yubikey-serial", "--kit-yubikey-slot",
-        ],
-        repeatable: &[],
-        switches: &[],
-        positionals: 2,
-    }),
-    ("recovery-kit", Some("revoke"), ArgSpec {
-        values: &["--pib", "-c", "--config", "--passphrase-file", "--pin-file"],
-        repeatable: &[],
-        switches: &[],
-        positionals: 2,
-    }),
-    ("recover", None, ArgSpec {
-        values: &[
-            "--old-root", "--kit", "--namespace", "--device", "--pib", "-c", "--config",
-            "--kit-passphrase-file", "--kit-pin-file", "--words-file", "--kit-yubikey-serial",
-            "--kit-yubikey-slot", "--root-store", "--passphrase-file", "--pin-file",
-            "--yubikey-slot", "--yubikey-serial", "--touch-policy", "--keep-kit",
-        ],
-        repeatable: &["--keep-kit"],
-        switches: &["--from-held", "--replace-slot"],
-        positionals: 0,
-    }),
+    (
+        "init",
+        None,
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--device",
+                "--pib",
+                "-c",
+                "--config",
+                "--root-store",
+                "--passphrase-file",
+                "--pin-file",
+                "--yubikey-slot",
+                "--yubikey-serial",
+                "--touch-policy",
+            ],
+            repeatable: &[],
+            switches: &["--force", "--replace-slot"],
+            positionals: 0,
+        },
+    ),
+    (
+        "adopt",
+        None,
+        ArgSpec {
+            values: &["--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "enroll",
+        None,
+        ArgSpec {
+            values: &["--device", "--role", "-c", "--config"],
+            repeatable: &[],
+            switches: &["--force", "--status"],
+            positionals: 1,
+        },
+    ),
+    (
+        "approvals",
+        Some("list"),
+        ArgSpec {
+            values: &["-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "approvals",
+        Some("approve"),
+        ArgSpec {
+            values: &["-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            // The verb, then the id or code; a code pasted as listed (`482 913`)
+            // is two words.
+            positionals: 3,
+        },
+    ),
+    (
+        "approvals",
+        Some("deny"),
+        ArgSpec {
+            values: &["--reason", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 3,
+        },
+    ),
+    (
+        "revoke",
+        None,
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--passphrase-file",
+                "--pin-file",
+            ],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "renew",
+        None,
+        ArgSpec {
+            values: &["-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 0,
+        },
+    ),
+    (
+        "node-identity",
+        None,
+        ArgSpec {
+            values: &["--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "context",
+        Some("refresh"),
+        ArgSpec {
+            values: &["-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 2,
+        },
+    ),
+    (
+        "schema",
+        Some("show"),
+        ArgSpec {
+            values: &["--namespace", "--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "schema",
+        Some("explain"),
+        ArgSpec {
+            values: &["--namespace", "--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 3,
+        },
+    ),
+    (
+        "schema",
+        Some("update"),
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--passphrase-file",
+                "--pin-file",
+            ],
+            repeatable: &[],
+            switches: &["--accept-narrowing"],
+            positionals: 1,
+        },
+    ),
+    (
+        "root-key",
+        Some("status"),
+        ArgSpec {
+            values: &["--namespace", "--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "root-key",
+        Some("move"),
+        ArgSpec {
+            values: &[
+                "--to",
+                "--namespace",
+                "--passphrase-file",
+                "--pin-file",
+                "--pib",
+                "-c",
+                "--config",
+            ],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "recovery-kit",
+        Some("create"),
+        ArgSpec {
+            values: &[
+                "--format",
+                "--out",
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--passphrase-file",
+                "--pin-file",
+                "--kit-passphrase-file",
+                "--kit-pin-file",
+                "--kit-yubikey-serial",
+                "--kit-yubikey-slot",
+                "--kit-touch-policy",
+            ],
+            repeatable: &[],
+            switches: &["--replace-slot"],
+            positionals: 1,
+        },
+    ),
+    (
+        "recovery-kit",
+        Some("list"),
+        ArgSpec {
+            values: &["--namespace", "--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 1,
+        },
+    ),
+    (
+        "recovery-kit",
+        Some("check"),
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--kit-passphrase-file",
+                "--kit-pin-file",
+                "--words-file",
+                "--kit-yubikey-serial",
+                "--kit-yubikey-slot",
+            ],
+            repeatable: &[],
+            switches: &[],
+            positionals: 2,
+        },
+    ),
+    (
+        "recovery-kit",
+        Some("revoke"),
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--passphrase-file",
+                "--pin-file",
+            ],
+            repeatable: &[],
+            switches: &[],
+            positionals: 2,
+        },
+    ),
+    (
+        "recover",
+        None,
+        ArgSpec {
+            values: &[
+                "--old-root",
+                "--kit",
+                "--namespace",
+                "--device",
+                "--pib",
+                "-c",
+                "--config",
+                "--kit-passphrase-file",
+                "--kit-pin-file",
+                "--words-file",
+                "--kit-yubikey-serial",
+                "--kit-yubikey-slot",
+                "--root-store",
+                "--passphrase-file",
+                "--pin-file",
+                "--yubikey-slot",
+                "--yubikey-serial",
+                "--touch-policy",
+                "--keep-kit",
+            ],
+            repeatable: &["--keep-kit"],
+            switches: &["--from-held", "--replace-slot"],
+            positionals: 0,
+        },
+    ),
 ];
 
 /// The spec of `ndn-fwd <command> <rest…>` and its name for refusals
@@ -302,7 +458,8 @@ fn arg_spec(command: &str, rest: &[String]) -> Option<(String, &'static ArgSpec)
 /// flag), a value flag given twice, a surplus positional — instead of
 /// ignoring it.
 fn check_args(command: &str, args: &[String], spec: &ArgSpec) -> Result<()> {
-    let refuse = |what: String| anyhow::anyhow!("{what} for `ndn-fwd {command}`; see `ndn-fwd --help`");
+    let refuse =
+        |what: String| anyhow::anyhow!("{what} for `ndn-fwd {command}`; see `ndn-fwd --help`");
     let mut given: Vec<&str> = Vec::new();
     let mut positionals = 0;
     let mut rest = args.iter().map(String::as_str);
@@ -422,16 +579,21 @@ async fn run_init(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
     // What enrollment needs an admin's approval for, which devices may link,
     // relay and make direct paths, and which relays the namespace
-    // advertises: `[ca]` of `-c`, else the defaults. The context advertises
-    // them (the link policy always stated), and the CA enforces exactly
-    // what the context advertises.
+    // advertises: the `[ca]` / `[[ca]]` entry of `-c` for this namespace's
+    // CA, else the defaults. The context advertises them (the link policy
+    // always stated), and the CA enforces exactly what the context
+    // advertises.
     let stated = match flag(args, &["-c", "--config"]) {
         Some(path) => {
-            let toml = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
+            let toml =
+                std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
             let cfg: ForwarderConfig = toml
                 .parse()
                 .with_context(|| format!("parse config {path}"))?;
-            crate::ca::policy_input(&cfg.ca)?
+            match crate::ca::config_for(&cfg.ca, &namespace) {
+                Some(ca) => crate::ca::policy_input(ca)?,
+                None => PolicyInput::default(),
+            }
         }
         None => PolicyInput::default(),
     };
@@ -444,7 +606,11 @@ async fn run_init(args: &[String]) -> Result<()> {
 
     let out =
         init_namespace_in_pib_with(&pib, &namespace, &device, force, &root, &policies).await?;
-    let NamespacePolicies { approval, link, relays } = policies;
+    let NamespacePolicies {
+        approval,
+        link,
+        relays,
+    } = policies;
     drop(root);
     let root_dev = &out.init;
     // The daemon may run from another directory: print an absolute path.
@@ -460,7 +626,10 @@ async fn run_init(args: &[String]) -> Result<()> {
     println!("ca_cert        = {}", out.ca_cert_path.display());
     println!("device         = {} (admin)", out.device_identity);
     println!("device_key     = {}", out.device_key);
-    println!("device_cert    = {} (issued by the CA)", out.device_cert_path.display());
+    println!(
+        "device_cert    = {} (issued by the CA)",
+        out.device_cert_path.display()
+    );
     let root_lines = crate::root_key::describe_new_root(&out.root_store, &pib_dir);
     println!("{}", root_lines[0]);
     println!(
@@ -517,12 +686,18 @@ async fn run_init(args: &[String]) -> Result<()> {
     }
     if !approval.roles.is_empty() {
         let roles: Vec<&str> = approval.roles.iter().map(|r| r.as_str()).collect();
-        let link = if approval.invite_also { "<invite link>" } else { "<anchor_uri>" };
+        let link = if approval.invite_also {
+            "<invite link>"
+        } else {
+            "<anchor_uri>"
+        };
         println!(
             "#  - on an admin's approval: `ndn-fwd enroll {link} --role {}` on the device, then",
             roles.join("|")
         );
-        println!("#    compare its code and `ndn-fwd approvals approve <code>` here or on an admin device.");
+        println!(
+            "#    compare its code and `ndn-fwd approvals approve <code>` here or on an admin device."
+        );
     }
     for line in &root_lines[1..] {
         println!("{line}");
@@ -531,7 +706,7 @@ async fn run_init(args: &[String]) -> Result<()> {
     println!("# Losing this device would lose the namespace: create a recovery kit now (a");
     println!("# separate recovery key the namespace trusts, kept offline), e.g.");
     println!(
-        "#   ndn-fwd recovery-kit create --format words --pib {}",
+        "#   ndn-fwd recovery-kit create --format words --namespace {namespace} --pib {}",
         pib_abs.display()
     );
     println!("# (--format file --out <path> for a passphrase-sealed file, --format yubikey for a");
@@ -547,6 +722,17 @@ async fn run_init(args: &[String]) -> Result<()> {
     println!(
         "pib_path = {}",
         toml_basic_string(&pib_abs.display().to_string())
+    );
+    println!("# and run the namespace CA (one [[ca]] table per trusted prefix this device is the");
+    println!(
+        "# root of; add its [[ca.challenge]] set, e.g. kind = \"token\" or \"device-approval\"):"
+    );
+    println!("[[ca]]");
+    println!("enabled  = true");
+    println!("prefix   = {}", toml_basic_string(&namespace.to_string()));
+    println!(
+        "identity = {}",
+        toml_basic_string(&format!("{namespace}/CA"))
     );
     Ok(())
 }
@@ -589,9 +775,9 @@ pub(crate) fn face_socket(args: &[String]) -> Result<String> {
 
 async fn run_adopt(args: &[String]) -> Result<()> {
     // The link is the first argument that is neither a flag nor a flag's value.
-    let uri = *positionals(args)
-        .first()
-        .context("adopt requires an <anchor link> (an ndn-trust://anchor URI or its https mirror)")?;
+    let uri = *positionals(args).first().context(
+        "adopt requires an <anchor link> (an ndn-trust://anchor URI or its https mirror)",
+    )?;
     // Read it here first so a malformed link is reported without a daemon.
     let link = AnchorLink::from_uri(uri).map_err(|e| anyhow::anyhow!("adopt refused: {e}"))?;
     let socket = face_socket(args)?;
@@ -616,7 +802,11 @@ async fn adopt_via_daemon(client: &ndn_ipc::MgmtClient, uri: &str, socket: &str)
         .await
         .with_context(|| format!("ask the daemon at {socket} to adopt"))?;
     if !resp.is_ok() {
-        bail!("adopt refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+        bail!(
+            "adopt refused by the daemon ({}): {}",
+            resp.status_code,
+            resp.status_text
+        );
     }
     let info: ndn_mgmt::AdoptedContextInfo = serde_json::from_str(&resp.status_text)
         .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
@@ -683,9 +873,8 @@ fn adopt_offline(
 /// for the key generation and storing.
 fn daemon_enroll_timeout() -> std::time::Duration {
     ndn_namespace::enroll::context_check_budget()
-        + ndn_identity::enroll_via_engine_budget().max(
-            ndn_app::DEFAULT_TIMEOUT * 2 + ndn_identity::poll_via_engine_budget(),
-        )
+        + ndn_identity::enroll_via_engine_budget()
+            .max(ndn_app::DEFAULT_TIMEOUT * 2 + ndn_identity::poll_via_engine_budget())
         + std::time::Duration::from_secs(5)
 }
 
@@ -746,7 +935,11 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         }
     };
     if !resp.is_ok() {
-        bail!("enroll refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+        bail!(
+            "enroll refused by the daemon ({}): {}",
+            resp.status_code,
+            resp.status_text
+        );
     }
     let outcome: ndn_mgmt::EnrollOutcome = serde_json::from_str(&resp.status_text)
         .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
@@ -783,7 +976,10 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         }
     };
     println!("identity         = {}", info.identity);
-    println!("key              = {} (generated in the daemon's PIB)", info.key);
+    println!(
+        "key              = {} (generated in the daemon's PIB)",
+        info.key
+    );
     println!("certificate      = {}", info.certificate);
     println!(
         "issued_by        = {} (chain checked to the root of {} under its schema)",
@@ -849,7 +1045,10 @@ async fn run_enroll(args: &[String]) -> Result<()> {
 fn print_pending(info: &ndn_mgmt::PendingEnrollInfo) {
     println!("state            = pending (waiting for an admin's approval)");
     println!("identity         = {}", info.identity);
-    println!("key              = {} (generated in the daemon's PIB)", info.key);
+    println!(
+        "key              = {} (generated in the daemon's PIB)",
+        info.key
+    );
     println!("ca               = {}", info.ca);
     println!("request          = {}", info.request);
     println!("code             = {}", info.code);
@@ -857,10 +1056,19 @@ fn print_pending(info: &ndn_mgmt::PendingEnrollInfo) {
         println!("expires          = {}", info.expires);
     }
     println!();
-    println!("# On an admin device of {} (or its root device), run", info.namespace);
+    println!(
+        "# On an admin device of {} (or its root device), run",
+        info.namespace
+    );
     println!("#   ndn-fwd approvals list");
-    println!("# check it shows the code {} for this request, then", info.code);
-    println!("#   ndn-fwd approvals approve {}", info.code.replace(' ', ""));
+    println!(
+        "# check it shows the code {} for this request, then",
+        info.code
+    );
+    println!(
+        "#   ndn-fwd approvals approve {}",
+        info.code.replace(' ', "")
+    );
     println!("# The daemon waits on the CA for the decision, across restarts, and installs");
     println!("# the certificate the moment it is approved; `ndn-fwd enroll --status` shows");
     println!("# where the request stands (a denial says why).");
@@ -874,7 +1082,11 @@ async fn run_enroll_status(args: &[String]) -> Result<()> {
         .await
         .with_context(|| format!("ask the daemon at {socket} for its requests"))?;
     if !resp.is_ok() {
-        bail!("enroll --status refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+        bail!(
+            "enroll --status refused by the daemon ({}): {}",
+            resp.status_code,
+            resp.status_text
+        );
     }
     let requests: Vec<ndn_cert::OutgoingRequest> = serde_json::from_str(&resp.status_text)
         .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
@@ -890,11 +1102,17 @@ async fn run_enroll_status(args: &[String]) -> Result<()> {
         println!("request   = {}", r.request_id);
         println!("code      = {}", r.code);
         println!("key       = {}", r.key_name);
-        println!("asked     = {}", ndn_cert::approval::iso_secs(r.created_secs));
+        println!(
+            "asked     = {}",
+            ndn_cert::approval::iso_secs(r.created_secs)
+        );
         match &r.state {
             ndn_cert::OutgoingState::Pending => {
                 if r.expires_secs != 0 {
-                    println!("expires   = {}", ndn_cert::approval::iso_secs(r.expires_secs));
+                    println!(
+                        "expires   = {}",
+                        ndn_cert::approval::iso_secs(r.expires_secs)
+                    );
                 }
             }
             ndn_cert::OutgoingState::Issued { certificate } => {
@@ -939,7 +1157,11 @@ async fn run_renew(args: &[String]) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("ask the daemon at {socket} to renew")),
     };
     if !resp.is_ok() {
-        bail!("renew refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+        bail!(
+            "renew refused by the daemon ({}): {}",
+            resp.status_code,
+            resp.status_text
+        );
     }
     let results: Vec<ndn_mgmt::RenewalInfo> = serde_json::from_str(&resp.status_text)
         .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))?;
@@ -947,7 +1169,10 @@ async fn run_renew(args: &[String]) -> Result<()> {
     let mut not_renewed = false;
     for r in &results {
         println!("key              = {}", r.key);
-        println!("previous         = {} (valid until {})", r.previous, r.previous_valid_until);
+        println!(
+            "previous         = {} (valid until {})",
+            r.previous, r.previous_valid_until
+        );
         match r.state {
             ndn_mgmt::RenewalState::Renewed => {
                 println!(
@@ -1039,7 +1264,10 @@ async fn run_context(args: &[String]) -> Result<()> {
                 "failed"
             }
         };
-        println!("{} v{} -> v{}: {state}", r.namespace, r.held_version, r.version);
+        println!(
+            "{} v{} -> v{}: {state}",
+            r.namespace, r.held_version, r.version
+        );
         for revoked in &r.revoked {
             println!("  revoked {revoked}");
         }
@@ -1082,7 +1310,9 @@ mod tests {
             .map(String::from)
             .to_vec();
         assert_eq!(positionals(&args), ["/d", "/k"]);
-        let args: Vec<String> = ["--config", "x.toml", "/d", "/k"].map(String::from).to_vec();
+        let args: Vec<String> = ["--config", "x.toml", "/d", "/k"]
+            .map(String::from)
+            .to_vec();
         assert_eq!(positionals(&args), ["/d", "/k"]);
     }
 
@@ -1097,16 +1327,53 @@ mod tests {
     /// value, a flag given twice and surplus positionals are refused.
     #[test]
     fn arguments_a_subcommand_does_not_take_are_refused() {
-        check(&["init", "--namespace", "/home/bob", "--root-store", "sealed-file", "--force"])
-            .expect("init's own flags");
-        check(&["recovery-kit", "check", "words", "--pib", "p", "--words-file", "w"])
-            .expect("a subcommand word and its flags");
-        check(&["recover", "--old-root", "destroyed", "--kit", "words", "--keep-kit", "/a", "--keep-kit", "/b"])
-            .expect("a repeatable flag");
+        check(&[
+            "init",
+            "--namespace",
+            "/home/bob",
+            "--root-store",
+            "sealed-file",
+            "--force",
+        ])
+        .expect("init's own flags");
+        check(&[
+            "recovery-kit",
+            "check",
+            "words",
+            "--pib",
+            "p",
+            "--words-file",
+            "w",
+        ])
+        .expect("a subcommand word and its flags");
+        check(&[
+            "recover",
+            "--old-root",
+            "destroyed",
+            "--kit",
+            "words",
+            "--keep-kit",
+            "/a",
+            "--keep-kit",
+            "/b",
+        ])
+        .expect("a repeatable flag");
         for refused in [
-            &["init", "--namespace", "/home/bob", "--root-store=sealed-file"][..],
+            &[
+                "init",
+                "--namespace",
+                "/home/bob",
+                "--root-store=sealed-file",
+            ][..],
             &["init", "--namespace=/home/bob"],
-            &["recover", "--old-root", "destroyed", "--kit", "words", "--from-hold"],
+            &[
+                "recover",
+                "--old-root",
+                "destroyed",
+                "--kit",
+                "words",
+                "--from-hold",
+            ],
             &["revoke", "/a", "/b"],
             &["adopt", "ndn-trust://anchor/x", "--pib", "--force"],
             &["renew", "-c"],
@@ -1123,7 +1390,10 @@ mod tests {
     fn every_value_flag_is_known_to_positionals() {
         for (_, _, spec) in ARG_SPECS {
             for flag in spec.values {
-                assert!(VALUE_FLAGS.contains(flag), "{flag} is missing from VALUE_FLAGS");
+                assert!(
+                    VALUE_FLAGS.contains(flag),
+                    "{flag} is missing from VALUE_FLAGS"
+                );
             }
         }
     }

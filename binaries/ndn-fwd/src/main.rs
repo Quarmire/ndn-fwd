@@ -45,11 +45,11 @@ fn build_obs_retention(
 
 mod active_identity;
 mod approvals;
+mod ca;
 mod context_adopt;
 mod context_publisher;
 mod context_refresh;
 mod context_sync;
-mod ca;
 mod enroll;
 mod face_provision;
 mod face_setup;
@@ -62,6 +62,7 @@ mod links;
 #[cfg(feature = "quic")]
 mod links_mgmt;
 mod monitors;
+mod node_identity_cmd;
 mod onboard;
 mod own_certs;
 mod pib_vault;
@@ -102,8 +103,8 @@ struct CliArgs {
 /// `--help` text. The parser is deliberately hand-rolled (the daemon stays
 /// dependency-light; only the tooling siblings use clap), so keep this in
 /// sync with the options `parse_args` accepts and the
-/// `init`/`adopt`/`enroll`/`approvals`/`revoke`/`context`/`schema`/`root-key`/
-/// `recovery-kit`/`recover` subcommands
+/// `init`/`adopt`/`enroll`/`approvals`/`revoke`/`renew`/`node-identity`/
+/// `context`/`schema`/`root-key`/`recovery-kit`/`recover` subcommands
 /// `onboard::maybe_run` intercepts.
 fn print_help() {
     println!(
@@ -181,8 +182,13 @@ USAGE:
                                           verification code, then asks the CA
                                           until an admin decides, across
                                           restarts; it stores the certificate
-                                          and makes it the PIB's default
-                                          identity. --force enrolls another key
+                                          and adds the identity: Data under the
+                                          namespace is signed with its key, the
+                                          node's other trusted prefixes keep
+                                          theirs, and the node identity stays
+                                          (only a node's first identity becomes
+                                          the PIB's default and node identity).
+                                          --force enrolls another key
                                           although the node already holds a
                                           certificate there; the CA certifies a
                                           new key for the same <device> only once
@@ -205,7 +211,8 @@ USAGE:
                                           when the code matches the one the
                                           new device shows
   ndn-fwd revoke <device-identity | key-name | cert-name> [--pib <dir>]
-                [-c <config>] [--passphrase-file <path> | --pin-file <path>]
+                [--namespace <prefix>] [-c <config>]
+                [--passphrase-file <path> | --pin-file <path>]
                                           on the root device: sign, here, a new
                                           version of the namespace's trust
                                           context that revokes the device's
@@ -228,6 +235,17 @@ USAGE:
                                           an expired certificate, a revoked key
                                           or a non-renewable role (guest) needs
                                           a new invite
+  ndn-fwd node-identity [<identity>] [--pib <dir>] [-c <config>]
+                                          show the node identity — what the
+                                          daemon signs its own packets as
+                                          (management, discovery, links, DV) —
+                                          and why, and the identities it signs
+                                          Data as (one per trusted prefix); with
+                                          <identity> (one of them) record it as
+                                          the PIB's default identity: the node
+                                          identity from the next start, unless
+                                          [security] identity names another.
+                                          Enrolling never changes it
   ndn-fwd context refresh [<namespace>] [-c <config>]
                                           check the held trust context(s) for a
                                           newer version now (the daemon also
@@ -261,9 +279,11 @@ USAGE:
                                           link policy narrows or an advertised
                                           relay is dropped, unless
                                           --accept-narrowing
-  ndn-fwd root-key status [--pib <dir>]   where this root device keeps its
-                                          namespace root key
-  ndn-fwd root-key move --to <store> [--pib <dir>]
+  ndn-fwd root-key status [--namespace <prefix>] [--pib <dir>]
+                                          where this root device keeps its
+                                          namespace root keys (each trusted
+                                          prefix it is the root of)
+  ndn-fwd root-key move --to <store> [--namespace <prefix>] [--pib <dir>]
                 [--passphrase-file <path>]
                                           move the root key into another store
                                           (os-keyring, sealed-file): the new
@@ -277,6 +297,7 @@ USAGE:
                 [--kit-yubikey-slot 9d] [--kit-yubikey-serial <n>]
                 [--kit-touch-policy always|cached|never] [--replace-slot]
                 [--passphrase-file <path> | --pin-file <path>] [--pib <dir>]
+                [--namespace <prefix>]
                                           on the root device: make a recovery
                                           kit — a separate recovery key added
                                           as an anchor of the trust context in a
@@ -306,6 +327,7 @@ USAGE:
                                           signs nothing
   ndn-fwd recovery-kit revoke <recovery-key-name>
                 [--passphrase-file <path> | --pin-file <path>] [--pib <dir>]
+                [--namespace <prefix>]
                                           on the root device: a new version
                                           without that recovery anchor, revoking
                                           its key
@@ -576,15 +598,18 @@ async fn main() -> Result<()> {
 
     let security_init = load_security(&fwd_config)?;
     load_adopted_contexts(&fwd_config, &security_init.mgr);
-    // The key the daemon signs its own packets with — management responses
-    // and discovery records — captured before `security_init.mgr` moves into
-    // the EngineBuilder. They sign through `active_identity` (one snapshot per
-    // packet), which `security/enroll` switches to a newly enrolled key at
-    // runtime. DV `static`/`lvs` trust keeps the startup key (installs/dv.rs).
-    let active_identity = security_init.mgr.any_signer().map(|signer| {
+    // The node identity — the key the daemon signs its own packets with:
+    // management responses, discovery records, links — and the engine's
+    // signing identities (each trusted prefix's Data with its own key). The
+    // node key changes only by an operator (`[security] identity`, `ndn-fwd
+    // node-identity`), or when a daemon on its ephemeral startup key enrolls
+    // its first identity. DV `static`/`lvs` trust keeps the startup key
+    // (installs/dv.rs).
+    let active_identity = security_init.node.clone().map(|node| {
         Arc::new(active_identity::ActiveIdentity::new(
-            signer,
-            security_init.is_ephemeral,
+            Arc::clone(&security_init.mgr),
+            node,
+            security_init.source,
         ))
     });
     // The keyring the engine's validator uses; a trust context adopted at
@@ -593,23 +618,16 @@ async fn main() -> Result<()> {
     let mgmt_validator = load_mgmt_validator(&fwd_config.security.mgmt)?;
     let mut localhop_validator = load_localhop_validator(&fwd_config.security.mgmt)?;
 
-    // Prepare the CA's in-process faces and signing identity (from the PIB,
+    // Prepare each CA's in-process face and signing identity (from the PIB,
     // or a throwaway key with `ephemeral = true`) before build so the faces
     // can be attached, and splice its trust anchor into the localhop
-    // validator so certs it issues authorise localhop commands.
-    let ca_artifacts = if fwd_config.ca.enabled {
-        // The configured PIB even when the node identity fell back to an
-        // ephemeral key: the CA identity is its own key in that PIB.
-        let ca_pib = pib_root(&fwd_config);
-        let (faces, spawn) = ca::prepare(&fwd_config.ca, &ca_pib).await?;
-        localhop_validator = Some(ca::install_localhop_anchor(
-            &spawn,
-            localhop_validator,
-        )?);
-        Some((faces, spawn))
-    } else {
-        None
-    };
+    // validator so certs it issues authorise localhop commands. The
+    // configured PIB even when the node identity fell back to an ephemeral
+    // key: each CA identity is its own key in that PIB.
+    let ca_artifacts = ca::prepare_all(&fwd_config.ca, &pib_root(&fwd_config)).await?;
+    for (_, spawn) in &ca_artifacts {
+        localhop_validator = Some(ca::install_localhop_anchor(spawn, localhop_validator)?);
+    }
     // Publish the stored trust contexts by name (RDR) so a device holding only
     // an anchor fingerprint can fetch one; its face is attached before build.
     let context_publication = if fwd_config.security.serve_contexts {
@@ -668,15 +686,13 @@ async fn main() -> Result<()> {
         builder = builder.with_rate_limit_hook(rate_limit_hook.clone());
     }
 
-    let ca_spawn = match ca_artifacts {
-        Some((faces, spawn)) => {
-            for face in faces {
-                builder = builder.face(face);
-            }
-            Some(spawn)
+    let mut ca_spawns = Vec::with_capacity(ca_artifacts.len());
+    for (faces, spawn) in ca_artifacts {
+        for face in faces {
+            builder = builder.face(face);
         }
-        None => None,
-    };
+        ca_spawns.push(spawn);
+    }
     let context_publisher = match context_publication {
         Some((face, publisher)) => {
             builder = builder.face(face);
@@ -987,7 +1003,9 @@ async fn main() -> Result<()> {
     let dv_installer = installs::dv::prepare(
         &fwd_config,
         &mut builder,
-        active_identity.as_ref().map(|identity| Arc::clone(identity.signer())),
+        active_identity
+            .as_ref()
+            .map(|identity| Arc::clone(identity.signer())),
     )
     .await?;
     if let Some(installer) = dv_installer {
@@ -1030,11 +1048,8 @@ async fn main() -> Result<()> {
     // Each CertFetcher dedups concurrent requests and backs off after a failure.
     ndn_app::install_engine_cert_fetcher(&engine, cancel.child_token());
     if let Some(validator) = &localhop_validator {
-        let fetcher = ndn_app::engine_cert_fetcher(
-            &engine,
-            validator.cert_cache_arc(),
-            cancel.child_token(),
-        );
+        let fetcher =
+            ndn_app::engine_cert_fetcher(&engine, validator.cert_cache_arc(), cancel.child_token());
         if validator.set_cert_fetcher(fetcher).is_ok() {
             tracing::info!(
                 target: "security",
@@ -1053,37 +1068,45 @@ async fn main() -> Result<()> {
 
     let published_contexts = context_publisher.map(|publisher| publisher.spawn(&engine));
 
-    // The CA's approval store (if it offers device-approval), shared with
+    // Each CA's approval store (if it offers device-approval), shared with
     // the mgmt `ca` module below, and its state, which follows every
-    // trust-context version the daemon keeps (`TrustAdmin::keep`).
-    let running_ca = match ca_spawn {
-        Some(spawn) => {
-            // `/<prefix>` covers `/<prefix>/CA/*` and cert-fetch for the
-            // certs issued under it; more-specific registrations still win LPM.
-            engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
-            tracing::info!(
-                target: "ca",
-                prefix = %spawn.prefix,
-                face = spawn.face_id.0,
-                "CA FIB entry installed"
-            );
-            Some(ca::spawn(spawn, &fwd_config.ca, &engine)?)
-        }
-        None => None,
-    };
-    let (ca_approvals, ca_state, ca_status) = match running_ca {
-        Some(running) => (running.approvals, Some(running.state), running.status),
-        None => (None, None, None),
-    };
+    // trust-context version of its namespace the daemon keeps
+    // (`TrustAdmin::keep`).
+    let mut ca_approvals = Vec::new();
+    let mut ca_states = Vec::new();
+    let mut ca_statuses = Vec::new();
+    for spawn in ca_spawns {
+        // `/<prefix>` covers `/<prefix>/CA/*` and cert-fetch for the
+        // certs issued under it; more-specific registrations still win LPM.
+        engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
+        tracing::info!(
+            target: "ca",
+            prefix = %spawn.prefix,
+            face = spawn.face_id.0,
+            "CA FIB entry installed"
+        );
+        let running = ca::spawn(spawn, &engine)?;
+        ca_approvals.extend(running.approvals);
+        ca_states.push(running.state);
+        ca_statuses.extend(running.status);
+    }
 
     // This node's certificates, by name, so a peer validating its Data can
     // fetch the chain from it (the CA serves the certificates it issued):
-    // the PIB's, and the signing key's own (an ephemeral key has no PIB).
-    let signing_key = active_identity.as_ref().map(|identity| identity.current().0);
+    // the PIB's, and those of every key it signs with — the node key (an
+    // ephemeral key has no PIB) and each signing identity's.
+    let signing_keys: Vec<ndn_packet::Name> = active_identity
+        .as_ref()
+        .map(|identity| {
+            std::iter::once(identity.current().0)
+                .chain(identity.signing_identities().into_iter().map(|s| s.key))
+                .collect()
+        })
+        .unwrap_or_default();
     let own_certs = own_certs::spawn(
         &engine,
         pib.as_deref(),
-        signing_key.as_ref(),
+        &signing_keys,
         &trust_keyring,
         cancel.child_token(),
     );
@@ -1114,19 +1137,21 @@ async fn main() -> Result<()> {
     // a version signed by a CLI on this device (`revoke`, `recovery-kit`,
     // `recover`) at runtime; `security/identity-status` reports
     // `active_identity`.
-    let trust_admin = Arc::new(context_adopt::TrustAdmin::new(context_adopt::TrustAdminParts {
-        engine: engine.clone(),
-        keyring: trust_keyring,
-        pib_root: pib_root(&fwd_config),
-        publisher: published_contexts,
-        signing: active_identity.clone(),
-        own_certs: Some(own_certs),
-        dv_keeps_startup_key: fwd_config.routing.dv.enabled
-            && matches!(fwd_config.routing.dv.trust.mode.as_str(), "static" | "lvs"),
-        configured_identity: fwd_config.security.identity.clone(),
-        ca: ca_state,
-        context_sync,
-    }));
+    let trust_admin = Arc::new(context_adopt::TrustAdmin::new(
+        context_adopt::TrustAdminParts {
+            engine: engine.clone(),
+            keyring: trust_keyring,
+            pib_root: pib_root(&fwd_config),
+            publisher: published_contexts,
+            signing: active_identity.clone(),
+            own_certs: Some(own_certs),
+            dv_keeps_startup_key: fwd_config.routing.dv.enabled
+                && matches!(fwd_config.routing.dv.trust.mode.as_str(), "static" | "lvs"),
+            configured_identity: fwd_config.security.identity.clone(),
+            cas: ca_states,
+            context_sync,
+        },
+    ));
     context_refresh::spawn_periodic(
         Arc::clone(&trust_admin),
         fwd_config.security.context_refresh_secs,
@@ -1396,10 +1421,10 @@ async fn main() -> Result<()> {
     wait_for_shutdown_signal().await?;
 
     tracing::info!(target: "engine", "shutting down");
-    // The CA answers the status Interests it holds while the faces still
+    // Each CA answers the status Interests it holds while the faces still
     // forward, so devices waiting on a request ask the restarted CA instead
     // of waiting out their Interests.
-    if let Some(status) = &ca_status {
+    for status in &ca_statuses {
         status.release_held(std::time::Duration::from_secs(1)).await;
     }
     // Tell linked devices this one is going (they dial again when it is

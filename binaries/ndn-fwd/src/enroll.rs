@@ -6,13 +6,17 @@
 //!
 //! The key `/<ns>/<role>/<device>/KEY/<id>` is generated in the daemon's
 //! PIB (the private key never leaves it); the certificate is stored beside
-//! it (and the issuer certificates of its chain under `<pib>/issuers`), and
-//! the identity becomes the PIB's default — loaded at every start unless
-//! `[security] identity` names another one (the config file is never
-//! edited). The running daemon then signs its management responses and
-//! discovery records with the new key from the next packet on. DV routing in
-//! the `static`/`lvs` trust modes keeps the key it started with (neighbours
-//! list it in their `trusted_keys`) until the next start. Requests for an
+//! it (and the issuer certificates of its chain under `<pib>/issuers`). The
+//! identity is **added** to those the daemon signs as: Data under the
+//! namespace is signed with the new key from the next packet on, it is
+//! loaded at every start, and the daemon's other identities stay as they
+//! were. The node identity (management responses, discovery records, links)
+//! does not change — except for the daemon's first identity, enrolled while
+//! it ran on its ephemeral startup key: that one becomes the PIB's default
+//! identity and the node identity at once (unless `[security] identity`
+//! names another; the config file is never edited). DV routing in the
+//! `static`/`lvs` trust modes keeps the key it started with (neighbours list
+//! it in their `trusted_keys`) until the next start. Requests for an
 //! admin's approval are recorded under `<pib>/requests/`.
 
 use std::sync::Arc;
@@ -50,7 +54,7 @@ pub(crate) mod tests {
     use std::time::Duration;
 
     use ndn_cert::OutgoingState;
-    use ndn_config::{ChallengeConfig, CaTomlConfig};
+    use ndn_config::{CaTomlConfig, ChallengeConfig};
     use ndn_engine::{EngineBuilder, EngineConfig, ShutdownHandle};
     use ndn_mgmt::RefreshState;
     use ndn_mgmt_wire::control_response::status;
@@ -87,10 +91,15 @@ pub(crate) mod tests {
     pub(crate) async fn node(root_dev: &Path, device: &Path, tokens: &[&str]) -> Node {
         let ns: Name = "/home/bob".parse().unwrap();
         let pib = FilePib::new(root_dev).unwrap();
-        let persisted =
-            ndn_cert::init_namespace_in_pib(&pib, &ns, "desk", false, &ndn_cert::NewRootStore::File)
-                .await
-                .unwrap();
+        let persisted = ndn_cert::init_namespace_in_pib(
+            &pib,
+            &ns,
+            "desk",
+            false,
+            &ndn_cert::NewRootStore::File,
+        )
+        .await
+        .unwrap();
         let cfg = CaTomlConfig {
             enabled: true,
             prefix: "/home/bob".into(),
@@ -108,21 +117,24 @@ pub(crate) mod tests {
             cert_validity_days: ndn_config::CertValidityDays::uniform(200),
             ..CaTomlConfig::default()
         };
-        let (faces, ca) = crate::ca::prepare(&cfg, root_dev).await.unwrap();
+        let (faces, ca) = crate::ca::prepare(&cfg, 0, root_dev).await.unwrap();
         let (context_face, publisher) = crate::context_publisher::prepare(root_dev);
+        let security = Arc::new(SecurityManager::new());
         let mut builder = EngineBuilder::new(EngineConfig::default())
             .security_profile(ndn_security::SecurityProfile::Disabled)
-            .security(Arc::new(SecurityManager::new()))
+            .security(Arc::clone(&security))
             .face(context_face);
         for face in faces {
             builder = builder.face(face);
         }
         let (engine, shutdown) = builder.build().await.unwrap();
         engine.fib().add_nexthop(&ca.prefix, ca.face_id, 0);
-        let running = crate::ca::spawn(ca, &cfg, &engine).unwrap();
+        let running = crate::ca::spawn(ca, &engine).unwrap();
         let (ca, approvals) = (
             running.state,
-            running.approvals.expect("a namespace CA offers device-approval"),
+            running
+                .approvals
+                .expect("a namespace CA offers device-approval"),
         );
         let root_contexts = publisher.spawn(&engine);
 
@@ -141,11 +153,15 @@ pub(crate) mod tests {
                 keyring,
                 pib_root: device.to_path_buf(),
                 publisher: None,
-                signing: Some(Arc::new(ActiveIdentity::new(startup, true))),
+                signing: Some(Arc::new(ActiveIdentity::new(
+                    security,
+                    startup,
+                    ndn_cert::NodeIdentitySource::Ephemeral,
+                ))),
                 own_certs: None,
                 dv_keeps_startup_key: false,
                 configured_identity: None,
-                ca: None,
+                cas: Vec::new(),
                 context_sync: None,
             }),
             fingerprint,
@@ -207,7 +223,11 @@ pub(crate) mod tests {
     fn state(node: &Node) -> (Vec<Name>, Option<Name>, Name) {
         let pib = FilePib::new(&node.admin.pib_root).unwrap();
         let (signing, _) = node.admin.signing.as_ref().unwrap().current();
-        (pib.list_keys().unwrap(), pib.get_default_identity().unwrap(), signing)
+        (
+            pib.list_keys().unwrap(),
+            pib.get_default_identity().unwrap(),
+            signing,
+        )
     }
 
     /// A successful enrollment generates the key in the node's PIB (it
@@ -219,10 +239,14 @@ pub(crate) mod tests {
         let node = node(root_dev.path(), device.path(), &["member-m1"]).await;
         assert_eq!(state(&node), (vec![], None, node.startup_key.clone()));
 
-        let EnrollOutcome::Enrolled(info) =
-            enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
-                .await
-                .expect("enrolls") else { panic!("an invite enrolls at once") };
+        let EnrollOutcome::Enrolled(info) = enroll(
+            &node.admin,
+            request(&node, "member", "member-m1", "laptop", false),
+        )
+        .await
+        .expect("enrolls") else {
+            panic!("an invite enrolls at once")
+        };
         let key: Name = info.key.parse().unwrap();
         let identity: Name = "/home/bob/member/laptop".parse().unwrap();
         assert!(key.has_prefix(&identity));
@@ -235,10 +259,17 @@ pub(crate) mod tests {
         );
         assert!(cert.components().last().unwrap().as_version().is_some());
         assert!(info.signing_now);
-        assert_eq!(info.validity_secs / 86_400, 200, "the CA's cert_validity_days decides");
+        assert_eq!(
+            info.validity_secs / 86_400,
+            200,
+            "the CA's cert_validity_days decides"
+        );
 
         let pib = FilePib::open(device.path()).unwrap();
-        assert_eq!(state(&node), (vec![key.clone()], Some(identity), key.clone()));
+        assert_eq!(
+            state(&node),
+            (vec![key.clone()], Some(identity), key.clone())
+        );
         assert!(pib.get_issued_cert(&key).unwrap().is_some());
         let secret = pib.export_pkcs8(&key).unwrap();
         let answer = serde_json::to_string(&EnrollOutcome::Enrolled(info)).unwrap();
@@ -254,40 +285,71 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn refused_enrollment_leaves_the_previous_identity_selected() {
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let node = node(root_dev.path(), device.path(), &["member-m1", "member-m2", "guest-g1"]).await;
-        enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
-            .await
-            .expect("first enrollment");
+        let node = node(
+            root_dev.path(),
+            device.path(),
+            &["member-m1", "member-m2", "guest-g1"],
+        )
+        .await;
+        enroll(
+            &node.admin,
+            request(&node, "member", "member-m1", "laptop", false),
+        )
+        .await
+        .expect("first enrollment");
         let before = state(&node);
 
-        let spent = enroll(&node.admin, request(&node, "member", "member-m1", "phone", true)).await;
+        let spent = enroll(
+            &node.admin,
+            request(&node, "member", "member-m1", "phone", true),
+        )
+        .await;
         assert_eq!(spent.unwrap_err().status_code, status::UNAUTHORIZED);
         assert_eq!(state(&node), before);
 
-        let forged = enroll(&node.admin, request(&node, "member", "guest-g1", "tab", true)).await;
+        let forged = enroll(
+            &node.admin,
+            request(&node, "member", "guest-g1", "tab", true),
+        )
+        .await;
         assert_eq!(forged.unwrap_err().status_code, status::BAD_PARAMS);
         assert_eq!(state(&node), before);
 
-        let again = enroll(&node.admin, request(&node, "member", "member-m2", "tab", false)).await;
+        let again = enroll(
+            &node.admin,
+            request(&node, "member", "member-m2", "tab", false),
+        )
+        .await;
         assert_eq!(again.unwrap_err().status_code, 409);
         assert_eq!(state(&node), before);
 
-        let wrong_device = enroll(&node.admin, request(&node, "member", "member-m2", "KEY", true)).await;
+        let wrong_device = enroll(
+            &node.admin,
+            request(&node, "member", "member-m2", "KEY", true),
+        )
+        .await;
         assert_eq!(wrong_device.unwrap_err().status_code, status::BAD_PARAMS);
         assert_eq!(state(&node), before);
 
         // The CA keeps the device name to the key it certified.
-        let same_name =
-            enroll(&node.admin, request(&node, "member", "member-m2", "laptop", true)).await;
+        let same_name = enroll(
+            &node.admin,
+            request(&node, "member", "member-m2", "laptop", true),
+        )
+        .await;
         assert_eq!(same_name.unwrap_err().status_code, 409);
         assert_eq!(state(&node), before);
 
         // With `force` the same (unspent) token enrolls a second key under
         // another name; the first stays.
-        let EnrollOutcome::Enrolled(info) =
-            enroll(&node.admin, request(&node, "member", "member-m2", "tab", true))
-                .await
-                .expect("forced enrollment") else { panic!("an invite enrolls at once") };
+        let EnrollOutcome::Enrolled(info) = enroll(
+            &node.admin,
+            request(&node, "member", "member-m2", "tab", true),
+        )
+        .await
+        .expect("forced enrollment") else {
+            panic!("an invite enrolls at once")
+        };
         assert_eq!(info.still_valid.len(), 1);
         assert_eq!(state(&node).0.len(), 2);
         node.shutdown.shutdown().await;
@@ -300,19 +362,29 @@ pub(crate) mod tests {
     async fn a_certificate_under_a_revoked_issuer_is_not_held() {
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let node = node(root_dev.path(), device.path(), &["member-m1"]).await;
-        let EnrollOutcome::Enrolled(info) =
-            enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
-                .await
-                .expect("enrolls") else { panic!("an invite enrolls at once") };
+        let EnrollOutcome::Enrolled(info) = enroll(
+            &node.admin,
+            request(&node, "member", "member-m1", "laptop", false),
+        )
+        .await
+        .expect("enrolls") else {
+            panic!("an invite enrolls at once")
+        };
         let ns: Name = "/home/bob".parse().unwrap();
         let held = certified_in(&node.admin.ns, node.admin.vault.as_ref(), &ns);
         assert_eq!(held.len(), 1);
-        assert_eq!(held[0].revoked, None, "nothing revokes a fresh certificate's chain");
+        assert_eq!(
+            held[0].revoked, None,
+            "nothing revokes a fresh certificate's chain"
+        );
 
         let version = node.admin.ns.keyring().version_of(&ns).unwrap();
-        for (bump, revoked) in [ndn_cert::namespace::ca_key_name(&ns), ndn_cert::namespace::root_key_name(&ns)]
-            .into_iter()
-            .enumerate()
+        for (bump, revoked) in [
+            ndn_cert::namespace::ca_key_name(&ns),
+            ndn_cert::namespace::root_key_name(&ns),
+        ]
+        .into_iter()
+        .enumerate()
         {
             node.admin.ns.keyring().adopt(Arc::new(
                 ndn_security::SignedTrustContext::hierarchical(ns.clone())
@@ -321,7 +393,11 @@ pub(crate) mod tests {
             ));
             let held = certified_in(&node.admin.ns, node.admin.vault.as_ref(), &ns);
             assert_eq!(held[0].key.to_string(), info.key);
-            assert_eq!(held[0].revoked.as_ref(), Some(&revoked), "revoking {revoked}");
+            assert_eq!(
+                held[0].revoked.as_ref(),
+                Some(&revoked),
+                "revoking {revoked}"
+            );
         }
         node.shutdown.shutdown().await;
     }
@@ -336,10 +412,14 @@ pub(crate) mod tests {
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let node = node(root_dev.path(), device.path(), &["member-m1", "member-m2"]).await;
         let ns: Name = "/home/bob".parse().unwrap();
-        let EnrollOutcome::Enrolled(first) =
-            enroll(&node.admin, request(&node, "member", "member-m1", "laptop", false))
-                .await
-                .expect("first enrollment") else { panic!("an invite enrolls at once") };
+        let EnrollOutcome::Enrolled(first) = enroll(
+            &node.admin,
+            request(&node, "member", "member-m1", "laptop", false),
+        )
+        .await
+        .expect("first enrollment") else {
+            panic!("an invite enrolls at once")
+        };
         let laptop: Name = first.key.parse().unwrap();
         let held = node.admin.ns.keyring().version_of(&ns).unwrap();
 
@@ -365,24 +445,34 @@ pub(crate) mod tests {
         // the shared engine's Content Store; publishing v2 purges it, so the
         // next check is answered by the publisher at once.
 
-        let EnrollOutcome::Enrolled(second) =
-            enroll(&node.admin, request(&node, "member", "member-m2", "tab", false))
-                .await
-                .expect("the only certificate held is revoked by the newest version") else {
-                panic!("an invite enrolls at once")
-            };
+        let EnrollOutcome::Enrolled(second) = enroll(
+            &node.admin,
+            request(&node, "member", "member-m2", "tab", false),
+        )
+        .await
+        .expect("the only certificate held is revoked by the newest version") else {
+            panic!("an invite enrolls at once")
+        };
         assert!(second.still_valid.is_empty(), "{:?}", second.still_valid);
         assert_eq!(second.unusable.len(), 1, "{:?}", second.unusable);
         assert!(second.unusable[0].starts_with(&first.key));
         let check = second.context_check.expect("the held context was checked");
         assert_eq!(check.state, RefreshState::Updated, "{}", check.detail);
-        assert_eq!(node.admin.ns.keyring().version_of(&ns), Some(bump.context.version()));
+        assert_eq!(
+            node.admin.ns.keyring().version_of(&ns),
+            Some(bump.context.version())
+        );
         node.shutdown.shutdown().await;
     }
 
     /// `security/enroll` of `/home/bob/<role>/<device>` with the namespace's
     /// anchor link (its root's expected fingerprint `fingerprint`).
-    fn approval_request(fingerprint: [u8; 32], role: &str, device: &str, force: bool) -> EnrollRequest {
+    fn approval_request(
+        fingerprint: [u8; 32],
+        role: &str,
+        device: &str,
+        force: bool,
+    ) -> EnrollRequest {
         EnrollRequest {
             link_uri: TrustEnvelope::Anchor {
                 namespace: Some("/home/bob".into()),
@@ -405,7 +495,10 @@ pub(crate) mod tests {
         tokio::time::timeout(within, async {
             loop {
                 let records = enroll_status(admin).unwrap();
-                let record = records.into_iter().find(|r| r.request_id == request).unwrap();
+                let record = records
+                    .into_iter()
+                    .find(|r| r.request_id == request)
+                    .unwrap();
                 if record.state != OutgoingState::Pending {
                     return record;
                 }
@@ -429,24 +522,32 @@ pub(crate) mod tests {
         let at_once = Duration::from_secs(3);
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let node = node(root_dev.path(), device.path(), &[]).await;
-        let EnrollOutcome::Pending(pending) =
-            enroll(&node.admin, approval_request(node.fingerprint, "admin", "tablet", false))
-                .await
-                .expect("the request is made")
-        else {
+        let EnrollOutcome::Pending(pending) = enroll(
+            &node.admin,
+            approval_request(node.fingerprint, "admin", "tablet", false),
+        )
+        .await
+        .expect("the request is made") else {
             panic!("an admin certificate waits for an admin's approval")
         };
         let at_ca = node.approvals.pending();
         assert_eq!(at_ca.len(), 1);
-        assert_eq!((&at_ca[0].request_id, &at_ca[0].code), (&pending.request, &pending.code));
-        let EnrollOutcome::Pending(again) =
-            enroll(&node.admin, approval_request(node.fingerprint, "admin", "tablet", false))
-                .await
-                .expect("asking again")
-        else {
+        assert_eq!(
+            (&at_ca[0].request_id, &at_ca[0].code),
+            (&pending.request, &pending.code)
+        );
+        let EnrollOutcome::Pending(again) = enroll(
+            &node.admin,
+            approval_request(node.fingerprint, "admin", "tablet", false),
+        )
+        .await
+        .expect("asking again") else {
             panic!("still pending")
         };
-        assert_eq!((again.request, again.key), (pending.request.clone(), pending.key.clone()));
+        assert_eq!(
+            (again.request, again.key),
+            (pending.request.clone(), pending.key.clone())
+        );
         assert_eq!(state(&node).0.len(), 1, "one key for one request");
 
         let crate::enroll::tests::Node {
@@ -467,7 +568,11 @@ pub(crate) mod tests {
         spawn_status_watch(Arc::clone(&admin), cancel.clone());
         tokio::time::sleep(settle).await;
         approvals
-            .decide_locally(&pending.code, ndn_cert::Decision::Approve, "uid 1000 (alice)")
+            .decide_locally(
+                &pending.code,
+                ndn_cert::Decision::Approve,
+                "uid 1000 (alice)",
+            )
             .unwrap();
         let OutgoingState::Issued { certificate } =
             resolved(&admin, &pending.request, at_once).await.state
@@ -500,13 +605,262 @@ pub(crate) mod tests {
                 "uid 1000 (alice)",
             )
             .unwrap();
-        let OutgoingState::Denied { reason } = resolved(&admin, &relay.request, at_once).await.state
+        let OutgoingState::Denied { reason } =
+            resolved(&admin, &relay.request, at_once).await.state
         else {
             panic!("denied")
         };
         assert!(reason.contains("not my relay"), "{reason}");
         let relay_key: Name = relay.key.parse().unwrap();
-        assert!(!pib.list_keys().unwrap().contains(&relay_key), "the denied key is deleted");
+        assert!(
+            !pib.list_keys().unwrap().contains(&relay_key),
+            "the denied key is deleted"
+        );
+        cancel.cancel();
+        shutdown.shutdown().await;
+    }
+
+    /// `security/enroll` with an invite of `ns` (anchor `fingerprint`) for
+    /// `<ns>/member/<device>`.
+    fn invite_in(ns: &Name, fingerprint: [u8; 32], token: &str, device: &str) -> EnrollRequest {
+        EnrollRequest {
+            link_uri: TrustEnvelope::Invite {
+                ca_prefix: ns.to_string(),
+                identity_namespace: format!("{ns}/member"),
+                token: token.into(),
+                ttl_secs: None,
+                anchor_fingerprint: Some(fingerprint),
+            }
+            .to_uri(),
+            identity: format!("{ns}/member/{device}").parse().unwrap(),
+            force: false,
+        }
+    }
+
+    /// A device member of /home/bob (A) that enrolls in /work/acme (C) adds
+    /// C beside A: A's Data keeps A's key, C's gets C's, the node identity
+    /// stays A's. Each certificate renews at its own namespace's CA, and an
+    /// admin's approval landing later in C changes nothing about A (node
+    /// signer, A's key, A's certificate, the PIB's default identity).
+    #[tokio::test]
+    async fn two_namespaces_enroll_renew_and_approve_independently() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (a, c): (Name, Name) = ("/home/bob".parse().unwrap(), "/work/acme".parse().unwrap());
+        let root_pib = FilePib::new(root_dev.path()).unwrap();
+        let mut fingerprints = Vec::new();
+        // The keyring of the engine's key store, as the daemon wires them.
+        let security = Arc::new(SecurityManager::new());
+        let keyring = Arc::clone(security.keyring());
+        for ns in [&a, &c] {
+            let persisted = ndn_cert::init_namespace_in_pib(
+                &root_pib,
+                ns,
+                "desk",
+                false,
+                &ndn_cert::NewRootStore::File,
+            )
+            .await
+            .unwrap();
+            let fp = ndn_cert::anchor_fingerprint(&persisted.init.anchor);
+            ndn_cert::adopt_with_tofu(&keyring, &persisted.init.context_data, ns, &fp).unwrap();
+            fingerprints.push(fp);
+        }
+        let cas: Vec<CaTomlConfig> = [(&a, "tok-a"), (&c, "tok-c")]
+            .into_iter()
+            .map(|(ns, token)| CaTomlConfig {
+                enabled: true,
+                prefix: ns.to_string(),
+                identity: format!("{ns}/CA"),
+                challenges: vec![ChallengeConfig {
+                    kind: "token".into(),
+                    tokens: vec![token.into()],
+                    pin: None,
+                    max_tries: None,
+                    ttl_secs: None,
+                    smtp: None,
+                }],
+                ..CaTomlConfig::default()
+            })
+            .collect();
+        let prepared = crate::ca::prepare_all(&cas, root_dev.path()).await.unwrap();
+        let mut builder = EngineBuilder::new(EngineConfig::default())
+            .security_profile(ndn_security::SecurityProfile::Disabled)
+            .security(Arc::clone(&security));
+        let mut spawns = Vec::new();
+        for (faces, spawn) in prepared {
+            for face in faces {
+                builder = builder.face(face);
+            }
+            spawns.push(spawn);
+        }
+        let (engine, shutdown) = builder.build().await.unwrap();
+        let mut approvals = Vec::new();
+        for spawn in spawns {
+            engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
+            approvals.push(crate::ca::spawn(spawn, &engine).unwrap().approvals.unwrap());
+        }
+        let startup: Arc<dyn Signer> = Arc::new(Ed25519Signer::from_seed(
+            &[1; 32],
+            "/ndn-fwd/test/KEY/e".parse().unwrap(),
+        ));
+        // As the daemon starts: the ephemeral key is in the engine's store.
+        security.register_signer(startup.key_name().clone(), Arc::clone(&startup));
+        let identity = Arc::new(ActiveIdentity::new(
+            Arc::clone(&security),
+            startup,
+            ndn_cert::NodeIdentitySource::Ephemeral,
+        ));
+        let admin = Arc::new(TrustAdmin::new(TrustAdminParts {
+            engine,
+            keyring,
+            pib_root: device.path().to_path_buf(),
+            publisher: None,
+            signing: Some(Arc::clone(&identity)),
+            own_certs: None,
+            dv_keeps_startup_key: false,
+            configured_identity: None,
+            cas: Vec::new(),
+            context_sync: None,
+        }));
+        let mut changes = identity.changes();
+
+        let EnrollOutcome::Enrolled(in_a) =
+            enroll(&admin, invite_in(&a, fingerprints[0], "tok-a", "laptop"))
+                .await
+                .unwrap()
+        else {
+            panic!("an invite enrolls at once")
+        };
+        assert!(
+            in_a.node_identity,
+            "the first identity becomes the node identity"
+        );
+        let a_key: Name = in_a.key.parse().unwrap();
+        assert_eq!(identity.current().0, a_key);
+        let signing: Vec<Name> = identity
+            .signing_identities()
+            .into_iter()
+            .map(|s| s.identity)
+            .collect();
+        assert_eq!(
+            signing,
+            vec!["/home/bob/member/laptop".parse::<Name>().unwrap()],
+            "the ephemeral startup key no longer signs"
+        );
+
+        let EnrollOutcome::Enrolled(in_c) =
+            enroll(&admin, invite_in(&c, fingerprints[1], "tok-c", "laptop"))
+                .await
+                .unwrap()
+        else {
+            panic!("an invite enrolls at once")
+        };
+        assert!(in_c.signing_now && !in_c.node_identity);
+        let c_key: Name = in_c.key.parse().unwrap();
+        assert!(
+            changes.has_changed().unwrap(),
+            "links learn of the new identity"
+        );
+        changes.mark_unchanged();
+        let key_for = |name: &str| {
+            security
+                .signer_for(&name.parse().unwrap())
+                .unwrap()
+                .key_name()
+                .clone()
+        };
+        assert_eq!(identity.current().0, a_key, "the node identity stays A's");
+        assert_eq!(key_for("/home/bob/shared/notes"), a_key);
+        assert_eq!(key_for("/work/acme/shared/notes"), c_key);
+        let relations: Vec<_> =
+            ndn_namespace::membership::memberships(&admin.ns, admin.vault.as_ref())
+                .into_iter()
+                .map(|m| (m.namespace, m.relation, m.node_identity))
+                .collect();
+        assert_eq!(
+            relations,
+            vec![
+                (
+                    "/home/bob".into(),
+                    ndn_mgmt::MembershipRelation::Member,
+                    true
+                ),
+                (
+                    "/work/acme".into(),
+                    ndn_mgmt::MembershipRelation::Member,
+                    false
+                ),
+            ]
+        );
+
+        // Each certificate renews at its own namespace's CA.
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let renewed = crate::renewal::renew_now(&admin).await.unwrap();
+        let mut states: Vec<(String, ndn_mgmt::RenewalState)> =
+            renewed.into_iter().map(|r| (r.key, r.state)).collect();
+        states.sort_by(|x, y| x.0.cmp(&y.0));
+        assert_eq!(
+            states,
+            vec![
+                (a_key.to_string(), ndn_mgmt::RenewalState::Renewed),
+                (c_key.to_string(), ndn_mgmt::RenewalState::Renewed),
+            ]
+        );
+
+        // An admin's approval in C lands later; A is untouched.
+        let pib = FilePib::open(device.path()).unwrap();
+        let a_cert = pib.get_issued_cert(&a_key).unwrap();
+        let EnrollOutcome::Pending(pending) = enroll(
+            &admin,
+            EnrollRequest {
+                link_uri: TrustEnvelope::Anchor {
+                    namespace: Some(c.to_string()),
+                    fingerprint: Some(fingerprints[1]),
+                    version: None,
+                    context_data: None,
+                    context_content: None,
+                }
+                .to_uri(),
+                identity: "/work/acme/admin/laptop".parse().unwrap(),
+                force: true,
+            },
+        )
+        .await
+        .unwrap() else {
+            panic!("an admin certificate waits for an admin's approval")
+        };
+        let cancel = CancellationToken::new();
+        spawn_status_watch(Arc::clone(&admin), cancel.clone());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        approvals[1]
+            .decide_locally(
+                &pending.code,
+                ndn_cert::Decision::Approve,
+                "uid 1000 (alice)",
+            )
+            .unwrap();
+        let OutgoingState::Issued { .. } =
+            resolved(&admin, &pending.request, Duration::from_secs(3))
+                .await
+                .state
+        else {
+            panic!("approved: issued")
+        };
+        assert_eq!(identity.current().0, a_key, "the node signer is unchanged");
+        assert_eq!(
+            key_for("/home/bob/shared/notes"),
+            a_key,
+            "A's key is unchanged"
+        );
+        assert_eq!(
+            pib.get_issued_cert(&a_key).unwrap(),
+            a_cert,
+            "A's certificate is unchanged"
+        );
+        assert_eq!(
+            pib.get_default_identity().unwrap(),
+            Some("/home/bob/member/laptop".parse().unwrap())
+        );
         cancel.cancel();
         shutdown.shutdown().await;
     }

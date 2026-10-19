@@ -3,8 +3,11 @@
 //! `security/context-refresh` (`ndn-fwd context refresh`),
 //! `security/context-update` (`ndn-fwd revoke`, `ndn-fwd recovery-kit`,
 //! `ndn-fwd recover`: a version signed on this device), `security/renew`
-//! (`ndn-fwd renew`) and the signing identity `security/identity-status`
-//! reports.
+//! (`ndn-fwd renew`), `security/memberships` (`ndn-ctl status`: the trusted
+//! prefixes and how the daemon takes part in each, with their changes at
+//! `/localhost/nfd/security/notifications`) and the identities
+//! `security/identity-status` reports (the node identity, why, and every
+//! signing identity).
 //!
 //! Every verb is the [`ndn_namespace`] operation of the same name over the
 //! daemon's [`Participant`] — its engine, the keyring its validator uses,
@@ -30,8 +33,8 @@ pub(crate) struct TrustAdmin {
     pub(crate) ns: Arc<Participant>,
     pub(crate) vault: Arc<PibVault>,
     pub(crate) pib_root: PathBuf,
-    /// The key management responses and discovery records are signed with;
-    /// `None` when the node runs unsigned.
+    /// The daemon's identities (node signer, signing identities); `None`
+    /// when the node runs unsigned.
     pub(crate) signing: Option<Arc<ActiveIdentity>>,
 }
 
@@ -52,8 +55,9 @@ pub(crate) struct TrustAdminParts {
     pub(crate) dv_keeps_startup_key: bool,
     /// `[security] identity` from the config.
     pub(crate) configured_identity: Option<String>,
-    /// This node's CA (`[ca]`); `None` when the node runs none.
-    pub(crate) ca: Option<Arc<CaState>>,
+    /// This node's CAs (`[ca]` / `[[ca]]`), one per namespace it runs one
+    /// of; empty when it runs none.
+    pub(crate) cas: Vec<Arc<CaState>>,
     /// The namespaces' sync groups (`[security] context_sync`).
     pub(crate) context_sync: Option<ContextSync>,
 }
@@ -71,8 +75,8 @@ pub(crate) fn namespace_words() -> HostWords {
         role_invite: "`ndn-fwd-tokens new --role {role}`".into(),
         anchor_link_origin: "`ndn-fwd init` prints it as anchor_uri".into(),
         adopt: "`ndn-fwd adopt`".into(),
-        adopt_anchor_link: "`ndn-fwd adopt <ndn-trust://anchor/…>`, the link `ndn-fwd init` printed"
-            .into(),
+        adopt_anchor_link:
+            "`ndn-fwd adopt <ndn-trust://anchor/…>`, the link `ndn-fwd init` printed".into(),
         refresh_context: "`ndn-fwd context refresh {namespace}`".into(),
         list_approvals: "`ndn-fwd approvals list`".into(),
         decide_approvals: "Run `ndn-fwd approvals`".into(),
@@ -103,7 +107,7 @@ impl TrustAdmin {
             own_certs,
             dv_keeps_startup_key,
             configured_identity,
-            ca,
+            cas,
             context_sync,
         } = parts;
         Self {
@@ -114,7 +118,7 @@ impl TrustAdmin {
                 publisher,
                 own_certs,
                 sync: context_sync,
-                ca,
+                cas,
                 words: namespace_words(),
             })),
             vault: Arc::new(PibVault {
@@ -147,7 +151,9 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         crate::enroll::enroll(self, request).await
     }
 
-    async fn enroll_status(&self) -> Result<Vec<ndn_cert::OutgoingRequest>, ndn_mgmt::TrustRefusal> {
+    async fn enroll_status(
+        &self,
+    ) -> Result<Vec<ndn_cert::OutgoingRequest>, ndn_mgmt::TrustRefusal> {
         crate::enroll::enroll_status(self)
     }
 
@@ -182,11 +188,30 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
                 key,
                 ephemeral,
                 valid_until,
+                source: s.source(),
+                signing: s
+                    .signing_identities()
+                    .into_iter()
+                    .map(|i| (i.identity, i.key))
+                    .collect(),
             }
         })
     }
 
-    fn root_store(&self) -> Option<ndn_mgmt::RootStoreInfo> {
+    async fn memberships(&self) -> Result<Vec<ndn_mgmt::MembershipInfo>, ndn_mgmt::TrustRefusal> {
+        Ok(ndn_namespace::membership::memberships(
+            &self.ns,
+            self.vault.as_ref(),
+        ))
+    }
+
+    fn membership_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<ndn_mgmt::MembershipEvent>> {
+        Some(self.ns.membership_events())
+    }
+
+    fn root_stores(&self) -> Vec<ndn_mgmt::RootStoreInfo> {
         crate::root_key::status_info(&self.pib_root)
     }
 }
@@ -219,7 +244,9 @@ mod tests {
         );
         let e = ndn_cert::EnrollLink::parse("not a link").unwrap_err();
         assert_eq!(
-            ndn_namespace::enroll::parse_link("not a link", &w).unwrap_err().reason,
+            ndn_namespace::enroll::parse_link("not a link", &w)
+                .unwrap_err()
+                .reason,
             format!(
                 "the link is neither an invite nor an anchor link ({e}): give an \
                  ndn-trust://invite link (`ndn-fwd-tokens new` prints one) or, for a role the \
@@ -258,7 +285,10 @@ mod tests {
              full), so it would never finish it: the key was deleted. Fix the PIB directory (the \
              PIB at /var/lib/ndn/pib) and ask again; an admin can deny request r1"
         );
-        assert_eq!(w.enrolled(), "enrolled; the PIB's default identity is now this one");
+        assert_eq!(
+            w.enrolled(),
+            "enrolled; the PIB's default identity is now this one"
+        );
         assert_eq!(
             w.request_names_no_ca(),
             "the request record names no valid namespace or CA; ask again (`ndn-fwd enroll`)"
@@ -336,7 +366,9 @@ mod tests {
             ..source
         };
         assert_eq!(
-            newest_of(&ns, &unreachable, false, &w).unwrap_err().to_string(),
+            newest_of(&ns, &unreachable, false, &w)
+                .unwrap_err()
+                .to_string(),
             "no answer. Recovering from the held v3 without knowing it is the newest could fork \
              the namespace: give this device a face and a route toward a relay or member that \
              holds it, then retry. If no other node holding /home/bob exists or can be reached, \

@@ -3,18 +3,21 @@
 //!
 //! - every valid certificate the PIB stores beside a key (`keys/*/certs/`,
 //!   what `ndn-fwd enroll` stores);
-//! - on the root device, the CA's and the device's certificates
-//!   (`ca/ca-cert.data`, `ca/device-cert.data`, written by `ndn-fwd init`);
+//! - on a root device, each CA's and device's certificates (`ca-cert.data`,
+//!   `device-cert.data` in each CA directory, [`ndn_cert::ca_dir`], written
+//!   by `ndn-fwd init`);
 //! - the issuer certificates of this node's certificates, kept at
 //!   enrollment and renewal (`issuers/`, [`ndn_cert::issuers`]);
 //!
-//! and every valid certificate the engine's key store caches for the key
-//! this node signs with (an ephemeral identity has no PIB).
+//! and every valid certificate the engine's key store caches for each key
+//! this node signs with — its node key (an ephemeral identity has no PIB)
+//! and each signing identity's.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use ndn_cert::namespace::{CA_CERT_FILE, CA_DIR, DEVICE_CERT_FILE};
 use ndn_engine::ForwarderEngine;
 use ndn_packet::Name;
 use ndn_security::{FilePib, Keyring};
@@ -23,22 +26,23 @@ use tokio_util::sync::CancellationToken;
 pub(crate) use ndn_namespace::publish::OwnCertificates;
 
 /// Serve the certificates stored in `pib` (none without a PIB) and the
-/// ones the engine's key store caches for `signing_key`, as
+/// ones the engine's key store caches for `signing_keys`, as
 /// [`OwnCertificates::spawn`] does.
 pub(crate) fn spawn(
     engine: &ForwarderEngine,
     pib: Option<&FilePib>,
-    signing_key: Option<&Name>,
+    signing_keys: &[Name],
     keyring: &Keyring,
     cancel: CancellationToken,
 ) -> Arc<OwnCertificates> {
     let stored = pib.map(stored_certificates).unwrap_or_default();
-    OwnCertificates::spawn(engine, stored, signing_key, keyring, cancel)
+    OwnCertificates::spawn(engine, stored, signing_keys, keyring, cancel)
 }
 
 /// The certificate Data the PIB at `pib` stores: every valid certificate of
-/// each key, a root device's CA and device certificates, and the issuer
-/// certificates kept beside the PIB.
+/// each key, a root device's CA and device certificates (of every
+/// namespace it is the root of), and the issuer certificates kept beside
+/// the PIB.
 fn stored_certificates(pib: &FilePib) -> Vec<Bytes> {
     let mut certs: Vec<Bytes> = pib
         .list_keys()
@@ -46,14 +50,31 @@ fn stored_certificates(pib: &FilePib) -> Vec<Bytes> {
         .iter()
         .flat_map(|key| pib.valid_cert_wires(key).unwrap_or_default())
         .collect();
-    let ca_dir = pib.root().join("ca");
-    for file in ["ca-cert.data", "device-cert.data"] {
-        if let Some(wire) = read_if_present(&ca_dir.join(file)) {
-            certs.push(wire);
+    for ca_dir in ca_dirs(pib.root()) {
+        for file in [CA_CERT_FILE, DEVICE_CERT_FILE] {
+            if let Some(wire) = read_if_present(&ca_dir.join(file)) {
+                certs.push(wire);
+            }
         }
     }
     certs.extend(ndn_cert::issuers::stored_issuer_certs(pib.root()));
     certs
+}
+
+/// The CA directories of the PIB at `pib_root`: `<pib>/ca` (the CA of a PIB
+/// from before several CAs) and each `<pib>/ca/<hex>/` of one namespace
+/// ([`ndn_cert::ca_dir`]).
+fn ca_dirs(pib_root: &Path) -> Vec<PathBuf> {
+    let legacy = pib_root.join(CA_DIR);
+    let mut dirs = vec![legacy.clone()];
+    if let Ok(entries) = std::fs::read_dir(&legacy) {
+        dirs.extend(
+            entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.join(CA_CERT_FILE).is_file()),
+        );
+    }
+    dirs
 }
 
 fn read_if_present(path: &Path) -> Option<Bytes> {
@@ -78,8 +99,8 @@ mod tests {
 
     use ndn_app::{EngineAppExt, ShutdownHandle};
     use ndn_engine::{EngineBuilder, EngineConfig};
-    use ndn_packet::encode::InterestBuilder;
     use ndn_packet::Data;
+    use ndn_packet::encode::InterestBuilder;
     use ndn_security::{CertCache, SecurityProfile, Validator};
 
     use super::*;
@@ -91,12 +112,8 @@ mod tests {
         keyring: &Arc<Keyring>,
         cancel: &CancellationToken,
     ) -> (ForwarderEngine, ShutdownHandle, Arc<OwnCertificates>) {
-        let validator = Validator::with_keyring(
-            Arc::clone(keyring),
-            Arc::new(CertCache::new()),
-            None,
-            5,
-        );
+        let validator =
+            Validator::with_keyring(Arc::clone(keyring), Arc::new(CertCache::new()), None, 5);
         let (engine, shutdown) = EngineBuilder::new(EngineConfig::default())
             .security_profile(SecurityProfile::Custom(Arc::new(validator)))
             .build()
@@ -104,7 +121,7 @@ mod tests {
             .unwrap();
         // Answers come from the server, not the content store.
         engine.cs().set_serve(false);
-        let own = spawn(&engine, Some(pib), None, keyring, cancel.child_token());
+        let own = spawn(&engine, Some(pib), &[], keyring, cancel.child_token());
         (engine, shutdown, own)
     }
 
@@ -128,7 +145,11 @@ mod tests {
             .map(|d| d.raw().clone())
     }
 
-    async fn fetch(engine: &ForwarderEngine, key: &Name, cancel: &CancellationToken) -> Option<Bytes> {
+    async fn fetch(
+        engine: &ForwarderEngine,
+        key: &Name,
+        cancel: &CancellationToken,
+    ) -> Option<Bytes> {
         fetch_as(engine, key, true, cancel).await
     }
 
@@ -158,20 +179,36 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let (engine, shutdown, own) = node(&pib, &keyring, &cancel).await;
-        assert_eq!(fetch(&engine, &ns.device_key, &cancel).await, Some(device_cert.clone()));
-        assert_eq!(fetch(&engine, &ns.ca_key, &cancel).await, Some(ca_cert.clone()));
+        assert_eq!(
+            fetch(&engine, &ns.device_key, &cancel).await,
+            Some(device_cert.clone())
+        );
+        assert_eq!(
+            fetch(&engine, &ns.ca_key, &cancel).await,
+            Some(ca_cert.clone())
+        );
         assert_eq!(
             fetch_as(&engine, &ns.device_cert.name, false, &cancel).await,
             Some(device_cert.clone()),
             "by its certificate name"
         );
-        assert_eq!(fetch_as(&engine, &ns.device_key, false, &cancel).await, None, "a key is not a certificate");
+        assert_eq!(
+            fetch_as(&engine, &ns.device_key, false, &cancel).await,
+            None,
+            "a key is not a certificate"
+        );
 
         // A renewal: a second certificate of the device key, issued later.
-        let device_pub = pib.get_signer(&ns.device_key).unwrap().public_key().unwrap();
+        let device_pub = pib
+            .get_signer(&ns.device_key)
+            .unwrap()
+            .public_key()
+            .unwrap();
         let ca_signer = pib.get_signer(&ns.ca_key).unwrap();
-        let renewed_name =
-            ndn_security::cert_name::new_cert_name(&ns.device_key, ndn_security::cert_name::NDNCERT_ISSUER);
+        let renewed_name = ndn_security::cert_name::new_cert_name(
+            &ns.device_key,
+            ndn_security::cert_name::NDNCERT_ISSUER,
+        );
         let now_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -186,7 +223,11 @@ mod tests {
         .await
         .unwrap();
         own.serve(renewed.clone());
-        assert_eq!(fetch(&engine, &ns.device_key, &cancel).await, Some(renewed.clone()), "newest wins");
+        assert_eq!(
+            fetch(&engine, &ns.device_key, &cancel).await,
+            Some(renewed.clone()),
+            "newest wins"
+        );
         assert_eq!(
             fetch_as(&engine, &ns.device_cert.name, false, &cancel).await,
             Some(device_cert),
@@ -203,13 +244,28 @@ mod tests {
         .unwrap()
         .expect("a new version");
         keyring.adopt_update(Arc::new(bump.context)).unwrap();
-        assert_eq!(fetch(&engine, &ns.device_key, &cancel).await, None, "withdrawn");
-        assert_eq!(fetch_as(&engine, &renewed_name, false, &cancel).await, None, "every certificate of the key");
-        assert_eq!(fetch(&engine, &ns.ca_key, &cancel).await, Some(ca_cert.clone()));
+        assert_eq!(
+            fetch(&engine, &ns.device_key, &cancel).await,
+            None,
+            "withdrawn"
+        );
+        assert_eq!(
+            fetch_as(&engine, &renewed_name, false, &cancel).await,
+            None,
+            "every certificate of the key"
+        );
+        assert_eq!(
+            fetch(&engine, &ns.ca_key, &cancel).await,
+            Some(ca_cert.clone())
+        );
         shutdown.shutdown().await;
 
         let (restarted, shutdown, _own) = node(&pib, &keyring, &cancel).await;
-        assert_eq!(fetch(&restarted, &ns.device_key, &cancel).await, None, "not served at start");
+        assert_eq!(
+            fetch(&restarted, &ns.device_key, &cancel).await,
+            None,
+            "not served at start"
+        );
         assert_eq!(fetch(&restarted, &ns.ca_key, &cancel).await, Some(ca_cert));
         cancel.cancel();
         shutdown.shutdown().await;
@@ -233,9 +289,17 @@ mod tests {
             .unwrap();
         engine.cs().set_serve(false);
         let cancel = CancellationToken::new();
-        let _own = spawn(&engine, None, Some(kc.key_name()), &keyring, cancel.child_token());
+        let _own = spawn(
+            &engine,
+            None,
+            std::slice::from_ref(kc.key_name()),
+            &keyring,
+            cancel.child_token(),
+        );
 
-        let served = fetch(&engine, kc.key_name(), &cancel).await.expect("served by key name");
+        let served = fetch(&engine, kc.key_name(), &cancel)
+            .await
+            .expect("served by key name");
         let cert_name = kc.cert_name().expect("a self-signed certificate");
         assert_eq!(*Data::decode(served).unwrap().name, cert_name);
         cancel.cancel();

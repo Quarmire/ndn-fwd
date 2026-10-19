@@ -106,7 +106,10 @@ fn ask(
     }
     let out = cx.ok(op, "enroll --role")?;
     if first(out.kv("state")).as_deref() != Some("pending") {
-        return Err(format!("enroll: expected state pending, got {:?}", out.kv("state")));
+        return Err(format!(
+            "enroll: expected state pending, got {:?}",
+            out.kv("state")
+        ));
     }
     let req = Req {
         id: out.kv("request").ok_or("no request id in the output")?,
@@ -120,11 +123,15 @@ fn ask(
         return Err(format!("{node}'s PIB holds no key under {identity}"));
     }
     if cx.certs(node) != before {
-        return Err(format!("{node} holds a new certificate before any decision"));
+        return Err(format!(
+            "{node} holds a new certificate before any decision"
+        ));
     }
     let shown = status_of(cx, node, &req.id, true)?;
     if field(&shown, "state") != "pending" || digits(field(&shown, "code")) != digits(&req.code) {
-        return Err(format!("enroll --status on {node} shows {shown:?}, expected pending {req:?}"));
+        return Err(format!(
+            "enroll --status on {node} shows {shown:?}, expected pending {req:?}"
+        ));
     }
     Ok(req)
 }
@@ -221,7 +228,8 @@ fn refused_with_reason(cx: &mut Cx<'_>, op: Op, what: &str) -> StepResult<()> {
 
 /// The CA host's durable approval records, byte for byte.
 fn ca_records(cx: &Cx<'_>) -> Vec<(std::path::PathBuf, Vec<u8>)> {
-    snapshot(&cx.w.node("root").pib().join("ca").join("approvals"))
+    let ns: Name = NS.parse().expect("a namespace name");
+    snapshot(&ndn_cert::ca_dir(&cx.w.node("root").pib(), &ns).join("approvals"))
 }
 
 /// A denial reached `node`: its request `req` is denied with `reason`, the
@@ -237,7 +245,10 @@ fn denial_reached(
     let held = cx.certs(node);
     let r = resolved(cx, node, &req.id)?;
     if field(&r, "state") != "denied" || !field(&r, "reason").contains(reason) {
-        return Err(format!("{node}: expected request {} denied with {reason:?}: {r:?}", req.id));
+        return Err(format!(
+            "{node}: expected request {} denied with {reason:?}: {r:?}",
+            req.id
+        ));
     }
     let prefix = format!("{identity}/KEY/");
     if let Some(k) = cx.w.keys(node).into_iter().find(|k| k.starts_with(&prefix)) {
@@ -346,30 +357,36 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     sc.world.add("tablet", 3, to_root.clone());
     sc.world.add("phone", 4, to_root);
 
-    let root = sc.step("init the root device of /ap", |cx| init_root(cx, "root", NS, "desk"))?;
+    let root = sc.step("init the root device of /ap", |cx| {
+        init_root(cx, "root", NS, "desk")
+    })?;
     let invite = sc.step("mint a member invite", |cx| {
         mint(cx, NS, &root.fp, 1, Some("2h")).map(|mut v| v.remove(0))
     })?;
-    sc.step("start the root device with its CA, and laptop, tablet and phone", |cx| {
-        cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
-        cx.w.node_mut("root").cfg.ca = Some(CaCfg {
-            prefix: NS.into(),
-            identity: n("/CA"),
-            tokens: vec![invite.token.clone()],
-            member_days: None,
-        });
-        for node in ["root", "laptop", "tablet", "phone"] {
-            cx.start(node)?;
-        }
-        Ok(())
-    })?;
+    sc.step(
+        "start the root device with its CA, and laptop, tablet and phone",
+        |cx| {
+            cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
+            cx.w.node_mut("root").cfg.ca = Some(CaCfg {
+                prefix: NS.into(),
+                identity: n("/CA"),
+                tokens: vec![invite.token.clone()],
+                member_days: None,
+            });
+            for node in ["root", "laptop", "tablet", "phone"] {
+                cx.start(node)?;
+            }
+            Ok(())
+        },
+    )?;
     sc.step("phone enrolls as a member with the invite", |cx| {
         enroll(cx, "phone", &invite, "phone", false, None).map(|_| ())
     })?;
 
-    let laptop = sc.step("laptop asks to be an admin device (anchor link): pending, with a code", |cx| {
-        ask(cx, "laptop", &root.link_fp, "admin", "laptop", false)
-    })?;
+    let laptop = sc.step(
+        "laptop asks to be an admin device (anchor link): pending, with a code",
+        |cx| ask(cx, "laptop", &root.link_fp, "admin", "laptop", false),
+    )?;
     sc.step(
         "the root device's operator approves by code; laptop's certificate is issued with no further action",
         |cx| {
@@ -393,94 +410,124 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
 
-    let tablet = sc.step("tablet asks to be an admin device: pending, with a code", |cx| {
-        ask(cx, "tablet", &root.link_fp, "admin", "tablet", false)
-    })?;
-    let relay = sc.step("phone (a member) asks for a node certificate: pending, with a code", |cx| {
-        ask(cx, "phone", &root.link_fp, "node", "relay", true)
-    })?;
-    sc.step("restart the CA's daemon and tablet's: the requests stay pending on both sides", |cx| {
-        let before = ca_records(cx);
-        for node in ["root", "tablet"] {
-            cx.stop(node);
-        }
-        for node in ["root", "tablet"] {
-            cx.start(node)?;
-        }
-        if ca_records(cx) != before {
-            return Err("the CA's approval records changed across the restart".into());
-        }
-        let at_ca = listed(cx, "root", &tablet.id, false)?;
-        if field(&at_ca, "state") != "pending" || digits(field(&at_ca, "code")) != digits(&tablet.code) {
-            return Err(format!("the CA lists {at_ca:?}, expected pending {tablet:?}"));
-        }
-        let shown = status_of(cx, "tablet", &tablet.id, false)?;
-        if field(&shown, "state") != "pending" || digits(field(&shown, "code")) != digits(&tablet.code) {
-            return Err(format!("tablet shows {shown:?}, expected pending {tablet:?}"));
-        }
-        Ok(())
-    })?;
-    sc.step("laptop (remote admin) lists the request with tablet's code and approves it", |cx| {
-        let r = listed(cx, "laptop", &tablet.id, true)?;
-        if field(&r, "state") != "pending" || digits(field(&r, "code")) != digits(&tablet.code) {
-            return Err(format!("laptop lists {r:?}; tablet shows {tablet:?}"));
-        }
-        let op = decide(cx, "laptop", "approve", field(&r, "code"), None);
-        cx.ok(op, "approvals approve on the remote admin device").map(|_| ())
-    })?;
-    sc.step("tablet's certificate is issued with no further action; the CA records laptop's key", |cx| {
-        let before = cx.certs("tablet");
-        let r = resolved(cx, "tablet", &tablet.id)?;
-        if field(&r, "state") != "issued" {
-            return Err(format!("tablet: expected its request issued: {r:?}"));
-        }
-        let cert = new_cert(cx, "tablet", &before)?;
-        if !cert.starts_with(&n("/admin/tablet/KEY/")) {
-            return Err(format!("unexpected certificate {cert}"));
-        }
-        let at_ca = listed(cx, "root", &tablet.id, false)?;
-        if field(&at_ca, "state") != "approved"
-            || !field(&at_ca, "decided_by").contains(&n("/admin/laptop/KEY/"))
-        {
-            return Err(format!("the CA's record does not name laptop's admin key: {at_ca:?}"));
-        }
-        Ok(())
-    })?;
+    let tablet = sc.step(
+        "tablet asks to be an admin device: pending, with a code",
+        |cx| ask(cx, "tablet", &root.link_fp, "admin", "tablet", false),
+    )?;
+    let relay = sc.step(
+        "phone (a member) asks for a node certificate: pending, with a code",
+        |cx| ask(cx, "phone", &root.link_fp, "node", "relay", true),
+    )?;
+    sc.step(
+        "restart the CA's daemon and tablet's: the requests stay pending on both sides",
+        |cx| {
+            let before = ca_records(cx);
+            for node in ["root", "tablet"] {
+                cx.stop(node);
+            }
+            for node in ["root", "tablet"] {
+                cx.start(node)?;
+            }
+            if ca_records(cx) != before {
+                return Err("the CA's approval records changed across the restart".into());
+            }
+            let at_ca = listed(cx, "root", &tablet.id, false)?;
+            if field(&at_ca, "state") != "pending"
+                || digits(field(&at_ca, "code")) != digits(&tablet.code)
+            {
+                return Err(format!(
+                    "the CA lists {at_ca:?}, expected pending {tablet:?}"
+                ));
+            }
+            let shown = status_of(cx, "tablet", &tablet.id, false)?;
+            if field(&shown, "state") != "pending"
+                || digits(field(&shown, "code")) != digits(&tablet.code)
+            {
+                return Err(format!(
+                    "tablet shows {shown:?}, expected pending {tablet:?}"
+                ));
+            }
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "laptop (remote admin) lists the request with tablet's code and approves it",
+        |cx| {
+            let r = listed(cx, "laptop", &tablet.id, true)?;
+            if field(&r, "state") != "pending" || digits(field(&r, "code")) != digits(&tablet.code)
+            {
+                return Err(format!("laptop lists {r:?}; tablet shows {tablet:?}"));
+            }
+            let op = decide(cx, "laptop", "approve", field(&r, "code"), None);
+            cx.ok(op, "approvals approve on the remote admin device")
+                .map(|_| ())
+        },
+    )?;
+    sc.step(
+        "tablet's certificate is issued with no further action; the CA records laptop's key",
+        |cx| {
+            let before = cx.certs("tablet");
+            let r = resolved(cx, "tablet", &tablet.id)?;
+            if field(&r, "state") != "issued" {
+                return Err(format!("tablet: expected its request issued: {r:?}"));
+            }
+            let cert = new_cert(cx, "tablet", &before)?;
+            if !cert.starts_with(&n("/admin/tablet/KEY/")) {
+                return Err(format!("unexpected certificate {cert}"));
+            }
+            let at_ca = listed(cx, "root", &tablet.id, false)?;
+            if field(&at_ca, "state") != "approved"
+                || !field(&at_ca, "decided_by").contains(&n("/admin/laptop/KEY/"))
+            {
+                return Err(format!(
+                    "the CA's record does not name laptop's admin key: {at_ca:?}"
+                ));
+            }
+            Ok(())
+        },
+    )?;
     let doc = content(4_000, 41);
     sc.step("tablet's Data validates at the root", |cx| {
         cx.publish("tablet", &n("/admin/tablet/doc"), &doc, None, None)?;
         cx.fetch_ok("root", &n("/admin/tablet/doc"), &doc)
     })?;
 
-    sc.step("phone, a member, cannot decide: its approve is refused and nothing changes", |cx| {
-        let before = ca_records(cx);
-        // A member cannot list: it types the code its requester shows.
-        let op = decide(cx, "phone", "approve", &relay.code, None);
-        refused_with_reason(cx, op, "approvals approve on a member device")?;
-        if ca_records(cx) != before {
-            return Err("the CA's approval records changed".into());
-        }
-        let at_ca = listed(cx, "root", &relay.id, false)?;
-        if field(&at_ca, "state") != "pending" {
-            return Err(format!("the CA lists {at_ca:?}, expected it still pending"));
-        }
-        let shown = status_of(cx, "phone", &relay.id, false)?;
-        if field(&shown, "state") != "pending" {
-            return Err(format!("phone shows {shown:?}, expected it still pending"));
-        }
-        Ok(())
-    })?;
-    sc.step("laptop denies it with a reason; phone learns why and its new key is deleted", |cx| {
-        let r = listed(cx, "laptop", &relay.id, true)?;
-        let op = decide(cx, "laptop", "deny", field(&r, "code"), Some(DENIAL));
-        cx.ok(op, "approvals deny on the remote admin device")?;
-        denial_reached(cx, "phone", &relay, &n("/node/relay"), DENIAL)
-    })?;
+    sc.step(
+        "phone, a member, cannot decide: its approve is refused and nothing changes",
+        |cx| {
+            let before = ca_records(cx);
+            // A member cannot list: it types the code its requester shows.
+            let op = decide(cx, "phone", "approve", &relay.code, None);
+            refused_with_reason(cx, op, "approvals approve on a member device")?;
+            if ca_records(cx) != before {
+                return Err("the CA's approval records changed".into());
+            }
+            let at_ca = listed(cx, "root", &relay.id, false)?;
+            if field(&at_ca, "state") != "pending" {
+                return Err(format!("the CA lists {at_ca:?}, expected it still pending"));
+            }
+            let shown = status_of(cx, "phone", &relay.id, false)?;
+            if field(&shown, "state") != "pending" {
+                return Err(format!("phone shows {shown:?}, expected it still pending"));
+            }
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "laptop denies it with a reason; phone learns why and its new key is deleted",
+        |cx| {
+            let r = listed(cx, "laptop", &relay.id, true)?;
+            let op = decide(cx, "laptop", "deny", field(&r, "code"), Some(DENIAL));
+            cx.ok(op, "approvals deny on the remote admin device")?;
+            denial_reached(cx, "phone", &relay, &n("/node/relay"), DENIAL)
+        },
+    )?;
 
     // A namespace made before `#deny`/`#pending`: its context lacks them.
-    let hub = sc.step("phone asks for a node certificate again (hub): pending", |cx| {
-        ask(cx, "phone", &root.link_fp, "node", "hub", true)
-    })?;
+    let hub = sc.step(
+        "phone asks for a node certificate again (hub): pending",
+        |cx| ask(cx, "phone", &root.link_fp, "node", "hub", true),
+    )?;
     let v = sc.world.held_version("root", NS).unwrap_or(0);
     sc.step(
         "fixture: the root device signs a version with the schema of a namespace made before \
@@ -498,30 +545,36 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             Ok(())
         },
     )?;
-    sc.step("on that schema the remote admin's list and deny are refused; nothing changes", |cx| {
-        let before = ca_records(cx);
-        let op = list_op(cx, "laptop");
-        refused_with_reason(cx, op, "approvals list on the remote admin device")?;
-        let op = decide(cx, "laptop", "deny", &hub.code, Some(DENIAL_AGAIN));
-        refused_with_reason(cx, op, "approvals deny on the remote admin device")?;
-        if ca_records(cx) != before {
-            return Err("the CA's approval records changed".into());
-        }
-        let at_ca = listed(cx, "root", &hub.id, false)?;
-        if field(&at_ca, "state") != "pending" {
-            return Err(format!("the CA lists {at_ca:?}, expected it still pending"));
-        }
-        Ok(())
-    })?;
-    sc.step("`ndn-fwd schema update` on the root device signs a version with the current schema", |cx| {
-        let op = cx
-            .tool("ndn-fwd")
-            .args(["schema", "update", "-c"])
-            .arg(cx.w.node("root").cfg_arg())
-            .env("NDN_ROOT_PASSPHRASE", ROOT_PASS);
-        cx.ok(op, "schema update")?;
-        cx.expect_version("root", NS, v + 2)
-    })?;
+    sc.step(
+        "on that schema the remote admin's list and deny are refused; nothing changes",
+        |cx| {
+            let before = ca_records(cx);
+            let op = list_op(cx, "laptop");
+            refused_with_reason(cx, op, "approvals list on the remote admin device")?;
+            let op = decide(cx, "laptop", "deny", &hub.code, Some(DENIAL_AGAIN));
+            refused_with_reason(cx, op, "approvals deny on the remote admin device")?;
+            if ca_records(cx) != before {
+                return Err("the CA's approval records changed".into());
+            }
+            let at_ca = listed(cx, "root", &hub.id, false)?;
+            if field(&at_ca, "state") != "pending" {
+                return Err(format!("the CA lists {at_ca:?}, expected it still pending"));
+            }
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "`ndn-fwd schema update` on the root device signs a version with the current schema",
+        |cx| {
+            let op = cx
+                .tool("ndn-fwd")
+                .args(["schema", "update", "-c"])
+                .arg(cx.w.node("root").cfg_arg())
+                .env("NDN_ROOT_PASSPHRASE", ROOT_PASS);
+            cx.ok(op, "schema update")?;
+            cx.expect_version("root", NS, v + 2)
+        },
+    )?;
     sc.step("laptop, tablet and phone adopt it", |cx| {
         let start = Instant::now();
         for node in ["laptop", "tablet", "phone"] {
@@ -529,19 +582,25 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         }
         Ok(())
     })?;
-    sc.step("the remote admin lists the request with phone's code and denies it; phone learns why", |cx| {
-        let r = listed(cx, "laptop", &hub.id, true)?;
-        if field(&r, "state") != "pending" || digits(field(&r, "code")) != digits(&hub.code) {
-            return Err(format!("laptop lists {r:?}; phone shows {hub:?}"));
-        }
-        let op = decide(cx, "laptop", "deny", field(&r, "code"), Some(DENIAL_AGAIN));
-        cx.ok(op, "approvals deny on the remote admin device")?;
-        denial_reached(cx, "phone", &hub, &n("/node/hub"), DENIAL_AGAIN)
-    })?;
+    sc.step(
+        "the remote admin lists the request with phone's code and denies it; phone learns why",
+        |cx| {
+            let r = listed(cx, "laptop", &hub.id, true)?;
+            if field(&r, "state") != "pending" || digits(field(&r, "code")) != digits(&hub.code) {
+                return Err(format!("laptop lists {r:?}; phone shows {hub:?}"));
+            }
+            let op = decide(cx, "laptop", "deny", field(&r, "code"), Some(DENIAL_AGAIN));
+            cx.ok(op, "approvals deny on the remote admin device")?;
+            denial_reached(cx, "phone", &hub, &n("/node/hub"), DENIAL_AGAIN)
+        },
+    )?;
     let doc2 = content(4_000, 42);
-    sc.step("devices keep validating: tablet's new Data validates at the root and at laptop", |cx| {
-        cx.publish("tablet", &n("/admin/tablet/doc2"), &doc2, None, None)?;
-        fetch_all(cx, &["root", "laptop"], &n("/admin/tablet/doc2"), &doc2)
-    })?;
+    sc.step(
+        "devices keep validating: tablet's new Data validates at the root and at laptop",
+        |cx| {
+            cx.publish("tablet", &n("/admin/tablet/doc2"), &doc2, None, None)?;
+            fetch_all(cx, &["root", "laptop"], &n("/admin/tablet/doc2"), &doc2)
+        },
+    )?;
     Ok(())
 }

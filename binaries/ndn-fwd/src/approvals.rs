@@ -20,34 +20,32 @@ use ndn_namespace::approver::{self, AdminCredential};
 
 use crate::context_adopt::TrustAdmin;
 
-/// The daemon's `ca` mgmt backend: its own CA's records (`local`, when it
-/// runs a CA that takes approval requests) and, as an admin device, the
-/// pending requests of the namespaces whose CA runs elsewhere.
+/// The daemon's `ca` mgmt backend: its own CAs' records (`local`, one store
+/// per CA it runs that takes approval requests) and, as an admin device,
+/// the pending requests of the namespaces whose CA runs elsewhere.
 pub(crate) struct DaemonApprovals {
-    local: Option<ApprovalStore>,
+    local: Vec<ApprovalStore>,
     admin: Arc<TrustAdmin>,
 }
 
 impl DaemonApprovals {
-    pub(crate) fn new(local: Option<ApprovalStore>, admin: Arc<TrustAdmin>) -> Self {
+    pub(crate) fn new(local: Vec<ApprovalStore>, admin: Arc<TrustAdmin>) -> Self {
         Self { local, admin }
     }
 
-    /// The PIB's admin keys of namespaces whose CA is not this node's own.
+    /// The PIB's admin keys of namespaces whose CA is not one of this
+    /// node's own.
     fn credentials(&self) -> Result<Vec<AdminCredential>, TrustRefusal> {
-        approver::admin_credentials(
-            &self.admin.ns,
-            self.admin.vault.as_ref(),
-            self.local.as_ref().map(|s| s.ca_prefix()),
-        )
+        let local_cas: Vec<ndn_packet::Name> =
+            self.local.iter().map(|s| s.ca_prefix().clone()).collect();
+        approver::admin_credentials(&self.admin.ns, self.admin.vault.as_ref(), &local_cas)
     }
 }
 
 #[async_trait::async_trait]
 impl ApprovalMgmtBackend for DaemonApprovals {
     async fn list(&self) -> Result<ApprovalListing, TrustRefusal> {
-        let listing =
-            approver::list(&self.admin.ns, self.local.as_ref(), || self.credentials()).await?;
+        let listing = approver::list(&self.admin.ns, &self.local, || self.credentials()).await?;
         Ok(ApprovalListing {
             rows: listing.records.iter().map(approval_row).collect(),
             notes: listing.notes,
@@ -62,7 +60,7 @@ impl ApprovalMgmtBackend for DaemonApprovals {
     ) -> Result<PendingApproval, TrustRefusal> {
         approver::decide(
             &self.admin.ns,
-            self.local.as_ref(),
+            &self.local,
             || self.credentials(),
             &target,
             decision,
@@ -144,11 +142,17 @@ async fn list(args: &[String]) -> Result<()> {
             println!("device    = {} {:?}", row.role, row.device);
         }
         println!("key       = {}", row.key_name);
-        println!("created   = {}", ndn_cert::approval::iso_secs(row.created_secs));
+        println!(
+            "created   = {}",
+            ndn_cert::approval::iso_secs(row.created_secs)
+        );
         let until = ndn_cert::approval::iso_secs(row.expires_secs);
         if row.state == "pending" {
             println!("expires   = {until}");
-            println!("approve   = ndn-fwd approvals approve {}", copyable(&row.code));
+            println!(
+                "approve   = ndn-fwd approvals approve {}",
+                copyable(&row.code)
+            );
         } else {
             println!("kept_until = {until}");
         }
@@ -187,17 +191,27 @@ fn decision_target(words: &[&str]) -> Option<String> {
 }
 
 async fn decide(args: &[String], approve: bool, target: &str) -> Result<()> {
-    let what = if approve { "approvals approve" } else { "approvals deny" };
+    let what = if approve {
+        "approvals approve"
+    } else {
+        "approvals deny"
+    };
     let (client, socket) = crate::onboard::daemon(args, what).await?;
     let resp = if approve {
         client.ca_approve(target, DAEMON_APPROVALS_TIMEOUT).await
     } else {
         let reason = crate::onboard::flag(args, &["--reason"]).unwrap_or("");
-        client.ca_deny(target, reason, DAEMON_APPROVALS_TIMEOUT).await
+        client
+            .ca_deny(target, reason, DAEMON_APPROVALS_TIMEOUT)
+            .await
     }
     .map_err(|e| daemon_error(what, &socket, e))?;
     if !resp.is_ok() {
-        bail!("{what} refused by the daemon ({}): {}", resp.status_code, resp.status_text);
+        bail!(
+            "{what} refused by the daemon ({}): {}",
+            resp.status_code,
+            resp.status_text
+        );
     }
     println!("# ndn-fwd {what} (by the running daemon at {socket})");
     println!("{}", resp.status_text);
@@ -215,10 +229,25 @@ mod tests {
         assert!(want.is_some());
         // `code = 482 913` pasted unquoted: two shell words.
         let words: Vec<&str> = code.split_whitespace().collect();
-        assert_eq!(decision_target(&words).as_deref().and_then(ndn_cert::approval::normalize_code), want);
+        assert_eq!(
+            decision_target(&words)
+                .as_deref()
+                .and_then(ndn_cert::approval::normalize_code),
+            want
+        );
         // The `approve` line's form, and the code quoted.
-        assert_eq!(decision_target(&[&copyable(code)]).as_deref().and_then(ndn_cert::approval::normalize_code), want);
-        assert_eq!(decision_target(&[code]).as_deref().and_then(ndn_cert::approval::normalize_code), want);
+        assert_eq!(
+            decision_target(&[&copyable(code)])
+                .as_deref()
+                .and_then(ndn_cert::approval::normalize_code),
+            want
+        );
+        assert_eq!(
+            decision_target(&[code])
+                .as_deref()
+                .and_then(ndn_cert::approval::normalize_code),
+            want
+        );
         // A request id passes through; anything else is refused, not guessed.
         assert_eq!(decision_target(&["1a2b3c4d"]).as_deref(), Some("1a2b3c4d"));
         assert_eq!(decision_target(&["1a2b", "913"]), None);
