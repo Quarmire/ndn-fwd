@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use ndn_cert::{ApprovalStore, Decision};
-use ndn_mgmt::{ApprovalMgmtBackend, TrustRefusal, approval_row};
-use ndn_mgmt_wire::{ApprovalListing, PendingApproval};
+use ndn_mgmt::{ApprovalDecision, ApprovalMgmtBackend, TrustRefusal, approval_row};
+use ndn_mgmt_wire::{ApprovalListing, ApprovalNote, PendingApproval};
+use ndn_namespace::Detail;
 use ndn_namespace::approver::{self, AdminCredential};
 
-use crate::context_adopt::TrustAdmin;
+use crate::context_adopt::{TrustAdmin, refusal_text, render_detail};
 
 /// The daemon's `ca` mgmt backend: its own CAs' records (`local`, one store
 /// per CA it runs that takes approval requests) and, as an admin device,
@@ -48,7 +49,15 @@ impl ApprovalMgmtBackend for DaemonApprovals {
         let listing = approver::list(&self.admin.ns, &self.local, || self.credentials()).await?;
         Ok(ApprovalListing {
             rows: listing.records.iter().map(approval_row).collect(),
-            notes: listing.notes,
+            notes: listing
+                .notes
+                .into_iter()
+                .map(|n| ApprovalNote {
+                    code: n.code,
+                    params: n.params,
+                    text: n.text,
+                })
+                .collect(),
         })
     }
 
@@ -100,7 +109,10 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
 fn daemon_error(what: &str, socket: &str, e: ndn_ipc::ForwarderError) -> anyhow::Error {
     match e {
         ndn_ipc::ForwarderError::Command { code, text } => {
-            anyhow::anyhow!("{what} refused by the daemon ({code}): {text}")
+            anyhow::anyhow!(
+                "{what} refused by the daemon ({code}): {}",
+                refusal_text(code, &text)
+            )
         }
         ndn_ipc::ForwarderError::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             anyhow::anyhow!(
@@ -121,7 +133,12 @@ async fn list(args: &[String]) -> Result<()> {
         .map_err(|e| daemon_error("approvals list", &socket, e))?;
     println!("# ndn-fwd approvals (by the running daemon at {socket})");
     for note in &listing.notes {
-        println!("# {note}");
+        let note = Detail {
+            code: note.code.clone(),
+            params: note.params.clone(),
+            text: note.text.clone(),
+        };
+        println!("# {}", render_detail(&note));
     }
     let rows = &listing.rows;
     let pending = rows.iter().filter(|r| r.state == "pending").count();
@@ -197,7 +214,7 @@ async fn decide(args: &[String], approve: bool, target: &str) -> Result<()> {
         "approvals deny"
     };
     let (client, socket) = crate::onboard::daemon(args, what).await?;
-    let resp = if approve {
+    let decided = if approve {
         client.ca_approve(target, DAEMON_APPROVALS_TIMEOUT).await
     } else {
         let reason = crate::onboard::flag(args, &["--reason"]).unwrap_or("");
@@ -206,16 +223,30 @@ async fn decide(args: &[String], approve: bool, target: &str) -> Result<()> {
             .await
     }
     .map_err(|e| daemon_error(what, &socket, e))?;
-    if !resp.is_ok() {
-        bail!(
-            "{what} refused by the daemon ({}): {}",
-            resp.status_code,
-            resp.status_text
-        );
-    }
     println!("# ndn-fwd {what} (by the running daemon at {socket})");
-    println!("{}", resp.status_text);
+    println!("{}", decided_text(&decided));
     Ok(())
+}
+
+/// What a decision recorded, in one sentence.
+fn decided_text(row: &ApprovalDecision) -> String {
+    let subject = if row.role.is_empty() {
+        row.key_name.clone()
+    } else {
+        format!("{} device {:?} ({})", row.role, row.device, row.key_name)
+    };
+    let outcome = if row.state == "approved" {
+        "the device's next request gets its certificate".to_owned()
+    } else {
+        format!(
+            "reason: {}; the device is told so at its next request",
+            row.reason
+        )
+    };
+    format!(
+        "{} request {} for {subject} at {} (code {}), recorded as decided by {}; {outcome}",
+        row.state, row.request_id, row.namespace, row.code, row.approver
+    )
 }
 
 #[cfg(test)]

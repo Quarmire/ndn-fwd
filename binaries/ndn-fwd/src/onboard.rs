@@ -69,12 +69,12 @@ use anyhow::{Context, Result, bail};
 use ndn_cert::roles::{Role, sanitize_device_name};
 use ndn_cert::{
     AnchorLink, EnrollTarget, NamespacePolicies, PolicyInput, adopt_envelope_into_store,
-    anchor_fingerprint, init_namespace_in_pib_with,
 };
 use ndn_config::ForwarderConfig;
 use ndn_packet::Name;
-use ndn_security::FilePib;
 use ndn_trust_envelope::TrustEnvelope;
+
+use crate::context_adopt::{refusal_text, render_detail};
 
 /// Inspect `argv`; if it names an onboarding subcommand, run it and return
 /// `Some(result)`. Returns `None` for the normal daemon path.
@@ -597,25 +597,32 @@ async fn run_init(args: &[String]) -> Result<()> {
         }
         None => PolicyInput::default(),
     };
-    let policies = stated.new_namespace_policies(&namespace)?;
-    // Where the root goes, and its passphrase / PIN — asked now, never
-    // taken from the command line.
-    let root = crate::root_key::new_root_store(args)?;
-    let pib =
-        FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-
-    let out =
-        init_namespace_in_pib_with(&pib, &namespace, &device, force, &root, &policies).await?;
+    // Where the root goes, and its passphrase / PIN — asked by the library
+    // once the stated policies passed, never taken from the command line.
+    let root = crate::root_key::root_store_choice(args)?;
+    let made = ndn_namespace::root::init::init(
+        ndn_namespace::root::init::InitRequest {
+            pib_dir: pib_dir.clone(),
+            namespace: namespace.clone(),
+            device,
+            force,
+            stated,
+            root,
+        },
+        &crate::root_host::Secrets { args },
+    )
+    .await
+    .map_err(crate::root_host::render)?;
+    let out = &made.persisted;
     let NamespacePolicies {
         approval,
         link,
         relays,
-    } = policies;
-    drop(root);
+    } = &made.policies;
     let root_dev = &out.init;
     // The daemon may run from another directory: print an absolute path.
-    let pib_abs = std::fs::canonicalize(&pib_dir).unwrap_or_else(|_| pib_dir.clone());
-    let anchor_fp = hex_lower(&anchor_fingerprint(&root_dev.anchor));
+    let pib_abs = &made.pib_abs;
+    let anchor_fp = hex_lower(&made.anchor_fingerprint);
 
     println!("# ndn-fwd namespace initialized on this root device");
     println!("namespace      = {namespace}");
@@ -643,7 +650,7 @@ async fn run_init(args: &[String]) -> Result<()> {
     if relays.is_empty() {
         println!("relays         = none advertised");
     }
-    for relay in &relays {
+    for relay in relays {
         println!("relay          = {relay}");
     }
     println!("anchor_uri     = {}", root_dev.envelope.to_uri());
@@ -652,14 +659,7 @@ async fn run_init(args: &[String]) -> Result<()> {
         root_dev.envelope.to_https_url("ndn.local")
     );
     // The same link without the context: a short QR; the context is fetched by name.
-    let fingerprint_only = TrustEnvelope::Anchor {
-        namespace: Some(namespace.to_string()),
-        fingerprint: Some(anchor_fingerprint(&root_dev.anchor)),
-        version: Some(root_dev.context.version()),
-        context_data: None,
-        context_content: None,
-    };
-    println!("anchor_uri_fp  = {}", fingerprint_only.to_uri());
+    println!("anchor_uri_fp  = {}", made.fingerprint_link.to_uri());
     println!();
     if root_dev.envelope.to_uri().len() <= ndn_trust_envelope::qr::MAX_TEXT_LEN {
         println!("# Scan anchor_uri as a QR, or share anchor_url. anchor_uri_fp is the short");
@@ -678,8 +678,7 @@ async fn run_init(args: &[String]) -> Result<()> {
         .collect();
     if !invited.is_empty() {
         println!(
-            "#  - by invite: ndn-fwd-tokens new --ca {namespace} --namespace {namespace} \
-             --anchor-fp {anchor_fp} --role {}",
+            "#  - by invite: ndn-fwd-tokens new -c <config> --namespace {namespace} --role {}",
             invited.join("|")
         );
         println!("#    then `ndn-fwd enroll <invite link>` on the device;");
@@ -805,7 +804,7 @@ async fn adopt_via_daemon(client: &ndn_ipc::MgmtClient, uri: &str, socket: &str)
         bail!(
             "adopt refused by the daemon ({}): {}",
             resp.status_code,
-            resp.status_text
+            refusal_text(resp.status_code, &resp.status_text)
         );
     }
     let info: ndn_mgmt::AdoptedContextInfo = serde_json::from_str(&resp.status_text)
@@ -903,9 +902,15 @@ async fn run_enroll(args: &[String]) -> Result<()> {
          mirror, as `ndn-fwd-tokens new` prints it), or the namespace's <anchor link> with \
          --role admin|node (`ndn-fwd init` prints it as anchor_uri)",
     )?;
+    // --device, else the name the inviter suggested, else this host's.
+    let hint = || {
+        ndn_cert::InviteLink::from_uri(uri)
+            .ok()
+            .and_then(|l| l.device_hint)
+    };
     let device = match flag(args, &["--device"]) {
         Some(device) => device.to_string(),
-        None => default_device()?,
+        None => hint().map_or_else(default_device, Ok)?,
     };
     // Read the link here first so a malformed one is reported without a
     // daemon.
@@ -938,7 +943,7 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         bail!(
             "enroll refused by the daemon ({}): {}",
             resp.status_code,
-            resp.status_text
+            refusal_text(resp.status_code, &resp.status_text)
         );
     }
     let outcome: ndn_mgmt::EnrollOutcome = serde_json::from_str(&resp.status_text)
@@ -1006,7 +1011,7 @@ async fn run_enroll(args: &[String]) -> Result<()> {
     println!("# The daemon renews this certificate for the same key before it expires");
     println!("# ([security] renew_before) if the CA renews the role; `ndn-fwd renew` renews now.");
     for note in &info.at_next_start {
-        println!("# At the next start: {note}");
+        println!("# At the next start: {}", render_detail(note));
     }
     for old in &info.still_valid {
         println!("# Also held, still valid: {old}");
@@ -1022,7 +1027,8 @@ async fn run_enroll(args: &[String]) -> Result<()> {
         match check.state {
             S::Updated => println!(
                 "# Trust context {} was checked before enrolling: {}",
-                check.namespace, check.detail
+                check.namespace,
+                render_detail(&check.detail)
             ),
             S::Current | S::Source => {}
             S::UpstreamOlder | S::Behind | S::Unreachable | S::Failed => {
@@ -1032,7 +1038,9 @@ async fn run_enroll(args: &[String]) -> Result<()> {
                          this node holds: whether a newer version revokes one could not be \
                          checked ({}). Run `ndn-fwd context refresh {}` once the namespace is \
                          reachable.",
-                        check.version, check.detail, check.namespace
+                        check.version,
+                        render_detail(&check.detail),
+                        check.namespace
                     );
                 }
             }
@@ -1085,7 +1093,7 @@ async fn run_enroll_status(args: &[String]) -> Result<()> {
         bail!(
             "enroll --status refused by the daemon ({}): {}",
             resp.status_code,
-            resp.status_text
+            refusal_text(resp.status_code, &resp.status_text)
         );
     }
     let requests: Vec<ndn_cert::OutgoingRequest> = serde_json::from_str(&resp.status_text)
@@ -1120,7 +1128,9 @@ async fn run_enroll_status(args: &[String]) -> Result<()> {
             }
             ndn_cert::OutgoingState::Denied { reason }
             | ndn_cert::OutgoingState::Expired { reason }
-            | ndn_cert::OutgoingState::Failed { reason } => println!("reason    = {reason}"),
+            | ndn_cert::OutgoingState::Failed { reason } => {
+                println!("reason    = {}", render_detail(reason))
+            }
         }
     }
     Ok(())
@@ -1160,7 +1170,7 @@ async fn run_renew(args: &[String]) -> Result<()> {
         bail!(
             "renew refused by the daemon ({}): {}",
             resp.status_code,
-            resp.status_text
+            refusal_text(resp.status_code, &resp.status_text)
         );
     }
     let results: Vec<ndn_mgmt::RenewalInfo> = serde_json::from_str(&resp.status_text)
@@ -1187,11 +1197,11 @@ async fn run_renew(args: &[String]) -> Result<()> {
             }
             ndn_mgmt::RenewalState::Refused => {
                 not_renewed = true;
-                println!("refused          = {}", r.detail);
+                println!("refused          = {}", detail_text(r.detail.as_ref()));
             }
             ndn_mgmt::RenewalState::Failed => {
                 not_renewed = true;
-                println!("failed           = {}", r.detail);
+                println!("failed           = {}", detail_text(r.detail.as_ref()));
             }
         }
         println!();
@@ -1238,7 +1248,7 @@ async fn run_context(args: &[String]) -> Result<()> {
         bail!(
             "context refresh refused by the daemon ({}): {}",
             resp.status_code,
-            resp.status_text
+            refusal_text(resp.status_code, &resp.status_text)
         );
     }
     let results: Vec<ndn_mgmt::ContextRefreshInfo> = serde_json::from_str(&resp.status_text)
@@ -1271,12 +1281,17 @@ async fn run_context(args: &[String]) -> Result<()> {
         for revoked in &r.revoked {
             println!("  revoked {revoked}");
         }
-        println!("  {}", r.detail);
+        println!("  {}", render_detail(&r.detail));
     }
     if failed {
         bail!("a refresh failed or was refused (see above); the held versions stay in force");
     }
     Ok(())
+}
+
+/// A renewal's detail in this CLI's words (none: empty).
+fn detail_text(detail: Option<&ndn_namespace::Detail>) -> String {
+    detail.map(render_detail).unwrap_or_default()
 }
 
 /// A lifetime in days, for display (whole days when within a minute of one:

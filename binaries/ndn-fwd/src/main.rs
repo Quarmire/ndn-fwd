@@ -58,6 +58,9 @@ mod installs;
 // QUIC links: `[[peer]]` and `[[face]] kind = "quic"`.
 #[cfg(feature = "quic")]
 mod links;
+// The links change-notification stream.
+#[cfg(feature = "quic")]
+mod link_events;
 // `links/list`: the links' paths and direct-path states.
 #[cfg(feature = "quic")]
 mod links_mgmt;
@@ -74,6 +77,7 @@ mod recover;
 mod recovery_kit;
 mod renewal;
 mod revoke;
+mod root_host;
 mod root_key;
 mod schema_cmd;
 mod security_init;
@@ -1068,6 +1072,11 @@ async fn main() -> Result<()> {
 
     let published_contexts = context_publisher.map(|publisher| publisher.spawn(&engine));
 
+    // The trust and links change notifications (`/localhost/nfd/security/
+    // notifications`, `/localhost/nfd/links/notifications`): made before
+    // the subsystems that publish to them, served by the mgmt handler.
+    let events = mgmt_ndn::MgmtEvents::default();
+
     // Each CA's approval store (if it offers device-approval), shared with
     // the mgmt `ca` module below, and its state, which follows every
     // trust-context version of its namespace the daemon keeps
@@ -1075,7 +1084,22 @@ async fn main() -> Result<()> {
     let mut ca_approvals = Vec::new();
     let mut ca_states = Vec::new();
     let mut ca_statuses = Vec::new();
+    // Each CA's invites, for the mgmt `ca/invite-*` verbs.
+    let mut ca_invites = Vec::new();
     for spawn in ca_spawns {
+        // Told of every request opened or decided from its first one.
+        if let Some(approvals) = &spawn.approvals {
+            approvals.set_observer(mgmt_ndn::events::approval_observer(events.trust_sink()));
+        }
+        // And of every invite made, withdrawn or redeemed.
+        spawn
+            .invites
+            .tokens()
+            .set_observer(mgmt_ndn::events::invite_observer(
+                spawn.prefix.to_string(),
+                events.trust_sink(),
+            ));
+        ca_invites.push(spawn.invites.clone());
         // `/<prefix>` covers `/<prefix>/CA/*` and cert-fetch for the
         // certs issued under it; more-specific registrations still win LPM.
         engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
@@ -1122,6 +1146,10 @@ async fn main() -> Result<()> {
         &fwd_config,
         cancel.child_token(),
     )?;
+    #[cfg(feature = "quic")]
+    if let Some(links) = &links {
+        link_events::spawn(Arc::clone(links), events.links_sink(), cancel.child_token());
+    }
 
     // On a namespace's root device whose root key is still plaintext in the
     // PIB (a namespace made before root stores), say so and how to seal it.
@@ -1177,6 +1205,10 @@ async fn main() -> Result<()> {
     let approval_handler: Arc<dyn mgmt_ndn::ApprovalMgmtBackend> = Arc::new(
         approvals::DaemonApprovals::new(ca_approvals, Arc::clone(&trust_admin)),
     );
+    // `ca invite-create / invite-list / invite-withdraw`: the invites of
+    // every CA this node runs.
+    let invite_handler: Arc<dyn mgmt_ndn::InviteMgmtBackend> =
+        Arc::new(ndn_cert::HostInvites::new(ca_invites));
     let trust_context_handler: Arc<dyn mgmt_ndn::TrustAdminMgmtBackend> = trust_admin;
 
     // Face listeners, WT/WebRTC listeners, auto-multicast face creation,
@@ -1274,6 +1306,7 @@ async fn main() -> Result<()> {
             extra_modules,
             face_provisioners: face_provision::face_provisioners(),
             control_surfaces: radio_control_surfaces,
+            events,
             security_is_ephemeral,
             // None when [security.mgmt].trust_anchor_pib is unset. With
             // require_signed_commands=true and no validator, only local
@@ -1315,6 +1348,7 @@ async fn main() -> Result<()> {
             webtransport_status_handler: None,
             ble_handler,
             approval_handler: Some(approval_handler),
+            invite_handler: Some(invite_handler),
             trust_context_handler: Some(trust_context_handler),
             // Runtime-mutable mgmt-access policy. `policy-set` hot-flips
             // booleans; validator-anchor changes are `pending_restart`

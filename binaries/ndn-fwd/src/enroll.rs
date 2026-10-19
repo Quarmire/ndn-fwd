@@ -38,7 +38,7 @@ pub(crate) async fn enroll(
 /// `security/enroll-status`: this node's requests for an admin's approval,
 /// oldest first.
 pub(crate) fn enroll_status(admin: &TrustAdmin) -> Result<Vec<OutgoingRequest>, TrustRefusal> {
-    ndn_namespace::enroll::enroll_status(admin.vault.as_ref(), admin.ns.words())
+    ndn_namespace::enroll::enroll_status(&admin.ns, admin.vault.as_ref())
 }
 
 /// Finish this node's requests for an admin's approval, until `cancel`
@@ -82,9 +82,33 @@ pub(crate) mod tests {
         /// answers the node's refreshes.
         pub(crate) root_contexts: ndn_namespace::publish::PublishedContexts,
         pub(crate) shutdown: ShutdownHandle,
+        /// Every trust event the node and the root device's CA told of.
+        pub(crate) events: Arc<Recorded>,
+        /// The invites the root device's CA made for the test, by the label
+        /// the test names them with (`member-m1`, `guest-g1`, …: the role,
+        /// then a tag); [`request`] hands the CA the real token.
+        pub(crate) invites: std::collections::HashMap<String, String>,
     }
 
-    /// One engine carrying the root device's CA (PIB `root_dev`, tokens `tokens`) and
+    /// A trust-event sink that keeps what it is told.
+    #[derive(Default)]
+    pub(crate) struct Recorded(std::sync::Mutex<Vec<ndn_mgmt::TrustEvent>>);
+
+    impl ndn_mgmt::EventSink<ndn_mgmt::TrustEvent> for Recorded {
+        fn publish(&self, event: ndn_mgmt::TrustEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    impl Recorded {
+        /// What it was told since the last call.
+        pub(crate) fn take(&self) -> Vec<ndn_mgmt::TrustEvent> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    /// One engine carrying the root device's CA (PIB `root_dev`, one invite per
+    /// label in `tokens`, made through the CA's invites) and
     /// trust-context publisher, and the enrolling node's trust-admin backend (PIB
     /// `device`, holding the root device's trust context already, signing with an
     /// ephemeral key).
@@ -106,7 +130,6 @@ pub(crate) mod tests {
             identity: "/home/bob/CA".into(),
             challenges: vec![ChallengeConfig {
                 kind: "token".into(),
-                tokens: tokens.iter().map(|t| t.to_string()).collect(),
                 pin: None,
                 max_tries: None,
                 ttl_secs: None,
@@ -118,6 +141,20 @@ pub(crate) mod tests {
             ..CaTomlConfig::default()
         };
         let (faces, ca) = crate::ca::prepare(&cfg, 0, root_dev).await.unwrap();
+        // Each label names an invite of its role, made as `ca/invite-create`
+        // makes it.
+        let invites = tokens
+            .iter()
+            .map(|label| {
+                let role = label.split('-').next().unwrap_or("member");
+                let request = ndn_cert::InviteRequest {
+                    role: role.into(),
+                    ..Default::default()
+                };
+                let made = ca.invites.create(&request, "uid 1000 (alice)").unwrap();
+                (label.to_string(), made.token)
+            })
+            .collect();
         let (context_face, publisher) = crate::context_publisher::prepare(root_dev);
         let security = Arc::new(SecurityManager::new());
         let mut builder = EngineBuilder::new(EngineConfig::default())
@@ -137,6 +174,8 @@ pub(crate) mod tests {
                 .expect("a namespace CA offers device-approval"),
         );
         let root_contexts = publisher.spawn(&engine);
+        let events = Arc::new(Recorded::default());
+        approvals.set_observer(ndn_mgmt::events::approval_observer(events.clone()));
 
         let keyring = Arc::new(Keyring::new());
         let fingerprint = ndn_cert::anchor_fingerprint(&persisted.init.anchor);
@@ -146,24 +185,39 @@ pub(crate) mod tests {
             &[1; 32],
             "/ndn-fwd/test/KEY/e".parse().unwrap(),
         ));
+        let admin = TrustAdmin::new(TrustAdminParts {
+            engine,
+            keyring,
+            pib_root: device.to_path_buf(),
+            publisher: None,
+            signing: Some(Arc::new(ActiveIdentity::new(
+                security,
+                startup.clone(),
+                ndn_cert::NodeIdentitySource::Ephemeral,
+            ))),
+            own_certs: None,
+            dv_keeps_startup_key: false,
+            configured_identity: None,
+            cas: Vec::new(),
+            context_sync: None,
+        });
+        // The node's own events, recorded beside its CA's (as the daemon
+        // forwards them to its trust stream).
+        let mut told = admin.ns.events();
+        let recorded = Arc::clone(&events);
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match told.recv().await {
+                    Ok(event) => ndn_mgmt::EventSink::publish(recorded.as_ref(), event),
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => return,
+                }
+            }
+        });
         Node {
             startup_key: startup.key_name().clone(),
-            admin: TrustAdmin::new(TrustAdminParts {
-                engine,
-                keyring,
-                pib_root: device.to_path_buf(),
-                publisher: None,
-                signing: Some(Arc::new(ActiveIdentity::new(
-                    security,
-                    startup,
-                    ndn_cert::NodeIdentitySource::Ephemeral,
-                ))),
-                own_certs: None,
-                dv_keeps_startup_key: false,
-                configured_identity: None,
-                cas: Vec::new(),
-                context_sync: None,
-            }),
+            admin,
             fingerprint,
             context_data: ndn_packet::Data::decode(persisted.init.context_data.raw().clone())
                 .unwrap(),
@@ -171,6 +225,8 @@ pub(crate) mod tests {
             approvals,
             root_contexts,
             shutdown,
+            events,
+            invites,
         }
     }
 
@@ -181,6 +237,8 @@ pub(crate) mod tests {
         device: &str,
         force: bool,
     ) -> EnrollRequest {
+        // A label of an invite the CA made, else a token as given.
+        let token = node.invites.get(token).map_or(token, String::as_str);
         EnrollRequest {
             link_uri: TrustEnvelope::Invite {
                 ca_prefix: "/home/bob".into(),
@@ -188,6 +246,7 @@ pub(crate) mod tests {
                 token: token.into(),
                 ttl_secs: None,
                 anchor_fingerprint: Some(node.fingerprint),
+                device: None,
             }
             .to_uri(),
             identity: format!("/home/bob/{role}/{device}").parse().unwrap(),
@@ -214,7 +273,11 @@ pub(crate) mod tests {
                 .with_version(held.version() + 1),
         ));
         let refused = ndn_namespace::keep::keep_adopted(&node.admin.ns, &older, &node.fingerprint);
-        assert_eq!(refused.unwrap_err().status_code, 409);
+        assert!(
+            refused
+                .unwrap_err()
+                .is(ndn_namespace::code::CONTEXT_SUPERSEDED)
+        );
         assert!(!ndn_cert::context_file_path(device.path(), &ns).exists());
         node.shutdown.shutdown().await;
     }
@@ -320,7 +383,11 @@ pub(crate) mod tests {
             request(&node, "member", "member-m2", "tab", false),
         )
         .await;
-        assert_eq!(again.unwrap_err().status_code, 409);
+        assert!(
+            again
+                .unwrap_err()
+                .is(ndn_namespace::code::ALREADY_CERTIFIED)
+        );
         assert_eq!(state(&node), before);
 
         let wrong_device = enroll(
@@ -328,7 +395,11 @@ pub(crate) mod tests {
             request(&node, "member", "member-m2", "KEY", true),
         )
         .await;
-        assert_eq!(wrong_device.unwrap_err().status_code, status::BAD_PARAMS);
+        assert!(
+            wrong_device
+                .unwrap_err()
+                .is(ndn_namespace::code::IDENTITY_INVALID)
+        );
         assert_eq!(state(&node), before);
 
         // The CA keeps the device name to the key it certified.
@@ -337,7 +408,11 @@ pub(crate) mod tests {
             request(&node, "member", "member-m2", "laptop", true),
         )
         .await;
-        assert_eq!(same_name.unwrap_err().status_code, 409);
+        assert!(
+            same_name
+                .unwrap_err()
+                .is(ndn_namespace::code::DEVICE_NAME_TAKEN)
+        );
         assert_eq!(state(&node), before);
 
         // With `force` the same (unspent) token enrolls a second key under
@@ -457,7 +532,7 @@ pub(crate) mod tests {
         assert_eq!(second.unusable.len(), 1, "{:?}", second.unusable);
         assert!(second.unusable[0].starts_with(&first.key));
         let check = second.context_check.expect("the held context was checked");
-        assert_eq!(check.state, RefreshState::Updated, "{}", check.detail);
+        assert_eq!(check.state, RefreshState::Updated, "{:?}", check.detail);
         assert_eq!(
             node.admin.ns.keyring().version_of(&ns),
             Some(bump.context.version())
@@ -610,7 +685,14 @@ pub(crate) mod tests {
         else {
             panic!("denied")
         };
-        assert!(reason.contains("not my relay"), "{reason}");
+        assert_eq!(reason.code, ndn_namespace::detail_code::REQUEST_ENDED);
+        // The admin's reason reaches the device.
+        assert!(
+            reason
+                .param("error")
+                .is_some_and(|e| e.contains("not my relay")),
+            "{reason:?}"
+        );
         let relay_key: Name = relay.key.parse().unwrap();
         assert!(
             !pib.list_keys().unwrap().contains(&relay_key),
@@ -630,6 +712,7 @@ pub(crate) mod tests {
                 token: token.into(),
                 ttl_secs: None,
                 anchor_fingerprint: Some(fingerprint),
+                device: None,
             }
             .to_uri(),
             identity: format!("{ns}/member/{device}").parse().unwrap(),
@@ -665,20 +748,12 @@ pub(crate) mod tests {
             ndn_cert::adopt_with_tofu(&keyring, &persisted.init.context_data, ns, &fp).unwrap();
             fingerprints.push(fp);
         }
-        let cas: Vec<CaTomlConfig> = [(&a, "tok-a"), (&c, "tok-c")]
+        let cas: Vec<CaTomlConfig> = [&a, &c]
             .into_iter()
-            .map(|(ns, token)| CaTomlConfig {
+            .map(|ns| CaTomlConfig {
                 enabled: true,
                 prefix: ns.to_string(),
                 identity: format!("{ns}/CA"),
-                challenges: vec![ChallengeConfig {
-                    kind: "token".into(),
-                    tokens: vec![token.into()],
-                    pin: None,
-                    max_tries: None,
-                    ttl_secs: None,
-                    smtp: None,
-                }],
                 ..CaTomlConfig::default()
             })
             .collect();
@@ -695,7 +770,14 @@ pub(crate) mod tests {
         }
         let (engine, shutdown) = builder.build().await.unwrap();
         let mut approvals = Vec::new();
+        // A member invite of each CA, made as `ca/invite-create` makes it.
+        let mut tokens = Vec::new();
         for spawn in spawns {
+            let request = ndn_cert::InviteRequest {
+                role: "member".into(),
+                ..Default::default()
+            };
+            tokens.push(spawn.invites.create(&request, "").unwrap().token);
             engine.fib().add_nexthop(&spawn.prefix, spawn.face_id, 0);
             approvals.push(crate::ca::spawn(spawn, &engine).unwrap().approvals.unwrap());
         }
@@ -725,7 +807,7 @@ pub(crate) mod tests {
         let mut changes = identity.changes();
 
         let EnrollOutcome::Enrolled(in_a) =
-            enroll(&admin, invite_in(&a, fingerprints[0], "tok-a", "laptop"))
+            enroll(&admin, invite_in(&a, fingerprints[0], &tokens[0], "laptop"))
                 .await
                 .unwrap()
         else {
@@ -749,7 +831,7 @@ pub(crate) mod tests {
         );
 
         let EnrollOutcome::Enrolled(in_c) =
-            enroll(&admin, invite_in(&c, fingerprints[1], "tok-c", "laptop"))
+            enroll(&admin, invite_in(&c, fingerprints[1], &tokens[1], "laptop"))
                 .await
                 .unwrap()
         else {
@@ -863,5 +945,174 @@ pub(crate) mod tests {
         );
         cancel.cancel();
         shutdown.shutdown().await;
+    }
+
+    /// Each trust change is told once, as it happens — by the CA (a request
+    /// opened, decided) and by the node (enrolled, renewed, a request ended)
+    /// — with identifiers and states only: never the verification code, the
+    /// invite token, the requester's device, a denial's reason or who
+    /// decided.
+    #[tokio::test]
+    async fn trust_events_tell_each_change_by_identifier_and_state_only() {
+        use ndn_cert::report::{Decision, EnrollmentEnd, MembershipChange};
+        use ndn_mgmt::TrustEvent;
+        let at_once = Duration::from_secs(3);
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-m1"]).await;
+        // What was told since the last call, once the node's events reached
+        // the record.
+        let take = || async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            node.events.take()
+        };
+        // A membership change's kind, key and request.
+        let membership = |event: &TrustEvent| match event {
+            TrustEvent::MembershipChanged(m) if m.namespace == "/home/bob" => {
+                Some((m.change, m.key.clone(), m.request.clone()))
+            }
+            _ => None,
+        };
+        let mut told = Vec::new();
+
+        let EnrollOutcome::Enrolled(member) = enroll(
+            &node.admin,
+            request(&node, "member", "member-m1", "laptop", false),
+        )
+        .await
+        .expect("enrolls") else {
+            panic!("an invite enrolls at once")
+        };
+        let events = take().await;
+        assert_eq!(
+            events.iter().map(membership).collect::<Vec<_>>(),
+            [Some((
+                MembershipChange::Enrolled,
+                Some(member.key.clone()),
+                None
+            ))],
+            "{events:?}"
+        );
+        told.extend(events);
+
+        crate::renewal::renew_now(&node.admin)
+            .await
+            .expect("renews");
+        let events = take().await;
+        assert_eq!(
+            events.iter().map(membership).collect::<Vec<_>>(),
+            [Some((
+                MembershipChange::Renewed,
+                Some(member.key.clone()),
+                None
+            ))],
+            "{events:?}"
+        );
+        told.extend(events);
+
+        let admin = Arc::new(node.admin);
+        let cancel = CancellationToken::new();
+        spawn_status_watch(Arc::clone(&admin), cancel.clone());
+        let mut codes = Vec::new();
+        for (role, name, decision) in [
+            ("admin", "tablet", ndn_cert::Decision::Approve),
+            (
+                "node",
+                "relay",
+                ndn_cert::Decision::Deny {
+                    reason: "not my relay".into(),
+                },
+            ),
+        ] {
+            let EnrollOutcome::Pending(pending) =
+                enroll(&admin, approval_request(node.fingerprint, role, name, true))
+                    .await
+                    .expect("the request is made")
+            else {
+                panic!("{role} waits for an admin's approval")
+            };
+            codes.push(pending.code.clone());
+            let approve = decision == ndn_cert::Decision::Approve;
+            node.approvals
+                .decide_locally(&pending.request, decision, "uid 1000 (alice)")
+                .unwrap();
+            resolved(&admin, &pending.request, at_once).await;
+            let events = take().await;
+            let identity = format!("/home/bob/{role}/{name}");
+            assert_eq!(
+                events[..2],
+                [
+                    TrustEvent::ApprovalRequested {
+                        ca: "/home/bob".into(),
+                        request: pending.request.clone(),
+                        role: Some(role.into()),
+                    },
+                    TrustEvent::ApprovalDecided {
+                        ca: "/home/bob".into(),
+                        request: pending.request.clone(),
+                        decision: if approve {
+                            Decision::Approved
+                        } else {
+                            Decision::Denied
+                        },
+                    },
+                ],
+                "{events:?}"
+            );
+            if approve {
+                match &events[2..] {
+                    [TrustEvent::MembershipChanged(m)] => assert_eq!(
+                        (
+                            m.namespace.as_str(),
+                            m.change,
+                            m.key.as_ref().is_some_and(|k| k.starts_with(&identity)),
+                            m.request.as_deref()
+                        ),
+                        (
+                            "/home/bob",
+                            MembershipChange::Enrolled,
+                            true,
+                            Some(pending.request.as_str())
+                        )
+                    ),
+                    other => panic!("{other:?}"),
+                }
+            } else {
+                assert_eq!(
+                    events[2..],
+                    [TrustEvent::EnrollmentEnded {
+                        namespace: "/home/bob".into(),
+                        identity,
+                        request: pending.request.clone(),
+                        state: EnrollmentEnd::Denied,
+                    }],
+                    "{events:?}"
+                );
+            }
+            told.extend(events);
+        }
+
+        for event in &told {
+            let json = serde_json::to_string(event).unwrap();
+            let mut never = vec![
+                "member-m1".to_owned(),
+                "not my relay".into(),
+                "alice".into(),
+            ];
+            for code in &codes {
+                never.push(code.clone());
+                never.push(code.replace(' ', ""));
+            }
+            if matches!(
+                event,
+                TrustEvent::ApprovalRequested { .. } | TrustEvent::ApprovalDecided { .. }
+            ) {
+                never.extend(["tablet".into(), "relay".into(), "KEY".into()]);
+            }
+            for secret in &never {
+                assert!(!json.contains(secret.as_str()), "{json} carries {secret:?}");
+            }
+        }
+        cancel.cancel();
+        node.shutdown.shutdown().await;
     }
 }

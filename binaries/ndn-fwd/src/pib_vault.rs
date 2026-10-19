@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use ndn_cert::{NodeIdentitySource, RequestStore};
-use ndn_namespace::{Activation, KeyUnavailable, KeyVault};
+use ndn_namespace::{Activation, Detail, KeyUnavailable, KeyVault, detail_code};
 use ndn_packet::{Data, Name};
 use ndn_security::{Certificate, FilePib, PibError, Signer};
 
@@ -171,9 +171,16 @@ impl KeyVault for PibVault {
     ) -> Activation {
         let mut at_next_start = Vec::new();
         let Some(active) = &self.signing else {
-            at_next_start.push(format!(
-                "this node started without a signing key; it signs as {identity} after a restart"
-            ));
+            at_next_start.push(
+                Detail::new(
+                    detail_code::NEXT_START_UNSIGNED,
+                    format!(
+                        "this node started without a signing key; it signs as {identity} after \
+                         a restart"
+                    ),
+                )
+                .with("identity", identity),
+            );
             return Activation {
                 signing_now: false,
                 node_identity: false,
@@ -183,21 +190,33 @@ impl KeyVault for PibVault {
         let mut node_identity = false;
         if first_identity {
             match &self.configured_identity {
-                Some(configured) => at_next_start.push(format!(
-                    "the node identity stays {configured}: [security] identity in this node's \
-                     config names it; {identity} is recorded as the PIB's default identity, the \
-                     node identity once that line is removed"
-                )),
+                Some(configured) => at_next_start.push(
+                    Detail::new(
+                        detail_code::NEXT_START_CONFIGURED_IDENTITY,
+                        format!(
+                            "the node identity stays {configured}: this node's configuration \
+                             names it; {identity} is recorded as its default identity, the node \
+                             identity once the configuration names none"
+                        ),
+                    )
+                    .with("configured", configured)
+                    .with("identity", identity),
+                ),
                 None if active.current().1 => {
                     active.replace_node(Arc::clone(&signer), NodeIdentitySource::PibDefault);
                     node_identity = true;
                     if self.dv_keeps_startup_key {
-                        at_next_start.push(format!(
-                            "DV routing: it keeps signing with the key this node started with \
-                             (DV `static`/`lvs` trust); it signs with {key} after a restart, so \
-                             add that key to every DV neighbour's [routing.dv.trust] \
-                             trusted_keys before restarting"
-                        ));
+                        at_next_start.push(
+                            Detail::new(
+                                detail_code::NEXT_START_ROUTING_KEY,
+                                format!(
+                                    "routing keeps signing with the key this node started with; \
+                                     it signs with {key} after a restart, so have every routing \
+                                     neighbour trust that key before restarting"
+                                ),
+                            )
+                            .with("key", key),
+                        );
                     }
                 }
                 None => {}

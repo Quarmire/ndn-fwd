@@ -62,7 +62,8 @@ mod tests {
     /// A version handed to the daemon (`security/context-update`) is
     /// adopted, stored and kept only under the continuity rule: one a
     /// stranger signs, or one not newer, changes nothing; one the root signs
-    /// (adding a recovery kit) is adopted and stored.
+    /// (adding a recovery kit) is adopted and stored. Only the adopted one is
+    /// told, once (a kit added changes no root).
     #[tokio::test]
     async fn a_handed_version_is_adopted_only_under_the_continuity_rule() {
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -144,6 +145,17 @@ mod tests {
             .unwrap();
         assert!(stored.has_key_role(&kit.key_name(), ndn_security::KeyRole::RECOVERY_ANCHOR));
         assert_eq!(data.raw(), bump.data.raw());
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            node.events.take(),
+            [ndn_mgmt::TrustEvent::ContextUpdated {
+                namespace: ns.to_string(),
+                held_version: Some(1),
+                version: 2,
+                how: ndn_cert::report::ContextChange::Update,
+                revoked: Vec::new(),
+            }]
+        );
         node.shutdown.shutdown().await;
     }
 }

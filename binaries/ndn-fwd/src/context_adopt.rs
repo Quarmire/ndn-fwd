@@ -23,7 +23,10 @@ use ndn_cert::{AnchorLink, CaState};
 use ndn_engine::ForwarderEngine;
 use ndn_namespace::publish::{OwnCertificates, PublishedContexts};
 use ndn_namespace::sync::ContextSync;
-use ndn_namespace::{HostWords, Participant, ParticipantParts, PibContextStore, keep};
+use ndn_namespace::{
+    Detail, HostWords, Participant, ParticipantParts, PibContextStore, TrustRefusal, code,
+    detail_code, keep,
+};
 use ndn_security::Keyring;
 
 use crate::active_identity::ActiveIdentity;
@@ -62,8 +65,10 @@ pub(crate) struct TrustAdminParts {
     pub(crate) context_sync: Option<ContextSync>,
 }
 
-/// How the person at this node does what a library refusal or log line
-/// asks of them: the daemon's CLI and configuration, its PIB.
+/// How the person at this node does what a library refusal, detail or log
+/// line asks of them: the daemon's CLI and configuration, its PIB. The
+/// daemon quotes them in its own log lines; the CLI renders the daemon's
+/// refusals and details with them ([`render_refusal`], [`render_detail`]).
 pub(crate) fn namespace_words() -> HostWords {
     HostWords {
         enroll_again: "`ndn-fwd enroll`".into(),
@@ -75,25 +80,118 @@ pub(crate) fn namespace_words() -> HostWords {
         role_invite: "`ndn-fwd-tokens new --role {role}`".into(),
         anchor_link_origin: "`ndn-fwd init` prints it as anchor_uri".into(),
         adopt: "`ndn-fwd adopt`".into(),
-        adopt_anchor_link:
-            "`ndn-fwd adopt <ndn-trust://anchor/…>`, the link `ndn-fwd init` printed".into(),
+        add_route: "`ndn-ctl route add {namespace} --face <face-id>`".into(),
+        list_routes: "`ndn-ctl route list`".into(),
         refresh_context: "`ndn-fwd context refresh {namespace}`".into(),
         list_approvals: "`ndn-fwd approvals list`".into(),
         decide_approvals: "Run `ndn-fwd approvals`".into(),
-        root_key_status: "`ndn-fwd root-key status`".into(),
         key_storage: "the PIB".into(),
         key_storage_dir: "the PIB directory".into(),
         make_key_storage_readable: "Make the PIB readable by this daemon".into(),
         renew_before: "[security] renew_before".into(),
         contexts_not_served: "[security] serve_contexts = false".into(),
         enroll_another_key: "run again with --force and another --device name".into(),
-        recover_from_held: "retry with --from-held".into(),
     }
 }
 
-/// The context store beside the PIB at `pib_root`, worded as the daemon's.
+/// A refusal the daemon answered, in this CLI's words: the library's
+/// sentences with [`namespace_words`], and the management layer's own
+/// codes (a verb the daemon does not run, the trust-admin gate) naming the
+/// CLI and its configuration; any other code as its neutral sentence.
+pub(crate) fn render_refusal(refusal: &TrustRefusal) -> String {
+    let get = |k: &str| refusal.param(k).unwrap_or_default();
+    let configured = || match get("groups") {
+        "" => "none configured".to_owned(),
+        groups => format!("currently: {groups}"),
+    };
+    match refusal.code.as_str() {
+        c if c == code::NOT_AT_RUNTIME.code => {
+            let run = match get("operation") {
+                "context-adopt" => {
+                    return "this node does not adopt trust contexts at runtime; adopt offline \
+                            with `ndn-fwd adopt <link> --pib <dir>` and restart it"
+                        .to_owned();
+                }
+                "enroll" => "`ndn-fwd enroll`",
+                "enroll-status" => "`ndn-fwd enroll --status`",
+                "renew" => "`ndn-fwd renew`",
+                "context-refresh" => "`ndn-fwd context refresh`",
+                "context-update" => "it",
+                _ => return refusal.reason.clone(),
+            };
+            format!("{}: run {run} against an ndn-fwd daemon", refusal.reason)
+        }
+        c if c == code::TRUST_CHANGE_UNIDENTIFIED.code => format!(
+            "refused: changing this node's trust must be requested over the forwarder's local \
+             management socket, where the kernel reports who is asking; this request arrived on \
+             a face that carries no caller identity. Run the command on this node against the \
+             daemon's Unix socket, as the daemon's user (uid {}), root, or a member of a group \
+             in `[security] trust_admin_groups` ({}).",
+            get("daemon_uid"),
+            configured()
+        ),
+        c if c == code::TRUST_CHANGE_NOT_OPERATOR.code => format!(
+            "refused: only the daemon's user (uid {}), root, or members of `[security] \
+             trust_admin_groups` ({}) may change this node's trust; this request came from uid \
+             {}. Run the command as the daemon's user or root, or add a group you belong to to \
+             `[security] trust_admin_groups` in the daemon config and restart.",
+            get("daemon_uid"),
+            configured(),
+            get("uid")
+        ),
+        c if c == code::TRUST_CHANGE_OVER_LOCALHOP.code => {
+            "trust changes — adopting, enrolling, revoking, refreshing, and listing or deciding \
+             approval requests — are accepted only on this node's local management socket; run \
+             `ndn-fwd adopt` / `enroll` / `revoke` / `context refresh` / `approvals` on the node \
+             itself (an admin device decides another node's requests with `ndn-fwd approvals` \
+             on its own node)"
+                .to_owned()
+        }
+        c if c == code::APPROVAL_TARGET_MISSING.code => {
+            "give the request id or the six-digit code (`ndn-fwd approvals list` shows them) in \
+             Uri; a denial may add `:<reason>`"
+                .to_owned()
+        }
+        _ => namespace_words().render(refusal),
+    }
+}
+
+/// A detail of the daemon's answer, in this CLI's words: the library's
+/// sentences with [`namespace_words`], and the daemon's own (what changes
+/// at the next start) naming its configuration.
+pub(crate) fn render_detail(detail: &Detail) -> String {
+    let get = |k: &str| detail.param(k).unwrap_or_default();
+    match detail.code.as_str() {
+        detail_code::NEXT_START_CONFIGURED_IDENTITY => format!(
+            "the node identity stays {}: [security] identity in this node's config names it; \
+             {} is recorded as the PIB's default identity, the node identity once that line is \
+             removed",
+            get("configured"),
+            get("identity")
+        ),
+        detail_code::NEXT_START_ROUTING_KEY => format!(
+            "DV routing: it keeps signing with the key this node started with (DV \
+             `static`/`lvs` trust); it signs with {} after a restart, so add that key to every \
+             DV neighbour's [routing.dv.trust] trusted_keys before restarting",
+            get("key")
+        ),
+        _ => namespace_words().render_detail(detail),
+    }
+}
+
+/// The status text of a refusing answer, in this CLI's words: a structured
+/// refusal rendered from its code ([`render_refusal`]); any other text as it
+/// stands.
+pub(crate) fn refusal_text(status_code: u64, status_text: &str) -> String {
+    match ndn_ipc::trust_refusal_of(status_code, status_text) {
+        Some(refusal) => render_refusal(&refusal),
+        None => status_text.to_owned(),
+    }
+}
+
+/// The context store beside the PIB at `pib_root`.
 pub(crate) fn context_store(pib_root: &std::path::Path) -> PibContextStore {
-    PibContextStore::new(pib_root).with_words(&namespace_words())
+    PibContextStore::new(pib_root)
 }
 
 impl TrustAdmin {
@@ -139,8 +237,7 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         &self,
         link_uri: String,
     ) -> Result<ndn_mgmt::AdoptedContextInfo, ndn_mgmt::TrustRefusal> {
-        let link = AnchorLink::from_uri(&link_uri)
-            .map_err(|e| ndn_namespace::refusal(keep::adopt_status(&e), e.to_string()))?;
+        let link = AnchorLink::from_uri(&link_uri).map_err(|e| keep::adopt_refusal(&e))?;
         keep::adopt_link(&self.ns, &link).await
     }
 
@@ -205,10 +302,8 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
         ))
     }
 
-    fn membership_events(
-        &self,
-    ) -> Option<tokio::sync::broadcast::Receiver<ndn_mgmt::MembershipEvent>> {
-        Some(self.ns.membership_events())
+    fn trust_events(&self) -> Option<tokio::sync::broadcast::Receiver<ndn_mgmt::TrustEvent>> {
+        Some(self.ns.events())
     }
 
     fn root_stores(&self) -> Vec<ndn_mgmt::RootStoreInfo> {
@@ -218,22 +313,33 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
 
 #[cfg(test)]
 mod tests {
-    use ndn_namespace::admin::{NewestRefusal, newest_of};
-    use ndn_namespace::{ContextRefreshInfo, ContextStore, RefreshState};
-    use ndn_packet::Name;
-
     use super::*;
 
-    /// The library's messages with the daemon's words read exactly as the
-    /// daemon printed them before the library took its words from the host.
-    #[test]
-    fn the_daemon_words_reproduce_its_messages() {
-        let w = namespace_words();
-        let ns: Name = "/home/bob".parse().unwrap();
-        let key: Name = "/home/bob/node/pi/KEY/k1".parse().unwrap();
+    /// A refusal as the daemon answers it: its code and params (the CLI
+    /// words those codes from the params alone).
+    fn refused(kind: ndn_cert::report::RefusalCode, params: &[(&str, &str)]) -> TrustRefusal {
+        params
+            .iter()
+            .fold(TrustRefusal::new(kind, "neutral"), |r, (k, v)| r.with(k, v))
+    }
 
+    fn detail(code: &str, params: &[(&str, &str)]) -> Detail {
+        params
+            .iter()
+            .fold(Detail::new(code, "neutral"), |d, (k, v)| d.with(k, v))
+    }
+
+    /// The CLI renders the daemon's coded refusals and details exactly as
+    /// the daemon worded them before it answered codes: its output is
+    /// unchanged.
+    #[test]
+    fn the_cli_renders_the_daemon_codes_as_before() {
+        let w = namespace_words();
         assert_eq!(
-            w.context_check_timed_out(8, &ns),
+            render_detail(&detail(
+                detail_code::CONTEXT_CHECK_TIMED_OUT,
+                &[("budget_secs", "8"), ("namespace", "/home/bob")]
+            )),
             "no newer version was confirmed within 8s (following several versions takes \
              longer); `ndn-fwd context refresh /home/bob` completes the check"
         );
@@ -244,9 +350,7 @@ mod tests {
         );
         let e = ndn_cert::EnrollLink::parse("not a link").unwrap_err();
         assert_eq!(
-            ndn_namespace::enroll::parse_link("not a link", &w)
-                .unwrap_err()
-                .reason,
+            render_refusal(&ndn_namespace::enroll::parse_link("not a link").unwrap_err()),
             format!(
                 "the link is neither an invite nor an anchor link ({e}): give an \
                  ndn-trust://invite link (`ndn-fwd-tokens new` prints one) or, for a role the \
@@ -255,62 +359,115 @@ mod tests {
             )
         );
         assert_eq!(
-            w.invite_for_another_role(&ns, "member", "guest"),
+            render_refusal(&refused(
+                code::INVITE_FOR_ANOTHER_ROLE,
+                &[
+                    ("namespace", "/home/bob"),
+                    ("invite_role", "member"),
+                    ("role", "guest")
+                ]
+            )),
             "the invite admits a member device, not a guest device; /home/bob certifies guest \
              devices by invite: ask for a guest invite (`ndn-fwd-tokens new --role guest`)"
         );
         assert_eq!(
-            w.role_by_invite(&ns, "member", "admin, node by an admin's approval"),
+            render_refusal(&refused(
+                code::ROLE_BY_INVITE,
+                &[
+                    ("namespace", "/home/bob"),
+                    ("role", "member"),
+                    ("policy", "admin, node by an admin's approval")
+                ]
+            )),
             "/home/bob certifies member devices by invite, not on an admin's approval (admin, \
              node by an admin's approval): ask an admin for an invite (`ndn-fwd-tokens new \
              --role member` on the root device) and run `ndn-fwd enroll <invite link>`"
         );
         assert_eq!(
-            w.role_by_invite_and_approval(&ns, "node"),
+            render_refusal(&refused(
+                code::ROLE_NEEDS_INVITE_AND_APPROVAL,
+                &[("namespace", "/home/bob"), ("role", "node")]
+            )),
             "/home/bob certifies a node device only on an invite AND an admin's approval: ask \
              an admin for an invite and run `ndn-fwd enroll <invite link> --role node`"
         );
         assert_eq!(
-            w.invite_spent(),
-            "The token is spent: fix the PIB directory and ask for a new invite"
+            render_refusal(&refused(
+                code::CERTIFICATE_NOT_KEPT,
+                &[
+                    ("certificate", "/c"),
+                    ("location", "/var/lib/ndn/pib"),
+                    ("error", "disk full"),
+                    ("spent", "invite")
+                ]
+            )),
+            "the CA issued /c, but storing it in /var/lib/ndn/pib failed (disk full); nothing \
+             was kept and nothing changed. The token is spent: fix the PIB directory and ask for \
+             a new invite"
         );
         assert_eq!(
-            w.approval_used(),
-            "The approval is used: fix the PIB directory, ask again (`ndn-fwd enroll`) and have \
-             an admin approve the new request"
+            render_refusal(&refused(
+                code::CERTIFICATE_NOT_KEPT,
+                &[
+                    ("certificate", "/c"),
+                    ("location", "/var/lib/ndn/pib"),
+                    ("error", "disk full"),
+                    ("spent", "approval")
+                ]
+            )),
+            "the CA issued /c, but storing it in /var/lib/ndn/pib failed (disk full); nothing \
+             was kept and nothing changed. The approval is used: fix the PIB directory, ask \
+             again (`ndn-fwd enroll`) and have an admin approve the new request"
         );
         assert_eq!(
-            w.request_not_recorded("r1", "123456", "disk full", "the PIB at /var/lib/ndn/pib"),
+            render_refusal(&refused(
+                code::REQUEST_NOT_RECORDED,
+                &[
+                    ("request", "r1"),
+                    ("code", "123456"),
+                    ("error", "disk full"),
+                    ("location", "/var/lib/ndn/pib")
+                ]
+            )),
             "the CA holds request r1 (code 123456), but this node could not record it (disk \
-             full), so it would never finish it: the key was deleted. Fix the PIB directory (the \
-             PIB at /var/lib/ndn/pib) and ask again; an admin can deny request r1"
+             full), so it would never finish it: the key was deleted. Fix the PIB directory \
+             (/var/lib/ndn/pib) and ask again; an admin can deny request r1"
         );
         assert_eq!(
             w.enrolled(true),
             "enrolled; the PIB's default identity is now this one, the node identity"
         );
         assert_eq!(
-            w.request_names_no_ca(),
+            render_detail(&detail(detail_code::REQUEST_NAMES_NO_CA, &[])),
             "the request record names no valid namespace or CA; ask again (`ndn-fwd enroll`)"
         );
         assert_eq!(
-            w.request_names_no_key(),
+            render_detail(&detail(detail_code::REQUEST_NAMES_NO_KEY, &[])),
             "the request record names no valid namespace, CA, identity or key; ask again \
              (`ndn-fwd enroll`)"
         );
         assert_eq!(
-            w.request_key_gone(&key, "gone from the PIB"),
+            render_detail(&detail(
+                detail_code::REQUEST_KEY_GONE,
+                &[
+                    ("key", "/home/bob/node/pi/KEY/k1"),
+                    ("why", "gone from the PIB")
+                ]
+            )),
             "the key /home/bob/node/pi/KEY/k1 of this request is gone from the PIB; nothing can \
              be certified for it: ask again (`ndn-fwd enroll`)"
         );
         assert_eq!(
-            w.no_pending_request("123456", "the CAs of the namespaces this node administers"),
+            render_refusal(&refused(
+                code::APPROVAL_NOT_PENDING,
+                &[("target", "123456"), ("scope", "administered")]
+            )),
             "no pending request shows \"123456\" at the CAs of the namespaces this node \
              administers: check the code on the new device against `ndn-fwd approvals list` (a \
              request that expired or was decided is not pending)"
         );
         assert_eq!(
-            w.nothing_to_approve(),
+            render_refusal(&refused(code::NOTHING_TO_APPROVE, &[])),
             "this node neither runs a CA that takes approval requests nor holds a current admin \
              certificate of a namespace whose CA runs elsewhere: there is nothing to approve \
              here. Run `ndn-fwd approvals` on the namespace's root device (its CA host) or on \
@@ -318,16 +475,25 @@ mod tests {
              admin`, approved by an admin"
         );
         assert_eq!(
-            w.no_context(&ns),
+            render_refusal(&refused(
+                code::CONTEXT_NOT_HELD,
+                &[("namespace", "/home/bob")]
+            )),
             "this node holds no trust context for /home/bob; adopt it first (`ndn-fwd adopt`)"
         );
         assert_eq!(
-            w.renewal_unreadable("the PIB cannot be read"),
+            render_refusal(&refused(
+                code::RENEWAL_KEYS_UNREADABLE,
+                &[("error", "the PIB cannot be read")]
+            )),
             "the PIB cannot be read: nothing was renewed. Make the PIB readable by this daemon, \
              then renew again"
         );
         assert_eq!(
-            w.nothing_to_renew("/var/lib/ndn/pib"),
+            render_refusal(&refused(
+                code::NOTHING_TO_RENEW,
+                &[("location", "/var/lib/ndn/pib")]
+            )),
             "this node holds no certificate a namespace CA issued to it in /var/lib/ndn/pib: \
              nothing to renew. Enroll first (`ndn-fwd enroll <invite>`)"
         );
@@ -342,64 +508,75 @@ mod tests {
              issues; renewing them once a third of their lifetime is left instead"
         );
         assert_eq!(
-            w.not_published(),
-            "; not published: [security] serve_contexts = false, so no node fetches it from this \
-             one"
+            render_refusal(&refused(
+                code::CONTEXT_NOT_STORED,
+                &[
+                    ("namespace", "/home/bob"),
+                    ("version", "3"),
+                    ("error", "disk full"),
+                    ("location", "/var/lib/ndn/pib")
+                ]
+            )),
+            "adopted /home/bob v3 for this run, but storing it failed (disk full); it will be \
+             gone after a restart — fix the PIB directory (/var/lib/ndn/pib)"
         );
-
-        let source = ContextRefreshInfo {
-            namespace: ns.to_string(),
-            state: RefreshState::Source,
-            held_version: 3,
-            version: 3,
-            revoked: Vec::new(),
-            detail: String::new(),
-        };
-        assert_eq!(
-            newest_of(&ns, &source, false, &w).unwrap_err().to_string(),
-            "this device holds the root of /home/bob (`ndn-fwd root-key status`): it is the \
-             root device, nothing to recover"
-        );
-        let unreachable = ContextRefreshInfo {
-            state: RefreshState::Unreachable,
-            detail: "no answer".into(),
-            ..source
-        };
-        assert_eq!(
-            newest_of(&ns, &unreachable, false, &w)
-                .unwrap_err()
-                .to_string(),
-            "no answer. Recovering from the held v3 without knowing it is the newest could fork \
-             the namespace: give this device a face and a route toward a relay or member that \
-             holds it, then retry. If no other node holding /home/bob exists or can be reached, \
-             and you know no version newer than v3 was made, retry with --from-held"
+        assert!(
+            render_detail(&detail(
+                detail_code::CONTEXT_UPDATED,
+                &[
+                    ("version", "4"),
+                    ("signer", "/s"),
+                    ("from", "3"),
+                    ("stored", "/c"),
+                    ("published", "false")
+                ]
+            ))
+            .ends_with(
+                "; not published: [security] serve_contexts = false, so no node fetches it from \
+                 this one"
+            )
         );
         assert_eq!(
-            w.already_certified(
-                &ns,
-                "/home/bob/member/phone/KEY/k1 until 20270101T000000",
-                " (judged against v2)"
-            ),
+            render_refusal(&refused(
+                code::ALREADY_CERTIFIED,
+                &[
+                    ("namespace", "/home/bob"),
+                    (
+                        "still_valid",
+                        "/home/bob/member/phone/KEY/k1 (valid until 20270101T000000Z)"
+                    ),
+                    ("judged_version", "2"),
+                    ("cause", detail_code::CONTEXT_CHECK_TIMED_OUT),
+                    ("budget_secs", "8"),
+                ]
+            )),
             "this node already holds a certificate in /home/bob: /home/bob/member/phone/KEY/k1 \
-             until 20270101T000000 (judged against v2). To enroll another key anyway, run again \
-             with --force and another --device name (the CA certifies a new key for a device \
-             name it already certified only once that certificate is revoked or an admin \
+             (valid until 20270101T000000Z) (judged against the trust context v2 this node \
+             holds; whether a newer version revokes it could not be checked: no newer version \
+             was confirmed within 8s (following several versions takes longer); `ndn-fwd \
+             context refresh /home/bob` completes the check). To enroll another key anyway, run \
+             again with --force and another --device name (the CA certifies a new key for a \
+             device name it already certified only once that certificate is revoked or an admin \
              approves the new key); the certificate this node holds stays valid until it \
              expires or is revoked"
         );
-        let not_held = NewestRefusal::NotHeld {
-            namespace: ns.clone(),
-            adopt_anchor_link: w.adopt_anchor_link.clone(),
-        };
         assert_eq!(
-            not_held.to_string(),
-            "this device's daemon holds no trust context for /home/bob. Adopt it first with the \
-             namespace's anchor link (`ndn-fwd adopt <ndn-trust://anchor/…>`, the link `ndn-fwd \
-             init` printed), so the version recovered from is authenticated, then retry"
+            render_refusal(
+                &TrustRefusal::new(code::NOT_AT_RUNTIME, "this node does not enroll at runtime")
+                    .with("operation", "enroll")
+            ),
+            "this node does not enroll at runtime: run `ndn-fwd enroll` against an ndn-fwd \
+             daemon"
         );
         assert_eq!(
-            context_store(std::path::Path::new("/var/lib/ndn/pib")).location(),
-            "the PIB directory (/var/lib/ndn/pib)"
+            render_refusal(&refused(
+                code::TRUST_CHANGE_NOT_OPERATOR,
+                &[("uid", "1000"), ("daemon_uid", "0"), ("groups", "")]
+            )),
+            "refused: only the daemon's user (uid 0), root, or members of `[security] \
+             trust_admin_groups` (none configured) may change this node's trust; this request \
+             came from uid 1000. Run the command as the daemon's user or root, or add a group \
+             you belong to to `[security] trust_admin_groups` in the daemon config and restart."
         );
     }
 }

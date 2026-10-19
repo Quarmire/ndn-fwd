@@ -86,7 +86,7 @@ mod tests {
             .expect("a node holding a certificate renews");
         assert_eq!(results.len(), 1);
         let r = &results[0];
-        assert_eq!(r.state, RenewalState::Renewed, "{}", r.detail);
+        assert_eq!(r.state, RenewalState::Renewed, "{:?}", r.detail);
         assert_eq!(r.key, enrolled.key);
 
         let after = stored(device.path(), &key);

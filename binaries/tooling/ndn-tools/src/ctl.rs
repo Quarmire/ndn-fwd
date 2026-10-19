@@ -353,7 +353,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                         *cost as u64,
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
             RouteAction::Remove { prefix, face } => {
@@ -365,34 +365,28 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                         Some(*face as u64),
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
             RouteAction::List => {
-                let entries = mgmt
-                    .route_list()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let entries = mgmt.route_list().await.map_err(mgmt_error)?;
                 print_fib_list(&entries);
             }
             RouteAction::RibList => {
-                let entries = mgmt.rib_list().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                let entries = mgmt.rib_list().await.map_err(mgmt_error)?;
                 print_rib_list(&entries);
             }
         },
         Command::Face { action } => match action {
             FaceAction::Create { uri } => {
-                let resp = mgmt
-                    .face_create(uri)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let resp = mgmt.face_create(uri).await.map_err(mgmt_error)?;
                 print_params(&resp);
             }
             FaceAction::Destroy { face_id } => {
                 let resp = mgmt
                     .face_destroy(*face_id as u64)
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
             FaceAction::Update {
@@ -403,7 +397,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                 let resp = mgmt
                     .face_update(*face_id as u64, *flags, mask.unwrap_or(*flags))
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
             FaceAction::List {
@@ -411,7 +405,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                 remote,
                 local,
             } => {
-                let entries = mgmt.face_list().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                let entries = mgmt.face_list().await.map_err(mgmt_error)?;
                 let filtered = filter_face_list(
                     &entries,
                     scheme.as_deref(),
@@ -433,7 +427,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                             .map_err(|e| anyhow::anyhow!("bad strategy: {e}"))?,
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
             StrategyAction::Unset { prefix } => {
@@ -444,46 +438,34 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                             .map_err(|e| anyhow::anyhow!("bad prefix: {e}"))?,
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
             StrategyAction::List => {
-                let entries = mgmt
-                    .strategy_list()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let entries = mgmt.strategy_list().await.map_err(mgmt_error)?;
                 print_strategy_list(&entries);
             }
         },
         Command::Cs { action } => match action {
             CsAction::Info => {
-                let resp = mgmt.cs_info().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                let resp = mgmt.cs_info().await.map_err(mgmt_error)?;
                 print_control_response(&resp);
             }
             CsAction::Config { capacity } => {
-                let resp = mgmt
-                    .cs_config(*capacity)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let resp = mgmt.cs_config(*capacity).await.map_err(mgmt_error)?;
                 print_params(&resp);
             }
             CsAction::Erase { prefix, count } => {
                 let name: ndn_packet::Name = prefix
                     .parse()
                     .map_err(|e| anyhow::anyhow!("bad prefix: {e}"))?;
-                let resp = mgmt
-                    .cs_erase(&name, *count)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let resp = mgmt.cs_erase(&name, *count).await.map_err(mgmt_error)?;
                 print_params(&resp);
             }
         },
         Command::Neighbors { action } => match action {
             NeighborsAction::List => {
-                let resp = mgmt
-                    .neighbors_list()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let resp = mgmt.neighbors_list().await.map_err(mgmt_error)?;
                 print_control_response(&resp);
             }
         },
@@ -492,7 +474,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                 let listing = mgmt
                     .link_list(std::time::Duration::from_secs(4))
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(|e| anyhow::anyhow!("{}", link_error(e)))?;
                 let mut out = String::new();
                 render_link_list_into(&mut out, &listing);
                 print!("{out}");
@@ -512,10 +494,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
         },
         Command::Service { action } => match action {
             ServiceAction::List => {
-                let resp = mgmt
-                    .service_list()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let resp = mgmt.service_list().await.map_err(mgmt_error)?;
                 print_control_response(&resp);
             }
             ServiceAction::Browse { prefix } => {
@@ -527,7 +506,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                 let resp = mgmt
                     .service_browse(parsed.as_ref())
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_control_response(&resp);
             }
             ServiceAction::Announce { prefix } => {
@@ -538,7 +517,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                             .map_err(|e| anyhow::anyhow!("bad prefix: {e}"))?,
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
             ServiceAction::Withdraw { prefix } => {
@@ -549,20 +528,18 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                             .map_err(|e| anyhow::anyhow!("bad prefix: {e}"))?,
                     )
                     .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    .map_err(mgmt_error)?;
                 print_params(&resp);
             }
         },
         Command::Status => {
-            let s = mgmt.status().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            let s = mgmt.status().await.map_err(mgmt_error)?;
             let mut out = String::new();
             render_status_into(&mut out, &s);
             // The node identity the forwarder signs its own packets with,
             // and why, and every identity it signs Data as.
-            if let Ok(id) = mgmt.security_identity_status().await
-                && id.is_ok()
-            {
-                out.push_str(&format!("signing: {}\n", id.status_text.trim()));
+            if let Ok(id) = mgmt.security_identity_status().await {
+                out.push_str(&format!("signing: {}\n", render_identity_status(&id)));
             }
             if let Ok(resp) = mgmt.security_memberships().await
                 && resp.is_ok()
@@ -572,7 +549,7 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
             print!("{out}");
         }
         Command::Shutdown => {
-            let resp = mgmt.shutdown().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            let resp = mgmt.shutdown().await.map_err(mgmt_error)?;
             print_control_response(&resp);
         }
         // Security is handled before run_nfd is called.
@@ -580,6 +557,35 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The `security/identity-status` report as one line of `key=value`
+/// fields: the node identity, its key and certificate expiry and why it is
+/// the node identity, each identity the node signs Data as, and each root
+/// store.
+fn render_identity_status(id: &ndn_cert::report::IdentityStatus) -> String {
+    let mut line = format!(
+        "identity={} is_ephemeral={} pib_path={}",
+        id.identity.as_deref().unwrap_or("(none)"),
+        id.is_ephemeral,
+        id.pib_path
+    );
+    if let Some(key) = &id.key {
+        line.push_str(&format!(" key={key}"));
+    }
+    if let (Some(until), Some(days)) = (&id.valid_until, id.days_left) {
+        line.push_str(&format!(" valid_until={until} days_left={days:.1}"));
+    }
+    if let Some(source) = id.node_identity_source {
+        line.push_str(&format!(" node_identity_source={source}"));
+    }
+    for s in &id.signing_identities {
+        line.push_str(&format!(" signing_identity={}", s.identity));
+    }
+    for r in &id.root_stores {
+        line.push_str(&format!(" root_store={} root_key={}", r.kind, r.key));
+    }
+    line
 }
 
 /// The `security/memberships` answer (a JSON list of
@@ -1277,20 +1283,189 @@ fn print_params(params: &ndn_config::ControlParameters) {
 
 /// A link command's answer: what was done, or (exit status non-zero) why
 /// nothing was.
-fn link_command_result<E: std::fmt::Display>(
-    resp: Result<ControlResponse, E>,
+fn link_command_result(
+    resp: Result<ndn_ipc::refusal::Detail, ndn_ipc::ForwarderError>,
 ) -> anyhow::Result<()> {
-    let resp = resp.map_err(|e| anyhow::anyhow!("{e}"))?;
-    if !resp.is_ok() {
-        anyhow::bail!("{} {}", resp.status_code, resp.status_text);
+    match resp.map_err(link_error) {
+        Ok(done) => {
+            println!("{}", link_done_text(&done));
+            Ok(())
+        }
+        Err(ndn_ipc::ForwarderError::Command { code, text }) => anyhow::bail!("{code} {text}"),
+        Err(e) => anyhow::bail!("{e}"),
     }
-    println!("{}", resp.status_text);
-    Ok(())
+}
+
+/// How ndn-ctl words the link details whose neutral sentence stands in for
+/// the daemon's configuration and commands.
+const LINK_WORDS: ndn_mgmt_wire::LinkWords<'static> = ndn_mgmt_wire::LinkWords {
+    peer_entry: "[[peer]]",
+    renew: "`ndn-fwd renew`",
+    expect_key: "add [[peer]] key = \"{key}\" to the other device's config",
+};
+
+/// What a link command did, in ndn-ctl's words.
+fn link_done_text(done: &ndn_ipc::refusal::Detail) -> String {
+    use ndn_mgmt_wire::link_code;
+    let Some(label) = done.param("label") else {
+        return done.text.clone();
+    };
+    match done.code.as_str() {
+        link_code::LINKING => {
+            format!("linking to {label}, whatever its mode, until it is disconnected")
+        }
+        link_code::LINK_RELEASED => format!(
+            "no longer asking for the link to {label}: an `off` link closes now, an `on-demand` \
+             one once idle; an `always` link stays up (set its mode to off to close it)"
+        ),
+        link_code::LINK_MODE_SET => {
+            let mode = match (done.param("mode"), done.param("idle_secs")) {
+                (Some("on-demand"), Some(idle)) => {
+                    format!("on-demand, closing after {idle} s idle")
+                }
+                (Some(mode), _) => mode.to_owned(),
+                (None, _) => return done.text.clone(),
+            };
+            format!("{label} is now {mode} (until the daemon restarts)")
+        }
+        _ => done.text.clone(),
+    }
+}
+
+/// `e` with a links refusal's sentence in ndn-ctl's words; any other error
+/// as it is.
+fn link_error(e: ndn_ipc::ForwarderError) -> ndn_ipc::ForwarderError {
+    match e {
+        ndn_ipc::ForwarderError::Command { code, text } => {
+            let text = ndn_ipc::trust_refusal_of(code, &text)
+                .map_or(text, |refusal| link_refusal_text(&refusal));
+            ndn_ipc::ForwarderError::Command { code, text }
+        }
+        e => e,
+    }
+}
+
+/// A links refusal in ndn-ctl's words; its neutral sentence for a code
+/// ndn-ctl does not word.
+fn link_refusal_text(refusal: &ndn_ipc::refusal::TrustRefusal) -> String {
+    use ndn_cert::report::code;
+    let param = |key: &str| refusal.param(key).unwrap_or_default();
+    if refusal.is(code::LINKS_UNKNOWN_VERB) {
+        "unknown links verb; the links module answers `list`, `connect`, `disconnect` and `mode`"
+            .to_owned()
+    } else if refusal.is(code::LINKS_NOT_RUNNING) {
+        "this daemon runs no QUIC links: it has no key ([security] profile = \"disabled\"); \
+         enable security to link"
+            .to_owned()
+    } else if refusal.is(code::LINK_LABEL_MISSING) {
+        "name the link (its label in `ndn-ctl link list`) in Uri".to_owned()
+    } else if refusal.is(code::LINK_MODE_INVALID) {
+        param("mode")
+            .parse::<ndn_mgmt_wire::LinkModeArg>()
+            .err()
+            .unwrap_or_else(|| refusal.reason.clone())
+    } else if refusal.is(code::LINK_NOT_FOUND) {
+        format!(
+            "no link is labelled {:?}; `ndn-ctl link list` shows the labels",
+            param("label")
+        )
+    } else if refusal.is(code::LINK_NOT_CONFIGURED) {
+        format!(
+            "{:?} linked in and is not configured, so it has no mode to set and is not \
+             dialled: add it as a [[peer]] (or [[relay]]) to control its link",
+            param("label")
+        )
+    } else if refusal.is(code::LINK_MODE_MISSING) {
+        "name the mode in LocalUri: always, on-demand, on-demand:<idle seconds> or off".to_owned()
+    } else if refusal.is(code::LINK_IDLE_OUT_OF_RANGE) {
+        format!(
+            "idle close {} s is outside {}..={} s: below that an on-demand link closes \
+             between the packets of one exchange; pick a value in range",
+            param("idle_secs"),
+            param("min"),
+            param("max")
+        )
+    } else {
+        refusal.reason.clone()
+    }
+}
+
+/// A management command's error, its refusal in ndn-ctl's words
+/// ([`mgmt_refusal_text`]).
+fn mgmt_error(e: ndn_ipc::ForwarderError) -> anyhow::Error {
+    match e {
+        ndn_ipc::ForwarderError::Command { code, text } => {
+            let text = mgmt_refusal_text(code, &text);
+            anyhow::anyhow!("{}", ndn_ipc::ForwarderError::Command { code, text })
+        }
+        e => anyhow::anyhow!("{e}"),
+    }
+}
+
+/// The status text of a management answer in ndn-ctl's words: a structured
+/// refusal of the management gate (or of a verb this daemon does not run)
+/// says what to change in ndn-ctl's and the daemon's terms; any other
+/// refusal is its neutral sentence, any other text as it stands.
+fn mgmt_refusal_text(status_code: u64, status_text: &str) -> String {
+    use ndn_cert::report::code;
+    let Some(refusal) = ndn_ipc::trust_refusal_of(status_code, status_text) else {
+        return status_text.to_owned();
+    };
+    let param = |key: &str| refusal.param(key).unwrap_or_default();
+    let configured = match param("groups") {
+        "" => "none configured".to_owned(),
+        groups => format!("currently: {groups}"),
+    };
+    if refusal.is(code::COMMAND_NO_ANCHOR) {
+        "refused: this command must be signed by a key trusted by `[security.mgmt] \
+         trust_anchor_pib`, and none is configured. Send it over this node's local management \
+         socket as the daemon's user, root, or a member of `[security] trust_admin_groups`, or \
+         set trust_anchor_pib in the daemon config."
+            .to_owned()
+    } else if refusal.is(code::COMMAND_SIGNER_UNVERIFIABLE) {
+        "refused: this command is signed by a key, but no `[security.mgmt] trust_anchor_pib` \
+         is configured to verify that key. You are a local operator on this socket, so send \
+         the command unsigned (without `--identity`), or set trust_anchor_pib in the daemon \
+         config and restart."
+            .to_owned()
+    } else if refusal.is(code::COMMAND_NOT_OPERATOR) {
+        let anchor = if param("anchor_configured") == "true" {
+            ""
+        } else {
+            " (none is configured yet)"
+        };
+        format!(
+            "refused: unsigned management commands are accepted on the local socket only from \
+             the daemon's user (uid {}), root, or members of `[security] trust_admin_groups` \
+             ({configured}); this request came from uid {}. Run the command as the daemon's \
+             user or root, add a group you belong to to `[security] trust_admin_groups` in the \
+             daemon config and restart, or sign the command with a key trusted by \
+             `[security.mgmt] trust_anchor_pib`{anchor}.",
+            param("daemon_uid"),
+            param("uid")
+        )
+    } else if refusal.is(code::VALIDATION_DISABLED) {
+        "validation is disabled; set [security] profile = \"default\" or \"accept-signed\" to \
+         enable trust schema management"
+            .to_owned()
+    } else if refusal.is(code::NOT_AT_RUNTIME) && param("operation") == "ca-info" {
+        "no CA configured (set [[ca]] in router TOML)".to_owned()
+    } else if refusal.is(code::NOT_AT_RUNTIME) && param("operation") == "yubikey" {
+        "yubikey-piv feature is not compiled in; rebuild ndn-fwd with --features yubikey-piv"
+            .to_owned()
+    } else {
+        refusal.reason
+    }
 }
 
 fn print_control_response(resp: &ControlResponse) {
     let symbol = if resp.is_ok() { "\u{2713}" } else { "\u{2717}" };
-    println!("{symbol} {} {}", resp.status_code, resp.status_text);
+    let text = if resp.is_ok() {
+        resp.status_text.clone()
+    } else {
+        mgmt_refusal_text(resp.status_code, &resp.status_text)
+    };
+    println!("{symbol} {} {text}", resp.status_code);
     if let Some(ref body) = resp.body {
         print_params(body);
     }
@@ -1312,8 +1487,9 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
     let _ = writeln!(out, "key {}", fingerprint(&listing.key));
     let _ = writeln!(out, "probes-sent {}", listing.probes_sent);
     let _ = writeln!(out, "punches-refused {}", listing.punches_refused);
-    if !listing.serve.is_empty() {
-        let _ = writeln!(out, "serve {}", listing.serve);
+    let render = |d: &ndn_mgmt_wire::LinkDetail| d.render(&|d, c| LINK_WORDS.word(d, c));
+    if let Some(serve) = &listing.serve {
+        let _ = writeln!(out, "serve {}", render(serve));
     }
     let _ = writeln!(out, "held-total {}", listing.held_total);
     let _ = writeln!(out, "wakes-sent {}", listing.wakes_sent);
@@ -1340,8 +1516,8 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
                 "  relay {} source={} preference={}",
                 r.state, r.source, r.preference
             );
-            if !r.text.is_empty() {
-                let _ = write!(out, " {}", r.text);
+            if let Some(d) = &r.detail {
+                let _ = write!(out, " {}", render(d));
             }
             out.push('\n');
         }
@@ -1357,7 +1533,7 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
             );
         }
         if let Some(down) = &link.down {
-            let _ = writeln!(out, "  down {down}");
+            let _ = writeln!(out, "  down {}", render(down));
         }
         for p in &link.paths {
             let rtt = p
@@ -1381,8 +1557,8 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
         if let Some(s) = link.retry_in_secs {
             let _ = write!(out, " retry-in-s={s}");
         }
-        if !link.direct_text.is_empty() {
-            let _ = write!(out, " {}", link.direct_text);
+        if let Some(d) = &link.direct {
+            let _ = write!(out, " {}", render(d));
         }
         out.push('\n');
     }
@@ -1391,6 +1567,31 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
 #[cfg(test)]
 mod ctl_tests {
     use super::*;
+
+    /// The management gate's coded refusals read as ndn-ctl printed them
+    /// before the daemon answered codes.
+    #[test]
+    fn gate_refusals_read_as_before() {
+        use ndn_cert::report::{TrustRefusal, code};
+        let json = |r: TrustRefusal| serde_json::to_string(&r).unwrap();
+        let not_operator = TrustRefusal::new(code::COMMAND_NOT_OPERATOR, "neutral")
+            .with("uid", 1000)
+            .with("daemon_uid", 0)
+            .with("groups", "ndnadmin")
+            .with("anchor_configured", false);
+        assert_eq!(
+            mgmt_refusal_text(403, &json(not_operator)),
+            "refused: unsigned management commands are accepted on the local socket only from \
+             the daemon's user (uid 0), root, or members of `[security] trust_admin_groups` \
+             (currently: ndnadmin); this request came from uid 1000. Run the command as the \
+             daemon's user or root, add a group you belong to to `[security] \
+             trust_admin_groups` in the daemon config and restart, or sign the command with a \
+             key trusted by `[security.mgmt] trust_anchor_pib` (none is configured yet)."
+        );
+        let unverifiable = TrustRefusal::new(code::COMMAND_SIGNER_UNVERIFIABLE, "neutral");
+        assert!(mgmt_refusal_text(403, &json(unverifiable)).contains("without `--identity`"));
+        assert_eq!(mgmt_refusal_text(500, "plain text"), "plain text");
+    }
 
     #[test]
     fn status_renderer_includes_nfd_compatible_fields() {
@@ -1651,10 +1852,16 @@ mod ctl_tests {
                 LinkEntry {
                     label: "laptop".into(),
                     direct_state: "not-possible".into(),
-                    direct_text: "no probe came back".into(),
+                    direct: Some(ndn_mgmt_wire::LinkDetail::new(
+                        "punch-no-probe",
+                        "no probe came back",
+                    )),
                     retry_in_secs: Some(20),
                     mode: Some("off".into()),
-                    down: Some("off: links when asked".into()),
+                    down: Some(ndn_mgmt_wire::LinkDetail::new(
+                        "down-off",
+                        "off: links when asked",
+                    )),
                     ..Default::default()
                 },
                 LinkEntry {
@@ -1665,12 +1872,12 @@ mod ctl_tests {
                         source: "namespace:/home".into(),
                         preference: 0,
                         state: "linked".into(),
-                        text: String::new(),
+                        detail: None,
                     }),
                     ..Default::default()
                 },
             ],
-            serve: "own".into(),
+            serve: Some(ndn_mgmt_wire::LinkDetail::new("serve-own", "own")),
             held_total: 4,
             wakes_sent: 0,
         };

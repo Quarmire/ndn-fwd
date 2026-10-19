@@ -2649,6 +2649,7 @@ dependencies = [
  "ndn-tlv",
  "ndn-trust-envelope",
  "p256",
+ "parking_lot",
  "ring",
  "serde",
  "serde_json",
@@ -2754,6 +2755,7 @@ dependencies = [
  "ndn-ipc",
  "ndn-packet",
  "ndn-security",
+ "ndn-trust-envelope",
  "serde_json",
  "tokio",
 ]
@@ -3045,10 +3047,13 @@ dependencies = [
  "anyhow",
  "clap",
  "ndn-cert",
+ "ndn-config",
+ "ndn-ipc",
  "ndn-packet",
  "ndn-security",
  "ndn-trust-envelope",
  "qrcode",
+ "tokio",
 ]
 
 [[package]]
@@ -3081,12 +3086,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "ndn-cert",
  "ndn-face",
  "ndn-mgmt-wire",
  "ndn-packet",
  "ndn-security",
  "ndn-tlv",
  "ndn-transport",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -3165,6 +3173,7 @@ dependencies = [
  "bytes",
  "ndn-foundation-types",
  "ndn-tlv",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -3186,6 +3195,7 @@ dependencies = [
  "ndn-strategy",
  "ndn-sync",
  "ndn-transport",
+ "ndn-trust-envelope",
  "parking_lot",
  "tokio",
  "tokio-util",
@@ -3581,6 +3591,7 @@ dependencies = [
  "bytes",
  "clap",
  "ndn-app",
+ "ndn-cert",
  "ndn-config",
  "ndn-engine",
  "ndn-face",
