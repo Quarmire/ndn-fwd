@@ -1,5 +1,5 @@
 //! `ndn-fwd recovery-kit create|list|check|revoke`: the recovery kits of a
-//! namespace, the operator's side of [`ndn_cert::recovery`].
+//! namespace — the CLI over [`ndn_namespace::root::kit`].
 //!
 //! A kit holds a separate **recovery key**, never a copy of the root. On the
 //! root device, `create` makes the key (24 words shown once, a
@@ -11,7 +11,9 @@
 //! PIB (`security/context-update`), which adopts it under the continuity
 //! rule, stores and publishes it; when no daemon listens on the socket it
 //! is stored in `<pib>/contexts/` for the daemon's next start. `list` and
-//! `check` read the held context only and sign nothing.
+//! `check` read the held context only and sign nothing. A PIB holding the
+//! roots of several trusted prefixes names the one with `--namespace`
+//! (`revoke` without it acts on the prefix covering the recovery key).
 //!
 //! A YubiKey kit's token is selected with `--kit-yubikey-serial` /
 //! `--kit-yubikey-slot` (`--yubikey-*` always mean the root's token), and is
@@ -19,55 +21,27 @@
 //! says the slot's key is not needed ([`ndn_cert::SlotGuard`]).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use ndn_cert::context_update::ContextBump;
-use ndn_cert::recovery::{DEFAULT_KIT_SLOT, KIT_PASSPHRASE_ENV, KIT_PIN_ENV, KIT_WORDS_ENV};
-use ndn_cert::{
-    FileKit, KitFormat, RecoverySeed, RootSecret, RootStore, SlotGuard, YubikeyKit,
-    add_recovery_anchor, anchor_fingerprint, held_context, kit_anchor, read_secret,
-    recovery_anchor, remove_recovery_anchor, seal_file_kit,
-};
-use ndn_mgmt::ContextRefreshInfo;
-use ndn_namespace::admin::{ContextUpdateSink, HandedOver, SinkError};
+use ndn_cert::recovery::DEFAULT_KIT_SLOT;
+use ndn_cert::report::code;
+use ndn_cert::{KitFormat, YubikeyKit};
 use ndn_namespace::hex;
-use ndn_packet::{Data, Name};
-use ndn_security::{FilePib, KeyRole, SignedTrustContext, Signer};
+use ndn_namespace::root::RootError;
+use ndn_namespace::root::kit::{self, KitLocation, KitRequest, KitSpec};
+use ndn_packet::Name;
 
 use crate::onboard::{flag, pib_dir, positionals};
+use crate::root_host::{Daemon, Secrets, handed_text, listed, namespace_arg, render};
 
-/// How long one request waits for the daemon to take a new version (local
-/// work: verify, store, publish — after any other change of the namespace
-/// running there). Without an answer the same version is handed over again;
-/// the answer to that one says what became of it. After
-/// [`ndn_namespace::admin::HAND_OVER_WAITS`] waits (about five minutes) the
-/// outcome is reported as not known.
-const DAEMON_UPDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// A kit named on the command line: `words`, `yubikey`, or a kit file.
-pub(crate) enum KitSpec {
-    Words,
-    Yubikey,
-    File(PathBuf),
-}
-
-impl KitSpec {
-    pub(crate) fn parse(s: &str) -> KitSpec {
-        match s {
-            "words" => KitSpec::Words,
-            "yubikey" => KitSpec::Yubikey,
-            path => KitSpec::File(PathBuf::from(path)),
-        }
-    }
-
-    pub(crate) fn format(&self) -> KitFormat {
-        match self {
-            KitSpec::Words => KitFormat::Words,
-            KitSpec::Yubikey => KitFormat::Yubikey,
-            KitSpec::File(_) => KitFormat::File,
-        }
-    }
+/// A kit named on the command line: `words`, `yubikey` (the token and slot
+/// of `--kit-yubikey-*`), or a kit file.
+pub(crate) fn kit_spec(args: &[String], s: &str) -> Result<KitSpec> {
+    Ok(match s {
+        "words" => KitSpec::Words,
+        "yubikey" => KitSpec::Yubikey(yubikey_kit(args)?),
+        path => KitSpec::File(PathBuf::from(path)),
+    })
 }
 
 /// The token and slot of a YubiKey kit from the command line.
@@ -84,296 +58,6 @@ fn yubikey_kit(args: &[String]) -> Result<YubikeyKit> {
             .unwrap_or("always")
             .to_string(),
     })
-}
-
-fn kit_passphrase(args: &[String], purpose: &str, confirm: bool) -> Result<RootSecret> {
-    Ok(read_secret(
-        Some(KIT_PASSPHRASE_ENV),
-        "--kit-passphrase-file",
-        flag(args, &["--kit-passphrase-file"]).map(Path::new),
-        confirm,
-        purpose,
-        "recovery kit passphrase",
-    )?)
-}
-
-fn kit_pin(args: &[String], purpose: &str) -> Result<RootSecret> {
-    Ok(read_secret(
-        Some(KIT_PIN_ENV),
-        "--kit-pin-file",
-        flag(args, &["--kit-pin-file"]).map(Path::new),
-        false,
-        purpose,
-        "recovery kit YubiKey PIN",
-    )?)
-}
-
-fn kit_words(args: &[String], purpose: &str) -> Result<RecoverySeed> {
-    let words = read_secret(
-        Some(KIT_WORDS_ENV),
-        "--words-file",
-        flag(args, &["--words-file"]).map(Path::new),
-        false,
-        purpose,
-        "24 recovery words",
-    )?;
-    let words = std::str::from_utf8(words.expose()).context("the recovery words are not text")?;
-    Ok(RecoverySeed::from_words(words)?)
-}
-
-/// Open the kit `spec` as the recovery key of `namespace` (asking for its
-/// words, passphrase or PIN). Nothing is signed. Returns the key and, for a
-/// YubiKey kit, its token's serial.
-pub(crate) async fn open_kit(
-    args: &[String],
-    spec: &KitSpec,
-    namespace: &Name,
-    purpose: &str,
-) -> Result<(Arc<dyn Signer>, Option<u32>)> {
-    Ok(match spec {
-        KitSpec::Words => (Arc::new(kit_words(args, purpose)?.signer(namespace)), None),
-        KitSpec::File(path) => {
-            let kit = FileKit::read(path)?;
-            if kit.namespace != *namespace {
-                bail!(
-                    "{} is a recovery kit for {}, not {namespace}",
-                    path.display(),
-                    kit.namespace
-                );
-            }
-            (
-                Arc::new(kit.open(&kit_passphrase(args, purpose, false)?)?),
-                None,
-            )
-        }
-        KitSpec::Yubikey => {
-            let (signer, serial) = yubikey_kit(args)?
-                .signer(namespace, &kit_pin(args, purpose)?)
-                .await?;
-            (signer, Some(serial))
-        }
-    })
-}
-
-/// The namespace a command acts on: `--namespace`, else the one a file kit
-/// names, else the only context this PIB holds ([`ndn_cert::kit_namespace`]).
-pub(crate) fn kit_namespace(
-    args: &[String],
-    spec: Option<&KitSpec>,
-    pib_dir: &Path,
-) -> Result<Name> {
-    if let Some(ns) = flag(args, &["--namespace"]) {
-        return ns
-            .parse()
-            .map_err(|e| anyhow::anyhow!("--namespace {ns:?} is not an NDN name: {e}"));
-    }
-    let kit_file = match spec {
-        Some(KitSpec::File(path)) => Some(path.as_path()),
-        _ => None,
-    };
-    Ok(ndn_cert::kit_namespace(kit_file, pib_dir)?)
-}
-
-/// This PIB's root store and the context it is the root of
-/// ([`ndn_cert::root_device`]): of the trusted prefix `--namespace` names,
-/// else of the only one whose root the PIB holds (several: refused, listing
-/// them). `work` says what is done only on the root device, for the
-/// refusal on any other device.
-pub(crate) fn root_device(
-    pib: &FilePib,
-    args: &[String],
-    work: &str,
-) -> Result<(RootStore, SignedTrustContext, Data)> {
-    let namespace = crate::root_key::namespace_arg(args)?;
-    let ndn_cert::RootDevice {
-        store,
-        context,
-        data,
-    } = ndn_cert::root_device(pib, namespace.as_ref(), work)?;
-    Ok((store, context, data))
-}
-
-/// [`root_device`] for a command that names a key: of `--namespace` when
-/// given, else of the trusted prefix covering `name` among those whose
-/// root the PIB holds ([`ndn_cert::root_device_covering`]).
-pub(crate) fn root_device_for(
-    pib: &FilePib,
-    args: &[String],
-    name: &Name,
-    work: &str,
-) -> Result<(RootStore, SignedTrustContext, Data)> {
-    if crate::root_key::namespace_arg(args)?.is_some() {
-        return root_device(pib, args, work);
-    }
-    match ndn_cert::root_device_covering(pib, name, work)? {
-        Some(ndn_cert::RootDevice {
-            store,
-            context,
-            data,
-        }) => Ok((store, context, data)),
-        None => {
-            let held: Vec<String> = RootStore::open_all(pib)?
-                .iter()
-                .map(|s| s.namespace().to_string())
-                .collect();
-            bail!(
-                "{name} is not in a trusted prefix whose root this device holds ({}): {work} on \
-                 the root device of its prefix",
-                held.join(", ")
-            )
-        }
-    }
-}
-
-/// Why a version handed to the daemon ([`hand_over`]) was not taken:
-/// [`ndn_namespace::admin::NotTaken`].
-pub(crate) type NotTaken = ndn_namespace::admin::NotTaken<anyhow::Error>;
-
-/// The running daemon that uses `pib_dir`, on its socket: takes the
-/// versions made here (`security/context-update`).
-struct Daemon<'a> {
-    socket: &'a str,
-    pib_dir: &'a Path,
-}
-
-#[async_trait::async_trait]
-impl ContextUpdateSink for Daemon<'_> {
-    type Error = anyhow::Error;
-
-    fn peer(&self) -> String {
-        format!("the daemon at {}", self.socket)
-    }
-
-    async fn hand_over(&self, data: &Data) -> Result<ContextRefreshInfo, SinkError<anyhow::Error>> {
-        let socket = self.socket;
-        let client = match ndn_ipc::MgmtClient::connect(socket).await {
-            Ok(client) => client,
-            Err(ndn_ipc::ForwarderError::Io(e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                return Err(SinkError::NotRunning);
-            }
-            Err(e) => {
-                return Err(SinkError::NotReached(anyhow::anyhow!(
-                    "cannot use the daemon's socket {socket} ({e}): run this as a user the \
-                     daemon accepts, or pass -c with the config of the daemon that uses {}",
-                    self.pib_dir.display()
-                )));
-            }
-        };
-        ensure_daemon_pib(&client, socket, self.pib_dir)
-            .await
-            .map_err(SinkError::NotReached)?;
-        match client
-            .security_context_update(data.raw().clone(), DAEMON_UPDATE_TIMEOUT)
-            .await
-        {
-            Ok(resp) if resp.is_ok() => {
-                serde_json::from_str(&resp.status_text).map_err(|e| SinkError::Unreadable {
-                    error: e.to_string(),
-                    answer: resp.status_text.clone(),
-                })
-            }
-            Ok(resp) => Err(SinkError::Refused {
-                status_code: resp.status_code,
-                reason: resp.status_text,
-            }),
-            Err(ndn_ipc::ForwarderError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
-                Err(SinkError::NoAnswer)
-            }
-            Err(e) => Err(SinkError::Failed(e.into())),
-        }
-    }
-
-    fn no_answer_yet(&self, version: u64) {
-        eprintln!(
-            "# no answer yet from the daemon at {} on v{version} (another change of the \
-             namespace may be running there); asking again with the same version",
-            self.socket
-        );
-    }
-}
-
-/// Hand a version signed here to the running daemon that uses `pib_dir`,
-/// which adopts it by the continuity rule, stores and publishes it; with no
-/// daemon listening on the socket, store it in `pib_dir` for the daemon's
-/// next start ([`ndn_namespace::admin::hand_over`]: the same version again
-/// while unanswered, undo only on a refusal). Returns what happened.
-pub(crate) async fn hand_over(
-    args: &[String],
-    pib_dir: &Path,
-    bump: &ContextBump,
-) -> Result<String, NotTaken> {
-    let socket = crate::onboard::face_socket(args).map_err(NotTaken::Refused)?;
-    let daemon = Daemon {
-        socket: &socket,
-        pib_dir,
-    };
-    let store = crate::context_adopt::context_store(pib_dir);
-    Ok(
-        match ndn_namespace::admin::hand_over(&daemon, &store, bump).await? {
-            HandedOver::Taken(info) => format!("the daemon at {socket} {}", info.detail),
-            HandedOver::Stored { location } => format!(
-                "no daemon listens at {socket}: v{} is stored in {location}; (re)start the daemon \
-                 that uses {} so it loads, adopts and publishes it (one running with another \
-                 socket keeps the version before until it restarts)",
-                bump.context.version(),
-                pib_dir.display()
-            ),
-        },
-    )
-}
-
-/// The PIB directory a daemon reports (`security/identity-status`,
-/// `pib_path=`).
-async fn daemon_pib(client: &ndn_ipc::MgmtClient, socket: &str) -> Result<PathBuf> {
-    let resp = client
-        .security_identity_status()
-        .await
-        .with_context(|| format!("ask the daemon at {socket} which PIB it uses"))?;
-    resp.is_ok()
-        .then(|| {
-            resp.status_text
-                .split_whitespace()
-                .find_map(|field| field.strip_prefix("pib_path="))
-        })
-        .flatten()
-        .map(PathBuf::from)
-        .with_context(|| {
-            format!(
-                "the daemon at {socket} does not say which PIB it uses ({}): {}",
-                resp.status_code, resp.status_text
-            )
-        })
-}
-
-/// Refuse unless the daemon at `socket` uses `pib_dir`: a version made from
-/// the context stored there, handed to a daemon of another PIB holding the
-/// same namespace, would be adopted there while this PIB stays behind — and
-/// the next version made here would be a second, different one with the
-/// same number.
-pub(crate) async fn ensure_daemon_pib(
-    client: &ndn_ipc::MgmtClient,
-    socket: &str,
-    pib_dir: &Path,
-) -> Result<()> {
-    let theirs = daemon_pib(client, socket).await?;
-    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    if canonical(&theirs) != canonical(pib_dir) {
-        bail!(
-            "the daemon at {socket} uses the PIB {}, not {}: what is made here from {} must go \
-             to the daemon that uses it. Pass -c with that daemon's config (its [management] \
-             face_socket), or --pib {} to work on the PIB of the daemon at {socket}",
-            theirs.display(),
-            pib_dir.display(),
-            pib_dir.display(),
-            theirs.display()
-        );
-    }
-    Ok(())
 }
 
 /// `ndn-fwd recovery-kit …`.
@@ -393,140 +77,102 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     }
 }
 
+/// A refused `create`, as the CLI says it.
+fn create_refused(e: RootError) -> anyhow::Error {
+    if e.is(code::KIT_FILE_EXISTS) {
+        return anyhow::anyhow!(
+            "{} exists; refusing to overwrite a kit",
+            e.param("path").unwrap_or_default()
+        );
+    }
+    if e.is(code::KIT_NOT_ADDED) {
+        return render(e).context("no recovery kit was added; the trust context is unchanged");
+    }
+    render(e)
+}
+
 async fn create(args: &[String]) -> Result<()> {
     let format: KitFormat = flag(args, &["--format"])
         .context("recovery-kit create needs --format words|file|yubikey")?
         .parse()
         .map_err(|e| anyhow::anyhow!("--format: {e}"))?;
     let out = match format {
-        KitFormat::File => {
-            let out = PathBuf::from(
-                flag(args, &["--out"]).context("a file kit needs --out <path> to write it to")?,
-            );
-            if out.exists() {
-                bail!("{} exists; refusing to overwrite a kit", out.display());
-            }
-            Some(out)
-        }
+        KitFormat::File => Some(PathBuf::from(
+            flag(args, &["--out"]).context("a file kit needs --out <path> to write it to")?,
+        )),
         _ => None,
     };
+    let yubikey = match format {
+        KitFormat::Yubikey => yubikey_kit(args)?,
+        _ => YubikeyKit {
+            serial: None,
+            slot: DEFAULT_KIT_SLOT.to_string(),
+            touch_policy: "always".to_string(),
+        },
+    };
     let pib_dir = pib_dir(args)?;
-    let pib =
-        FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) = root_device(&pib, args, "recovery kits are made and revoked")?;
-    let namespace = store.namespace().clone();
-    let purpose = format!("Creating a recovery kit for {namespace}");
-
-    // The recovery key: in memory (words, file) or on the token.
-    let (seed, signer, location): (Option<RecoverySeed>, Arc<dyn Signer>, String) = match format {
-        KitFormat::Words | KitFormat::File => {
-            let seed = RecoverySeed::generate()?;
-            let signer = Arc::new(seed.signer(&namespace));
-            (Some(seed), signer, format.to_string())
-        }
-        KitFormat::Yubikey => {
-            let kit = yubikey_kit(args)?;
-            let pin = kit_pin(args, &purpose)?;
-            // Never on the root's own token (one lost token would lose both),
-            // never over a slot's key unless the operator says it is unneeded.
-            let guard = SlotGuard {
-                replace: args.iter().any(|a| a == "--replace-slot"),
-                not_on: store
-                    .yubikey()
-                    .map(|y| (y.serial, format!("the root of {namespace}"))),
-            };
-            let (signer, serial) = kit.generate(&namespace, &pin, &guard).await?;
-            (
-                None,
-                signer,
-                format!("YubiKey {serial}, PIV slot {}", kit.slot),
-            )
-        }
-    };
-    let anchor = recovery_anchor(Arc::clone(&signer)).await?;
-    drop(signer);
-    let key = anchor.key_name();
-
-    // A file kit is written before the root signs, and removed again if the
-    // new version does not land: no anchor without its kit.
-    if let (Some(out), Some(seed)) = (&out, &seed) {
-        let passphrase = kit_passphrase(args, "Sealing the recovery kit", true)?;
-        let root_fp = ctx
-            .anchors()
-            .iter()
-            .find(|a| {
-                ndn_cert::root_store::same_public_key(&a.value().public_key, store.public_key())
-            })
-            .map(|a| anchor_fingerprint(a.value()));
-        let uri = seal_file_kit(seed, &anchor, &namespace, root_fp, &passphrase)?;
-        ndn_security::secure_fs::write_private(out, format!("{uri}\n"))
-            .with_context(|| format!("write {}", out.display()))?;
-    }
-    let remove_out = || {
-        if let Some(out) = &out {
-            let _ = std::fs::remove_file(out);
-        }
-    };
-
-    let signed = async {
-        let unlock = crate::root_key::operator_secret(
-            args,
-            store.unlock_kind(),
-            &format!("Adding a recovery kit to {namespace} signs a new trust context version"),
-            false,
-        )?;
-        let root = store.signer(unlock.as_ref()).await?;
-        drop(unlock);
-        anyhow::Ok(add_recovery_anchor(root.as_ref(), &held_data, &anchor).await?)
-    }
+    let daemon = Daemon::new(args, &pib_dir);
+    let created = kit::create(
+        KitRequest {
+            pib_dir: pib_dir.clone(),
+            namespace: namespace_arg(args)?,
+            format,
+            out: out.clone(),
+            yubikey,
+            replace_slot: args.iter().any(|a| a == "--replace-slot"),
+        },
+        &daemon,
+        &Secrets { args },
+    )
     .await
-    .map_err(NotTaken::Refused);
-    let handed = match signed {
-        Ok(bump) => hand_over(args, &pib_dir, &bump).await.map(|h| (bump, h)),
-        Err(e) => Err(e),
-    };
-    let taken = match handed {
-        Ok(done) => Some(done),
-        Err(NotTaken::Refused(e)) => {
-            remove_out();
-            return Err(e.context("no recovery kit was added; the trust context is unchanged"));
-        }
+    .map_err(create_refused)?;
+    let kit::KitCreated {
+        namespace,
+        key,
+        fingerprint,
+        kit,
+        words,
+        held_version,
+        version,
+        root_key,
+        handed,
+        ..
+    } = created;
+    let handed = match handed {
+        Ok(taken) => Some(taken),
         // The version listing the kit may still be adopted: the kit is kept
         // and shown, so no anchor is left without its kit.
-        Err(NotTaken::Unknown(e)) => {
-            eprintln!("warning: {e:#}");
+        Err(unknown) => {
+            eprintln!("warning: {:#}", render(unknown));
             None
         }
+    };
+    let location = match &kit {
+        KitLocation::Words => "words".to_string(),
+        KitLocation::File(_) => "file".to_string(),
+        KitLocation::Yubikey { serial, slot } => format!("YubiKey {serial}, PIV slot {slot}"),
     };
 
     println!("# ndn-fwd recovery-kit create ({format})");
     println!("namespace      = {namespace}");
     println!("recovery_key   = {key}");
-    println!("fingerprint    = {}", hex(&anchor_fingerprint(&anchor)));
+    println!("fingerprint    = {}", hex(&fingerprint));
     println!("kit            = {location}");
-    match &taken {
-        Some((bump, handed)) => {
+    match &handed {
+        Some((handed, kits)) => {
             println!(
-                "trust_context  = v{} -> v{} (signed by the root {})",
-                ctx.version(),
-                bump.context.version(),
-                store.key_name()
+                "trust_context  = v{held_version} -> v{version} (signed by the root {root_key})"
             );
-            println!("handed_over    = {handed}");
             println!(
-                "recovery_kits  = {}",
-                bump.context
-                    .keys_with_role(KeyRole::RECOVERY_ANCHOR)
-                    .count()
+                "handed_over    = {}",
+                handed_text(handed, &daemon, version, &pib_dir)
             );
+            println!("recovery_kits  = {kits}");
         }
         None => {
             println!(
-                "trust_context  = v{} -> v{} (signed by the root {}): NOT KNOWN whether the \
-                 daemon adopted it",
-                ctx.version(),
-                ctx.version() + 1,
-                store.key_name()
+                "trust_context  = v{held_version} -> v{version} (signed by the root {root_key}): \
+                 NOT KNOWN whether the daemon adopted it"
             );
             println!(
                 "# The kit is kept, as that version may still be adopted. `ndn-fwd recovery-kit \
@@ -539,7 +185,7 @@ async fn create(args: &[String]) -> Result<()> {
     println!();
     match format {
         KitFormat::Words => {
-            let seed = seed.expect("a word kit has a seed");
+            let seed = words.as_ref().expect("a word kit has a seed");
             let words = seed.to_words();
             println!(
                 "# Write these 24 words down, in order, and keep them offline. They are shown"
@@ -591,43 +237,31 @@ fn list(args: &[String]) -> Result<()> {
         .map(|ns| ns.parse())
         .transpose()
         .map_err(|e| anyhow::anyhow!("--namespace: {e}"))?;
-    let mut shown = 0;
-    for (path, read) in ndn_cert::read_stored_contexts(&pib_dir)? {
-        let (ctx, _) = match read {
-            Ok(held) => held,
-            Err(e) => {
-                eprintln!("skipping {}: {e}", path.display());
-                continue;
-            }
-        };
-        if only.as_ref().is_some_and(|ns| ns != ctx.namespace()) {
-            continue;
-        }
-        shown += 1;
-        println!("namespace      = {} (v{})", ctx.namespace(), ctx.version());
-        let mut anchors: Vec<_> = ctx.anchors().iter().map(|a| a.value().clone()).collect();
-        anchors.sort_by_key(|a| a.name.to_string());
-        let mut kits = 0;
-        for anchor in &anchors {
-            let key = anchor.key_name();
-            let role = if ctx.has_key_role(&key, KeyRole::RECOVERY_ANCHOR) {
-                kits += 1;
+    let listed = kit::list(&pib_dir, only.as_ref()).map_err(render)?;
+    for (path, e) in &listed.skipped {
+        eprintln!("skipping {}: {e}", path.display());
+    }
+    for ctx in &listed.contexts {
+        println!("namespace      = {} (v{})", ctx.namespace, ctx.version);
+        for anchor in &ctx.anchors {
+            let role = if anchor.recovery_kit {
                 "recovery-kit"
             } else {
                 "root"
             };
             println!(
-                "{role:<14} = {key} (fingerprint {})",
-                hex(&anchor_fingerprint(anchor))
+                "{role:<14} = {} (fingerprint {})",
+                anchor.key,
+                hex(&anchor.fingerprint)
             );
         }
-        for key in ctx.keys_with_role(KeyRole::ROOT_DEVICE) {
+        for key in &ctx.root_device_keys {
             println!("root-device    = {key}");
         }
-        println!("recovery_kits  = {kits}");
+        println!("recovery_kits  = {}", ctx.recovery_kits);
         println!();
     }
-    if shown == 0 {
+    if listed.contexts.is_empty() {
         println!("# {} holds no matching trust context", pib_dir.display());
     }
     Ok(())
@@ -635,33 +269,60 @@ fn list(args: &[String]) -> Result<()> {
 
 async fn check(args: &[String]) -> Result<()> {
     let positional = positionals(args);
-    let spec =
-        KitSpec::parse(positional.get(1).context(
-            "recovery-kit check needs the kit: words, yubikey, or the path of a kit file",
-        )?);
-    let pib_dir = pib_dir(args)?;
-    let namespace = kit_namespace(args, Some(&spec), &pib_dir)?;
-    let (ctx, _) = held_context(&pib_dir, &namespace)?;
-    let (signer, _) = open_kit(
+    let spec = kit_spec(
         args,
-        &spec,
-        &namespace,
-        &format!("Checking a recovery kit of {namespace}"),
-    )
-    .await?;
-    let public_key = signer
-        .public_key()
-        .context("the kit's key reports no public key")?;
-    let key = kit_anchor(&ctx, &public_key)?;
-    println!("# ndn-fwd recovery-kit check ({})", spec.format());
-    println!("namespace      = {namespace}");
-    println!("recovery_key   = {key}");
+        positional.get(1).context(
+            "recovery-kit check needs the kit: words, yubikey, or the path of a kit file",
+        )?,
+    )?;
+    let pib_dir = pib_dir(args)?;
+    let namespace = namespace_arg(args)?;
+    let checked = kit::check(&pib_dir, &spec, namespace.as_ref(), &Secrets { args })
+        .await
+        .map_err(render)?;
+    println!("# ndn-fwd recovery-kit check ({})", checked.format);
+    println!("namespace      = {}", checked.namespace);
+    println!("recovery_key   = {}", checked.key);
     println!(
         "ok             = the kit opens, and its key is a recovery anchor of the held trust \
          context v{} (nothing was signed)",
-        ctx.version()
+        checked.version
     );
     Ok(())
+}
+
+/// A refused `revoke` of the kit `key`, as the CLI says it.
+fn revoke_refused(e: RootError, key: &Name, pib_dir: &Path) -> anyhow::Error {
+    let p = |param| e.param(param).unwrap_or_default().to_string();
+    if e.is(code::REVOKE_OUTSIDE_NAMESPACE) {
+        return anyhow::anyhow!(
+            "{key} is not in a trusted prefix whose root this device holds ({}): {} on the root \
+             device of its prefix",
+            listed(e.param("namespace")),
+            p("operation")
+        );
+    }
+    if e.is(code::NOT_A_RECOVERY_KIT) {
+        return anyhow::anyhow!(
+            "{key} is not a recovery kit of {} v{} (`ndn-fwd recovery-kit list` shows them); \
+             nothing was signed",
+            p("namespace"),
+            p("version")
+        );
+    }
+    if e.is(code::VERSION_NOT_TAKEN) {
+        return render(e).context("the kit was not revoked; the trust context is unchanged");
+    }
+    if e.is(code::HAND_OVER_UNKNOWN) {
+        let version = p("version");
+        return render(e).context(format!(
+            "whether the daemon adopted v{version} (without the kit) is not known: `ndn-fwd \
+             recovery-kit list --pib {}` stops listing {key} once it did; if it still lists it \
+             once the daemon is idle, revoke it again",
+            pib_dir.display()
+        ));
+    }
+    render(e)
 }
 
 async fn revoke(args: &[String]) -> Result<()> {
@@ -673,63 +334,34 @@ async fn revoke(args: &[String]) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("{target:?} is not an NDN name: {e}"))?;
     let pib_dir = pib_dir(args)?;
-    let pib =
-        FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) =
-        root_device_for(&pib, args, &key, "recovery kits are made and revoked")?;
-    let namespace = store.namespace().clone();
-    if !ctx.has_key_role(&key, KeyRole::RECOVERY_ANCHOR) {
-        bail!(
-            "{key} is not a recovery kit of {namespace} v{} (`ndn-fwd recovery-kit list` shows \
-             them); nothing was signed",
-            ctx.version()
-        );
-    }
-    let unlock = crate::root_key::operator_secret(
-        args,
-        store.unlock_kind(),
-        &format!("Revoking the recovery kit {key} signs a new trust context version"),
-        false,
-    )?;
-    let root = store.signer(unlock.as_ref()).await?;
-    drop(unlock);
-    let bump = remove_recovery_anchor(root.as_ref(), &held_data, &key).await?;
-    drop(root);
-    let handed = hand_over(args, &pib_dir, &bump)
-        .await
-        .map_err(|not| match not {
-            NotTaken::Refused(e) => {
-                e.context("the kit was not revoked; the trust context is unchanged")
-            }
-            NotTaken::Unknown(e) => e.context(format!(
-                "whether the daemon adopted v{} (without the kit) is not known: `ndn-fwd \
-             recovery-kit list --pib {}` stops listing {key} once it did; if it still lists it \
-             once the daemon is idle, revoke it again",
-                bump.context.version(),
-                pib_dir.display()
-            )),
-        })?;
+    let namespace = namespace_arg(args)?;
+    let daemon = Daemon::new(args, &pib_dir);
+    let revoked = kit::revoke(
+        &pib_dir,
+        &key,
+        namespace.as_ref(),
+        &daemon,
+        &Secrets { args },
+    )
+    .await
+    .map_err(|e| revoke_refused(e, &key, &pib_dir))?;
     println!("# ndn-fwd recovery-kit revoke");
-    println!("namespace      = {namespace}");
+    println!("namespace      = {}", revoked.namespace);
     println!("revoked_key    = {key}");
     println!(
         "trust_context  = v{} -> v{} (signed by the root {})",
-        ctx.version(),
-        bump.context.version(),
-        store.key_name()
+        revoked.held_version, revoked.version, revoked.root_key
     );
-    println!("handed_over    = {handed}");
     println!(
-        "recovery_kits  = {}",
-        bump.context
-            .keys_with_role(KeyRole::RECOVERY_ANCHOR)
-            .count()
+        "handed_over    = {}",
+        handed_text(&revoked.handed_over, &daemon, revoked.version, &pib_dir)
     );
+    println!("recovery_kits  = {}", revoked.recovery_kits);
     println!();
     println!("# The kit is no longer an anchor and its key is revoked: once a node holds");
     println!(
         "# v{}, a version the kit signs is refused there.",
-        bump.context.version()
+        revoked.version
     );
     Ok(())
 }

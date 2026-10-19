@@ -1,7 +1,8 @@
 //! `ndn-fwd schema show|explain|update` — inspect the trust schema of the
 //! contexts the node adopted (`<pib>/contexts/`, verified on load exactly as
 //! the daemon loads them), and bring a namespace's schema up to date on its
-//! root device. Early-exit subcommand like `init`/`adopt`.
+//! root device: the CLI over [`ndn_namespace::root::schema`]. Early-exit
+//! subcommand like `init`/`adopt`.
 //!
 //! - `show [--namespace <ns>]` prints the context and each schema blob as
 //!   readable rules: an LVS binary decoded back to LVS source (rule names
@@ -37,16 +38,18 @@
 //! rules devices would lose, unless `--accept-narrowing` is given.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use ndn_cert::{RootStore, SchemaUpdatePlan, load_persisted_contexts};
+use ndn_cert::report::code;
 use ndn_config::{CaTomlConfig, ForwarderConfig};
-use ndn_packet::{Data, Name};
-use ndn_security::{FilePib, Keyring, LvsModel, SchemaFormat, SignedTrustContext};
+use ndn_namespace::root::RootError;
+use ndn_namespace::root::schema::{self, Adopted, SchemaBlobView, SchemaUpdate};
+use ndn_packet::Name;
 
 use crate::onboard::{flag, pib_dir, positionals};
-use crate::recovery_kit::{NotTaken, hand_over, root_device};
+use crate::root_host::{
+    Daemon, Secrets, handed_text, listed, namespace_arg, render, render_before_signing,
+};
 
 const USAGE: &str = "usage: ndn-fwd schema show [-c <config>] [--pib <dir>] [--namespace <ns>]\n       \
      ndn-fwd schema explain <data-name> <key-name> [-c <config>] [--pib <dir>] \
@@ -62,25 +65,40 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     }
 }
 
-/// Every adopted context in the PIB's store, in a keyring. Contexts that fail
+/// Every adopted context in the PIB's store, verified. Contexts that fail
 /// to verify are reported and skipped, as the daemon does.
-fn load(pib: &Path) -> Result<Keyring> {
-    let keyring = Keyring::new();
-    let loaded = load_persisted_contexts(pib, &keyring)
-        .with_context(|| format!("read adopted contexts in {}", pib.display()))?;
-    for (path, result) in &loaded {
-        if let Err(e) = result {
-            eprintln!("warning: skipping {}: {e}", path.display());
-        }
+fn load(pib: &Path) -> Result<Adopted> {
+    let adopted = schema::load(pib).map_err(render)?;
+    for (path, e) in &adopted.skipped {
+        eprintln!("warning: skipping {}: {e}", path.display());
     }
-    if keyring.is_empty() {
-        bail!(
+    Ok(adopted)
+}
+
+/// A refused choice of the adopted context, as the CLI says it.
+fn select_refused(e: RootError) -> anyhow::Error {
+    let p = |key: &str| e.param(key).unwrap_or_default().to_string();
+    if e.is(code::NO_NAMESPACE_HELD) {
+        return anyhow::anyhow!(
             "no adopted trust context in {}/contexts (run `ndn-fwd init --namespace <ns>` or \
              `ndn-fwd adopt <envelope>`)",
-            pib.display()
+            p("pib")
         );
     }
-    Ok(keyring)
+    if e.is(code::NAMESPACE_NOT_HELD) {
+        return anyhow::anyhow!("no adopted trust context for {}", p("namespace"));
+    }
+    if e.is(code::SEVERAL_NAMESPACES) {
+        return anyhow::anyhow!(
+            "{} adopted contexts ({}); pick one with --namespace",
+            p("count"),
+            listed(e.param("namespaces"))
+        );
+    }
+    if e.is(code::NO_CONTEXT_GOVERNS) {
+        return anyhow::anyhow!("no adopted trust context governs {}", p("name"));
+    }
+    render(e)
 }
 
 fn parse_name(raw: &str, what: &str) -> Result<Name> {
@@ -88,82 +106,75 @@ fn parse_name(raw: &str, what: &str) -> Result<Name> {
         .map_err(|e| anyhow::anyhow!("invalid {what} {raw:?}: {e}"))
 }
 
-/// The context named by `--namespace`, else the only adopted one.
-fn select(keyring: &Keyring, args: &[String]) -> Result<Arc<SignedTrustContext>> {
-    let contexts = keyring.contexts();
-    if let Some(ns) = flag(args, &["--namespace"]) {
-        let ns = parse_name(ns, "--namespace")?;
-        return contexts
-            .into_iter()
-            .find(|c| c.namespace() == &ns)
-            .with_context(|| format!("no adopted trust context for {ns}"));
-    }
-    match contexts.as_slice() {
-        [one] => Ok(Arc::clone(one)),
-        many => bail!(
-            "{} adopted contexts ({}); pick one with --namespace",
-            many.len(),
-            many.iter()
-                .map(|c| c.namespace().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+/// `--namespace`, as `show` and `explain` read it.
+fn namespace_flag(args: &[String]) -> Result<Option<Name>> {
+    flag(args, &["--namespace"])
+        .map(|ns| parse_name(ns, "--namespace"))
+        .transpose()
 }
 
 fn show(args: &[String]) -> Result<()> {
     let pib = pib_dir(args)?;
-    let ctx = select(&load(&pib)?, args)?;
-    println!("# trust context {} v{}", ctx.namespace(), ctx.version());
-    let anchors: Vec<String> = ctx.anchors().iter().map(|r| r.key().to_string()).collect();
+    let adopted = load(&pib)?;
+    let ctx = adopted
+        .select(namespace_flag(args)?.as_ref())
+        .map_err(select_refused)?;
+    let view = schema::view(&ctx);
+    println!("# trust context {} v{}", view.namespace, view.version);
+    let anchors: Vec<String> = view.anchors.iter().map(Name::to_string).collect();
     println!("anchors        = {}", anchors.join(", "));
-    let cas: Vec<String> = ctx.ca_endpoints().iter().map(Name::to_string).collect();
+    let cas: Vec<String> = view.ca_endpoints.iter().map(Name::to_string).collect();
     println!("ca_endpoints   = {}", cas.join(", "));
-    println!("link_policy    = {}", ctx.link_policy().describe());
-    if ctx.relays().is_empty() {
+    println!("link_policy    = {}", view.link_policy.describe());
+    if view.relays.is_empty() {
         println!("relays         = none advertised");
     }
-    for relay in ctx.relays() {
+    for relay in &view.relays {
         println!("relay          = {relay}");
     }
     println!(
         "evaluation     = {}",
-        if ctx.schema_is_authoritative() {
-            "schema only, on every certificate hop (authoritative)"
-        } else if ctx.enforces_hierarchy() {
-            "schema AND hierarchy floor (signer identity must prefix the name), first signature"
-        } else {
-            "schema only, first signature"
+        match view.evaluation {
+            schema::Evaluation::Authoritative => {
+                "schema only, on every certificate hop (authoritative)"
+            }
+            schema::Evaluation::WithHierarchyFloor => {
+                "schema AND hierarchy floor (signer identity must prefix the name), first signature"
+            }
+            schema::Evaluation::FirstSignature => "schema only, first signature",
         }
     );
-    for (i, blob) in ctx.published_schemas().iter().enumerate() {
+    for (i, blob) in view.blobs.into_iter().enumerate() {
         println!();
-        match blob.format {
-            SchemaFormat::Lvs => {
-                let model = LvsModel::decode(&blob.body)
-                    .map_err(|e| anyhow::anyhow!("schema blob {i}: {e}"))?;
-                println!(
-                    "# schema blob {i}: LVS binary ({} bytes), decoded to LVS source",
-                    blob.body.len()
-                );
-                print!("{}", model.to_text());
+        match blob.map_err(|e| blob_unreadable(e, i))? {
+            SchemaBlobView::Lvs { bytes, source } => {
+                println!("# schema blob {i}: LVS binary ({bytes} bytes), decoded to LVS source");
+                print!("{source}");
             }
-            SchemaFormat::NativeText => {
+            SchemaBlobView::Native { rules } => {
                 println!("# schema blob {i}: native rules (data => key), OR'd with the others");
-                let text = std::str::from_utf8(&blob.body)
-                    .with_context(|| format!("schema blob {i} is not UTF-8"))?;
-                for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                    println!("{}", line.trim());
+                for rule in rules {
+                    println!("{rule}");
                 }
             }
-            SchemaFormat::Unknown(code) => println!(
-                "# schema blob {i}: format {code} ({} bytes), not understood by this node: it \
-                 authorizes nothing here and is carried into the next version unchanged",
-                blob.body.len()
+            SchemaBlobView::Unknown { format, bytes } => println!(
+                "# schema blob {i}: format {format} ({bytes} bytes), not understood by this \
+                 node: it authorizes nothing here and is carried into the next version unchanged"
             ),
         }
     }
     Ok(())
+}
+
+/// A schema blob `i` that cannot be read, as the CLI says it.
+fn blob_unreadable(e: RootError, i: usize) -> anyhow::Error {
+    if e.param("format") == Some("native") {
+        return render(e).context(format!("schema blob {i} is not UTF-8"));
+    }
+    anyhow::anyhow!(
+        "schema blob {i}: {}",
+        e.param("error").unwrap_or(&e.refusal.reason)
+    )
 }
 
 fn explain(args: &[String]) -> Result<()> {
@@ -177,18 +188,11 @@ fn explain(args: &[String]) -> Result<()> {
     let data = parse_name(data, "data name")?;
     let key = parse_name(key, "key name")?;
     let pib = pib_dir(args)?;
-    let keyring = load(&pib)?;
-    let ctx = if flag(args, &["--namespace"]).is_some() {
-        select(&keyring, args)?
-    } else {
-        let ctx = keyring.context_for(&data);
-        if Arc::ptr_eq(&ctx, keyring.ambient()) {
-            bail!("no adopted trust context governs {data}");
-        }
-        ctx
-    };
-
-    let why = ctx.explain(&data, &key);
+    let adopted = load(&pib)?;
+    let explained = adopted
+        .explain(&data, &key, namespace_flag(args)?.as_ref())
+        .map_err(select_refused)?;
+    let (ctx, why) = (&explained.context, &explained.explanation);
     println!("data           = {data}");
     println!("key            = {key}");
     println!("context        = {} v{}", ctx.namespace(), ctx.version());
@@ -215,16 +219,6 @@ fn explain(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// What `ndn-fwd schema update` signs, decided before the root is unlocked.
-struct UpdatePlan {
-    store: RootStore,
-    held: SignedTrustContext,
-    held_data: Data,
-    /// The schema, enrollment policy and hint, and link policy of the next
-    /// version, and what they change ([`ndn_cert::plan_schema_update`]).
-    update: SchemaUpdatePlan,
-}
-
 /// The `[ca]` / `[[ca]]` entry of `-c` for the CA of `namespace`
 /// ([`crate::ca::config_for`]), else the defaults (no stated policy).
 fn ca_config(args: &[String], namespace: &Name) -> Result<CaTomlConfig> {
@@ -247,22 +241,15 @@ fn ca_config(args: &[String], namespace: &Name) -> Result<CaTomlConfig> {
 /// it advertises a policy (refused, as the CA's start refuses, when the
 /// namespace's `[ca]` entry of `-c` states another), else the policy the
 /// CA enforces for it; the link policy is that entry's when it differs from
-/// the held one ([`ndn_cert::plan_schema_update`]).
-fn plan_update(pib_dir: &Path, args: &[String]) -> Result<UpdatePlan> {
-    let pib =
-        FilePib::open(pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, held, held_data) = root_device(&pib, args, "a namespace's schema is updated")?;
-    let stated =
-        crate::ca::policy_input(&ca_config(args, held.namespace()).context("nothing was signed")?)
-            .context("nothing was signed")?;
+/// the held one ([`ndn_namespace::root::schema::plan_update`]).
+fn plan_update(pib_dir: &Path, args: &[String]) -> Result<SchemaUpdate> {
+    let root = schema::root_of(pib_dir, namespace_arg(args)?.as_ref()).map_err(render)?;
+    let stated = crate::ca::policy_input(
+        &ca_config(args, root.context.namespace()).context("nothing was signed")?,
+    )
+    .context("nothing was signed")?;
     let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
-    let update = ndn_cert::plan_schema_update(&held, &stated, accept_narrowing)?;
-    Ok(UpdatePlan {
-        store,
-        held,
-        held_data,
-        update,
-    })
+    schema::plan_update(root, &stated, accept_narrowing).map_err(render)
 }
 
 /// `<key> = <count>` and one `  <mark> <rule>` line per rule, or `= none`.
@@ -289,98 +276,66 @@ fn print_relays(key: &str, relays: &[ndn_security::AdvertisedRelay]) {
     }
 }
 
+/// A refused update of `namespace` (held at `held`), as the CLI says it.
+fn update_refused(e: RootError, namespace: &Name, held: u64, pib_dir: &Path) -> anyhow::Error {
+    if e.is(code::NOTHING_TO_SIGN) {
+        return anyhow::anyhow!(
+            "the held trust context carries this schema, enrollment hint, link policy and relays \
+             already; nothing was signed"
+        );
+    }
+    if e.is(code::VERSION_NOT_TAKEN) {
+        return render(e).context(format!(
+            "nothing changed: the trust context of {namespace} stays v{held} with its schema"
+        ));
+    }
+    if e.is(code::HAND_OVER_UNKNOWN) {
+        let version = e.param("version").unwrap_or_default().to_string();
+        return render(e).context(format!(
+            "whether the daemon adopted v{version} (the schema update) is not known: once the \
+             daemon is idle, run `ndn-fwd schema update --pib {}` again with the same flags — \
+             it reports nothing to change if the daemon took v{version}, and signs the \
+             version again if not",
+            pib_dir.display()
+        ));
+    }
+    render_before_signing(e)
+}
+
 /// `ndn-fwd schema update`.
 async fn update(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
-    let UpdatePlan {
-        store,
-        held,
-        held_data,
-        update:
-            SchemaUpdatePlan {
-                schema,
-                policy,
-                hint,
-                link,
-                relays,
-                change,
-            },
-    } = plan_update(&pib_dir, args)?;
-    let namespace = held.namespace().clone();
-    if change.is_empty() {
+    let planned = plan_update(&pib_dir, args)?;
+    let namespace = planned.root.context.namespace().clone();
+    let held = planned.root.context.version();
+    if planned.plan.change.is_empty() {
+        let (policy, change) = (&planned.plan.policy, &planned.plan.change);
         println!("# ndn-fwd schema update");
         println!("namespace      = {namespace}");
         println!(
-            "trust_context  = v{} (carries the current schema, enrollment hint, link policy and \
-             relays already; nothing signed)",
-            held.version()
+            "trust_context  = v{held} (carries the current schema, enrollment hint, link policy \
+             and relays already; nothing signed)"
         );
         println!("enrollment     = {}", policy.describe());
         println!("link_policy    = {}", change.link.describe());
         print_relays("relays", &change.relays);
         return Ok(());
     }
-    crate::revoke::check_daemon(args, &pib_dir).await?;
-
-    let unlock = crate::root_key::operator_secret(
-        args,
-        store.unlock_kind(),
-        &format!("Updating the schema of {namespace} signs a new trust context version"),
-        false,
-    )?;
-    let root = store
-        .signer(unlock.as_ref())
+    let daemon = Daemon::new(args, &pib_dir);
+    let updated = schema::update(planned, &pib_dir, &daemon, &Secrets { args })
         .await
-        .context("the root did not unlock; nothing was signed")?;
-    drop(unlock);
-    let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
-    let signed = ndn_cert::bump_context_schema(
-        root.as_ref(),
-        &held_data,
-        &schema,
-        &hint,
-        link.as_ref(),
-        relays.as_deref(),
-        accept_narrowing,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e}. Nothing was signed"))?
-    .context(
-        "the held trust context carries this schema, enrollment hint, link policy and relays \
-         already; nothing was signed",
-    )?;
-    drop(root);
-    let version = signed.bump.context.version();
-    let handed = hand_over(args, &pib_dir, &signed.bump)
-        .await
-        .map_err(|not| match not {
-            NotTaken::Refused(e) => e.context(format!(
-                "nothing changed: the trust context of {namespace} stays v{} with its schema",
-                held.version()
-            )),
-            NotTaken::Unknown(e) => e.context(format!(
-                "whether the daemon adopted v{version} (the schema update) is not known: once the \
-                 daemon is idle, run `ndn-fwd schema update --pib {}` again with the same flags — \
-                 it reports nothing to change if the daemon took v{version}, and signs the \
-                 version again if not",
-                pib_dir.display()
-            )),
-        })?;
-
-    let change = &signed.change;
+        .map_err(|e| update_refused(e, &namespace, held, &pib_dir))?;
+    let version = updated.version;
+    let change = &updated.change;
     println!("# ndn-fwd schema update");
     println!("namespace      = {namespace}");
     println!(
-        "trust_context  = v{} -> v{version} (signed by the root {})",
-        held.version(),
-        store.key_name()
+        "trust_context  = v{held} -> v{version} (signed by the root {})",
+        updated.root_key
     );
     print_rules("rules_added", &change.added, '+');
     if change.removed.is_empty() {
-        println!(
-            "narrowed       = none (every rule of v{} is kept)",
-            held.version()
-        );
+        println!("narrowed       = none (every rule of v{held} is kept)");
     } else {
         print_rules("rules_removed", &change.removed, '-');
         println!(
@@ -390,12 +345,11 @@ async fn update(args: &[String]) -> Result<()> {
     }
     if change.becomes_authoritative {
         println!(
-            "evaluation     = schema only, on every certificate hop (authoritative; v{} also \
-             required the hierarchy floor)",
-            held.version()
+            "evaluation     = schema only, on every certificate hop (authoritative; v{held} also \
+             required the hierarchy floor)"
         );
     }
-    println!("enrollment     = {}", policy.describe());
+    println!("enrollment     = {}", updated.policy.describe());
     if change.changes_link() {
         println!(
             "link_policy    = {} -> {}",
@@ -428,7 +382,10 @@ async fn update(args: &[String]) -> Result<()> {
             change.relays.len()
         );
     }
-    println!("handed_over    = {handed}");
+    println!(
+        "handed_over    = {}",
+        handed_text(&updated.handed_over, &daemon, version, &pib_dir)
+    );
     println!();
     if change.changes_hint() {
         println!("# The trust context now states the enrollment policy the CA of {namespace}");
@@ -444,16 +401,19 @@ async fn update(args: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use bytes::Bytes;
     use ndn_cert::{
         ApprovalPolicy, ApprovalPoll, ApprovalRecord, ApproverError, Decision, RefusalKind,
-        namespace_schema,
+        RootStore, load_persisted_contexts, namespace_schema,
     };
     use ndn_mgmt::EnrollOutcome;
+    use ndn_packet::Data;
     use ndn_packet::encode::DataBuilder;
     use ndn_security::{
-        CertCache, Certificate, Ed25519Signer, EnrollmentHint, SchemaBlob, Signer,
-        ValidationResult, Validator,
+        CertCache, Certificate, Ed25519Signer, EnrollmentHint, FilePib, Keyring, SchemaBlob,
+        Signer, ValidationResult, Validator,
     };
 
     use super::*;
@@ -648,26 +608,22 @@ mod tests {
         assert!(node.approvals.get(&record.request_id).unwrap().is_pending());
         assert!(produces(&node, keyring, device.path(), &phone_key).await);
 
-        let plan = plan_update(root_dev.path(), &[]).unwrap();
+        let planned = plan_update(root_dev.path(), &[]).unwrap();
+        let plan = &planned.plan;
+        assert_eq!(plan.change.added.len(), 2, "{:?}", plan.change.added);
+        assert!(plan.change.removed.is_empty());
         assert_eq!(
-            plan.update.change.added.len(),
-            2,
-            "{:?}",
-            plan.update.change.added
-        );
-        assert!(plan.update.change.removed.is_empty());
-        assert_eq!(
-            plan.update.policy,
+            plan.policy,
             ApprovalPolicy::default(),
             "what the CA enforces"
         );
         let update = ndn_cert::bump_context_schema(
             root.as_ref(),
-            &plan.held_data,
-            &plan.update.schema,
-            &plan.update.hint,
-            plan.update.link.as_ref(),
-            plan.update.relays.as_deref(),
+            &planned.root.data,
+            &plan.schema,
+            &plan.hint,
+            plan.link.as_ref(),
+            plan.relays.as_deref(),
             false,
         )
         .await
@@ -690,7 +646,7 @@ mod tests {
         assert!(
             plan_update(root_dev.path(), &[])
                 .unwrap()
-                .update
+                .plan
                 .change
                 .is_empty()
         );
