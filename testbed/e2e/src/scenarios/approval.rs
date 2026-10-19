@@ -303,7 +303,7 @@ fn sign_old_namespace_version(cx: &mut Cx<'_>) -> StepResult<u64> {
         };
         let secret = RootSecret::new(ROOT_PASS.as_bytes().to_vec());
         let root = store.signer(Some(&secret)).await.map_err(err)?;
-        let signed = bump_context_schema(root.as_ref(), &held, &blobs, &hint, None, true)
+        let signed = bump_context_schema(root.as_ref(), &held, &blobs, &hint, None, None, true)
             .await
             .map_err(err)?
             .ok_or("the held context carries that schema already")?;

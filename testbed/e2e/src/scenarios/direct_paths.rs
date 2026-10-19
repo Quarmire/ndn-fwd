@@ -68,28 +68,39 @@ fn segments(len: usize) -> u64 {
 
 /// `ndn-ctl link list`, parsed.
 #[derive(Debug, Default)]
-struct LinkList {
-    key: Option<String>,
+pub(super) struct LinkList {
+    pub(super) key: Option<String>,
     probes_sent: Option<u64>,
     punches_refused: Option<u64>,
-    links: Vec<Link>,
+    /// The `serve` line: this device's relay serving policy.
+    pub(super) serve: Option<String>,
+    pub(super) held_total: Option<u64>,
+    pub(super) wakes_sent: Option<u64>,
+    pub(super) links: Vec<Link>,
 }
 
 #[derive(Debug, Default)]
-struct Link {
-    key: Option<String>,
-    device: Option<String>,
-    paths: Vec<PathLine>,
+pub(super) struct Link {
+    /// The word after `link`.
+    pub(super) label: String,
+    pub(super) key: Option<String>,
+    pub(super) device: Option<String>,
+    /// The `mode`, `relay`, `asleep` and `down` lines after their word.
+    pub(super) mode: Option<String>,
+    pub(super) relay: Option<String>,
+    pub(super) asleep: Option<String>,
+    pub(super) down: Option<String>,
+    pub(super) paths: Vec<PathLine>,
     /// The `direct` line after the word `direct`.
-    direct: String,
+    pub(super) direct: String,
 }
 
 #[derive(Debug)]
-struct PathLine {
-    kind: String,
-    remote: Option<SocketAddrV4>,
+pub(super) struct PathLine {
+    pub(super) kind: String,
+    pub(super) remote: Option<SocketAddrV4>,
     /// The line after the word `path`.
-    text: String,
+    pub(super) text: String,
 }
 
 impl LinkList {
@@ -107,6 +118,10 @@ impl LinkList {
                 match word {
                     "key" => link.key = value,
                     "device" => link.device = value,
+                    "mode" => link.mode = Some(rest.to_owned()),
+                    "relay" => link.relay = Some(rest.to_owned()),
+                    "asleep" => link.asleep = Some(rest.to_owned()),
+                    "down" => link.down = Some(rest.to_owned()),
                     "path" => link.paths.push(PathLine {
                         kind: rest.split_whitespace().next().unwrap_or("").to_owned(),
                         remote: rest
@@ -123,7 +138,13 @@ impl LinkList {
                     "key" => l.key = value,
                     "probes-sent" => l.probes_sent = Some(count()?),
                     "punches-refused" => l.punches_refused = Some(count()?),
-                    "link" => l.links.push(Link::default()),
+                    "serve" => l.serve = Some(rest.to_owned()),
+                    "held-total" => l.held_total = Some(count()?),
+                    "wakes-sent" => l.wakes_sent = Some(count()?),
+                    "link" => l.links.push(Link {
+                        label: rest.to_owned(),
+                        ..Link::default()
+                    }),
                     _ => {}
                 }
             }
@@ -132,7 +153,7 @@ impl LinkList {
     }
 
     /// The link to the device named `device`, or holding `key`.
-    fn to(&self, device: &str, key: Option<&str>) -> Option<&Link> {
+    pub(super) fn to(&self, device: &str, key: Option<&str>) -> Option<&Link> {
         self.links
             .iter()
             .find(|l| l.device.as_deref() == Some(device) || (key.is_some() && l.key.as_deref() == key))
@@ -140,13 +161,13 @@ impl LinkList {
 }
 
 impl Link {
-    fn direct_path(&self) -> Option<&PathLine> {
+    pub(super) fn direct_path(&self) -> Option<&PathLine> {
         self.paths.iter().find(|p| p.kind == "direct")
     }
 
     /// The `direct` state, and the text after it (and after any
     /// `retry-in-s=`).
-    fn direct_state(&self) -> (String, String) {
+    pub(super) fn direct_state(&self) -> (String, String) {
         let d = self.direct.trim();
         let (state, rest) = d.split_once(' ').unwrap_or((d, ""));
         let text = match rest.split_once(' ') {
@@ -158,7 +179,7 @@ impl Link {
     }
 }
 
-fn link_list(cx: &mut Cx<'_>, node: &str) -> StepResult<LinkList> {
+pub(super) fn link_list(cx: &mut Cx<'_>, node: &str) -> StepResult<LinkList> {
     let sock = cx.w.node(node).sock().display().to_string();
     let op = cx.tool("ndn-ctl").args(["--socket", &sock, "link", "list"]);
     let out = cx.exec(op);
@@ -244,7 +265,7 @@ fn wait_direct_gone(cx: &mut Cx<'_>, a: &str, b: &str, within: Duration) -> Step
 
 /// `node`'s QUIC link faces: remote address and packets in and out
 /// (Interests, Data and Nacks).
-fn quic_faces(cx: &mut Cx<'_>, node: &str) -> StepResult<Vec<(SocketAddrV4, u64)>> {
+pub(super) fn quic_faces(cx: &mut Cx<'_>, node: &str) -> StepResult<Vec<(SocketAddrV4, u64)>> {
     let sock = cx.w.node(node).sock().display().to_string();
     let op = cx
         .tool("ndn-ctl")
@@ -298,38 +319,6 @@ fn wait_relay_sees(cx: &mut Cx<'_>, public: Ipv4Addr, within: Duration) -> StepR
         }
         if start.elapsed() > within {
             return Err(format!("the relay has no link from {public} after {}s", within.as_secs()));
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-}
-
-/// `node` (the relay) becomes a `node` device on the root device's approval.
-fn enroll_by_approval(cx: &mut Cx<'_>, root_link: &str, node: &str) -> StepResult<()> {
-    let before = cx.certs(node);
-    let op = cx
-        .tool("ndn-fwd")
-        .arg("enroll")
-        .arg(root_link)
-        .args(["--role", "node", "--device", node, "-c"])
-        .arg(cx.w.node(node).cfg_arg());
-    let out = cx.ok(op, "enroll --role node")?;
-    let code = out.kv("code").ok_or("no code in the enroll output")?;
-    let approve = cx
-        .tool("ndn-fwd")
-        .args(["approvals", "approve"])
-        .args(code.split_whitespace())
-        .arg("-c")
-        .arg(cx.w.node("root").cfg_arg());
-    cx.ok(approve, "approve")?;
-    let start = Instant::now();
-    loop {
-        if let Ok(cert) = new_cert(cx, node, &before)
-            && cert.starts_with(&n(&format!("/node/{node}/KEY/")))
-        {
-            return Ok(());
-        }
-        if start.elapsed() > SHORT {
-            return Err(format!("{node} holds no {} certificate {}s after the approval", n(&format!("/node/{node}")), SHORT.as_secs()));
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -466,7 +455,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             .arg(cx.w.node("relay").cfg_arg());
         cx.ok(op, "adopt")?;
         cx.expect_version("relay", NS, 1)?;
-        enroll_by_approval(cx, &root.link_fp, "relay")
+        enroll_by_approval(cx, NS, &root.link_fp, "relay")
     })?;
     let hello = content(2_000, 30);
     let relay_key = sc.step("the relay accepts stranger by its key and restarts: its link key", |cx| {
@@ -557,6 +546,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.stop("car");
         cx.start("car")?;
         let start = Instant::now();
+        // Until car's punch has failed and says why: its window (10 s) is
+        // over, and it names the symmetric NATs as the cause.
         loop {
             let lc = link_list(cx, "car")?;
             let lt = link_list(cx, "tv")?;
@@ -565,20 +556,19 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             let direct = lc.to(&n("/member/tv"), lt.key.as_deref()).map(|l| (l.direct_state(), l.direct.clone()));
             if let Some(((state, text), line)) = &direct
-                && start.elapsed() >= Duration::from_secs(20)
                 && state == "not-possible"
-                && !text.is_empty()
+                && text.contains("symmetric NAT")
             {
                 cx.evidence(&format!("after {:.1}s, no direct path; car → tv: direct {line}", start.elapsed().as_secs_f64()));
                 return Ok(());
             }
             if start.elapsed() > Duration::from_secs(60) {
                 return Err(format!(
-                    "car → tv after 60s: {} (expected not-possible with a reason)",
+                    "car → tv after 60s: {} (expected not-possible, naming symmetric NATs)",
                     direct.map_or_else(|| "no link".to_owned(), |(_, l)| format!("direct {l}"))
                 ));
             }
-            thread::sleep(Duration::from_millis(500));
+            thread::sleep(Duration::from_millis(250));
         }
     })?;
     let note = content(100_000, 34);
@@ -592,8 +582,19 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     })?;
 
     sc.step("a punch from a key not allowed to link is refused; tab sends nothing toward it", |cx| {
-        // No other punch reaches tab meanwhile.
-        cx.stop("phone");
+        // No other punch reaches tab meanwhile, and tab's own (of phone, car
+        // and tv, by membership) are over: its probe count stands still.
+        for node in ["phone", "car", "tv"] {
+            cx.stop(node);
+        }
+        let mut last = link_list(cx, "tab")?.probes_sent;
+        wait_for(cx, "tab runs no punch: no link trying, probes-sent steady for 1 s", SHORT, |cx| {
+            thread::sleep(Duration::from_secs(1));
+            let list = link_list(cx, "tab")?;
+            let steady = list.probes_sent == last;
+            last = list.probes_sent;
+            Ok(steady && list.links.iter().all(|l| l.direct_state().0 != "trying"))
+        })?;
         let before = link_list(cx, "tab")?;
         let probes = before.probes_sent.ok_or("tab's link list shows no probes-sent")?;
         let refused = before.punches_refused.ok_or("tab's link list shows no punches-refused")?;
@@ -625,8 +626,18 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             thread::sleep(Duration::from_millis(250));
         }
-        // A punch that went ahead would probe for 4 s.
-        thread::sleep(Duration::from_secs(5));
+        // A punch that went ahead probes from the moment its answer is sent,
+        // every 200 ms: once stranger holds tab's answer (its punch says
+        // refused), a probe would already be counted, or be within the
+        // next second's five.
+        wait_for(cx, "stranger's punch of tab ends refused, with a reason", SHORT, |cx| {
+            let ls = link_list(cx, "stranger")?;
+            Ok(ls.to(&n("/member/tab"), None).is_some_and(|l| {
+                let (state, text) = l.direct_state();
+                state == "refused" && !text.is_empty()
+            }))
+        })?;
+        thread::sleep(Duration::from_secs(1));
         let after = link_list(cx, "tab")?;
         let probes_after = after.probes_sent.ok_or("tab's link list shows no probes-sent")?;
         let sent = cx.w.nat.as_ref().expect("NAT boxes").counter(BOX_B, counter)?;

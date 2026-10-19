@@ -131,12 +131,16 @@ USAGE:
                                           ([ca] approval_roles /
                                           approval_requires_invite of -c, else
                                           admin, node by an admin's approval;
-                                          member, guest by invite) and the link
+                                          member, guest by invite), the link
                                           policy ([ca] link_roles /
                                           relay_roles / enrollment_links /
-                                          direct_paths of -c, else any role
-                                          links, node relays, enrollment links
-                                          and direct paths on), print its
+                                          direct_paths / direct_pairs of -c,
+                                          else any role links, node relays,
+                                          enrollment links on, direct paths
+                                          between admin, member and node) and
+                                          the relays it advertises
+                                          ([[ca.relay]] of -c, else none),
+                                          print its
                                           ndn-trust://anchor envelope and the
                                           [security] lines for ndn-fwd.toml,
                                           and exit. <store>: os-keyring (the
@@ -249,13 +253,15 @@ USAGE:
                                           an earlier release gains the rules
                                           added since) and the enrollment
                                           policy its CA enforces, the link
-                                          policy [ca] of -c states (else the
-                                          held one), and hand it to the
-                                          daemon. Prints the rules added and
-                                          removed and the link policy change;
-                                          refused when a rule devices hold
-                                          would be removed or the link policy
-                                          narrows, unless --accept-narrowing
+                                          policy and relays [ca] of -c states
+                                          (else the held ones), and hand it to
+                                          the daemon. Prints the rules added
+                                          and removed and the link policy and
+                                          relay changes; refused when a rule
+                                          devices hold would be removed, the
+                                          link policy narrows or an advertised
+                                          relay is dropped, unless
+                                          --accept-narrowing
   ndn-fwd root-key status [--pib <dir>]   where this root device keeps its
                                           namespace root key
   ndn-fwd root-key move --to <store> [--pib <dir>]

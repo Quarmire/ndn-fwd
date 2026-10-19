@@ -72,7 +72,8 @@ enum Command {
         #[command(subcommand)]
         action: NeighborsAction,
     },
-    /// Show this device's QUIC links and the paths that reach each device.
+    /// Show this device's QUIC links and the paths that reach each device;
+    /// connect, disconnect, or set a link's mode.
     Link {
         #[command(subcommand)]
         action: LinkAction,
@@ -211,9 +212,27 @@ enum NeighborsAction {
 
 #[derive(Subcommand)]
 enum LinkAction {
-    /// List the links: each device's paths (direct, link, relay) and its
-    /// direct-path state.
+    /// List the links: each device's paths (direct, link, relay), its
+    /// direct-path state, and its mode, relay and sleep state.
     List,
+    /// Link now to a configured device, whatever its mode.
+    Connect {
+        /// The link's label, as `link list` shows it.
+        label: String,
+    },
+    /// Close a link and keep it closed until connected again or its mode
+    /// is set.
+    Disconnect {
+        /// The link's label, as `link list` shows it.
+        label: String,
+    },
+    /// Set a link's mode until the daemon restarts.
+    Mode {
+        /// The link's label, as `link list` shows it.
+        label: String,
+        /// `always`, `on-demand`, `on-demand:<idle seconds>` or `off`.
+        mode: ndn_mgmt_wire::LinkModeArg,
+    },
 }
 
 #[derive(Subcommand)]
@@ -477,6 +496,18 @@ async fn run_nfd(cli: &Cli) -> anyhow::Result<()> {
                 let mut out = String::new();
                 render_link_list_into(&mut out, &listing);
                 print!("{out}");
+            }
+            LinkAction::Connect { label } => {
+                let resp = mgmt.link_connect(label).await;
+                link_command_result(resp)?;
+            }
+            LinkAction::Disconnect { label } => {
+                let resp = mgmt.link_disconnect(label).await;
+                link_command_result(resp)?;
+            }
+            LinkAction::Mode { label, mode } => {
+                let resp = mgmt.link_mode(label, *mode).await;
+                link_command_result(resp)?;
             }
         },
         Command::Service { action } => match action {
@@ -1196,6 +1227,17 @@ fn print_params(params: &ndn_config::ControlParameters) {
     }
 }
 
+/// A link command's answer: what was done, or (exit status non-zero) why
+/// nothing was.
+fn link_command_result<E: std::fmt::Display>(resp: Result<ControlResponse, E>) -> anyhow::Result<()> {
+    let resp = resp.map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !resp.is_ok() {
+        anyhow::bail!("{} {}", resp.status_code, resp.status_text);
+    }
+    println!("{}", resp.status_text);
+    Ok(())
+}
+
 fn print_control_response(resp: &ControlResponse) {
     let symbol = if resp.is_ok() { "\u{2713}" } else { "\u{2717}" };
     println!("{symbol} {} {}", resp.status_code, resp.status_text);
@@ -1205,8 +1247,10 @@ fn print_control_response(resp: &ControlResponse) {
 }
 
 /// `ndn-ctl link list`, one item per line (scripts parse it):
-/// `key`, `probes-sent`, `punches-refused`, then per link `link <label>`
-/// with indented `key`, `device`, `path …` lines and one `direct …` line.
+/// `key`, `probes-sent`, `punches-refused`, `serve` (when reported),
+/// `held-total`, `wakes-sent`, then per link `link <label>` with indented
+/// `key`, `device`, and when set `mode`, `relay`, `asleep`, `down` lines,
+/// then `path …` lines and one `direct …` line.
 fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing) {
     use std::fmt::Write as _;
     fn fingerprint(key: &Option<[u8; 32]>) -> String {
@@ -1218,6 +1262,12 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
     let _ = writeln!(out, "key {}", fingerprint(&listing.key));
     let _ = writeln!(out, "probes-sent {}", listing.probes_sent);
     let _ = writeln!(out, "punches-refused {}", listing.punches_refused);
+    if !listing.serve.is_empty() {
+        let _ = writeln!(out, "serve {}", listing.serve);
+    }
+    let _ = writeln!(out, "held-total {}", listing.held_total);
+    let _ = writeln!(out, "wakes-sent {}", listing.wakes_sent);
+    let yes_no = |b: bool| if b { "yes" } else { "no" };
     for link in &listing.links {
         let _ = writeln!(out, "link {}", link.label);
         let _ = writeln!(out, "  key {}", fingerprint(&link.key));
@@ -1226,6 +1276,38 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
                 let _ = writeln!(out, "  device {d}");
             }
             None => out.push_str("  device -\n"),
+        }
+        if let Some(mode) = &link.mode {
+            let _ = write!(out, "  mode {mode}");
+            if let Some(s) = link.idle_secs {
+                let _ = write!(out, " idle-s={s}");
+            }
+            out.push('\n');
+        }
+        if let Some(r) = &link.relay {
+            let _ = write!(
+                out,
+                "  relay {} source={} preference={}",
+                r.state, r.source, r.preference
+            );
+            if !r.text.is_empty() {
+                let _ = write!(out, " {}", r.text);
+            }
+            out.push('\n');
+        }
+        if let Some(a) = &link.asleep {
+            let _ = writeln!(
+                out,
+                "  asleep since-s={} held={} hold={} wake={} wakes={}",
+                a.since_secs,
+                a.held,
+                yes_no(a.hold),
+                yes_no(a.wake),
+                a.wakes
+            );
+        }
+        if let Some(down) = &link.down {
+            let _ = writeln!(out, "  down {down}");
         }
         for p in &link.paths {
             let rtt = p
@@ -1467,7 +1549,7 @@ mod ctl_tests {
 
     #[test]
     fn link_list_renders_the_contract_format() {
-        use ndn_mgmt_wire::{LinkEntry, LinkListing, LinkPathEntry};
+        use ndn_mgmt_wire::{LinkAsleepEntry, LinkEntry, LinkListing, LinkPathEntry, LinkRelayEntry};
         let listing = LinkListing {
             key: Some([0xab; 32]),
             probes_sent: 40,
@@ -1496,6 +1578,15 @@ mod ctl_tests {
                         },
                     ],
                     direct_state: "up".into(),
+                    mode: Some("on-demand".into()),
+                    idle_secs: Some(60),
+                    asleep: Some(LinkAsleepEntry {
+                        since_secs: 300,
+                        held: 4,
+                        hold: true,
+                        wake: false,
+                        wakes: 0,
+                    }),
                     ..Default::default()
                 },
                 LinkEntry {
@@ -1503,20 +1594,45 @@ mod ctl_tests {
                     direct_state: "not-possible".into(),
                     direct_text: "no probe came back".into(),
                     retry_in_secs: Some(20),
+                    mode: Some("off".into()),
+                    down: Some("off: links when asked".into()),
+                    ..Default::default()
+                },
+                LinkEntry {
+                    label: "vps".into(),
+                    direct_state: "none".into(),
+                    mode: Some("always".into()),
+                    relay: Some(LinkRelayEntry {
+                        source: "namespace:/home".into(),
+                        preference: 0,
+                        state: "linked".into(),
+                        text: String::new(),
+                    }),
                     ..Default::default()
                 },
             ],
+            serve: "own".into(),
+            held_total: 4,
+            wakes_sent: 0,
         };
         let mut out = String::new();
         render_link_list_into(&mut out, &listing);
         let expected = format!(
-            "key {}\nprobes-sent 40\npunches-refused 1\n\
+            "key {}\nprobes-sent 40\npunches-refused 1\nserve own\nheld-total 4\nwakes-sent 0\n\
              link phone\n  key {}\n  device /home/bob/node/phone\n\
+             \x20 mode on-demand idle-s=60\n\
+             \x20 asleep since-s=300 held=4 hold=yes wake=no wakes=0\n\
              \x20 path direct face=7 remote=203.0.113.5:6367 rtt-ms=12.3 age-s=90\n\
              \x20 path relay face=3 remote=- rtt-ms=- age-s=3600 via=vps\n\
              \x20 direct up\n\
              link laptop\n  key -\n  device -\n\
-             \x20 direct not-possible retry-in-s=20 no probe came back\n",
+             \x20 mode off\n\
+             \x20 down off: links when asked\n\
+             \x20 direct not-possible retry-in-s=20 no probe came back\n\
+             link vps\n  key -\n  device -\n\
+             \x20 mode always\n\
+             \x20 relay linked source=namespace:/home preference=0\n\
+             \x20 direct none\n",
             "ab".repeat(32),
             "01".repeat(32),
         );

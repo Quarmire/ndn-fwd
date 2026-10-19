@@ -12,8 +12,12 @@ mod compromised;
 mod destroyed;
 mod direct_paths;
 mod lifecycle;
+mod membership;
 mod negatives;
+mod on_demand;
+mod phone_links;
 mod quic_links;
+mod relays;
 
 pub const ALL: &[&str] = &[
     "lifecycle",
@@ -24,6 +28,10 @@ pub const ALL: &[&str] = &[
     "approval",
     "quic-links",
     "direct-paths",
+    "phone-links",
+    "relays",
+    "on-demand",
+    "membership",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -36,6 +44,10 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "approval" => approval::run(sc),
         "quic-links" => quic_links::run(sc),
         "direct-paths" => direct_paths::run(sc),
+        "phone-links" => phone_links::run(sc),
+        "relays" => relays::run(sc),
+        "on-demand" => on_demand::run(sc),
+        "membership" => membership::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }
@@ -108,13 +120,32 @@ pub fn root_info(out: &crate::run::Out) -> StepResult<RootInfo> {
 
 /// `ndn-fwd init` with a sealed-file root on `node`'s PIB.
 pub fn init_root(cx: &mut Cx<'_>, node: &str, ns: &str, device: &str) -> StepResult<RootInfo> {
+    init_root_with(cx, node, ns, device, false).map(|(info, _)| info)
+}
+
+/// `ndn-fwd init` with a sealed-file root on `node`'s PIB; with `config`,
+/// `-c` names `node`'s config, written first from its current settings
+/// (its `[ca]` link keys and `[[ca.relay]]` go into the trust context).
+/// The init output too.
+pub fn init_root_with(
+    cx: &mut Cx<'_>,
+    node: &str,
+    ns: &str,
+    device: &str,
+    config: bool,
+) -> StepResult<(RootInfo, crate::run::Out)> {
     let pib = cx.w.node(node).pib();
-    let op = cx
+    let mut op = cx
         .tool("ndn-fwd")
         .args(["init", "--namespace", ns, "--device", device, "--pib"])
         .arg(pib.display().to_string())
         .args(["--root-store", "sealed-file"])
         .env("NDN_ROOT_PASSPHRASE", ROOT_PASS);
+    if config {
+        let n = cx.w.node(node);
+        std::fs::write(n.config(), n.render()).map_err(|e| format!("{}: {e}", n.config().display()))?;
+        op = op.arg("-c").arg(n.cfg_arg());
+    }
     let out = cx.ok(op, "init")?;
     cx.expect_version(node, ns, 1)?;
     if !pib.join("root").join("root.safebag").exists() {
@@ -130,7 +161,7 @@ pub fn init_root(cx: &mut Cx<'_>, node: &str, ns: &str, device: &str) -> StepRes
     if !root_keys.is_empty() {
         return Err(format!("init: a root key sits in the PIB in plaintext: {root_keys:?}"));
     }
-    Ok(info)
+    Ok((info, out))
 }
 
 #[derive(Clone, Debug)]
@@ -139,7 +170,8 @@ pub struct Invite {
     pub link: String,
 }
 
-/// `ndn-fwd-tokens new` for `root`'s namespace and fingerprint.
+/// `ndn-fwd-tokens new` for `root`'s namespace and fingerprint: member
+/// invites.
 pub fn mint(
     cx: &mut Cx<'_>,
     ns: &str,
@@ -147,9 +179,22 @@ pub fn mint(
     count: u32,
     ttl: Option<&str>,
 ) -> StepResult<Vec<Invite>> {
+    mint_as(cx, ns, fp, "member", count, ttl)
+}
+
+/// `ndn-fwd-tokens new` for `root`'s namespace and fingerprint: invites
+/// for `role` (`member` or `guest`).
+pub fn mint_as(
+    cx: &mut Cx<'_>,
+    ns: &str,
+    fp: &str,
+    role: &str,
+    count: u32,
+    ttl: Option<&str>,
+) -> StepResult<Vec<Invite>> {
     let mut op = cx
         .tool("ndn-fwd-tokens")
-        .args(["new", "--ca", ns, "--namespace", ns, "--anchor-fp", fp, "--role", "member"])
+        .args(["new", "--ca", ns, "--namespace", ns, "--anchor-fp", fp, "--role", role])
         .arg("--count")
         .arg(count.to_string());
     if let Some(t) = ttl {
@@ -199,6 +244,39 @@ pub fn enroll(
         check_lifetime(&out, days)?;
     }
     Ok(new_cert)
+}
+
+/// `node` becomes a `node` device of `ns` on the root device's approval.
+pub fn enroll_by_approval(cx: &mut Cx<'_>, ns: &str, root_link: &str, node: &str) -> StepResult<()> {
+    let before = cx.certs(node);
+    let op = cx
+        .tool("ndn-fwd")
+        .arg("enroll")
+        .arg(root_link)
+        .args(["--role", "node", "--device", node, "-c"])
+        .arg(cx.w.node(node).cfg_arg());
+    let out = cx.ok(op, "enroll --role node")?;
+    let code = out.kv("code").ok_or("no code in the enroll output")?;
+    let approve = cx
+        .tool("ndn-fwd")
+        .args(["approvals", "approve"])
+        .args(code.split_whitespace())
+        .arg("-c")
+        .arg(cx.w.node("root").cfg_arg());
+    cx.ok(approve, "approve")?;
+    let device = format!("{ns}/node/{node}");
+    let start = Instant::now();
+    loop {
+        if let Ok(cert) = new_cert(cx, node, &before)
+            && cert.starts_with(&format!("{device}/KEY/"))
+        {
+            return Ok(());
+        }
+        if start.elapsed() > SHORT {
+            return Err(format!("{node} holds no {device} certificate {}s after the approval", SHORT.as_secs()));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The certificate in `node`'s PIB that `before` did not list.
@@ -281,6 +359,27 @@ pub fn fetch_within(cx: &mut Cx<'_>, node: &str, name: &str, expect: &[u8], with
             Err(e) if start.elapsed() > within => return Err(format!("after {}s: {e}", within.as_secs())),
             Err(_) => thread::sleep(Duration::from_millis(250)),
         }
+    }
+}
+
+/// Wait until `done`, polling; how long it took.
+pub fn wait_for(
+    cx: &mut Cx<'_>,
+    what: &str,
+    within: Duration,
+    mut done: impl FnMut(&mut Cx<'_>) -> StepResult<bool>,
+) -> StepResult<Duration> {
+    let start = Instant::now();
+    loop {
+        if done(cx)? {
+            let took = start.elapsed();
+            cx.note(&format!("{what} after {:.2}s", took.as_secs_f64()));
+            return Ok(took);
+        }
+        if start.elapsed() > within {
+            return Err(format!("not within {}s: {what}", within.as_secs()));
+        }
+        thread::sleep(Duration::from_millis(200));
     }
 }
 

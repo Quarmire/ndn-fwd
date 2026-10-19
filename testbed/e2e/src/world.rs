@@ -69,6 +69,8 @@ pub struct NodeCfg {
     pub quic_dial_only: bool,
     /// `[[peer]]` entries: QUIC links this node dials.
     pub peers: Vec<PeerCfg>,
+    /// Further config, appended verbatim (e.g. `[relay_service]`).
+    pub extra_toml: String,
 }
 
 /// One `[[peer]]`.
@@ -238,6 +240,11 @@ impl Node {
         s.push_str(&format!(
             "[discovery]\nenabled = false\n\n[logging]\nlevel = \"{level}\"\n"
         ));
+        if !c.extra_toml.is_empty() {
+            s.push('\n');
+            s.push_str(&c.extra_toml);
+            s.push('\n');
+        }
         s
     }
 
@@ -278,6 +285,9 @@ impl Node {
         ));
         if c.context_sync {
             v.push("config: [security] context_sync = true".to_owned());
+        }
+        for line in c.extra_toml.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            v.push(format!("config: {line}"));
         }
         v
     }

@@ -119,6 +119,13 @@ fn show(args: &[String]) -> Result<()> {
     println!("anchors        = {}", anchors.join(", "));
     let cas: Vec<String> = ctx.ca_endpoints().iter().map(Name::to_string).collect();
     println!("ca_endpoints   = {}", cas.join(", "));
+    println!("link_policy    = {}", ctx.link_policy().describe());
+    if ctx.relays().is_empty() {
+        println!("relays         = none advertised");
+    }
+    for relay in ctx.relays() {
+        println!("relay          = {relay}");
+    }
     println!(
         "evaluation     = {}",
         if ctx.schema_is_authoritative() {
@@ -253,7 +260,8 @@ fn plan_update(pib_dir: &Path, args: &[String]) -> Result<UpdatePlan> {
             );
         }
     }
-    let stated = crate::ca::policy_input(&ca_config(args).context("nothing was signed")?);
+    let stated = crate::ca::policy_input(&ca_config(args).context("nothing was signed")?)
+        .context("nothing was signed")?;
     let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
     let update = ndn_cert::plan_schema_update(&held, &stated, accept_narrowing)?;
     Ok(UpdatePlan {
@@ -276,6 +284,18 @@ fn print_rules(key: &str, rules: &[String], mark: char) {
     }
 }
 
+/// `<key> = none advertised`, or one `  <relay>` line per relay.
+fn print_relays(key: &str, relays: &[ndn_security::AdvertisedRelay]) {
+    if relays.is_empty() {
+        println!("{key:<15}= none advertised");
+        return;
+    }
+    println!("{key:<15}= {}", relays.len());
+    for relay in relays {
+        println!("    {relay}");
+    }
+}
+
 /// `ndn-fwd schema update`.
 async fn update(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
@@ -289,6 +309,7 @@ async fn update(args: &[String]) -> Result<()> {
                 policy,
                 hint,
                 link,
+                relays,
                 change,
             },
     } = plan_update(&pib_dir, args)?;
@@ -297,12 +318,13 @@ async fn update(args: &[String]) -> Result<()> {
         println!("# ndn-fwd schema update");
         println!("namespace      = {namespace}");
         println!(
-            "trust_context  = v{} (carries the current schema, enrollment hint and link policy \
-             already; nothing signed)",
+            "trust_context  = v{} (carries the current schema, enrollment hint, link policy and \
+             relays already; nothing signed)",
             held.version()
         );
         println!("enrollment     = {}", policy.describe());
         println!("link_policy    = {}", change.link.describe());
+        print_relays("relays", &change.relays);
         return Ok(());
     }
     crate::revoke::check_daemon(args, &pib_dir).await?;
@@ -325,13 +347,14 @@ async fn update(args: &[String]) -> Result<()> {
         &schema,
         &hint,
         link.as_ref(),
+        relays.as_deref(),
         accept_narrowing,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}. Nothing was signed"))?
     .context(
-        "the held trust context carries this schema, enrollment hint and link policy already; \
-         nothing was signed",
+        "the held trust context carries this schema, enrollment hint, link policy and relays \
+         already; nothing was signed",
     )?;
     drop(root);
     let version = signed.bump.context.version();
@@ -392,6 +415,19 @@ async fn update(args: &[String]) -> Result<()> {
         }
     } else {
         println!("link_policy    = {} (unchanged)", change.link.describe());
+    }
+    if change.changes_relays() {
+        print_relays("relays_before", &change.relays_before);
+        print_relays("relays", &change.relays);
+        if !change.relays_dropped.is_empty() {
+            print_rules("relays_dropped", &change.relays_dropped, '-');
+            println!(
+                "                 (--accept-narrowing: a device using it loses that relay once it \
+                 holds v{version})"
+            );
+        }
+    } else if !change.relays.is_empty() {
+        println!("relays         = {} advertised (unchanged)", change.relays.len());
     }
     println!("handed_over    = {handed}");
     println!();
@@ -574,7 +610,7 @@ mod tests {
         let (_, v1) = ndn_cert::read_stored_context(root_dev.path(), &ns()).unwrap().unwrap();
         let (old_schema, old_hint) = old_generated_schema();
         let old =
-            ndn_cert::bump_context_schema(root.as_ref(), &v1, &old_schema, &old_hint, None, true)
+            ndn_cert::bump_context_schema(root.as_ref(), &v1, &old_schema, &old_hint, None, None, true)
             .await
             .unwrap()
             .unwrap();
@@ -611,6 +647,7 @@ mod tests {
             &plan.update.schema,
             &plan.update.hint,
             plan.update.link.as_ref(),
+            plan.update.relays.as_deref(),
             false,
         )
         .await

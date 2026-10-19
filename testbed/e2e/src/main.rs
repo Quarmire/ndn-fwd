@@ -10,7 +10,7 @@
 //! - the outer one builds the binaries, then starts `unshare` with a new
 //!   user, network, mount and PID namespace (its own `/proc`) running this
 //!   binary again with `--inner`, and waits (Ctrl-C kills the namespace);
-//! - the inner one is PID 1 of that namespace: it adds 10.200.0.1-6 to its
+//! - the inner one is PID 1 of that namespace: it adds 10.200.0.1-10 to its
 //!   private `lo` and runs the scenarios (NAT boxes, where a scenario needs
 //!   them, are nested network namespaces: `nat.rs`). When it exits —
 //!   normally, by panic or killed — the kernel kills every process left in
@@ -49,7 +49,7 @@ OPTIONS:
 
 SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
            recovery-compromised, negatives, approval, quic-links,
-           direct-paths
+           direct-paths, phone-links, relays, on-demand, membership
 ";
 
 #[derive(Clone, Debug, Default)]
@@ -149,6 +149,18 @@ fn binaries(args: &Args) -> Result<PathBuf, String> {
         if !ok {
             return Err("cargo build of the binaries under test failed".into());
         }
+        // The app's side of phone-links: the ndn-boltffi FFI driven over
+        // stdin, from the ndn-mobile workspace (same shared target dir).
+        println!("ndn-e2e: building the ndn-boltffi phone host (ndn-mobile) …");
+        let ok = Command::new("cargo")
+            .args(["build", "-p", "ndn-boltffi", "--example", "phone_host"])
+            .current_dir(ws.join("../ndn-mobile"))
+            .status()
+            .map_err(|e| format!("cargo: {e}"))?
+            .success();
+        if !ok {
+            return Err("cargo build of the ndn-boltffi phone host failed".into());
+        }
     }
     let meta = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
@@ -165,7 +177,7 @@ fn binaries(args: &Args) -> Result<PathBuf, String> {
 
 fn outer(args: &Args) -> Result<bool, String> {
     let bin_dir = binaries(args)?;
-    for b in ["ndn-fwd", "ndn-fwd-tokens", "ndn-ctl", "ndn-put", "ndn-peek", "ndn-sec"] {
+    for b in ["ndn-fwd", "ndn-fwd-tokens", "ndn-ctl", "ndn-put", "ndn-peek", "ndn-sec", "examples/phone_host"] {
         if !bin_dir.join(b).is_file() {
             return Err(format!("{b} not found in {}", bin_dir.display()));
         }
@@ -265,7 +277,7 @@ fn setup_network() -> Result<(), String> {
         }
     };
     ip(&["link", "set", "lo", "up"])?;
-    for n in 1..=6 {
+    for n in 1..=10 {
         ip(&["addr", "add", &format!("{}/24", addr(n)), "dev", "lo"])?;
     }
     Ok(())
@@ -279,7 +291,7 @@ fn inner(args: &Args) -> Result<bool, String> {
     };
     setup_network()?;
     println!(
-        "ndn-e2e: private user+network+mount+PID namespace up; nodes on 10.200.0.1-6 (lo); run dir {}",
+        "ndn-e2e: private user+network+mount+PID namespace up; nodes on 10.200.0.1-10 (lo); run dir {}",
         run_dir.display()
     );
     let selected: Vec<&str> = scenarios::ALL

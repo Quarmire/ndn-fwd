@@ -68,7 +68,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use ndn_cert::roles::{Role, sanitize_device_name};
 use ndn_cert::{
-    AnchorLink, EnrollTarget, PolicyInput, adopt_envelope_into_store,
+    AnchorLink, EnrollTarget, NamespacePolicies, PolicyInput, adopt_envelope_into_store,
     anchor_fingerprint, init_namespace_in_pib_with,
 };
 use ndn_config::ForwarderConfig;
@@ -420,21 +420,22 @@ async fn run_init(args: &[String]) -> Result<()> {
     };
     let force = args.iter().any(|a| a == "--force");
     let pib_dir = pib_dir(args)?;
-    // What enrollment needs an admin's approval for, and which devices may
-    // link and relay: `[ca]` of `-c`, else the defaults. The context
-    // advertises both (the link policy always stated), and the CA enforces
-    // exactly what the context advertises.
+    // What enrollment needs an admin's approval for, which devices may link,
+    // relay and make direct paths, and which relays the namespace
+    // advertises: `[ca]` of `-c`, else the defaults. The context advertises
+    // them (the link policy always stated), and the CA enforces exactly
+    // what the context advertises.
     let stated = match flag(args, &["-c", "--config"]) {
         Some(path) => {
             let toml = std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
             let cfg: ForwarderConfig = toml
                 .parse()
                 .with_context(|| format!("parse config {path}"))?;
-            crate::ca::policy_input(&cfg.ca)
+            crate::ca::policy_input(&cfg.ca)?
         }
         None => PolicyInput::default(),
     };
-    let (approval, link) = stated.new_namespace_policies()?;
+    let policies = stated.new_namespace_policies(&namespace)?;
     // Where the root goes, and its passphrase / PIN — asked now, never
     // taken from the command line.
     let root = crate::root_key::new_root_store(args)?;
@@ -442,7 +443,8 @@ async fn run_init(args: &[String]) -> Result<()> {
         FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
 
     let out =
-        init_namespace_in_pib_with(&pib, &namespace, &device, force, &root, &approval, &link).await?;
+        init_namespace_in_pib_with(&pib, &namespace, &device, force, &root, &policies).await?;
+    let NamespacePolicies { approval, link, relays } = policies;
     drop(root);
     let root_dev = &out.init;
     // The daemon may run from another directory: print an absolute path.
@@ -469,6 +471,12 @@ async fn run_init(args: &[String]) -> Result<()> {
     println!("schema         = generated namespace schema (see `ndn-fwd schema show`)");
     println!("enrollment     = {}", approval.describe());
     println!("link_policy    = {}", link.describe());
+    if relays.is_empty() {
+        println!("relays         = none advertised");
+    }
+    for relay in &relays {
+        println!("relay          = {relay}");
+    }
     println!("anchor_uri     = {}", root_dev.envelope.to_uri());
     println!(
         "anchor_url     = {}",
@@ -660,6 +668,7 @@ fn adopt_offline(
     println!("source               = inline in the link");
     println!("anchors              = {}", ctx.anchors().len());
     println!("ca_endpoints         = {}", ctx.ca_endpoints().len());
+    println!("relays               = {} advertised", ctx.relays().len());
     println!("stored               = {}", path.display());
     println!();
     println!("# Signed by the anchor with the expected fingerprint. The daemon loads this");

@@ -54,12 +54,14 @@ use ndn_cert::{
     EmailSender, FileCaStore, IssuancePolicy, NopChallenge, PinChallenge, PolicyError,
     PolicyInput, RequireAttestationKind, RolePolicy, TokenChallenge, TokenStore,
 };
-use ndn_config::CaTomlConfig;
+use ndn_config::{CaRelayConfig, CaTomlConfig};
 use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_identity::NdncertCa;
 use ndn_packet::Name;
-use ndn_security::{Certificate, FilePib, KeyChain, SecurityManager, SignedTrustContext, Validator};
+use ndn_security::{
+    AdvertisedRelay, Certificate, FilePib, KeyChain, SecurityManager, SignedTrustContext, Validator,
+};
 use ndn_transport::FaceId;
 
 pub(crate) const CA_FACE_ID: u64 = 0xFFFF_0002;
@@ -150,7 +152,7 @@ pub(crate) async fn prepare(
     let approval_policy = match &namespace {
         Some(ns) => {
             let held = newest_context(pib_path, ns)?;
-            Some(policy_input(cfg).enforced_policy(held.as_ref())?)
+            Some(policy_input(cfg)?.enforced_policy(held.as_ref())?)
         }
         None => None,
     };
@@ -214,19 +216,61 @@ fn newest_context(pib_path: &Path, namespace: &Name) -> Result<Option<SignedTrus
 }
 
 /// What `[ca] approval_roles` / `approval_requires_invite` / `link_roles` /
-/// `relay_roles` / `enrollment_links` / `direct_paths` state. A namespace CA enforces what
-/// its trust context advertises and refuses to start when they state
-/// another policy ([`PolicyInput::enforced_policy`]); `ndn-fwd init` and
-/// `ndn-fwd schema update -c <config>` write them into the context.
-pub(crate) fn policy_input(cfg: &CaTomlConfig) -> PolicyInput {
-    PolicyInput {
+/// `relay_roles` / `enrollment_links` / `direct_paths` / `direct_pairs` /
+/// `[[ca.relay]]` state. A namespace CA enforces what its trust context
+/// advertises and refuses to start when they state another policy
+/// ([`PolicyInput::enforced_policy`]); `ndn-fwd init` and `ndn-fwd schema
+/// update -c <config>` write them into the context.
+pub(crate) fn policy_input(cfg: &CaTomlConfig) -> Result<PolicyInput> {
+    let relays = cfg
+        .relays
+        .as_ref()
+        .map(|relays| relays.iter().map(advertised_relay).collect::<Result<Vec<_>>>())
+        .transpose()?;
+    Ok(PolicyInput {
         approval_roles: cfg.approval_roles.clone(),
         approval_requires_invite: cfg.approval_requires_invite,
         link_roles: cfg.link_roles.clone(),
         relay_roles: cfg.relay_roles.clone(),
         enrollment_links: cfg.enrollment_links,
         direct_paths: cfg.direct_paths,
+        direct_pairs: cfg.direct_pairs.clone(),
+        relays,
+    })
+}
+
+/// One `[[ca.relay]]` entry as the trust context carries it.
+fn advertised_relay(relay: &CaRelayConfig) -> Result<AdvertisedRelay> {
+    let device: Name = relay.device.parse().with_context(|| {
+        format!("[[ca.relay]] device {:?} is not an NDN name", relay.device)
+    })?;
+    let key = relay
+        .key
+        .as_deref()
+        .map(|hex| {
+            fingerprint(hex).with_context(|| {
+                format!("[[ca.relay]] {device}: key must be 64 hex digits, not {hex:?}")
+            })
+        })
+        .transpose()?;
+    Ok(AdvertisedRelay {
+        device,
+        key,
+        endpoints: relay.endpoint.clone(),
+        preference: relay.preference,
+    })
+}
+
+/// 64 hex digits as the 32 octets of a fingerprint.
+fn fingerprint(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
     }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// `[ca].prefix` is the CA namespace; `NdncertCa` appends `/CA` itself
@@ -1394,9 +1438,10 @@ mod tests {
         }
     }
 
-    /// `ndn-fwd init -c` writes the `[ca]` link policy into the context
-    /// (unset keys: the default), and a namespace CA refuses to start when
-    /// `[ca]` states another link policy than its context.
+    /// `ndn-fwd init -c` writes the `[ca]` link policy and relays into the
+    /// context (unset keys: the default), and a namespace CA refuses to
+    /// start when `[ca]` states another link policy or other relays than
+    /// its context.
     #[tokio::test]
     async fn the_context_carries_the_configured_link_policy_and_the_ca_checks_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1404,8 +1449,16 @@ mod tests {
         cfg.link_roles = Some(vec!["admin".into(), "node".into()]);
         cfg.enrollment_links = Some(false);
         cfg.direct_paths = Some(false);
-        let (approval, link) = policy_input(&cfg).new_namespace_policies().unwrap();
+        cfg.direct_pairs = Some(vec!["admin:node".into()]);
+        let relay = CaRelayConfig {
+            device: "/home/bob/node/vps".into(),
+            key: None,
+            endpoint: vec!["vps.example.net:6367".into()],
+            preference: 0,
+        };
+        cfg.relays = Some(vec![relay.clone()]);
         let ns: Name = "/home/bob".parse().unwrap();
+        let policies = policy_input(&cfg).unwrap().new_namespace_policies(&ns).unwrap();
         let pib = FilePib::new(dir.path()).unwrap();
         ndn_cert::init_namespace_in_pib_with(
             &pib,
@@ -1413,8 +1466,7 @@ mod tests {
             "desk",
             false,
             &ndn_cert::NewRootStore::File,
-            &approval,
-            &link,
+            &policies,
         )
         .await
         .unwrap();
@@ -1424,10 +1476,16 @@ mod tests {
             relay_roles: vec!["node".into()],
             enrollment_links: false,
             direct_paths: false,
+            direct_pairs: vec![("admin".into(), "node".into())],
         };
         assert_eq!(ctx.stated_link_policy(), Some(&expected));
+        assert_eq!(ctx.relays(), [advertised_relay(&relay).unwrap()]);
 
         prepare(&cfg, dir.path()).await.expect("[ca] restating the context's link policy");
+        cfg.relays = Some(Vec::new());
+        let err = prepare(&cfg, dir.path()).await.err().expect("other [ca] relays are refused");
+        assert!(err.to_string().contains("[ca] relay entries disagree"), "{err}");
+        cfg.relays = None;
         cfg.link_roles = Some(Vec::new());
         let err = prepare(&cfg, dir.path()).await.err().expect("a disagreeing [ca] is refused");
         assert!(err.to_string().contains("ndn-fwd schema update -c <config>"), "{err}");
