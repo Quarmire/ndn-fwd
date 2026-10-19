@@ -238,7 +238,7 @@ mod tests {
         let bump = ndn_cert::bump_context_revoking(
             root.as_ref(),
             &ns.init.context_data,
-            &[ns.device_key.clone()],
+            std::slice::from_ref(&ns.device_key),
         )
         .await
         .unwrap()

@@ -29,6 +29,10 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per run; boxing the arguments buys nothing"
+)]
 #[derive(Subcommand)]
 enum Cmd {
     /// Author a context and print its `ndn-trust://anchor` URI (and optionally a QR).
