@@ -221,7 +221,12 @@ fn key_locator(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<String> {
         .lines()
         .chain(out.stderr.lines())
         .find_map(|l| l.trim().strip_prefix("key:").map(|k| k.trim().to_owned()))
-        .ok_or_else(|| format!("{name} at {node}: no KeyLocator in the Data"))
+        .ok_or_else(|| {
+            format!(
+                "{name} at {node}: no `key:` line in ndn-peek -m's output: {:?}",
+                out.stdout.trim()
+            )
+        })
 }
 
 /// `name` (published by dev) fetched and validated at `node`, its bytes

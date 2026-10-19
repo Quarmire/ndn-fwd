@@ -50,7 +50,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let (tx, mut rx) = mpsc::channel::<ToolEvent>(256);
-    tokio::spawn(async move {
+    // Awaited before exiting, so no queued line is lost at shutdown.
+    let printer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.level {
                 EventLevel::Error | EventLevel::Warn => eprintln!("{}", ev.text),
@@ -59,7 +60,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    run_client(
+    let result = run_client(
         TracerouteParams {
             conn: ConnectConfig {
                 face_socket: cli.face_socket,
@@ -74,5 +75,7 @@ async fn main() -> Result<()> {
         },
         tx,
     )
-    .await
+    .await;
+    let _ = printer.await;
+    result
 }

@@ -72,7 +72,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let (tx, mut rx) = mpsc::channel::<ToolEvent>(256);
-    tokio::spawn(async move {
+    // Awaited before exiting: `run_peek` drops `tx` when it returns, which
+    // ends `rx.recv()`; otherwise the runtime's shutdown drops the lines
+    // still queued (the `-m` metadata is sent last).
+    let printer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.level {
                 EventLevel::Error | EventLevel::Warn => eprintln!("{}", ev.text),
@@ -104,6 +107,7 @@ async fn main() -> Result<()> {
         tx,
     )
     .await;
+    let _ = printer.await;
     if let Some(refused) = result.as_ref().err().and_then(|e| e.downcast_ref::<Refused>()) {
         eprintln!("refused: {}", refused.refusal.as_str());
         let finality = if refused.refusal.is_final() { "final" } else { "refused for now" };

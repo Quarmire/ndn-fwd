@@ -75,7 +75,8 @@ async fn main() -> Result<()> {
         .with_context(|| format!("reading {}", cli.file))?;
 
     let (tx, mut rx) = mpsc::channel::<ToolEvent>(256);
-    tokio::spawn(async move {
+    // Awaited before exiting, so no queued line is lost at shutdown.
+    let printer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.level {
                 EventLevel::Error | EventLevel::Warn => eprintln!("{}", ev.text),
@@ -88,7 +89,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    run_producer(
+    let result = run_producer(
         PutParams {
             conn: ConnectConfig {
                 face_socket: cli.face_socket,
@@ -110,5 +111,7 @@ async fn main() -> Result<()> {
         },
         tx,
     )
-    .await
+    .await;
+    let _ = printer.await;
+    result
 }

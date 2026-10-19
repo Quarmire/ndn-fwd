@@ -85,7 +85,8 @@ async fn main() -> Result<()> {
 
     let (tx, mut rx) = mpsc::channel::<ToolEvent>(256);
 
-    tokio::spawn(async move {
+    // Awaited before exiting, so no queued line is lost at shutdown.
+    let printer = tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
             match ev.level {
                 EventLevel::Error | EventLevel::Warn => eprintln!("{}", ev.text),
@@ -94,7 +95,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    match cli.command {
+    let result = match cli.command {
         Command::Server {
             conn,
             prefix,
@@ -131,5 +132,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-    }
+    };
+    let _ = printer.await;
+    result
 }
