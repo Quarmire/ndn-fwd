@@ -455,6 +455,50 @@ fn load_adopted_contexts(cfg: &ForwarderConfig, mgr: &ndn_security::SecurityMana
     }
 }
 
+/// Say at startup, in one line, how Data from non-local faces is validated
+/// (local faces never are): the mapping is `boot::configure_data_path`'s.
+fn log_data_validation(sec: &ndn_config::SecurityConfig, ephemeral: bool) {
+    if !sec.validator_enabled || sec.profile == "disabled" {
+        if sec.profile.is_empty() {
+            // `SecurityConfig::default()`: the config has no [security] table.
+            tracing::warn!(
+                target: "security",
+                "no [security] table: Data from non-local faces is forwarded and cached \
+                 WITHOUT validation (profile \"disabled\"). Add a [security] table to \
+                 validate: profile = \"default\" (chain to this node's trust anchors) or \
+                 \"accept-signed\" (signature only)."
+            );
+        } else {
+            tracing::warn!(
+                target: "security",
+                "[security] disables validation: Data from non-local faces is forwarded and \
+                 cached WITHOUT validation."
+            );
+        }
+    } else if sec.profile == "accept-signed" {
+        tracing::info!(
+            target: "security",
+            "[security] profile = \"accept-signed\": Data from non-local faces must carry a \
+             signature that verifies against its signer's certificate; no trust anchor is \
+             required."
+        );
+    } else if ephemeral {
+        tracing::warn!(
+            target: "security",
+            "[security] profile = \"default\" with an ephemeral identity: the only trust \
+             anchors are this node's own key and adopted trust contexts, so key-signed Data \
+             from non-local faces that chains to neither is REFUSED (untrusted-root). Configure \
+             an identity whose PIB holds trust anchors, or `ndn-fwd adopt <anchor link>`."
+        );
+    } else {
+        tracing::info!(
+            target: "security",
+            "[security] profile = \"default\": Data from non-local faces must chain to a trust \
+             anchor of this node (its PIB's anchors, trust_anchor, adopted trust contexts)."
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Onboarding subcommands (`init` / `adopt`) run and exit before the daemon
@@ -598,6 +642,7 @@ async fn main() -> Result<()> {
             fwd_config.security.profile
         );
     }
+    log_data_validation(&fwd_config.security, security_is_ephemeral);
 
     // Parse [coding] and [rate-limit] from the same raw TOML.
     #[cfg(feature = "fec")]
