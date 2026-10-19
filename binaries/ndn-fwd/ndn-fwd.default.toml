@@ -46,7 +46,14 @@ face_socket = "/run/ndn-fwd/ndn-fwd.sock"
 [security]
 # Automatically generate an identity on first startup.
 auto_init = true
-# NDN identity name for this forwarder.
+# The node identity: what this forwarder signs its own packets as
+# (management responses, discovery records, links, DV). Unset: the PIB's
+# default identity (recorded by its first `ndn-fwd enroll`, or set with
+# `ndn-fwd node-identity <identity>`), else its device identity in a trusted
+# prefix whose root it holds, else the first enrolled, else an ephemeral key.
+# Data under each trusted prefix it is a member of is signed with that
+# prefix's own key whatever this says; enrolling in another prefix adds an
+# identity and never changes the node identity.
 # identity = "/ndn/router/docker"
 profile   = "default"
 
