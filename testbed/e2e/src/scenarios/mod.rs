@@ -19,6 +19,7 @@ mod on_demand;
 mod phone_links;
 mod quic_links;
 mod relays;
+mod tui;
 
 pub const ALL: &[&str] = &[
     "lifecycle",
@@ -34,6 +35,7 @@ pub const ALL: &[&str] = &[
     "on-demand",
     "membership",
     "multi-prefix",
+    "tui",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -51,6 +53,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "on-demand" => on_demand::run(sc),
         "membership" => membership::run(sc),
         "multi-prefix" => multi_prefix::run(sc),
+        "tui" => tui::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

@@ -1084,8 +1084,10 @@ async fn main() -> Result<()> {
     let mut ca_approvals = Vec::new();
     let mut ca_states = Vec::new();
     let mut ca_statuses = Vec::new();
-    // Each CA's invites, for the mgmt `ca/invite-*` verbs.
+    // Each CA's invites, for the mgmt `ca/invite-*` verbs, and its state,
+    // whose issued certificates `ca/issued-list` lists.
     let mut ca_invites = Vec::new();
+    let mut ca_issued = Vec::new();
     for spawn in ca_spawns {
         // Told of every request opened or decided from its first one.
         if let Some(approvals) = &spawn.approvals {
@@ -1109,11 +1111,28 @@ async fn main() -> Result<()> {
             face = spawn.face_id.0,
             "CA FIB entry installed"
         );
+        let issuer = spawn.invites.issuer().clone();
         let running = ca::spawn(spawn, &engine)?;
         ca_approvals.extend(running.approvals);
+        // And of every certificate it issues (by invite, approval, renewal).
+        running
+            .state
+            .set_issued_observer(mgmt_ndn::events::issued_observer(
+                issuer.ca_prefix.to_string(),
+                issuer.namespace.clone(),
+                events.trust_sink(),
+            ));
+        ca_issued.push(ndn_cert::CaIssued::new(
+            Arc::clone(&running.state),
+            issuer.ca_prefix,
+            issuer.namespace,
+        ));
         ca_states.push(running.state);
         ca_statuses.extend(running.status);
     }
+    // Revocation of an issued certificate is judged also against the trust
+    // contexts this node holds.
+    let ca_issued = ndn_cert::HostIssued::new(ca_issued, Arc::clone(&trust_keyring));
 
     // This node's certificates, by name, so a peer validating its Data can
     // fetch the chain from it (the CA serves the certificates it issued):
@@ -1205,10 +1224,12 @@ async fn main() -> Result<()> {
     let approval_handler: Arc<dyn mgmt_ndn::ApprovalMgmtBackend> = Arc::new(
         approvals::DaemonApprovals::new(ca_approvals, Arc::clone(&trust_admin)),
     );
-    // `ca invite-create / invite-list / invite-withdraw`: the invites of
-    // every CA this node runs.
-    let invite_handler: Arc<dyn mgmt_ndn::InviteMgmtBackend> =
-        Arc::new(ndn_cert::HostInvites::new(ca_invites));
+    // `ca invite-create / invite-list / invite-withdraw / issued-list`: the
+    // invites of every CA this node runs and the certificates they issued.
+    let invite_handler: Arc<dyn mgmt_ndn::InviteMgmtBackend> = Arc::new(ndn_cert::HostCas::new(
+        ndn_cert::HostInvites::new(ca_invites),
+        ca_issued,
+    ));
     let trust_context_handler: Arc<dyn mgmt_ndn::TrustAdminMgmtBackend> = trust_admin;
 
     // Face listeners, WT/WebRTC listeners, auto-multicast face creation,

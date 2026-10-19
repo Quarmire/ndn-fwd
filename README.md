@@ -12,7 +12,9 @@ deps — check them out (plus
 this repo to build. Like the rest of the ecosystem this code is primarily
 AI-authored and not proven spec-compliant; do not treat it as a reference
 NDN implementation. The operator dashboard lives in
-[ndn-dashboard](https://github.com/Quarmire/ndn-dashboard).
+[ndn-dashboard](https://github.com/Quarmire/ndn-dashboard); the admin and
+power-user terminal UI (trusted prefixes, members, invites, approvals,
+data, connections) is [`ndn-tui`](binaries/tooling/ndn-tui/).
 
 Where every repo in the workspace stands (branches, sync state, CI,
 direction) is recorded in the checkout-level [`STATE.md`](../STATE.md)

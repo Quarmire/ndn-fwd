@@ -14,6 +14,7 @@ members = [
     "binaries/ndn-trust-context",
     "binaries/tooling/audit-strict-mgmt-validation",
     "binaries/tooling/ndn-otel-bridge",
+    "binaries/tooling/ndn-tui",
     # Opt-in end-to-end harness (multi-daemon, minutes long): a member so it
     # shares the lockfile and lints, kept out of default-members so a plain
     # `cargo build` / `cargo test` never builds or runs it.
@@ -34,6 +35,7 @@ default-members = [
     "binaries/ndn-trust-context",
     "binaries/tooling/audit-strict-mgmt-validation",
     "binaries/tooling/ndn-otel-bridge",
+    "binaries/tooling/ndn-tui",
 ]
 
 [workspace.package]

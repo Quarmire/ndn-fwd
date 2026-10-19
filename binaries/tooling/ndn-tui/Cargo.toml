@@ -1,0 +1,40 @@
+[package]
+# The binary's name is set once, here and in `APP_NAME` (src/lib.rs).
+name = "ndn-tui"
+description = "Admin and power-user terminal UI for a personal NDN device: trusted prefixes, their members, invites and approvals, data, connections"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[package.metadata.scope]
+classification = "tooling"
+
+[lib]
+name = "ndn_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ndn-tui"
+path = "src/main.rs"
+
+[dependencies]
+ndn-cert           = { workspace = true }
+ndn-config         = { workspace = true }
+ndn-ipc            = { workspace = true }
+ndn-mgmt-wire      = { workspace = true }
+ndn-namespace      = { workspace = true }
+ndn-packet         = { workspace = true, features = ["std"] }
+ndn-trust-envelope = { workspace = true }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+clap        = { version = "4", features = ["derive"] }
+# Terminal UI (re-exports crossterm).
+ratatui     = "0.30"
+# Secrets typed into the TUI are zeroed once used.
+zeroize     = "1"
+
+[lints]
+workspace = true
