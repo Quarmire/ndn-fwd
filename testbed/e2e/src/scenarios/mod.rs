@@ -177,28 +177,33 @@ pub fn init_root_with(
     Ok((info, out))
 }
 
+/// An invite the CA made: its id (to withdraw it) and its link (to hand
+/// on).
 #[derive(Clone, Debug)]
 pub struct Invite {
-    pub token: String,
+    pub id: String,
     pub link: String,
 }
 
-/// `ndn-fwd-tokens new` for `root`'s namespace and fingerprint: member
-/// invites.
+/// `ndn-fwd-tokens new` at the running CA of `ns` on `node`: member invites.
+/// Each link must carry `fp`, the namespace's expected fingerprint.
 pub fn mint(
     cx: &mut Cx<'_>,
+    node: &str,
     ns: &str,
     fp: &str,
     count: u32,
     ttl: Option<&str>,
 ) -> StepResult<Vec<Invite>> {
-    mint_as(cx, ns, fp, "member", count, ttl)
+    mint_as(cx, node, ns, fp, "member", count, ttl)
 }
 
-/// `ndn-fwd-tokens new` for `root`'s namespace and fingerprint: invites
-/// for `role` (`member` or `guest`).
+/// `ndn-fwd-tokens new` at the running CA of `ns` on `node` (its daemon
+/// makes and records them): invites for `role` (`member` or `guest`), each
+/// link carrying `fp`.
 pub fn mint_as(
     cx: &mut Cx<'_>,
+    node: &str,
     ns: &str,
     fp: &str,
     role: &str,
@@ -207,38 +212,51 @@ pub fn mint_as(
 ) -> StepResult<Vec<Invite>> {
     let mut op = cx
         .tool("ndn-fwd-tokens")
-        .args([
-            "new",
-            "--ca",
-            ns,
-            "--namespace",
-            ns,
-            "--anchor-fp",
-            fp,
-            "--role",
-            role,
-        ])
+        .arg("-c")
+        .arg(cx.w.node(node).cfg_arg())
+        .args(["new", "--namespace", ns, "--role", role])
         .arg("--count")
         .arg(count.to_string());
     if let Some(t) = ttl {
         op = op.arg("--ttl").arg(t);
     }
-    let out = cx.ok(op, "mint invites")?;
+    let out = cx.ok(op, "make invites")?;
+    let ids = out.kv_all("id");
     let tokens: Vec<String> = out
         .kv_all("token")
         .iter()
         .filter_map(|v| v.split('"').nth(1).map(str::to_owned))
         .collect();
     let links = out.kv_all("invite");
-    if tokens.len() != count as usize || links.len() != count as usize {
+    if ids.len() != count as usize
+        || tokens.len() != count as usize
+        || links.len() != count as usize
+    {
         return Err(format!(
-            "expected {count} tokens and invites, got {tokens:?} / {links:?}"
+            "expected {count} invites, got ids {ids:?}, tokens {tokens:?}, links {links:?}"
         ));
     }
-    Ok(tokens
+    for (link, token) in links.iter().zip(&tokens) {
+        let read = ndn_cert::InviteLink::from_uri(link)
+            .map_err(|e| format!("unreadable invite link {link}: {e}"))?;
+        if &read.token != token {
+            return Err(format!(
+                "the link {link} carries another token than {token}"
+            ));
+        }
+        let carried = read
+            .expected_fingerprint
+            .map(|f| f.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        if carried.as_deref() != Some(fp) {
+            return Err(format!(
+                "the invite carries the fingerprint {carried:?}, not the root's {fp}"
+            ));
+        }
+    }
+    Ok(ids
         .into_iter()
         .zip(links)
-        .map(|(token, link)| Invite { token, link })
+        .map(|(id, link)| Invite { id, link })
         .collect())
 }
 

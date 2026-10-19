@@ -1,93 +1,106 @@
-//! `ndn-fwd-tokens` — mint invite tokens for the onboarding-link flow and
-//! render them as `ndn-trust://invite` envelopes (or their
-//! `https://<domain>/t/invite#…` universal-link mirror) and QR codes (ASCII or
-//! SVG). Tokens go into `[ca].tokens` in `ndn-fwd.toml`; the running CA
-//! picks them up on restart.
+//! `ndn-fwd-tokens` — invites at the CAs of the running `ndn-fwd`, through
+//! its management verbs `ca/invite-create`, `ca/invite-list` and
+//! `ca/invite-withdraw` (local trust administrators only), and QR codes of
+//! invite links (ASCII or SVG).
 //!
-//! Every minted token carries its role (`member-<hex>`, `guest-<hex>`): the CA
-//! scopes it to `<namespace>/<role>`, so it can only certify a device of that
-//! role, and the invite names that prefix as the invitee's identity
-//! namespace. Admin and relay (`node` role) certificates are never issued on a
-//! token alone — they need an admin's approval (`ndn-fwd enroll <anchor link>
-//! --role admin` on the new device, `ndn-fwd approvals approve <code>` on an
-//! admin device). With `--ttl` a token also carries its
-//! expiry (`…-until<unix-secs>`): the CA refuses it after that, and so does
-//! the invitee's `ndn-fwd enroll` before contacting the CA.
+//! The daemon makes every invite: a random one-time token scoped to
+//! `<namespace>/<role>` (a member or a guest — admin and relay (`node` role)
+//! certificates are never issued on an invite: they need an admin's
+//! approval), recorded durably by its CA before it is shown, and returned
+//! once with its `ndn-trust://invite` link (CA prefix, identity namespace,
+//! token, the namespace's expected fingerprint and, optionally, a suggested
+//! device name). The CA redeems it at once; nothing goes into the config.
+//!
+//! A daemon that runs several CAs needs `--namespace` to know whose invite
+//! to make or withdraw. Refusals come back as codes; this tool words them.
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use ndn_cert::roles::{Role, role_prefix, role_token, token_expiry, token_role, token_with_expiry};
+use clap::{Parser, Subcommand, ValueEnum};
+use ndn_cert::report::{TrustRefusal, code};
+use ndn_cert::{CaInviteListing, CreatedInvite, InviteEntry, InviteRequest};
 use ndn_packet::Name;
-use ndn_trust_envelope::{ANCHOR_FINGERPRINT_LEN, TrustEnvelope};
+use ndn_trust_envelope::TrustEnvelope;
 
 #[derive(Parser)]
 #[command(name = "ndn-fwd-tokens", version, about)]
 struct Cli {
+    /// The daemon's config (`ndn-fwd -c <config>`): where its management
+    /// socket is. Default: the default socket.
+    #[arg(short = 'c', long = "config", global = true)]
+    config: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
-/// What every invite envelope carries besides the token itself.
-#[derive(Args)]
-struct InviteArgs {
-    /// NDNCERT CA prefix the invitee enrolls against (e.g. `/home/bob`).
-    #[arg(long)]
-    ca: String,
-    /// The namespace (`ndn-fwd init --namespace`, e.g. `/home/bob`). The
-    /// invite names `<namespace>/<role>` as the invitee's identity
-    /// namespace.
-    #[arg(long)]
-    namespace: String,
-    /// Lowercase-hex SHA-256 of the namespace's root anchor public key
-    /// (`anchor_fp` from `ndn-fwd init`). With it, `ndn-fwd enroll <invite>`
-    /// adopts the namespace's trust context by itself and checks it is signed
-    /// by that root; without it the invitee must adopt the context first.
-    #[arg(long)]
-    anchor_fp: Option<String>,
-    /// Public domain serving the host's `EnrollClient` page. When set, emit the
-    /// `https://<domain>/t/invite#…` mirror; otherwise `ndn-trust://invite/…`.
-    #[arg(long)]
-    domain: Option<String>,
+#[derive(Subcommand)]
+enum Cmd {
+    /// Make one or more invites at the daemon's CA and print each one's id,
+    /// token and link (the only time the token is shown).
+    New {
+        /// The namespace whose CA makes the invite (needed when the daemon
+        /// runs several CAs).
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Role the invite admits: `member` (default) or `guest`. Admins and
+        /// relays (`node`) enroll on an admin's approval instead.
+        #[arg(long, default_value = "member")]
+        role: String,
+        /// How long the invite can be redeemed: seconds, or `90m`, `12h`,
+        /// `7d`. Default: until redeemed or withdrawn.
+        #[arg(long, value_parser = parse_ttl)]
+        ttl: Option<u64>,
+        /// The device name to suggest to the invitee (a hint: the invitee may
+        /// choose another).
+        #[arg(long)]
+        device: Option<String>,
+        /// Number of invites to make (default 1).
+        #[arg(long, default_value_t = 1)]
+        count: usize,
+        /// Public domain serving the host's `EnrollClient` page. When set,
+        /// print the `https://<domain>/t/invite#…` mirror of each link.
+        #[arg(long)]
+        domain: Option<String>,
+        /// Render a QR code for each invite in addition to the text lines.
+        #[arg(long, default_value_t = false)]
+        qr: bool,
+        /// QR encoding when `--qr` is set: `ascii` (terminal-friendly) or
+        /// `svg` (writes `<id>.svg` in the current directory).
+        #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
+        qr_format: QrFormat,
+    },
+    /// List the invites of the daemon's CAs (no tokens): outstanding ones and
+    /// those that ended recently.
+    List {
+        /// Only the invites of this namespace's CA.
+        #[arg(long)]
+        namespace: Option<String>,
+    },
+    /// Withdraw an outstanding invite by its id: its token is refused from
+    /// now on.
+    Withdraw {
+        /// The invite's id (as `new` and `list` print it).
+        id: String,
+        /// The namespace whose CA made it (needed when the daemon runs
+        /// several CAs).
+        #[arg(long)]
+        namespace: Option<String>,
+    },
+    /// Render an invite link as a QR code (e.g. for a paper handoff).
+    Qr {
+        /// The `ndn-trust://invite/…` link (or its https mirror).
+        link: String,
+        /// Render the `https://<domain>/t/invite#…` mirror instead.
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
+        format: QrFormat,
+    },
 }
 
-/// The role an invite admits.
-#[derive(Copy, Clone, Debug, ValueEnum)]
-enum InviteRole {
-    Member,
-    Guest,
-    /// Refused: admin certificates need an admin's device approval.
-    Admin,
-    /// Refused: relay (`node` role) certificates need an admin's device approval.
-    Node,
-}
-
-/// The role a token may carry; admins and relays are refused.
-fn invite_role(role: InviteRole) -> Result<Role> {
-    match role {
-        InviteRole::Member => Ok(Role::Member),
-        InviteRole::Guest => Ok(Role::Guest),
-        InviteRole::Admin => bail!(
-            "--role admin: an invite token never admits an admin device — the CA issues \
-             admin certificates only on an admin's approval: on the new device run \
-             `ndn-fwd enroll <anchor link> --role admin` (anchor_uri from `ndn-fwd init`), \
-             then compare its verification code and run `ndn-fwd approvals approve <code>` \
-             on an admin device"
-        ),
-        InviteRole::Node => bail!(
-            "--role node: an invite token never admits a relay — the CA issues node-role \
-             certificates only on an admin's approval: on the relay run `ndn-fwd enroll \
-             <anchor link> --role node` (anchor_uri from `ndn-fwd init`), then compare its \
-             verification code and run `ndn-fwd approvals approve <code>` on an admin device"
-        ),
-    }
-}
-
-/// The invitee's identity namespace: `<namespace>/<role>`.
-fn invite_namespace(namespace: &str, role: Role) -> Result<String> {
-    let ns: Name = namespace
-        .parse()
-        .map_err(|e| anyhow::anyhow!("--namespace {namespace:?} is not an NDN name: {e}"))?;
-    Ok(role_prefix(&ns, role).to_string())
+#[derive(Copy, Clone, ValueEnum)]
+enum QrFormat {
+    Ascii,
+    Svg,
 }
 
 /// A `--ttl` value: seconds, or a number with an `m`, `h` or `d` suffix.
@@ -109,156 +122,263 @@ fn parse_ttl(s: &str) -> Result<u64, String> {
     }
 }
 
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Generate one or more random tokens + their matching invite envelopes.
-    /// The token strings go into `[ca].tokens` in `ndn-fwd.toml`;
-    /// the invites go to your users.
-    New {
-        #[command(flatten)]
-        invite: InviteArgs,
-        /// Role the invite admits: `member` (default) or `guest`. `admin` and
-        /// `node` are refused — they need an admin's device approval.
-        #[arg(long, value_enum, default_value_t = InviteRole::Member)]
-        role: InviteRole,
-        /// Number of tokens to mint (default 1).
-        #[arg(long, default_value_t = 1)]
-        count: usize,
-        /// How long the invite can be redeemed: seconds, or `90m`, `12h`,
-        /// `7d`. The expiry is written into the token itself, so it holds
-        /// however long the token sits in the config. Default: no expiry.
-        #[arg(long, value_parser = parse_ttl)]
-        ttl: Option<u64>,
-        /// Token byte length (default 16 — 128 bits, fits a small QR).
-        #[arg(long, default_value_t = 16)]
-        bytes: usize,
-        /// Render a QR code for each invite in addition to the text line.
-        #[arg(long, default_value_t = false)]
-        qr: bool,
-        /// QR encoding when `--qr` is set: `ascii` (terminal-friendly)
-        /// or `svg` (writes `<token>.svg` in the current directory).
-        #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
-        qr_format: QrFormat,
-    },
-    /// Render an existing token's invite as a QR code (e.g. for a paper
-    /// handoff). A token without a role prefix is a member token.
-    Qr {
-        #[command(flatten)]
-        invite: InviteArgs,
-        #[arg(long)]
-        token: String,
-        #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
-        format: QrFormat,
-    },
-}
-
-#[derive(Copy, Clone, ValueEnum)]
-enum QrFormat {
-    Ascii,
-    Svg,
-}
-
-fn main() -> Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::New {
-            invite,
+            namespace,
             role,
-            count,
             ttl,
-            bytes,
+            device,
+            count,
+            domain,
             qr,
             qr_format,
         } => {
-            let role = invite_role(role)?;
-            let identity_namespace = invite_namespace(&invite.namespace, role)?;
+            let ca = namespace_arg(namespace.as_deref())?;
+            let (client, socket) = daemon(cli.config.as_deref()).await?;
+            let request = InviteRequest {
+                role,
+                ttl_secs: ttl,
+                device,
+            };
             for _ in 0..count {
-                let mut token = role_token(role, &mint_token(bytes)?);
-                if let Some(ttl) = ttl {
-                    token = token_with_expiry(&token, now_secs().saturating_add(ttl));
-                }
-                let url = invite_url(&invite, &identity_namespace, &token)?;
-                println!("token  = \"{token}\"  # {role} only: scoped to {identity_namespace}");
-                println!("invite = {url}");
+                let made = client
+                    .ca_invite_create(ca.as_ref(), &request)
+                    .await
+                    .map_err(|e| refused("new", &socket, e))?;
+                print_created(&made, domain.as_deref())?;
                 if qr {
-                    render_qr(&url, qr_format, &token)?;
+                    render_qr(
+                        &shown_link(&made.link, domain.as_deref())?,
+                        qr_format,
+                        &made.id,
+                    )?;
                 }
                 println!();
             }
         }
+        Cmd::List { namespace } => {
+            let ca = namespace_arg(namespace.as_deref())?;
+            let (client, socket) = daemon(cli.config.as_deref()).await?;
+            let listings = client
+                .ca_invite_list(ca.as_ref())
+                .await
+                .map_err(|e| refused("list", &socket, e))?;
+            print_listings(&listings);
+        }
+        Cmd::Withdraw { id, namespace } => {
+            let ca = namespace_arg(namespace.as_deref())?;
+            let (client, socket) = daemon(cli.config.as_deref()).await?;
+            let gone = client
+                .ca_invite_withdraw(ca.as_ref(), &id)
+                .await
+                .map_err(|e| refused("withdraw", &socket, e))?;
+            println!("# invite withdrawn: its token is refused from now on");
+            print_entry(&gone);
+        }
         Cmd::Qr {
-            invite,
-            token,
+            link,
+            domain,
             format,
         } => {
-            // The namespace CA scopes a token without a role prefix to members.
-            let role = token_role(&token).unwrap_or(Role::Member);
-            let identity_namespace = invite_namespace(&invite.namespace, role)?;
-            let url = invite_url(&invite, &identity_namespace, &token)?;
-            render_qr(&url, format, &token)?;
+            let envelope = invite_envelope(&link)?;
+            let shown = match domain {
+                Some(d) => envelope.to_https_url(&d),
+                None => envelope.to_uri(),
+            };
+            render_qr(&shown, format, "invite")?;
         }
     }
     Ok(())
 }
 
-/// The invite envelope for `token`. The https mirror keeps the payload in the
-/// URL fragment, not the query: fragments don't traverse the HTTP request line,
-/// so the token stays out of intermediary access logs.
-fn invite_url(args: &InviteArgs, identity_namespace: &str, token: &str) -> Result<String> {
-    let anchor_fingerprint = args.anchor_fp.as_deref().map(parse_fp).transpose()?;
-    // Names travel in their canonical URI form (trust-envelope.md §4.4).
-    let ca_prefix: Name = args
-        .ca
-        .parse()
-        .map_err(|e| anyhow::anyhow!("--ca {:?} is not an NDN name: {e}", args.ca))?;
-    let envelope = TrustEnvelope::Invite {
-        ca_prefix: ca_prefix.to_string(),
-        identity_namespace: identity_namespace.to_owned(),
-        token: token.to_owned(),
-        // What is left of the token's own expiry, for readers of the envelope.
-        ttl_secs: token_expiry(token)?.map(|at| at.saturating_sub(now_secs())),
-        anchor_fingerprint,
+/// `--namespace` as a name.
+fn namespace_arg(raw: Option<&str>) -> Result<Option<Name>> {
+    raw.map(|s| {
+        s.parse::<Name>()
+            .map_err(|e| anyhow::anyhow!("--namespace {s:?} is not an NDN name: {e}"))
+    })
+    .transpose()
+}
+
+/// The running daemon's management client and its socket.
+async fn daemon(config: Option<&str>) -> Result<(ndn_ipc::MgmtClient, String)> {
+    let socket = match config {
+        Some(path) => {
+            let toml =
+                std::fs::read_to_string(path).with_context(|| format!("read config {path}"))?;
+            toml.parse::<ndn_config::ForwarderConfig>()
+                .with_context(|| format!("parse config {path}"))?
+                .management
+                .face_socket
+        }
+        None => ndn_config::ManagementConfig::default().face_socket,
     };
-    Ok(match &args.domain {
-        Some(domain) => envelope.to_https_url(domain),
-        None => envelope.to_uri(),
+    let client = ndn_ipc::MgmtClient::connect(&socket).await.map_err(|e| {
+        anyhow::anyhow!(
+            "the daemon is not reachable at {socket} ({e}): its CAs make the invites, so start \
+             ndn-fwd (and pass `-c <config>` if it uses another socket), then retry"
+        )
+    })?;
+    Ok((client, socket))
+}
+
+/// What to tell when the daemon refused (or could not be asked): the
+/// refusal worded for this tool from its code, else the error.
+fn refused(what: &str, socket: &str, err: ndn_ipc::ForwarderError) -> anyhow::Error {
+    match ndn_ipc::trust_refusal_in(&err) {
+        Some(refusal) => anyhow::anyhow!("{what} refused: {}", words(&refusal)),
+        None => anyhow::anyhow!("{what}: the daemon at {socket} did not answer: {err}"),
+    }
+}
+
+/// A refusal in this tool's words: its flags and commands; any other code
+/// keeps the daemon's neutral sentence.
+fn words(refusal: &TrustRefusal) -> String {
+    let p = |k: &str| refusal.param(k).unwrap_or_default().to_owned();
+    match refusal.code.as_str() {
+        c if c == code::INVITE_NO_CA.code => "this daemon runs no CA, so it makes no invites; \
+             run ndn-fwd-tokens against the root device of the namespace (its config has [ca])"
+            .to_owned(),
+        c if c == code::INVITE_SEVERAL_CAS.code => format!(
+            "this daemon runs the CAs of {}: add --namespace <one of them>",
+            p("namespaces")
+        ),
+        c if c == code::INVITE_CA_UNKNOWN.code => format!(
+            "this daemon runs no CA of {}; its CAs: {} (--namespace)",
+            p("requested"),
+            p("namespaces")
+        ),
+        c if c == code::INVITE_ROLE_UNKNOWN.code => {
+            format!("--role {}: not a role; use member or guest", p("role"))
+        }
+        c if c == code::INVITE_ROLE_NEEDS_APPROVAL.code => {
+            let role = p("role");
+            format!(
+                "--role {role}: an invite never admits a {role} device; {} certifies it only on \
+                 an admin's approval: on the new device run `ndn-fwd enroll <anchor link> --role \
+                 {role}` (anchor_uri from `ndn-fwd init`), then compare its verification code and \
+                 run `ndn-fwd approvals approve <code>` on an admin device",
+                p("namespace")
+            )
+        }
+        c if c == code::INVITE_EXPIRY_INVALID.code => {
+            "--ttl must be a positive duration (e.g. 3600, 90m, 12h, 7d)".to_owned()
+        }
+        c if c == code::INVITE_DEVICE_INVALID.code => format!(
+            "--device {:?} is not a device name ({})",
+            p("device"),
+            p("error")
+        ),
+        c if c == code::INVITE_UNKNOWN.code => format!(
+            "the CA holds no invite {} (`ndn-fwd-tokens list` shows them)",
+            p("id")
+        ),
+        c if c == code::INVITE_ALREADY_REDEEMED.code => {
+            let by = refusal
+                .param("redeemed_for")
+                .map(|n| format!(" by {n}"))
+                .unwrap_or_default();
+            format!(
+                "invite {} was redeemed already{by}, so there is nothing to withdraw; to remove \
+                 the device, revoke it (`ndn-fwd revoke <device identity>`)",
+                p("id")
+            )
+        }
+        c if c == code::INVITE_ALREADY_WITHDRAWN.code => {
+            format!("invite {} was withdrawn already", p("id"))
+        }
+        _ => refusal.reason.clone(),
+    }
+}
+
+/// The link as shown: the `https://<domain>/t/invite#…` mirror when a
+/// domain is given (the payload rides in the fragment, so the token stays
+/// out of access logs), else the `ndn-trust://invite` link.
+fn shown_link(link: &str, domain: Option<&str>) -> Result<String> {
+    Ok(match domain {
+        Some(d) => invite_envelope(link)?.to_https_url(d),
+        None => link.to_owned(),
     })
 }
 
-fn parse_fp(hex: &str) -> Result<[u8; ANCHOR_FINGERPRINT_LEN]> {
-    let hex = hex.trim();
-    if !hex.is_ascii() || hex.len() != ANCHOR_FINGERPRINT_LEN * 2 {
-        bail!(
-            "--anchor-fp must be {} hex characters (SHA-256), got {hex:?}",
-            ANCHOR_FINGERPRINT_LEN * 2
+/// An invite link (`ndn-trust://invite/…` or its https mirror), read back.
+fn invite_envelope(link: &str) -> Result<TrustEnvelope> {
+    let envelope =
+        TrustEnvelope::from_uri(link).map_err(|e| anyhow::anyhow!("not an invite link: {e}"))?;
+    if !matches!(envelope, TrustEnvelope::Invite { .. }) {
+        bail!("not an invite link (an ndn-trust://invite link is needed)");
+    }
+    Ok(envelope)
+}
+
+fn print_created(made: &CreatedInvite, domain: Option<&str>) -> Result<()> {
+    let info = &made.info;
+    println!("id      = {}", made.id);
+    println!(
+        "token   = \"{}\"  # {} only: scoped to {}",
+        made.token,
+        info.role.as_deref().unwrap_or("member"),
+        info.scope.as_deref().unwrap_or(&made.namespace)
+    );
+    println!("invite  = {}", shown_link(&made.link, domain)?);
+    println!("ca      = {}", made.ca);
+    if let Some(at) = info.expires_secs {
+        println!("expires = {}", ndn_cert::approval::iso_secs(at));
+    }
+    if let Some(device) = &info.device {
+        println!("device  = {device}  # suggested to the invitee");
+    }
+    Ok(())
+}
+
+fn print_listings(listings: &[CaInviteListing]) {
+    for listing in listings {
+        println!(
+            "# invites of {} (CA {}): {}",
+            listing.namespace,
+            listing.ca,
+            listing.invites.len()
         );
+        for entry in &listing.invites {
+            print_entry(entry);
+            println!();
+        }
     }
-    let mut out = [0u8; ANCHOR_FINGERPRINT_LEN];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .with_context(|| format!("--anchor-fp is not hex: {hex}"))?;
-    }
-    Ok(out)
 }
 
-fn mint_token(bytes: usize) -> Result<String> {
-    use std::io::Read;
-    let mut buf = vec![0u8; bytes];
-    std::fs::File::open("/dev/urandom")
-        .context("open /dev/urandom (this CLI is Unix-only today)")?
-        .read_exact(&mut buf)
-        .context("read /dev/urandom")?;
-    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+fn print_entry(entry: &InviteEntry) {
+    let info = &entry.info;
+    let iso = ndn_cert::approval::iso_secs;
+    println!("id      = {}", entry.id);
+    println!("state   = {}", info.state.as_str());
+    if let Some(role) = &info.role {
+        println!("role    = {role}");
+    }
+    if let Some(scope) = &info.scope {
+        println!("scope   = {scope}");
+    }
+    println!("created = {}", iso(info.created_secs));
+    if !info.created_by.is_empty() {
+        println!("by      = {}", info.created_by);
+    }
+    if let Some(at) = info.expires_secs {
+        println!("expires = {}", iso(at));
+    }
+    if let Some(device) = &info.device {
+        println!("device  = {device}");
+    }
+    if let Some(at) = info.ended_secs {
+        println!("ended   = {}", iso(at));
+    }
+    if let Some(name) = &info.redeemed_for {
+        println!("for     = {name}");
+    }
 }
 
-fn render_qr(url: &str, format: QrFormat, token: &str) -> Result<()> {
+fn render_qr(url: &str, format: QrFormat, file_stem: &str) -> Result<()> {
     let code = ndn_trust_envelope::qr::encode(url).context("QR encoding")?;
     match format {
         QrFormat::Ascii => {
@@ -276,8 +396,8 @@ fn render_qr(url: &str, format: QrFormat, token: &str) -> Result<()> {
                 .render::<qrcode::render::svg::Color<'_>>()
                 .min_dimensions(256, 256)
                 .build();
-            let path = format!("{token}.svg");
-            // The QR carries the invite URL, token included: owner-only.
+            let path = format!("{file_stem}.svg");
+            // The QR carries the invite link, token included: owner-only.
             ndn_security::secure_fs::write_private(std::path::Path::new(&path), image)
                 .with_context(|| format!("write {path}"))?;
             println!("(wrote QR to {path})");
@@ -291,56 +411,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admin_and_node_invites_are_refused() {
-        assert_eq!(invite_role(InviteRole::Member).unwrap(), Role::Member);
-        assert_eq!(invite_role(InviteRole::Guest).unwrap(), Role::Guest);
-        for refused in [InviteRole::Admin, InviteRole::Node] {
-            assert!(invite_role(refused).is_err());
-        }
-    }
-
-    #[test]
-    fn role_tokens_name_their_scope() {
-        let token = role_token(Role::Guest, "00ff");
-        assert_eq!(token_role(&token), Some(Role::Guest));
-        assert_eq!(
-            invite_namespace("/home/bob", Role::Guest).unwrap(),
-            "/home/bob/guest"
-        );
-        assert!(invite_namespace("home bob", Role::Member).is_err());
-    }
-
-    /// `qr` for a token without a role prefix renders a member invite the
-    /// invitee can enroll with.
-    #[test]
-    fn unprefixed_token_qr_is_a_usable_member_invite() {
-        let args = InviteArgs {
-            ca: "/home/bob".into(),
-            namespace: "/home/bob".into(),
-            anchor_fp: None,
-            domain: None,
-        };
-        let role = token_role("plain").unwrap_or(Role::Member);
-        let url = invite_url(&args, &invite_namespace("/home/bob", role).unwrap(), "plain").unwrap();
-        let link = ndn_cert::InviteLink::from_uri(&url).expect("usable invite");
-        assert_eq!(link.role, Role::Member);
-    }
-
-    /// A `--ttl` token carries its expiry into the invite.
-    #[test]
-    fn ttl_travels_in_the_token() {
+    fn ttl_parses() {
         assert_eq!(parse_ttl("7d"), Ok(7 * 86_400));
+        assert_eq!(parse_ttl("90m"), Ok(90 * 60));
         assert_eq!(parse_ttl("90"), Ok(90));
         assert!(parse_ttl("0").is_err() && parse_ttl("x").is_err());
-        let token = token_with_expiry(&role_token(Role::Member, "ab"), now_secs() + 600);
-        let args = InviteArgs {
-            ca: "/home/bob".into(),
-            namespace: "/home/bob".into(),
-            anchor_fp: None,
-            domain: None,
+    }
+
+    /// An invite link reads back from either form; another kind of link is
+    /// refused.
+    #[test]
+    fn qr_takes_invite_links_only() {
+        let invite = TrustEnvelope::Invite {
+            ca_prefix: "/home/bob".into(),
+            identity_namespace: "/home/bob/member".into(),
+            token: "member-ab".into(),
+            ttl_secs: None,
+            anchor_fingerprint: Some([3; 32]),
+            device: Some("tv".into()),
         };
-        let url = invite_url(&args, "/home/bob/member", &token).unwrap();
-        let link = ndn_cert::InviteLink::from_uri(&url).unwrap();
-        assert_eq!(link.expires_at_secs, token_expiry(&token).unwrap());
+        let uri = invite.to_uri();
+        assert_eq!(invite_envelope(&uri).unwrap(), invite);
+        let https = shown_link(&uri, Some("ndn.example.com")).unwrap();
+        assert_eq!(invite_envelope(&https).unwrap(), invite);
+        assert!(invite_envelope("ndn-trust://nonsense").is_err());
     }
 }

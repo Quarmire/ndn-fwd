@@ -52,9 +52,6 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let root = sc.step("init the root device", |cx| {
         init_root(cx, "root", NS, "desk")
     })?;
-    let invites = sc.step("mint a member invite", |cx| {
-        mint(cx, NS, &root.fp, 1, Some("2h"))
-    })?;
     sc.step(
         "start the root device (CA) and the relay; relay adopts by fingerprint link",
         |cx| {
@@ -62,7 +59,6 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.w.node_mut("root").cfg.ca = Some(CaCfg {
                 prefix: NS.into(),
                 identity: n("/CA"),
-                tokens: invites.iter().map(|i| i.token.clone()).collect(),
                 member_days: None,
             });
             cx.start("root")?;
@@ -77,6 +73,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.expect_version("relay", NS, 1)
         },
     )?;
+    let invites = sc.step("make a member invite at the running CA", |cx| {
+        mint(cx, "root", NS, &root.fp, 1, Some("2h"))
+    })?;
     let old_cert = sc.step("phone enrolls with the invite through the relay", |cx| {
         cx.start("phone")?;
         enroll(cx, "phone", &invites[0], "phone", false, None)
@@ -155,9 +154,6 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             root_info(&out)
         },
     )?;
-    let new_invites = sc.step("mint an invite for the new root's fingerprint", |cx| {
-        mint(cx, NS, &new_root.fp, 1, Some("2h"))
-    })?;
     sc.step(
         "restart the relay as the root device with the printed [security]/[ca] lines",
         |cx| {
@@ -167,11 +163,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             relay.cfg.ca = Some(CaCfg {
                 prefix: NS.into(),
                 identity: n("/CA"),
-                tokens: new_invites.iter().map(|i| i.token.clone()).collect(),
                 member_days: None,
             });
             cx.start("relay")
         },
+    )?;
+    let new_invites = sc.step(
+        "make an invite at the new root's CA: it carries the new root's fingerprint",
+        |cx| mint(cx, "relay", NS, &new_root.fp, 1, Some("2h")),
     )?;
     sc.step(
         "phone adopts the recovered version by periodic refresh",

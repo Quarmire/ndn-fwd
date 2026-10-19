@@ -61,9 +61,6 @@ pub fn run(sc: &mut Scenario, push: bool) -> Result<(), Abort> {
         "init the root device (sealed-file root, passphrase via env)",
         |cx| init_root(cx, "root", ns, "desk"),
     )?;
-    let invites = sc.step("mint two member invites for the root's fingerprint", |cx| {
-        mint(cx, ns, &root.fp, 2, Some("2h"))
-    })?;
     sc.step(
         "start the root device's daemon with its CA (member lifetime 1 day)",
         |cx| {
@@ -71,11 +68,14 @@ pub fn run(sc: &mut Scenario, push: bool) -> Result<(), Abort> {
             cx.w.node_mut("root").cfg.ca = Some(crate::world::CaCfg {
                 prefix: ns.into(),
                 identity: n("/CA"),
-                tokens: invites.iter().map(|i| i.token.clone()).collect(),
                 member_days: Some(1),
             });
             cx.start("root")
         },
+    )?;
+    let invites = sc.step(
+        "make two member invites at the running CA (they carry the root's fingerprint)",
+        |cx| mint(cx, "root", ns, &root.fp, 2, Some("2h")),
     )?;
     sc.step("start the relay", |cx| cx.start("relay"))?;
     sc.step(

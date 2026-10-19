@@ -197,19 +197,19 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let root = sc.step("init the root device", |cx| {
         init_root(cx, "root", NS, "home")
     })?;
-    let invites = sc.step("mint three member invites (desk, phone, tab)", |cx| {
-        mint(cx, NS, &root.fp, 3, Some("2h"))
-    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
         cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
             prefix: NS.into(),
             identity: n("/CA"),
-            tokens: invites.iter().map(|i| i.token.clone()).collect(),
             member_days: None,
         });
         cx.start("root")
     })?;
+    let invites = sc.step(
+        "make three member invites at the running CA (desk, phone, tab)",
+        |cx| mint(cx, "root", NS, &root.fp, 3, Some("2h")),
+    )?;
     let hello = content(1_500, 71);
     sc.step("start the relay (holding, waking), adopt, become a node device on approval, serve a greeting", |cx| {
         cx.start("relay")?;

@@ -27,6 +27,9 @@ ndn-cert     = { workspace = true }
 ndn-ipc      = { workspace = true }
 ndn-packet   = { workspace = true, features = ["std"] }
 ndn-security = { workspace = true }
+# The `negatives` scenario's tampered invite: a real invite whose link a
+# sender altered to carry another namespace's fingerprint.
+ndn-trust-envelope = { workspace = true }
 
 [lints]
 workspace = true

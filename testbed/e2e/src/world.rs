@@ -40,12 +40,12 @@ impl Bins {
     }
 }
 
-/// `[ca]` (or one `[[ca]]` table) of a node that runs a namespace CA.
+/// `[ca]` (or one `[[ca]]` table) of a node that runs a namespace CA. Its
+/// invites are made at runtime through the daemon (`mint`), never configured.
 #[derive(Clone, Debug)]
 pub struct CaCfg {
     pub prefix: String,
     pub identity: String,
-    pub tokens: Vec<String>,
     /// `[ca.cert_validity_days] member`: a short per-role lifetime.
     pub member_days: Option<u32>,
 }
@@ -55,12 +55,9 @@ impl CaCfg {
     /// `[ca.cert_validity_days]` belongs to it (in an array, to the last
     /// table).
     fn render(&self, header: &str) -> String {
-        let toks: Vec<String> = self.tokens.iter().map(|t| format!("\"{t}\"")).collect();
         let mut s = format!(
-            "{header}\nenabled = true\nprefix = \"{}\"\nidentity = \"{}\"\ntokens = [{}]\n\n",
-            self.prefix,
-            self.identity,
-            toks.join(", ")
+            "{header}\nenabled = true\nprefix = \"{}\"\nidentity = \"{}\"\n\n",
+            self.prefix, self.identity,
         );
         if let Some(d) = self.member_days {
             s.push_str(&format!("[ca.cert_validity_days]\nmember = {d}\n\n"));
@@ -68,24 +65,12 @@ impl CaCfg {
         s
     }
 
-    /// The touchpoints: what the operator wrote under `header` (each
-    /// `[[ca]]` table's tokens apart).
+    /// The touchpoints: what the operator wrote under `header`.
     fn settings(&self, header: &str) -> Vec<String> {
-        let table = if header == "[ca]" {
-            header.to_owned()
-        } else {
-            format!("{header} {}", self.prefix)
-        };
-        let mut v = vec![
-            format!(
-                "config: {header} namespace CA {} (identity {})",
-                self.prefix, self.identity
-            ),
-            format!(
-                "config: {table} tokens ({} invite tokens)",
-                self.tokens.len()
-            ),
-        ];
+        let mut v = vec![format!(
+            "config: {header} namespace CA {} (identity {})",
+            self.prefix, self.identity
+        )];
         if let Some(d) = self.member_days {
             v.push(format!("config: [ca.cert_validity_days] member = {d}"));
         }

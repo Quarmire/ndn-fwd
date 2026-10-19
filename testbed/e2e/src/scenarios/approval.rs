@@ -360,9 +360,6 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let root = sc.step("init the root device of /ap", |cx| {
         init_root(cx, "root", NS, "desk")
     })?;
-    let invite = sc.step("mint a member invite", |cx| {
-        mint(cx, NS, &root.fp, 1, Some("2h")).map(|mut v| v.remove(0))
-    })?;
     sc.step(
         "start the root device with its CA, and laptop, tablet and phone",
         |cx| {
@@ -370,7 +367,6 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.w.node_mut("root").cfg.ca = Some(CaCfg {
                 prefix: NS.into(),
                 identity: n("/CA"),
-                tokens: vec![invite.token.clone()],
                 member_days: None,
             });
             for node in ["root", "laptop", "tablet", "phone"] {
@@ -379,6 +375,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             Ok(())
         },
     )?;
+    let invite = sc.step("make a member invite at the running CA", |cx| {
+        mint(cx, "root", NS, &root.fp, 1, Some("2h")).map(|mut v| v.remove(0))
+    })?;
     sc.step("phone enrolls as a member with the invite", |cx| {
         enroll(cx, "phone", &invite, "phone", false, None).map(|_| ())
     })?;

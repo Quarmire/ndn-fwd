@@ -37,13 +37,13 @@ require_signed_commands = false
 # `prefix` is the CA namespace (`/demo`); NdncertCa appends `/CA` itself and
 # serves `/demo/CA/{INFO,NEW,CHALLENGE}` (the client appends `/CA/NEW` too).
 # `identity` is the CA's signing identity, `/demo/CA`. A prefix ending in `/CA`
-# is rejected at startup. Replace the token before exposing this.
+# is rejected at startup. Invites are made at runtime against the running
+# daemon: `ndn-fwd-tokens -c <this config> new`.
 [ca]
 enabled   = true
 prefix    = "/demo"
 identity  = "/demo/CA"
 ephemeral = true
-tokens    = ["change-me-one-time-invite"]
 
 # ── WebTransport listener the phone dials ────────────────────────────────────
 # `[::]:4433` is LAN-reachable (dual-stack). On boot, ndn-fwd logs the dial URL

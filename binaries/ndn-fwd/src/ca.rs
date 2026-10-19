@@ -10,18 +10,20 @@
 //! `<pib_path>/ca/` for the CA a PIB from before several CAs holds), both
 //! written by `ndn-fwd init --namespace <ns>`. Issued certs therefore chain
 //! to the same root across restarts, and the issued certs, revocations and
-//! redeemed one-time tokens (as hashes) persist in that directory
-//! ([`FileCaStore`]), so an invite token redeemed before a restart stays
-//! spent. `ephemeral = true` mints a throwaway self-signed key at every
-//! start instead (demo only, warned; nothing persists).
+//! invites (with a hash of their token, never the token) persist in that
+//! directory ([`FileCaStore`]), so an invite made before a restart is still
+//! redeemable after it and one redeemed stays spent. `ephemeral = true`
+//! mints a throwaway self-signed key at every start instead (demo only,
+//! warned; nothing persists).
 //!
 //! A PIB-backed CA identity `/<ns>/CA` serves the namespace `/<ns>`:
 //! issuance follows the role layout ([`RolePolicy`]) — device keys
 //! `/<ns>/<role>/<device>/KEY/…` only; the roles the namespace's trust
 //! context certifies on an admin's approval (its enrollment hint, default
-//! `admin` and `node`; [`ApprovalPolicy`]) need one, tokens admit members
-//! and (guest-scoped) guests. An invite token
-//! minted with a role (`ndn-fwd-tokens new --role guest` → `guest-<hex>`) is
+//! `admin` and `node`; [`ApprovalPolicy`]) need one, invites admit members
+//! and guests. Every CA offers the `token` challenge over its invites
+//! ([`CaInvites`]): a trust administrator makes them at runtime through the
+//! management verbs `ca/invite-create|list|withdraw` (`ndn-fwd-tokens`), each
 //! scoped to `/<ns>/<role>`, so it cannot certify any other role. Each role's
 //! certificates last its `[ca] cert_validity_days`, and a device holding a
 //! current certificate of a role in `[ca] renewable_roles` renews it without
@@ -53,9 +55,9 @@ use ndn_cert::challenge::device_approval::DeviceApprovalChallenge;
 use ndn_cert::namespace::{ANCHOR_CERT_FILE, CA_CERT_FILE};
 use ndn_cert::roles::Role;
 use ndn_cert::{
-    AllIssuance, ApprovalPolicy, CaStore, ChallengeHandler, ChallengeSlot, EmailChallenge,
-    EmailSender, FileCaStore, IssuancePolicy, NopChallenge, PinChallenge, PolicyError, PolicyInput,
-    RequireAttestationKind, RolePolicy, TokenChallenge, TokenStore,
+    AllIssuance, ApprovalPolicy, CaInvites, CaStore, ChallengeHandler, ChallengeSlot,
+    EmailChallenge, EmailSender, FileCaStore, InviteIssuer, IssuancePolicy, NopChallenge,
+    PinChallenge, PolicyInput, RequireAttestationKind, RolePolicy, TokenChallenge, TokenStore,
 };
 use ndn_config::{CaRelayConfig, CaTomlConfig};
 use ndn_engine::ForwarderEngine;
@@ -138,7 +140,13 @@ pub(crate) struct CaSpawn {
     /// advertises (a namespace CA only).
     approval_policy: Option<ApprovalPolicy>,
     challenges: Vec<Box<dyn ChallengeHandler>>,
-    approvals: Option<ApprovalStore>,
+    /// The device-approval records; main gives them the change observer
+    /// before the CA runs.
+    pub approvals: Option<ApprovalStore>,
+    /// The CA's invites, which its `token` challenge redeems (persisted in
+    /// `store` on a PIB-backed CA); main gives them the change observer
+    /// and the `ca/invite-*` verbs.
+    pub invites: CaInvites,
     store: Option<Arc<FileCaStore>>,
 }
 
@@ -146,8 +154,8 @@ pub(crate) struct CaSpawn {
 /// the CA identity and build the challenge set. Returns the face to attach
 /// to the builder (the `index`-th CA's, [`ca_face_id`]) and the
 /// [`CaSpawn`] retained for post-build FIB wiring and the task spawn.
-/// Fails — so the forwarder refuses to start — on a CA with no challenge, a
-/// prefix ending in `/CA`, a missing / inconsistent PIB identity, or an
+/// Fails — so the forwarder refuses to start — on a prefix ending in `/CA`,
+/// a missing / inconsistent PIB identity, or an
 /// approval policy in the entry that disagrees with the namespace's trust
 /// context. `pib_path` is the configured `[security] pib_path` (unused when
 /// `ephemeral`).
@@ -200,9 +208,18 @@ pub(crate) async fn prepare(
         );
         (keychain, anchor, Some(Arc::new(store)), namespace)
     };
-    // Role-carrying invite tokens are scoped under the namespace (the CA
-    // prefix for an ephemeral demo CA); on a namespace CA every token is.
-    let token_ns = namespace.clone().unwrap_or_else(|| prefix.clone());
+    // Invite links name the CA, the namespace and, on a namespace CA, the
+    // fingerprint of its root anchor (the invitee adopts that context).
+    let invites = CaInvites::new(
+        token_store(store.as_ref())?,
+        InviteIssuer {
+            ca_prefix: prefix.clone(),
+            namespace: namespace.clone().unwrap_or_else(|| prefix.clone()),
+            expected_fingerprint: namespace
+                .is_some()
+                .then(|| ndn_security::anchor_fingerprint(&anchor)),
+        },
+    );
     let approval_policy = match &namespace {
         Some(ns) => {
             let held = newest_context(pib_path, ns)?;
@@ -228,10 +245,12 @@ pub(crate) async fn prepare(
         .map_err(|e| anyhow::anyhow!("[ca] loading the approval requests: {e}")),
         None => Ok(ApprovalStore::new(prefix.clone(), namespace.clone(), ttl)),
     };
-    let (challenges, approvals) = build_challenges(
+    let Challenges {
+        handlers: challenges,
+        approvals,
+    } = build_challenges(
         cfg,
-        store.as_ref(),
-        &token_ns,
+        invites.tokens(),
         approval_policy
             .as_ref()
             .map(|p| (namespace.as_ref().unwrap_or(&prefix), p)),
@@ -254,6 +273,7 @@ pub(crate) async fn prepare(
             approval_policy,
             challenges,
             approvals,
+            invites,
             store,
         },
     ))
@@ -703,48 +723,31 @@ pub(crate) fn spawn(prep: CaSpawn, engine: &ForwarderEngine) -> Result<RunningCa
     })
 }
 
-/// Build the CA's challenge set from config: the `[[ca.challenge]]` list
-/// when set, else a `token` challenge from the legacy `tokens`. A CA with
-/// neither has no way to authenticate requesters and is refused; `nop`
-/// (auto-approve) is only offered when listed explicitly. Every `token`
-/// entry feeds one [`TokenStore`] behind one `token` challenge; with a CA
-/// `store` (PIB mode), redemptions persist in it so a redeemed token is
-/// refused after a restart. Role-carrying tokens are scoped under
-/// `token_ns` ([`TokenStore::add_invite_tokens`]). The offer order is
-/// [`ndn_cert::challenge_order`]'s.
+/// A CA's challenge set, in offer order, and the approval store its
+/// `device-approval` challenge reads (when it offers one).
+struct Challenges {
+    handlers: Vec<Box<dyn ChallengeHandler>>,
+    approvals: Option<ApprovalStore>,
+}
+
+/// Build the CA's challenge set from config: the `[[ca.challenge]]` list,
+/// plus the `token` challenge every CA offers over its invites `tokens`
+/// (made at runtime; persisted in the CA store in PIB mode). `nop`
+/// (auto-approve) is only offered when listed explicitly. The offer order
+/// is [`ndn_cert::challenge_order`]'s.
 ///
 /// `approval`: the namespace and approval policy of a namespace CA, which
 /// offers `device-approval` whether listed or not when the policy names
-/// roles, with the invite it requires redeemed from the same tokens. The
+/// roles, with the invite it requires redeemed from the same invites. The
 /// `device-approval` challenge reads the [`ApprovalStore`] `approval_store`
 /// opens, returned for the mgmt backend and `/CA/APPROVAL`.
 fn build_challenges(
     cfg: &CaTomlConfig,
-    store: Option<&Arc<FileCaStore>>,
-    token_ns: &Name,
+    tokens: &TokenStore,
     approval: Option<(&Name, &ApprovalPolicy)>,
     approval_store: impl FnOnce() -> Result<ApprovalStore>,
-) -> Result<(Vec<Box<dyn ChallengeHandler>>, Option<ApprovalStore>)> {
-    let namespace_ca = approval.is_some();
-    let configured: Vec<ndn_config::ChallengeConfig> = if !cfg.challenges.is_empty() {
-        cfg.challenges.clone()
-    } else if !cfg.tokens.is_empty() {
-        vec![ndn_config::ChallengeConfig {
-            kind: "token".into(),
-            tokens: cfg.tokens.clone(),
-            pin: None,
-            max_tries: None,
-            ttl_secs: None,
-            smtp: None,
-        }]
-    } else {
-        bail!(
-            "[ca] no challenge configured, so the CA could not authenticate requesters; \
-             add `[[ca.challenge]]` entries (kind = \"token\" | \"device-approval\" | \
-             \"pin\" | \"email\", or \"nop\" to auto-approve every request in a demo) or \
-             `tokens = [...]`"
-        )
-    };
+) -> Result<Challenges> {
+    let configured = &cfg.challenges;
     let order = ndn_cert::challenge_order(
         configured.iter().map(|c| c.kind.as_str()),
         approval.map(|(_, policy)| policy),
@@ -753,21 +756,9 @@ fn build_challenges(
     // Every entry read in config order; the token and device-approval
     // handlers are built once every entry is read.
     let mut built: Vec<Option<Box<dyn ChallengeHandler>>> = Vec::with_capacity(configured.len());
-    let mut tokens: Option<TokenStore> = None;
-    for c in &configured {
+    for c in configured {
         built.push(match c.kind.as_str() {
-            "token" => {
-                if tokens.is_none() {
-                    tokens = Some(token_store(store)?);
-                }
-                tokens.as_ref().expect("set above").add_invite_tokens(
-                    &c.tokens,
-                    token_ns,
-                    namespace_ca,
-                )?;
-                None
-            }
-            DEVICE_APPROVAL => None,
+            "token" | DEVICE_APPROVAL => None,
             _ => Some(build_challenge(c)?),
         });
     }
@@ -789,9 +780,7 @@ fn build_challenges(
     for slot in order.slots {
         handlers.push(match slot {
             ChallengeSlot::Configured(i) => built[i].take().expect("built in config order"),
-            ChallengeSlot::Token => Box::new(TokenChallenge::new(
-                tokens.clone().expect("a token slot has its store"),
-            )),
+            ChallengeSlot::Token => Box::new(TokenChallenge::new(tokens.clone())),
             ChallengeSlot::DeviceApproval => {
                 let open = approval_store.take().expect("one device-approval slot");
                 let store = open()?;
@@ -799,12 +788,6 @@ fn build_challenges(
                 if let Some((namespace, policy)) = approval
                     && policy.needs_invite()
                 {
-                    let Some(tokens) = &tokens else {
-                        return Err(PolicyError::InviteWithoutToken {
-                            advertised: policy.clone(),
-                        }
-                        .into());
-                    };
                     challenge = challenge.requiring_invite(
                         namespace.clone(),
                         policy.roles.clone(),
@@ -816,15 +799,17 @@ fn build_challenges(
             }
         });
     }
-    Ok((handlers, approvals))
+    Ok(Challenges {
+        handlers,
+        approvals,
+    })
 }
 
-/// The CA's invite tokens, their redemptions persisted in `store` when one
-/// is given.
+/// The CA's invites, persisted in `store` when one is given.
 fn token_store(store: Option<&Arc<FileCaStore>>) -> Result<TokenStore> {
     match store {
         Some(store) => TokenStore::with_store(Arc::clone(store) as Arc<dyn CaStore>)
-            .map_err(|e| anyhow::anyhow!("[ca] loading redeemed tokens: {e}")),
+            .map_err(|e| anyhow::anyhow!("[ca] loading the invites: {e}")),
         None => Ok(TokenStore::new()),
     }
 }
@@ -915,10 +900,9 @@ mod tests {
         Path::new("/nonexistent/ndn-fwd-demo-ca-test-pib")
     }
 
-    fn challenge(kind: &str, tokens: &[&str]) -> ChallengeConfig {
+    fn challenge(kind: &str) -> ChallengeConfig {
         ChallengeConfig {
             kind: kind.to_string(),
-            tokens: tokens.iter().map(|t| t.to_string()).collect(),
             pin: None,
             max_tries: None,
             ttl_secs: None,
@@ -962,12 +946,19 @@ mod tests {
     struct RunningCa {
         client: NdncertClient,
         approvals: Option<ApprovalStore>,
+        invites: CaInvites,
         state: Arc<ndn_cert::CaState>,
         engine: ForwarderEngine,
         shutdown: ShutdownHandle,
     }
 
     impl RunningCa {
+        /// The token of a new invite for `role`, made as the `ca/invite-create`
+        /// verb makes it.
+        fn invite(&self, role: &str) -> String {
+            make_invite(&self.invites, role)
+        }
+
         async fn stop(self) {
             drop(self.client);
             drop(self.engine);
@@ -975,11 +966,24 @@ mod tests {
         }
     }
 
+    /// The token of a new invite of `invites` for `role`.
+    fn make_invite(invites: &CaInvites, role: &str) -> String {
+        let request = ndn_cert::InviteRequest {
+            role: role.into(),
+            ..Default::default()
+        };
+        invites
+            .create(&request, "uid 1000 (alice)")
+            .expect("the CA makes the invite")
+            .token
+    }
+
     /// Boot an engine with the CA wired exactly as `main` does, plus one
     /// client face. The content store is off so every fetch reaches the CA
     /// (a revoked cert would otherwise still be answered from the cache).
     async fn run_ca(cfg: &CaTomlConfig, pib: &Path) -> RunningCa {
         let (faces, spawn_state) = prepare(cfg, 0, pib).await.expect("CA prepares");
+        let invites = spawn_state.invites.clone();
         let (client_face, client_handle) = InProcFace::new(FaceId(CLIENT_FACE), 64);
         let mut builder = EngineBuilder::new(EngineConfig::default())
             .security_profile(ndn_security::SecurityProfile::Disabled)
@@ -999,6 +1003,7 @@ mod tests {
         RunningCa {
             client: NdncertClient::new(ndn_app::Consumer::from_handle(client_handle), prefix),
             approvals: running.approvals,
+            invites,
             state: running.state,
             engine,
             shutdown,
@@ -1084,41 +1089,69 @@ mod tests {
             .expect("CA answers REVOKE")
     }
 
-    /// A one-time token redeemed before a restart must stay spent although
-    /// it is still listed in the config; only its hash is persisted.
+    /// Invites survive a restart of the CA: one redeemed before it stays
+    /// spent, one made before it is still redeemable after it, a withdrawn
+    /// one stays withdrawn; the store keeps no token.
     #[tokio::test]
-    async fn redeemed_token_is_refused_after_restart() {
+    async fn invites_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         write_namespace_pib(dir.path());
-        let cfg = namespace_cfg(vec![challenge("token", &["invite-1", "invite-2"])]);
+        let cfg = namespace_cfg(Vec::new());
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
+        let make = |role: &str| {
+            let request = ndn_cert::InviteRequest {
+                role: role.into(),
+                ..Default::default()
+            };
+            ca.invites.create(&request, "").unwrap()
+        };
+        let (used, kept, gone) = (make("member"), make("member"), make("guest"));
+        ca.invites.withdraw(&gone.id).unwrap();
+        enroll(&mut ca.client, "member/laptop", "token", token(&used.token))
             .await
             .expect("first redemption enrolls");
         ca.stop().await;
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let replay = enroll(&mut ca.client, "member/phone", "token", token("invite-1")).await;
+        let state = |id: &str| {
+            ca.invites
+                .list()
+                .into_iter()
+                .find(|e| e.id == id)
+                .map(|e| e.info.state)
+        };
+        use ndn_cert::InviteState::{Outstanding, Redeemed, Withdrawn};
+        assert_eq!(state(&used.id), Some(Redeemed));
+        assert_eq!(state(&kept.id), Some(Outstanding));
+        assert_eq!(state(&gone.id), Some(Withdrawn));
+        let replay = enroll(&mut ca.client, "member/phone", "token", token(&used.token)).await;
         assert!(
             replay.is_err(),
-            "redeemed token must be refused after restart: {replay:?}"
+            "a redeemed invite is refused after a restart: {replay:?}"
         );
-        enroll(&mut ca.client, "member/phone", "token", token("invite-2"))
+        let withdrawn = enroll(&mut ca.client, "guest/tv", "token", token(&gone.token)).await;
+        assert!(
+            withdrawn.is_err(),
+            "a withdrawn invite is refused after a restart: {withdrawn:?}"
+        );
+        enroll(&mut ca.client, "member/phone", "token", token(&kept.token))
             .await
-            .expect("an unredeemed token still works");
+            .expect("an invite made before the restart enrolls after it");
         ca.stop().await;
 
-        let redeemed = bob_ca_dir(dir.path()).join("redeemed-tokens");
-        let entries: Vec<_> = redeemed
+        let stored = bob_ca_dir(dir.path()).join("invites");
+        let entries: Vec<_> = stored
             .read_dir()
             .unwrap()
             .map(|e| e.unwrap().path())
             .collect();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 3);
         for path in entries {
             let stored = std::fs::read_to_string(path).unwrap();
-            assert!(!stored.contains("invite"), "raw token stored: {stored}");
+            for made in [&used, &kept, &gone] {
+                assert!(!stored.contains(&made.token), "token stored: {stored}");
+            }
         }
     }
 
@@ -1130,17 +1163,19 @@ mod tests {
     async fn revoke_over_ndn_by_holder_or_ca_only() {
         let dir = tempfile::tempdir().unwrap();
         write_namespace_pib(dir.path());
-        let cfg = namespace_cfg(vec![challenge(
-            "token",
-            &["invite-1", "invite-2", "invite-3"],
-        )]);
+        let cfg = namespace_cfg(vec![challenge("token")]);
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let laptop = enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
+        let invite = [
+            ca.invite("member"),
+            ca.invite("member"),
+            ca.invite("member"),
+        ];
+        let laptop = enroll(&mut ca.client, "member/laptop", "token", token(&invite[0]))
             .await
             .expect("laptop enrolls");
         let laptop = (*laptop.name).clone();
-        let phone = enroll(&mut ca.client, "member/phone", "token", token("invite-2"))
+        let phone = enroll(&mut ca.client, "member/phone", "token", token(&invite[1]))
             .await
             .expect("phone enrolls");
         let phone = (*phone.name).clone();
@@ -1195,7 +1230,7 @@ mod tests {
             !ca_serves(&mut ca.client, &phone).await,
             "still revoked after restart"
         );
-        let again = enroll(&mut ca.client, "member/laptop", "token", token("invite-3")).await;
+        let again = enroll(&mut ca.client, "member/laptop", "token", token(&invite[2])).await;
         assert!(
             again.is_err(),
             "a revoked key is not re-certified: {again:?}"
@@ -1212,12 +1247,10 @@ mod tests {
     async fn admin_revocation_stops_serving_and_frees_the_device_name() {
         let dir = tempfile::tempdir().unwrap();
         write_namespace_pib(dir.path());
-        let cfg = namespace_cfg(vec![challenge(
-            "token",
-            &["invite-1", "invite-2", "invite-3", "invite-4"],
-        )]);
+        let cfg = namespace_cfg(vec![challenge("token")]);
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let phone = enroll(&mut ca.client, "member/phone", "token", token("invite-1"))
+        let invite: Vec<String> = (0..4).map(|_| ca.invite("member")).collect();
+        let phone = enroll(&mut ca.client, "member/phone", "token", token(&invite[0]))
             .await
             .expect("phone enrolls");
         let phone = (*phone.name).clone();
@@ -1229,7 +1262,7 @@ mod tests {
             &mut ca.client,
             Arc::clone(&new_key),
             "token",
-            token("invite-2"),
+            token(&invite[1]),
         )
         .await;
         assert!(
@@ -1276,12 +1309,12 @@ mod tests {
             "revoked once"
         );
 
-        let again = enroll(&mut ca.client, "member/phone", "token", token("invite-3")).await;
+        let again = enroll(&mut ca.client, "member/phone", "token", token(&invite[2])).await;
         assert!(
             again.is_err(),
             "the revoked key is never certified again: {again:?}"
         );
-        enroll_with(&mut ca.client, new_key, "token", token("invite-4"))
+        enroll_with(&mut ca.client, new_key, "token", token(&invite[3]))
             .await
             .expect("the device name is free for a new key");
         ca.stop().await;
@@ -1301,26 +1334,26 @@ mod tests {
         )
     }
 
+    /// A CA that lists no challenge starts and admits by invite only: every
+    /// CA offers `token` over its invites, never `nop` unless listed.
     #[tokio::test]
-    async fn ca_without_challenges_refuses_to_start() {
-        let cfg = CaTomlConfig {
-            enabled: true,
-            ephemeral: true,
-            ..CaTomlConfig::default()
-        };
-        let err = prepare(&cfg, 0, no_pib())
+    async fn a_ca_without_challenges_admits_by_invite() {
+        let mut cfg = namespace_cfg(Vec::new());
+        cfg.ephemeral = true;
+        let (_, spawn_state) = prepare(&cfg, 0, no_pib())
             .await
-            .err()
-            .expect("no-challenge CA must not start");
-        assert!(
-            err.to_string().contains("no challenge configured"),
-            "unexpected error: {err}"
-        );
+            .expect("a CA without challenges starts");
+        let kinds: Vec<_> = spawn_state
+            .challenges
+            .iter()
+            .map(|c| c.challenge_type())
+            .collect();
+        assert_eq!(kinds, ["token"]);
     }
 
     #[tokio::test]
     async fn nop_is_only_offered_when_listed() {
-        let mut cfg = namespace_cfg(vec![challenge("nop", &[])]);
+        let mut cfg = namespace_cfg(vec![challenge("nop")]);
         cfg.ephemeral = true;
         let (_, spawn_state) = prepare(&cfg, 0, no_pib())
             .await
@@ -1330,12 +1363,12 @@ mod tests {
             .iter()
             .map(|c| c.challenge_type())
             .collect();
-        assert_eq!(kinds, ["nop"]);
+        assert_eq!(kinds, ["nop", "token"]);
     }
 
     #[tokio::test]
     async fn prefix_ending_in_ca_is_rejected() {
-        let mut cfg = namespace_cfg(vec![challenge("nop", &[])]);
+        let mut cfg = namespace_cfg(vec![challenge("nop")]);
         cfg.ephemeral = true;
         cfg.prefix = "/home/bob/CA".to_string();
         let err = prepare(&cfg, 0, no_pib())
@@ -1352,7 +1385,7 @@ mod tests {
     async fn pib_ca_without_namespace_identity_refuses_to_start() {
         let dir = tempfile::tempdir().unwrap();
         FilePib::new(dir.path()).unwrap();
-        let cfg = namespace_cfg(vec![challenge("token", &["t"])]);
+        let cfg = namespace_cfg(vec![challenge("token")]);
         let err = prepare(&cfg, 0, dir.path())
             .await
             .err()
@@ -1378,13 +1411,14 @@ mod tests {
     async fn pib_backed_ca_survives_restart() {
         let dir = tempfile::tempdir().unwrap();
         let root = write_namespace_pib(dir.path());
-        let cfg = namespace_cfg(vec![challenge("token", &["invite-1", "invite-2"])]);
+        let cfg = namespace_cfg(vec![challenge("token")]);
         let ca_cert = read_cert_wire(&bob_ca_dir(dir.path()).join(CA_CERT_FILE))
             .unwrap()
             .unwrap();
 
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let first = enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
+        let invite = [ca.invite("member"), ca.invite("member")];
+        let first = enroll(&mut ca.client, "member/laptop", "token", token(&invite[0]))
             .await
             .expect("first enrollment");
         ca.stop().await;
@@ -1397,7 +1431,7 @@ mod tests {
             .expect("cert issued before the restart is still served");
         assert_eq!(refetched.raw(), first.raw());
 
-        let second = enroll(&mut ca.client, "member/phone", "token", token("invite-2"))
+        let second = enroll(&mut ca.client, "member/phone", "token", token(&invite[1]))
             .await
             .expect("enrollment after restart");
         for issued in [&first, &second] {
@@ -1425,7 +1459,7 @@ mod tests {
     }
 
     fn ephemeral_approval_cfg() -> CaTomlConfig {
-        let mut cfg = namespace_cfg(vec![challenge("device-approval", &[])]);
+        let mut cfg = namespace_cfg(vec![challenge("device-approval")]);
         cfg.ephemeral = true;
         cfg
     }
@@ -1512,61 +1546,53 @@ mod tests {
         ca.stop().await;
     }
 
-    /// A namespace CA (PIB-backed `/home/bob/CA`) issues only role-layout names, and
-    /// an invite token's role bounds what it can certify: a member token never
-    /// yields an admin cert, an unscoped one never a guest cert. A request the
-    /// CA refuses does not spend the token: it still enrolls a member after.
+    /// A namespace CA (PIB-backed `/home/bob/CA`) issues only role-layout
+    /// names, and an invite's role bounds what it can certify: a member
+    /// invite never yields an admin, node or guest cert, a guest invite
+    /// never a member cert. A request the CA refuses does not spend the
+    /// invite: it still enrolls a member after.
     #[tokio::test]
-    async fn namespace_ca_tokens_are_bounded_by_role() {
+    async fn namespace_ca_invites_are_bounded_by_role() {
         let dir = tempfile::tempdir().unwrap();
         write_namespace_pib(dir.path());
-        let tokens = ["member-m1", "member-m2", "guest-g1", "guest-g2", "invite-1"];
-        let cfg = namespace_cfg(vec![challenge("token", &tokens)]);
+        let cfg = namespace_cfg(vec![challenge("token")]);
         let mut ca = run_ca(&cfg, dir.path()).await;
+        let (m1, m2) = (ca.invite("member"), ca.invite("member"));
+        let (g1, g2) = (ca.invite("guest"), ca.invite("guest"));
 
-        // A member token is scoped to /home/bob/member: no admin cert.
-        let admin = enroll(&mut ca.client, "admin/evil", "token", token("member-m1")).await;
-        assert!(
-            admin.is_err(),
-            "member token must not certify an admin: {admin:?}"
-        );
-        // Nor does an unscoped token (admins need a device approval), nor a
-        // node, guest or non-role name.
+        // A member invite is scoped to /home/bob/member: no admin cert (an
+        // admin needs a device approval), nor a node, guest or non-role name.
         for name in ["admin/evil", "node/vps", "guest/bob", "laptop"] {
-            let refused = enroll(&mut ca.client, name, "token", token("invite-1")).await;
+            let refused = enroll(&mut ca.client, name, "token", token(&m1)).await;
             assert!(
                 refused.is_err(),
-                "an unscoped token must not certify {name}: {refused:?}"
+                "a member invite must not certify {name}: {refused:?}"
             );
         }
 
-        // The refused requests spent neither token: both still enroll a member.
-        enroll(&mut ca.client, "member/laptop", "token", token("invite-1"))
+        // The refused requests did not spend it: it still enrolls a member.
+        let phone = enroll(&mut ca.client, "member/phone", "token", token(&m1))
             .await
-            .expect("an unscoped token survives refused requests and certifies a member");
-        // Members by member (or unscoped) tokens; guests only by guest tokens.
-        let phone = enroll(&mut ca.client, "member/phone", "token", token("member-m1"))
-            .await
-            .expect("member token certifies a member");
+            .expect("a member invite survives refused requests and certifies a member");
         assert_eq!(
             ndn_security::cert_name::key_name_of(&phone.name).to_string(),
             "/home/bob/member/phone/KEY/k1",
             "a certificate of the requested key: {}",
             phone.name
         );
-        let guest = enroll(&mut ca.client, "guest/alice", "token", token("member-m2")).await;
+        let guest = enroll(&mut ca.client, "guest/alice", "token", token(&m2)).await;
         assert!(
             guest.is_err(),
-            "member token must not certify a guest: {guest:?}"
+            "a member invite must not certify a guest: {guest:?}"
         );
-        let member = enroll(&mut ca.client, "member/tv", "token", token("guest-g1")).await;
+        let member = enroll(&mut ca.client, "member/tv", "token", token(&g1)).await;
         assert!(
             member.is_err(),
-            "guest token must not certify a member: {member:?}"
+            "a guest invite must not certify a member: {member:?}"
         );
-        enroll(&mut ca.client, "guest/alice", "token", token("guest-g2"))
+        enroll(&mut ca.client, "guest/alice", "token", token(&g2))
             .await
-            .expect("guest token certifies a guest");
+            .expect("a guest invite certifies a guest");
         ca.stop().await;
     }
 
@@ -1576,12 +1602,10 @@ mod tests {
     async fn namespace_ca_admin_cert_needs_device_approval() {
         let dir = tempfile::tempdir().unwrap();
         write_namespace_pib(dir.path());
-        let cfg = namespace_cfg(vec![
-            challenge("token", &["invite-1"]),
-            challenge("device-approval", &[]),
-        ]);
+        let cfg = namespace_cfg(vec![challenge("token"), challenge("device-approval")]);
         let mut ca = run_ca(&cfg, dir.path()).await;
-        let by_token = enroll(&mut ca.client, "admin/tablet", "token", token("invite-1")).await;
+        let member = ca.invite("member");
+        let by_token = enroll(&mut ca.client, "admin/tablet", "token", token(&member)).await;
         assert!(
             by_token.is_err(),
             "admin by token must be refused: {by_token:?}"
@@ -1617,7 +1641,7 @@ mod tests {
     async fn namespace_ca_enforces_the_policy_its_context_advertises() {
         let dir = tempfile::tempdir().unwrap();
         write_namespace_pib(dir.path());
-        let mut cfg = namespace_cfg(vec![challenge("token", &["invite-1"])]);
+        let mut cfg = namespace_cfg(vec![challenge("token")]);
         let (_, spawn_state) = prepare(&cfg, 0, dir.path()).await.expect("the CA prepares");
         let kinds: Vec<_> = spawn_state
             .challenges
@@ -1657,7 +1681,7 @@ mod tests {
     #[tokio::test]
     async fn the_context_carries_the_configured_link_policy_and_the_ca_checks_it() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = namespace_cfg(vec![challenge("token", &["invite-1"])]);
+        let mut cfg = namespace_cfg(vec![challenge("token")]);
         cfg.link_roles = Some(vec!["admin".into(), "node".into()]);
         cfg.enrollment_links = Some(false);
         cfg.direct_paths = Some(false);
@@ -1744,7 +1768,7 @@ mod tests {
                 enabled: true,
                 prefix: ns.to_string(),
                 identity: format!("{ns}/CA"),
-                challenges: vec![challenge("token", &["same-token"])],
+                challenges: Vec::new(),
                 ..CaTomlConfig::default()
             })
             .collect();
@@ -1774,6 +1798,7 @@ mod tests {
         engine.cs().set_admit(false);
         engine.cs().set_serve(false);
         let mut states = Vec::new();
+        let invites: Vec<CaInvites> = spawns.iter().map(|s| s.invites.clone()).collect();
         for spawn_state in spawns {
             engine
                 .fib()
@@ -1795,8 +1820,28 @@ mod tests {
                 Arc::new(Ed25519Signer::from_seed(&[9; 32], key)) as Arc<dyn Signer>,
             )
         };
+        let answer = |params: serde_json::Map<String, serde_json::Value>| {
+            move |_: ndn_cert::client::ChallengeRound| {
+                let params = params.clone();
+                async move { Ok::<_, ndn_cert::CertError>(Some(params)) }
+            }
+        };
         for (i, ns) in [&bob, &acme].into_iter().enumerate() {
             let other = if i == 0 { &acme } else { &bob };
+            let own = token(&make_invite(&invites[i], "member"));
+            let theirs = token(&make_invite(&invites[1 - i], "member"));
+            // The other CA's invite is not this CA's.
+            let (prefix, signer) = enroll_in(ns, ns);
+            let refused = ndn_cert::client::enroll(
+                &mut clients[i],
+                &prefix,
+                signer,
+                86_400,
+                "token",
+                answer(theirs),
+            )
+            .await;
+            assert!(refused.is_err(), "{ns}'s CA took an invite of {other}");
             // A device of the other namespace is refused by this CA.
             let (prefix, signer) = enroll_in(ns, other);
             let refused = ndn_cert::client::enroll(
@@ -1805,11 +1850,11 @@ mod tests {
                 signer,
                 86_400,
                 "token",
-                |_| async { Ok(Some(token("same-token"))) },
+                answer(own.clone()),
             )
             .await;
             assert!(refused.is_err(), "{ns}'s CA certified a device of {other}");
-            // Its own device enrolls, with the token the other CA also lists.
+            // Its own device enrolls with its own invite.
             let (prefix, signer) = enroll_in(ns, ns);
             let cert = ndn_cert::client::enroll(
                 &mut clients[i],
@@ -1817,7 +1862,7 @@ mod tests {
                 signer,
                 86_400,
                 "token",
-                |_| async { Ok(Some(token("same-token"))) },
+                answer(own),
             )
             .await
             .expect("its own device enrolls");

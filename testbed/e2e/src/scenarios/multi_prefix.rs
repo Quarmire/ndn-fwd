@@ -375,26 +375,16 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let b = sc.step("rootb: init the root of trusted prefix /mpb", |cx| {
         init_root(cx, "rootb", B, "home")
     })?;
-    let (inv_a, inv_c) = sc.step(
-        "mint invites: /mpa for dev and temp; /mpc for dev, temp and cfan",
-        |cx| {
-            Ok((
-                mint(cx, A, &a.fp, 2, Some("2h"))?,
-                mint(cx, C, &c.fp, 3, Some("2h"))?,
-            ))
-        },
-    )?;
     sc.step(
         "owner runs the CAs of both trusted prefixes from one config (one [[ca]] each) and reports itself owner of both",
         |cx| {
             let owner = cx.w.node_mut("owner");
             owner.cfg.identity = Some(a.identity.clone());
-            owner.cfg.cas = [(A, &inv_a), (C, &inv_c)]
+            owner.cfg.cas = [A, C]
                 .into_iter()
-                .map(|(ns, invites)| CaCfg {
+                .map(|ns| CaCfg {
                     prefix: ns.into(),
                     identity: format!("{ns}/CA"),
-                    tokens: invites.iter().map(|i| i.token.clone()).collect(),
                     member_days: None,
                 })
                 .collect();
@@ -405,6 +395,21 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 &[(A, "owner", "admin", true), (C, "owner", "admin", false)],
             )?;
             Ok(())
+        },
+    )?;
+    let (inv_a, inv_c) = sc.step(
+        "make invites at owner's running CAs: an invite that names no trusted prefix is refused; /mpa for dev and temp; /mpc for dev, temp and cfan",
+        |cx| {
+            let op = cx
+                .tool("ndn-fwd-tokens")
+                .arg("-c")
+                .arg(cx.w.node("owner").cfg_arg())
+                .args(["new", "--role", "member"]);
+            cx.refused(op, "an invite naming no trusted prefix")?;
+            Ok((
+                mint(cx, "owner", A, &a.fp, 2, Some("2h"))?,
+                mint(cx, "owner", C, &c.fp, 3, Some("2h"))?,
+            ))
         },
     )?;
     sc.step(

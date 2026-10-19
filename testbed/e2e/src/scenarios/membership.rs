@@ -151,26 +151,24 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "init the root device (default direct-path role matrix)",
         |cx| init_root(cx, "root", NS, "home"),
     )?;
-    let (members, guests) = sc.step("mint two member invites and one guest invite", |cx| {
-        Ok((
-            mint(cx, NS, &root.fp, 2, Some("2h"))?,
-            mint_as(cx, NS, &root.fp, "guest", 1, Some("2h"))?,
-        ))
-    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
         cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
             prefix: NS.into(),
             identity: n("/CA"),
-            tokens: members
-                .iter()
-                .chain(&guests)
-                .map(|i| i.token.clone())
-                .collect(),
             member_days: None,
         });
         cx.start("root")
     })?;
+    let (members, guests) = sc.step(
+        "make two member invites and one guest invite at the running CA",
+        |cx| {
+            Ok((
+                mint(cx, "root", NS, &root.fp, 2, Some("2h"))?,
+                mint_as(cx, "root", NS, &root.fp, "guest", 1, Some("2h"))?,
+            ))
+        },
+    )?;
     let hello = content(2_000, 90);
     sc.step("start the relay (listening for QUIC links), adopt, become a node device on approval, serve a greeting", |cx| {
         cx.start("relay")?;

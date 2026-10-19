@@ -233,7 +233,6 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
             prefix: NS.into(),
             identity: n("/CA"),
-            tokens: Vec::new(),
             member_days: None,
         });
         let (info, out) = init_root_with(cx, "root", NS, "desk", true)?;
@@ -246,16 +245,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         }
         Ok(info)
     })?;
-    let invites = sc.step("mint two member invites (m1, m2)", |cx| {
-        mint(cx, NS, &root.fp, 2, Some("2h"))
-    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
-        let root_node = cx.w.node_mut("root");
-        root_node.cfg.identity = Some(root.identity.clone());
-        if let Some(ca) = root_node.cfg.ca.as_mut() {
-            ca.tokens = invites.iter().map(|i| i.token.clone()).collect();
-        }
+        cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
         cx.start("root")
+    })?;
+    let invites = sc.step("make two member invites at the running CA (m1, m2)", |cx| {
+        mint(cx, "root", NS, &root.fp, 2, Some("2h"))
     })?;
     let r1_key = sc.step(
         "r1 and r2 start (listening for QUIC links), adopt, and become node devices on approval",
@@ -384,8 +379,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let log = fs::read_to_string(cx.w.node("r2").log()).unwrap_or_default();
             if let Some(l) = log
                 .lines()
-                .filter(|l| l.contains("link down") && l.contains(&n("/member/m1")))
-                .last()
+                .rfind(|l| l.contains("link down") && l.contains(&n("/member/m1")))
             {
                 cx.evidence(&format!("r2's log: {}", l.trim()));
             }
@@ -394,19 +388,18 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "init /rb's root device, mint two member invites, start its CA; b1 and b2 enroll",
+        "init /rb's root device, start its CA, make two member invites there; b1 and b2 enroll",
         |cx| {
             let info = init_root(cx, "broot", NS_B, "home")?;
-            let invites = mint(cx, NS_B, &info.fp, 2, Some("2h"))?;
             let broot = cx.w.node_mut("broot");
             broot.cfg.identity = Some(info.identity.clone());
             broot.cfg.ca = Some(CaCfg {
                 prefix: NS_B.into(),
                 identity: format!("{NS_B}/CA"),
-                tokens: invites.iter().map(|i| i.token.clone()).collect(),
                 member_days: None,
             });
             cx.start("broot")?;
+            let invites = mint(cx, "broot", NS_B, &info.fp, 2, Some("2h"))?;
             enroll_member(cx, "b1", &invites[0])?;
             enroll_member(cx, "b2", &invites[1])
         },

@@ -178,18 +178,17 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let root = sc.step("init the root device", |cx| {
         init_root(cx, "root", NS, "desk")
     })?;
-    let invites = sc.step("mint a member invite", |cx| {
-        mint(cx, NS, &root.fp, 1, Some("2h"))
-    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
         cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
             prefix: NS.into(),
             identity: n("/CA"),
-            tokens: invites.iter().map(|i| i.token.clone()).collect(),
             member_days: None,
         });
         cx.start("root")
+    })?;
+    let invites = sc.step("make a member invite at the running CA", |cx| {
+        mint(cx, "root", NS, &root.fp, 1, Some("2h"))
     })?;
     sc.step(
         "start the relay (listening for QUIC links) and adopt the namespace",

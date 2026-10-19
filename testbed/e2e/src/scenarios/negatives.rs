@@ -22,6 +22,39 @@ use crate::world::{CaCfg, NodeCfg, PORT, addr};
 const NS: &str = "/ng";
 const OTHER: &str = "/ot";
 
+/// `link` as altered to carry the expected fingerprint `fp` (hex) instead of
+/// its own: what a sender who mixed up namespaces (or an attacker) hands on.
+fn with_fingerprint(link: &str, fp: &str) -> StepResult<String> {
+    use ndn_trust_envelope::TrustEnvelope;
+    let fp: Vec<u8> = (0..fp.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(fp.get(i..i + 2).unwrap_or("zz"), 16))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("fingerprint {fp}: {e}"))?;
+    let fp: [u8; 32] = fp
+        .try_into()
+        .map_err(|_| "a fingerprint is 32 bytes".to_owned())?;
+    match TrustEnvelope::from_uri(link).map_err(|e| format!("{link}: {e}"))? {
+        TrustEnvelope::Invite {
+            ca_prefix,
+            identity_namespace,
+            token,
+            ttl_secs,
+            device,
+            ..
+        } => Ok(TrustEnvelope::Invite {
+            ca_prefix,
+            identity_namespace,
+            token,
+            ttl_secs,
+            anchor_fingerprint: Some(fp),
+            device,
+        }
+        .to_uri()),
+        _ => Err(format!("{link} is not an invite link")),
+    }
+}
+
 /// The words with one word replaced by another valid word, the checksum
 /// failing.
 fn mistyped(words: &[String]) -> Vec<String> {
@@ -134,29 +167,50 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let other = sc.step("init the root device of another namespace /ot", |cx| {
         init_root(cx, "other", OTHER, "desk")
     })?;
-    let (invites, foreign, expiring) = sc.step(
-        "mint invites: two for /ng, one carrying /ot's fingerprint, one expiring in 1 s",
-        |cx| {
-            let ok = mint(cx, NS, &root.fp, 2, Some("2h"))?;
-            let foreign = mint(cx, NS, &other.fp, 1, Some("2h"))?.remove(0);
-            let expiring = mint(cx, NS, &root.fp, 1, Some("1"))?.remove(0);
-            Ok((ok, foreign, expiring))
-        },
-    )?;
-    let minted = Instant::now();
-    sc.step("start the root device with every token in its CA", |cx| {
+    sc.step("start the root device with its CA", |cx| {
         cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
-        let mut tokens: Vec<String> = invites.iter().map(|i| i.token.clone()).collect();
-        tokens.push(foreign.token.clone());
-        tokens.push(expiring.token.clone());
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
             prefix: NS.into(),
             identity: n("/CA"),
-            tokens,
             member_days: None,
         });
         cx.start("root")
     })?;
+    let (invites, foreign, expiring, withdrawn) = sc.step(
+        "make invites at the running CA: two for /ng, one whose link is altered to carry /ot's fingerprint, one expiring in 1 s, one withdrawn",
+        |cx| {
+            let ok = mint(cx, "root", NS, &root.fp, 2, Some("2h"))?;
+            let mut foreign = mint(cx, "root", NS, &root.fp, 1, Some("2h"))?.remove(0);
+            foreign.link = with_fingerprint(&foreign.link, &other.fp)?;
+            let expiring = mint(cx, "root", NS, &root.fp, 1, Some("1"))?.remove(0);
+            let withdrawn = mint(cx, "root", NS, &root.fp, 1, Some("2h"))?.remove(0);
+            let op = cx
+                .tool("ndn-fwd-tokens")
+                .arg("-c")
+                .arg(cx.w.node("root").cfg_arg())
+                .args(["withdraw", &withdrawn.id]);
+            cx.ok(op, "withdraw an invite")?;
+            let op = cx
+                .tool("ndn-fwd-tokens")
+                .arg("-c")
+                .arg(cx.w.node("root").cfg_arg())
+                .arg("list");
+            let out = cx.ok(op, "list invites")?;
+            let states = out.kv_all("state");
+            cx.evidence(&format!("the CA lists its invites as {states:?}"));
+            // The 1-s invite may be listed expired already.
+            let live = |s: &&String| *s == "outstanding" || *s == "expired";
+            if states.iter().filter(|s| *s == "withdrawn").count() != 1
+                || states.iter().filter(live).count() != 4
+            {
+                return Err(format!(
+                    "expected 4 outstanding (or expired) and 1 withdrawn invites, listed {states:?}"
+                ));
+            }
+            Ok((ok, foreign, expiring, withdrawn))
+        },
+    )?;
+    let minted = Instant::now();
     let (words, file_key) = sc.step("create a words kit and a file kit", |cx| {
         let cfg = cx.w.node("root").cfg_arg();
         let op = cx
@@ -291,6 +345,19 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             .args(["--device", "laptop", "-c"])
             .arg(cx.w.node("fresh").cfg_arg());
         cx.refused(op, "enroll with a used invite")?;
+        if !cx.certs("fresh").is_empty() {
+            return Err("fresh holds a certificate".into());
+        }
+        Ok(())
+    })?;
+    sc.step("a withdrawn invite is refused", |cx| {
+        let op = cx
+            .tool("ndn-fwd")
+            .arg("enroll")
+            .arg(&withdrawn.link)
+            .args(["--device", "laptop", "-c"])
+            .arg(cx.w.node("fresh").cfg_arg());
+        cx.refused(op, "enroll with a withdrawn invite")?;
         if !cx.certs("fresh").is_empty() {
             return Err("fresh holds a certificate".into());
         }

@@ -1,73 +1,71 @@
 # ndn-fwd-tokens
 
-Operator CLI for invite-token onboarding via the NDNCERT
-TokenChallenge. Mints fresh tokens, prints the matching invite as an
-`ndn-trust://invite` envelope (or its `https://<domain>/t/invite#…`
-universal-link mirror), and optionally renders it as a QR code
-(terminal ASCII or SVG) for paste-into-chat / scan-with-phone delivery.
+Operator CLI for invites. It asks the running `ndn-fwd` to make, list or
+withdraw the invites of its CAs, and renders invite links as QR codes
+(terminal ASCII or SVG) for paste-into-chat or scan-with-phone delivery.
 
-The invite carries the CA prefix, the identity namespace, the token,
-and optionally the CA's root anchor fingerprint — everything the
-invitee needs to enroll. The payload rides in the URL fragment, so the
-token never reaches a web server's access log.
+The daemon's CA makes each invite: a random one-time token scoped to
+`<namespace>/<role>`, recorded durably (only a hash of the token is stored)
+before it is shown. The invite is returned once, with its
+`ndn-trust://invite` link, or the `https://<domain>/t/invite#…`
+universal-link mirror with `--domain`. The link carries the CA prefix, the
+identity namespace, the token, the namespace's expected fingerprint and,
+optionally, a suggested device name. That is everything the invitee needs:
+`ndn-fwd enroll <link>` adopts the namespace's trust context, checks it
+against the fingerprint and enrolls. The CA can redeem the invite at once.
+Nothing goes into the config, and no restart is needed. Invites survive a
+restart of the daemon.
 
-Every token carries the role it admits — `member-<hex>` (default) or
-`guest-<hex>` (`--role guest`). The CA scopes such a token to
-`<namespace>/<role>`, so a member invite can never certify an admin or a
-guest, and the invite names `<namespace>/<role>` as the invitee's identity
-namespace. `--role admin` and `--role node` are refused: admin devices and
-relays (`node` role) need an admin's approval — on the new device run
-`ndn-fwd enroll <anchor link> --role admin` (or `node`), then on the CA host
-or an admin device run `ndn-fwd approvals approve <code>` with the code it
-shows.
+An invite admits a `member` (default) or a `guest` (`--role guest`), never
+anything else. Admin devices and relays (`node` role) need an admin's
+approval: on the new device run `ndn-fwd enroll <anchor link> --role admin`
+(or `node`), then on the CA host or an admin device run
+`ndn-fwd approvals approve <code>` with the code it shows.
 
-The CLI does **not** talk to a running `ndn-fwd` — tokens go into
-`[ca].tokens` in the TOML config, and the forwarder picks them
-up on restart. Live token management against a running CA is a
-future `ndn-fwd-mgmt` subcommand.
+The management verbs (`ca/invite-create`, `ca/invite-list`,
+`ca/invite-withdraw`) are trust changes. They are accepted only from a
+local trust administrator on the daemon's management socket, never over
+the network. The daemon records who made each invite.
 
 ## Get started
 
 ```bash
-cargo run --release -p ndn-fwd-tokens -- new \
-    --ca /home/bob --namespace /home/bob --domain ndn.example.com
+ndn-fwd-tokens -c /etc/ndn-fwd.toml new --domain ndn.example.com
 ```
 
 Output:
 
 ```
-token  = "member-8f3a4c19..."  # member only: scoped to /home/bob/member   (paste into [ca].tokens)
-invite = https://ndn.example.com/t/invite#cARx...                         (give to requester)
+id      = 3c9e0f…
+token   = "member-8f3a4c19…"  # member only: scoped to /home/bob/member
+invite  = https://ndn.example.com/t/invite#cARx…   (give to the invitee)
+ca      = /home/bob
 ```
 
 ## Configure
 
-CLI flags only.
+CLI flags only. `-c <config>` (global) names the daemon's config, which says
+where its management socket is. Without it, the default socket is used.
 
 | Subcommand | Purpose |
 |---|---|
-| `new --ca <p> --namespace <p> [--role member\|guest] [--ttl <dur>] [--anchor-fp <hex>] [--domain <d>] [--count N] [--bytes N] [--qr [--qr-format ascii\|svg]]` | Mint one or more tokens + invites. |
-| `qr --ca <p> --namespace <p> [--anchor-fp <hex>] [--domain <d>] --token <t> [--format ascii\|svg]` | Render the QR for an existing token's invite (a token without a role prefix is a member token). |
-
-### Invite flags (both subcommands)
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--ca` | required | NDNCERT CA prefix the invitee enrolls against (`[ca].prefix`). |
-| `--namespace` | required | The namespace (`ndn-fwd init --namespace`); the invite names `<namespace>/<role>` (the token's role) as the identity namespace. |
-| `--anchor-fp` | none | Lowercase-hex SHA-256 of the namespace's root anchor public key (`anchor_fp` from `ndn-fwd init`). With it, `ndn-fwd enroll <invite>` adopts the namespace's trust context by itself and checks it is signed by that root; without it the invitee must adopt the context first. |
-| `--domain` | none | DNS domain serving the `EnrollClient` page. Set → `https://<d>/t/invite#…`; unset → `ndn-trust://invite/…`. |
+| `new [--namespace <ns>] [--role member\|guest] [--ttl <dur>] [--device <name>] [--count N] [--domain <d>] [--qr [--qr-format ascii\|svg]]` | Make one or more invites. |
+| `list [--namespace <ns>]` | List the invites of the daemon's CAs (every CA's without `--namespace`): outstanding ones, and those redeemed, withdrawn or expired in the last 30 days. Tokens are never shown again. |
+| `withdraw <id> [--namespace <ns>]` | Withdraw an outstanding invite: its token is refused from now on. A redeemed invite cannot be withdrawn; revoke the device instead (`ndn-fwd revoke`). |
+| `qr <link> [--domain <d>] [--format ascii\|svg]` | Render an invite link as a QR code. |
 
 ### `new` flags
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--role` | `member` | `member` or `guest`; `admin`/`node` are refused: `ndn-fwd enroll <anchor link> --role admin`, then `ndn-fwd approvals approve <code>`. |
-| `--count` | `1` | How many tokens to mint. |
-| `--ttl` | none | How long the invite can be redeemed: seconds, or `90m`, `12h`, `7d`. The expiry is written into the token (`…-until<unix-secs>`), so it holds however long the token sits in `[ca].tokens`; the CA refuses the token after it, and `ndn-fwd enroll` refuses the invite before contacting the CA. |
-| `--bytes` | `16` | Token byte length (128 bits → small QR). |
+| `--namespace` | the daemon's only CA | The namespace whose CA makes the invite. Needed when the daemon is the root of several namespaces (`[[ca]]`). |
+| `--role` | `member` | `member` or `guest`. |
+| `--ttl` | none | How long the invite can be redeemed: seconds, or `90m`, `12h`, `7d`. The expiry also travels inside the token, so `ndn-fwd enroll` refuses an expired invite before contacting the CA. |
+| `--device` | none | A device name to suggest to the invitee (`ndn-fwd enroll` uses it unless `--device` is given there). A hint, not a constraint. |
+| `--count` | `1` | How many invites to make. |
+| `--domain` | none | DNS domain serving the `EnrollClient` page: print the `https://<d>/t/invite#…` mirror. The payload rides in the URL fragment, so the token never reaches a web server's access log. |
 | `--qr` | off | Also render a QR code for each invite. |
-| `--qr-format` | `ascii` | `ascii` (terminal) or `svg` (write `<token>.svg`). |
+| `--qr-format` | `ascii` | `ascii` (terminal) or `svg` (writes `<id>.svg`, owner-readable only). |
 
 ## Build
 
@@ -81,42 +79,42 @@ cargo build --release -p ndn-fwd-tokens
 ### Nix
 
 ```bash
-nix run github:Quarmire/ndn-rs#ndn-fwd-tokens -- new --ca /home/bob --namespace /home/bob
+nix run github:Quarmire/ndn-rs#ndn-fwd-tokens -- new
 nix profile install github:Quarmire/ndn-rs#ndn-fwd-tokens
 ```
 
 ## Run
 
-### Mint one member invite
+### Make one member invite
 
 ```bash
-ndn-fwd-tokens new --ca /home/bob --namespace /home/bob --domain ndn.example.com
-# Paste the token line into ndn-fwd.toml under [ca].tokens, restart ndn-fwd.
+ndn-fwd-tokens -c ndn-fwd.toml new --ttl 7d
 ```
 
-### Mint guest invites for a party
+### Guest invites for a party
 
 ```bash
-ndn-fwd-tokens new --ca /home/bob --namespace /home/bob --role guest --count 20 > tokens.txt
+ndn-fwd-tokens -c ndn-fwd.toml new --role guest --ttl 12h --count 20 > invites.txt
 ```
 
-Each entry is `token = "<…>"` + `invite = <…>`; bulk-paste the token
-half into `[ca].tokens`.
-
-### Token + QR
+### A root device of two namespaces
 
 ```bash
-ndn-fwd-tokens new --ca /home/bob --namespace /home/bob --qr --qr-format ascii
-# Terminal-renderable QR code; great for sharing in a slide deck.
-
-ndn-fwd-tokens new --ca /home/bob --namespace /home/bob --qr --qr-format svg
-# Writes <token>.svg next to where you run it.
+ndn-fwd-tokens -c ndn-fwd.toml new --namespace /work/acme --device laptop
 ```
 
-### Render a QR for an already-minted token
+### See and withdraw invites
 
 ```bash
-ndn-fwd-tokens qr --ca /home/bob --namespace /home/bob --token member-8f3a4c19...
+ndn-fwd-tokens -c ndn-fwd.toml list
+ndn-fwd-tokens -c ndn-fwd.toml withdraw 3c9e0f…
+```
+
+### Invite + QR
+
+```bash
+ndn-fwd-tokens -c ndn-fwd.toml new --qr --qr-format ascii
+ndn-fwd-tokens qr 'ndn-trust://invite/…' --format svg
 ```
 
 ## License

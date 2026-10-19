@@ -496,10 +496,8 @@ const VALUE_FLAGS: &[&str] = &[
     "--out",
     "--kit",
     "--keep-kit",
-    "--anchor-fp",
     "--role",
     "--ttl",
-    "--ca",
     "--count",
     "--identity",
     "--face-socket",
@@ -637,8 +635,15 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
             add(&mut concepts, "recovery".into());
             add(&mut concepts, "root device".into());
         }
-        ("ndn-fwd-tokens", _) => {
-            add(&mut concepts, "invite".into());
+        ("ndn-fwd-tokens", Some(verb)) => {
+            add(&mut concepts, format!("invite ({verb})"));
+            if verb == "withdraw" {
+                add(&mut inputs, "invite id (from `new` or `list`)".into());
+            }
+            if verb == "qr" {
+                add(&mut inputs, "invite link".into());
+            }
+            targets_from = usize::MAX;
         }
         ("ndn-put", _) => {
             add(&mut concepts, "publish signed Data".into());
@@ -680,6 +685,9 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
         let v = v.clone().unwrap_or_default();
         match f.as_str() {
             "--namespace" => add(&mut inputs, format!("namespace name ({v})")),
+            "--device" if op.tool == "ndn-fwd-tokens" => {
+                add(&mut inputs, format!("suggested device name ({v})"))
+            }
             "--device" => add(&mut inputs, format!("device name ({v})")),
             "--root-store" => add(&mut inputs, format!("root store choice ({v})")),
             "--old-root" => add(
@@ -690,10 +698,6 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
             "--out" => add(&mut inputs, "kit file location".into()),
             "--kit" if v != "words" => add(&mut inputs, "kit file".into()),
             "--keep-kit" => add(&mut inputs, format!("kit to keep ({v})")),
-            "--anchor-fp" => add(
-                &mut inputs,
-                "expected fingerprint (anchor_fp from init/recover)".into(),
-            ),
             "--role" if op.tool == "ndn-fwd" => add(&mut inputs, format!("requested role ({v})")),
             "--role" => add(&mut inputs, format!("invite role ({v})")),
             "--reason" => add(&mut inputs, "reason for the denial".into()),
