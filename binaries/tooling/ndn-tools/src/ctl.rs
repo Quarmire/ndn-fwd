@@ -1413,6 +1413,8 @@ mod ctl_tests {
             n_reasm_fragments_wasted: Some(35),
             n_lp_unacked_evictions: Some(7),
             n_lp_fast_retx: Some(5),
+            n_lp_duplicate_frames: None,
+            n_lp_acks_sent: None,
             n_reasm_fragments_rejected: Some(4),
             n_reasm_groups_evicted: Some(1),
         };
