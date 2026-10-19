@@ -144,7 +144,11 @@ async fn verify_response(
         "ok: {:?} signature verified; KeyLocator {} ({}) resolved to trust anchor {}",
         sig_info.sig_type,
         key_name,
-        if is_cert_name(key_name.as_ref()) { "certificate name" } else { "key name" },
+        if is_cert_name(key_name.as_ref()) {
+            "certificate name"
+        } else {
+            "key name"
+        },
         cert.name
     );
     Ok(())

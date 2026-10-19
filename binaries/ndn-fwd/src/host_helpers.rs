@@ -386,10 +386,8 @@ mod discovery_verifier_tests {
         };
         let installed = |sd: &ServiceDiscoveryProtocol, prefix: &str, ts: u64, keyed: bool| {
             let ctx = fresh_ctx();
-            let rec = ServiceRecord::new(
-                prefix.parse().unwrap(),
-                ndn_packet::name!("/ndn/fwd/peerA"),
-            );
+            let rec =
+                ServiceRecord::new(prefix.parse().unwrap(), ndn_packet::name!("/ndn/fwd/peerA"));
             let pkt = if keyed {
                 rec.build_data_signed(ts, &signer)
             } else {

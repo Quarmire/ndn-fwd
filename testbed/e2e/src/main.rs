@@ -113,7 +113,11 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-    let r = if args.inner { inner(&args) } else { outer(&args) };
+    let r = if args.inner {
+        inner(&args)
+    } else {
+        outer(&args)
+    };
     match r {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
@@ -142,7 +146,16 @@ fn binaries(args: &Args) -> Result<PathBuf, String> {
     if !args.no_build {
         println!("ndn-e2e: building ndn-fwd, ndn-tools, ndn-fwd-tokens …");
         let ok = Command::new("cargo")
-            .args(["build", "-p", "ndn-fwd", "-p", "ndn-tools", "-p", "ndn-fwd-tokens", "--bins"])
+            .args([
+                "build",
+                "-p",
+                "ndn-fwd",
+                "-p",
+                "ndn-tools",
+                "-p",
+                "ndn-fwd-tokens",
+                "--bins",
+            ])
             .current_dir(&ws)
             .status()
             .map_err(|e| format!("cargo: {e}"))?
@@ -178,7 +191,15 @@ fn binaries(args: &Args) -> Result<PathBuf, String> {
 
 fn outer(args: &Args) -> Result<bool, String> {
     let bin_dir = binaries(args)?;
-    for b in ["ndn-fwd", "ndn-fwd-tokens", "ndn-ctl", "ndn-put", "ndn-peek", "ndn-sec", "examples/phone_host"] {
+    for b in [
+        "ndn-fwd",
+        "ndn-fwd-tokens",
+        "ndn-ctl",
+        "ndn-put",
+        "ndn-peek",
+        "ndn-sec",
+        "examples/phone_host",
+    ] {
         if !bin_dir.join(b).is_file() {
             return Err(format!("{b} not found in {}", bin_dir.display()));
         }
@@ -188,13 +209,20 @@ fn outer(args: &Args) -> Result<bool, String> {
     }
     // --mount-proc: /proc of the new PID namespace, so /proc/<pid>/ns/net
     // of a process started inside names it (nested namespaces, nat.rs).
-    let base = ["--map-root-user", "--net", "--pid", "--mount-proc", "--fork"];
-    let foreign_uid = works(
-        Command::new("unshare")
-            .arg("--map-auto")
-            .args(base)
-            .args(["setpriv", "--reuid=1", "--regid=1", "--clear-groups", "true"]),
-    );
+    let base = [
+        "--map-root-user",
+        "--net",
+        "--pid",
+        "--mount-proc",
+        "--fork",
+    ];
+    let foreign_uid = works(Command::new("unshare").arg("--map-auto").args(base).args([
+        "setpriv",
+        "--reuid=1",
+        "--regid=1",
+        "--clear-groups",
+        "true",
+    ]));
     if !foreign_uid && !works(Command::new("unshare").args(base).arg("true")) {
         return Err(
             "cannot create a user+network+mount+PID namespace (`unshare --map-root-user --net \
@@ -221,8 +249,15 @@ fn outer(args: &Args) -> Result<bool, String> {
     if foreign_uid {
         cmd.arg("--map-auto");
     }
-    cmd.args(base).arg("--kill-child").arg("--").arg(exe).arg("--inner");
-    cmd.arg("--run-dir").arg(&run_dir).arg("--bin-dir").arg(&bin_dir);
+    cmd.args(base)
+        .arg("--kill-child")
+        .arg("--")
+        .arg(exe)
+        .arg("--inner");
+    cmd.arg("--run-dir")
+        .arg(&run_dir)
+        .arg("--bin-dir")
+        .arg(&bin_dir);
     if foreign_uid {
         cmd.arg("--foreign-uid");
     }
@@ -336,12 +371,20 @@ fn inner(args: &Args) -> Result<bool, String> {
             "{:<22} {}  {n:>2} steps{}  {:>6.1}s",
             name,
             if *passed { "PASS" } else { "FAIL" },
-            if skipped > 0 { format!(" ({skipped} skipped)") } else { String::new() },
+            if skipped > 0 {
+                format!(" ({skipped} skipped)")
+            } else {
+                String::new()
+            },
             dur.as_secs_f64()
         );
         all &= passed;
     }
-    println!("total {:.1}s: {}", total.as_secs_f64(), if all { "PASS" } else { "FAIL" });
+    println!(
+        "total {:.1}s: {}",
+        total.as_secs_f64(),
+        if all { "PASS" } else { "FAIL" }
+    );
 
     print_touchpoints(&summary);
 
@@ -351,7 +394,10 @@ fn inner(args: &Args) -> Result<bool, String> {
         "scenarios": reports,
     });
     let path = run_dir.join("report.json");
-    let _ = fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default());
+    let _ = fs::write(
+        &path,
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    );
     if args.keep {
         println!("touchpoints and results written to {}", path.display());
     }
@@ -392,7 +438,11 @@ fn print_touchpoints(summary: &[Summary<'_>]) {
             "  — {} distinct inputs, {} of them secrets: {}",
             distinct.len(),
             secrets.len(),
-            secrets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            secrets
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 }

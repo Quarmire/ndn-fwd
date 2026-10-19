@@ -108,9 +108,17 @@ async fn main() -> Result<()> {
     )
     .await;
     let _ = printer.await;
-    if let Some(refused) = result.as_ref().err().and_then(|e| e.downcast_ref::<Refused>()) {
+    if let Some(refused) = result
+        .as_ref()
+        .err()
+        .and_then(|e| e.downcast_ref::<Refused>())
+    {
         eprintln!("refused: {}", refused.refusal.as_str());
-        let finality = if refused.refusal.is_final() { "final" } else { "refused for now" };
+        let finality = if refused.refusal.is_final() {
+            "final"
+        } else {
+            "refused for now"
+        };
         eprintln!("{finality}: {}", refused.refusal.next_step());
         std::process::exit(EXIT_REFUSED);
     }

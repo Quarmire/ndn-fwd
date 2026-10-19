@@ -27,9 +27,9 @@ use bytes::Bytes;
 use ndn_app::Consumer;
 use ndn_packet::Name;
 use ndn_packet::encode::InterestBuilder;
+use ndn_security::Certificate;
 use ndn_security::custodian::{WireSignRequest, WireSignResponse};
 use ndn_security::verifier::{EcdsaSha256Verifier, Verifier, VerifyOutcome};
-use ndn_security::Certificate;
 use ndn_trust_envelope::{CAPABILITY_NONCE_LEN, CapDirection, Capability, TrustEnvelope};
 
 /// The operator public key from a `Capability{Grant}` URI: `grant` is the

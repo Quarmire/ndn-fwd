@@ -37,10 +37,7 @@ const CACHE_TAG: &str = "browser";
 /// `$XDG_STATE_HOME/ndn-fwd/tls`, else `$HOME/.local/state/ndn-fwd/tls`.
 /// `None` when neither variable yields an absolute path.
 pub fn default_self_signed_cache_dir() -> Option<PathBuf> {
-    default_cache_dir_from(
-        std::env::var_os("XDG_STATE_HOME"),
-        std::env::var_os("HOME"),
-    )
+    default_cache_dir_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
 }
 
 fn default_cache_dir_from(
@@ -48,9 +45,10 @@ fn default_cache_dir_from(
     home: Option<std::ffi::OsString>,
 ) -> Option<PathBuf> {
     let absolute = |v: std::ffi::OsString| Some(PathBuf::from(v)).filter(|p| p.is_absolute());
-    let base = xdg_state_home
-        .and_then(absolute)
-        .or_else(|| home.and_then(absolute).map(|h| h.join(".local").join("state")))?;
+    let base = xdg_state_home.and_then(absolute).or_else(|| {
+        home.and_then(absolute)
+            .map(|h| h.join(".local").join("state"))
+    })?;
     Some(base.join("ndn-fwd").join("tls"))
 }
 
@@ -324,10 +322,8 @@ mod tests {
 
         // Overwrite the cached cert with one (same key) expiring in an hour.
         let stem = cache_stem(&["localhost".to_string()]);
-        let key = rcgen::KeyPair::from_pem(
-            std::str::from_utf8(&first.private_key_pem).unwrap(),
-        )
-        .unwrap();
+        let key =
+            rcgen::KeyPair::from_pem(std::str::from_utf8(&first.private_key_pem).unwrap()).unwrap();
         let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
         let now = time::OffsetDateTime::now_utc();
         params.not_before = now - time::Duration::days(12);

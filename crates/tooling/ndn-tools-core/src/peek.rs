@@ -89,7 +89,9 @@ fn decode_reply(raw: Bytes) -> Result<Data> {
         .ok_or_else(|| anyhow::anyhow!("decode: LpPacket carries no fragment"))?;
     if let Some(header) = lp.nack {
         if let Some(refusal) = header.reason.and_then(|r| r.refusal()) {
-            let name = Interest::decode(fragment).ok().map(|i| Name::clone(&i.name));
+            let name = Interest::decode(fragment)
+                .ok()
+                .map(|i| Name::clone(&i.name));
             return Err(Refused { refusal, name }.into());
         }
         let reason = header
@@ -97,7 +99,9 @@ fn decode_reply(raw: Bytes) -> Result<Data> {
             .map_or_else(|| "unspecified".to_string(), |r| format!("{r:?}"));
         return match Interest::decode(fragment) {
             Ok(interest) => Err(anyhow::anyhow!("nack: {reason} for {}", interest.name)),
-            Err(e) => Err(anyhow::anyhow!("nack: {reason} (nacked Interest malformed: {e})")),
+            Err(e) => Err(anyhow::anyhow!(
+                "nack: {reason} (nacked Interest malformed: {e})"
+            )),
         };
     }
     if lp.frag_count.is_some_and(|c| c > 1) {

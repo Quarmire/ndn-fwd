@@ -125,8 +125,7 @@ async fn run_face_setup_inner(
     let mut bound_udp_listeners = std::collections::BTreeMap::new();
     for (face_idx, face_cfg) in face_configs.iter().enumerate() {
         if let ndn_config::FaceConfig::Udp { bind, remote: None } = face_cfg
-            && let Some(addr) =
-                parse_bind_addr(bind.as_deref().unwrap_or("0.0.0.0:6363"), "UDP")
+            && let Some(addr) = parse_bind_addr(bind.as_deref().unwrap_or("0.0.0.0:6363"), "UDP")
         {
             match mgmt_ndn::bind_udp_listener(addr, fwd_config.face_system.udp.rx_sockets) {
                 Ok(listener) => {
@@ -663,7 +662,9 @@ fn peer_face_port(
         Some(b) => ConnectedPort::Exclusive(b),
         None => listeners
             .first()
-            .map_or(ConnectedPort::Exclusive(any(0)), |l| ConnectedPort::Listener(any(l.port()))),
+            .map_or(ConnectedPort::Exclusive(any(0)), |l| {
+                ConnectedPort::Listener(any(l.port()))
+            }),
     }
 }
 
@@ -718,11 +719,26 @@ mod tests {
     fn a_peer_face_joins_only_what_a_listener_holds() {
         use ConnectedPort::{Exclusive, Listener};
         let on_one_ip = [a("10.0.0.1:6363")];
-        assert_eq!(peer_face_port(Some(a("10.0.0.2:6363")), &on_one_ip), Exclusive(a("10.0.0.2:6363")));
-        assert_eq!(peer_face_port(Some(a("10.0.0.1:6363")), &on_one_ip), Listener(a("10.0.0.1:6363")));
-        assert_eq!(peer_face_port(Some(a("0.0.0.0:6363")), &[]), Exclusive(a("0.0.0.0:6363")));
-        assert_eq!(peer_face_port(None, &[a("127.0.0.1:40123")]), Listener(a("0.0.0.0:40123")));
-        assert_eq!(peer_face_port(Some(a("0.0.0.0:0")), &[a("0.0.0.0:0")]), Exclusive(a("0.0.0.0:0")));
+        assert_eq!(
+            peer_face_port(Some(a("10.0.0.2:6363")), &on_one_ip),
+            Exclusive(a("10.0.0.2:6363"))
+        );
+        assert_eq!(
+            peer_face_port(Some(a("10.0.0.1:6363")), &on_one_ip),
+            Listener(a("10.0.0.1:6363"))
+        );
+        assert_eq!(
+            peer_face_port(Some(a("0.0.0.0:6363")), &[]),
+            Exclusive(a("0.0.0.0:6363"))
+        );
+        assert_eq!(
+            peer_face_port(None, &[a("127.0.0.1:40123")]),
+            Listener(a("0.0.0.0:40123"))
+        );
+        assert_eq!(
+            peer_face_port(Some(a("0.0.0.0:0")), &[a("0.0.0.0:0")]),
+            Exclusive(a("0.0.0.0:0"))
+        );
     }
 
     #[test]

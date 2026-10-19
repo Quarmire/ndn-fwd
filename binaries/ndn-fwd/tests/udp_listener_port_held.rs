@@ -133,7 +133,10 @@ async fn a_second_forwarder_refuses_a_held_udp_listener_port() {
         "the refusal must name the held port {port}, got: {stderr}"
     );
 
-    assert!(a.0.try_wait().unwrap().is_none(), "the first forwarder died");
+    assert!(
+        a.0.try_wait().unwrap().is_none(),
+        "the first forwarder died"
+    );
     assert!(
         peer_face_port(&client, hub_addr.port()).await == Some(port),
         "the first forwarder lost its peer face"

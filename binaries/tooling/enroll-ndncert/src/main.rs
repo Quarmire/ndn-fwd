@@ -65,13 +65,8 @@ async fn main() -> anyhow::Result<()> {
     let mut exchange = ConsumerExchange(consumer);
 
     let mut pin_opt = pin_opt;
-    let cert_name = ndn_cert::client::enroll(
-        &mut exchange,
-        &ca_prefix,
-        signer,
-        86400,
-        "pin",
-        |round| {
+    let cert_name =
+        ndn_cert::client::enroll(&mut exchange, &ca_prefix, signer, 86400, "pin", |round| {
             let next = match round.round {
                 // CHALLENGE trigger round — selects "pin", no code yet.
                 0 => {
@@ -93,15 +88,14 @@ async fn main() -> anyhow::Result<()> {
                 _ => Ok(None),
             };
             std::future::ready(next)
-        },
-    )
-    .await
-    .map_err(|e| match e {
-        CertError::ChallengePending(_) => {
-            anyhow::anyhow!("enrollment did not complete after PIN submission")
-        }
-        e => anyhow::Error::new(e).context("NDNCERT enrollment failed"),
-    })?;
+        })
+        .await
+        .map_err(|e| match e {
+            CertError::ChallengePending(_) => {
+                anyhow::anyhow!("enrollment did not complete after PIN submission")
+            }
+            e => anyhow::Error::new(e).context("NDNCERT enrollment failed"),
+        })?;
 
     eprintln!("enrollment complete — issued cert name: {cert_name}");
 
