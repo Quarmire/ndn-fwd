@@ -21,12 +21,14 @@ pub struct DvInstaller {
 
 /// Returns `None` if DV is disabled; an error if the network or router name
 /// is malformed. A neighbour or trusted key with a malformed name is skipped
-/// with an error log. `node_signer` is the node's key; the `static` and `lvs`
-/// trust modes sign with the key it holds at startup and keep it: DV
-/// neighbours accept only the keys in their `[routing.dv.trust]
-/// trusted_keys`, so a key the node switches to at runtime (`ndn-fwd
-/// enroll`) would silently cut it off from routing. DV moves to an enrolled
-/// key at a restart, once neighbours trust it.
+/// with an error log. `node_signer` is the node identity's key (DV routing
+/// signs as the node, never as a trusted prefix's identity); the `static`
+/// and `lvs` trust modes sign with the key it holds at startup and keep it:
+/// DV neighbours accept only the keys in their `[routing.dv.trust]
+/// trusted_keys`, so a node key that changes at runtime (a daemon on its
+/// ephemeral key enrolling its first identity) would silently cut it off
+/// from routing. DV moves to the new node key at a restart, once neighbours
+/// trust it.
 pub async fn prepare(
     fwd_config: &ndn_config::ForwarderConfig,
     builder: &mut EngineBuilder,

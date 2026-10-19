@@ -1,15 +1,17 @@
 //! The daemon's [`KeyVault`]: device keys and certificates in its PIB
 //! (`keys/*/certs/`, issuer certificates under `<pib>/issuers`, request
-//! records under `<pib>/requests`), and how a newly enrolled key takes
-//! over signing: the PIB's default identity changes, and the running
-//! daemon switches its signer unless `[security] identity` names another
-//! identity or DV routing keeps the key it started with.
+//! records under `<pib>/requests`), and how a newly enrolled key is added:
+//! the engine signs the namespace's Data with it at once (beside the
+//! daemon's other identities) and the subsystems presenting the daemon's
+//! identities are told. The node identity — the key of the daemon's own
+//! packets — changes only for the daemon's first identity (it ran on an
+//! ephemeral key), and the PIB's default identity is recorded only then.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use ndn_cert::RequestStore;
+use ndn_cert::{NodeIdentitySource, RequestStore};
 use ndn_namespace::{Activation, KeyUnavailable, KeyVault};
 use ndn_packet::{Data, Name};
 use ndn_security::{Certificate, FilePib, PibError, Signer};
@@ -21,14 +23,16 @@ pub(crate) const REQUESTS_DIR: &str = "requests";
 
 pub(crate) struct PibVault {
     pub(crate) pib_root: PathBuf,
-    /// The key management responses and discovery records are signed with;
-    /// `None` when the node runs unsigned.
+    /// The daemon's identities: the node signer and the engine's signing
+    /// identities; `None` when the node runs unsigned.
     pub(crate) signing: Option<Arc<ActiveIdentity>>,
     /// DV routing runs with `static`/`lvs` trust: it keeps the key the node
-    /// started with (see `installs::dv::prepare`), so an enrollment says so.
+    /// started with (see `installs::dv::prepare`), so a new node identity
+    /// says so.
     pub(crate) dv_keeps_startup_key: bool,
     /// `[security] identity` from the config: it takes precedence over the
-    /// PIB's default identity, so an enrollment does not change the signer.
+    /// PIB's default identity, so the first enrollment does not change the
+    /// node signer.
     pub(crate) configured_identity: Option<String>,
 }
 
@@ -40,6 +44,18 @@ impl PibVault {
     fn unreadable(&self, e: PibError) -> String {
         format!("cannot read the PIB {}: {e}", self.pib_root.display())
     }
+
+    /// The identity of the running node key, unless it is the ephemeral
+    /// startup key.
+    fn running_node_identity(&self) -> Option<Name> {
+        let (key, ephemeral) = self.signing.as_ref()?.current();
+        if ephemeral {
+            return None;
+        }
+        let comps = key.components();
+        let at = comps.iter().position(|c| c.value.as_ref() == b"KEY")?;
+        Some(Name::from_components(comps[..at].iter().cloned()))
+    }
 }
 
 impl KeyVault for PibVault {
@@ -47,10 +63,21 @@ impl KeyVault for PibVault {
         self.pib_root.display().to_string()
     }
 
+    /// The PIB's default identity, else the persistent node identity the
+    /// daemon runs on (configured, or chosen as a root device's or the first
+    /// enrolled identity): an enrollment never records a default beside it.
     fn default_identity(&self) -> Result<Option<Name>, String> {
         let pib = FilePib::new(&self.pib_root)
             .map_err(|e| format!("cannot open the PIB {}: {e}", self.pib_root.display()))?;
-        Ok(pib.get_default_identity().ok().flatten())
+        Ok(pib
+            .get_default_identity()
+            .ok()
+            .flatten()
+            .or_else(|| self.running_node_identity()))
+    }
+
+    fn node_identity(&self) -> Option<Name> {
+        self.running_node_identity()
     }
 
     fn request_store(&self) -> Result<RequestStore, String> {
@@ -129,38 +156,59 @@ impl KeyVault for PibVault {
             .map_err(|e| self.unreadable(e))
     }
 
-    fn activate(&self, identity: &Name, key: &Name, signer: Arc<dyn Signer>) -> Activation {
+    /// The engine signs `identity`'s Data with `key` already (the
+    /// enrollment registered it); the subsystems presenting the daemon's
+    /// identities are told. For the daemon's first identity
+    /// (`first_identity`, it ran on its ephemeral startup key) the node
+    /// signer switches to it too, unless `[security] identity` names
+    /// another one.
+    fn activate(
+        &self,
+        identity: &Name,
+        key: &Name,
+        signer: Arc<dyn Signer>,
+        first_identity: bool,
+    ) -> Activation {
         let mut at_next_start = Vec::new();
-        if self.dv_keeps_startup_key {
+        let Some(active) = &self.signing else {
             at_next_start.push(format!(
-                "DV routing: it keeps signing with the key this node started with (DV `static`/`lvs` \
-                 trust); it signs with {key} after a restart, so add that key to every DV \
-                 neighbour's [routing.dv.trust] trusted_keys before restarting"
+                "this node started without a signing key; it signs as {identity} after a restart"
             ));
-        }
-        let signing_now = match (&self.configured_identity, &self.signing) {
-            (Some(configured), _) => {
-                at_next_start.push(format!(
-                    "nothing: [security] identity = \"{configured}\" in this node's config takes \
-                     precedence over the PIB's default identity; remove that line to sign as \
-                     {identity}"
-                ));
-                false
-            }
-            (None, Some(active)) => {
-                active.switch_to(signer);
-                true
-            }
-            (None, None) => {
-                at_next_start.push(format!(
-                    "management responses: this node started without a signing key; it signs as \
-                     {identity} after a restart"
-                ));
-                false
-            }
+            return Activation {
+                signing_now: false,
+                node_identity: false,
+                at_next_start,
+            };
         };
+        let mut node_identity = false;
+        if first_identity {
+            match &self.configured_identity {
+                Some(configured) => at_next_start.push(format!(
+                    "the node identity stays {configured}: [security] identity in this node's \
+                     config names it; {identity} is recorded as the PIB's default identity, the \
+                     node identity once that line is removed"
+                )),
+                None if active.current().1 => {
+                    active.replace_node(Arc::clone(&signer), NodeIdentitySource::PibDefault);
+                    node_identity = true;
+                    if self.dv_keeps_startup_key {
+                        at_next_start.push(format!(
+                            "DV routing: it keeps signing with the key this node started with \
+                             (DV `static`/`lvs` trust); it signs with {key} after a restart, so \
+                             add that key to every DV neighbour's [routing.dv.trust] \
+                             trusted_keys before restarting"
+                        ));
+                    }
+                }
+                None => {}
+            }
+        }
+        // The engine holds the key already; links present the new
+        // membership.
+        active.identities_changed();
         Activation {
-            signing_now,
+            signing_now: true,
+            node_identity,
             at_next_start,
         }
     }
