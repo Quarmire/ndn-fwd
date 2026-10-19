@@ -24,9 +24,8 @@ use ndn_engine::ForwarderEngine;
 use ndn_face_quic::{KeyFingerprint, LinkEndpoint, LinkKeySource, LinkTransportConfig, RateLimit};
 use ndn_link::{
     AdvertisedCandidates, ConfiguredEndpoints, DirectOptions, EngineFaces, HoldLimits,
-    HostCandidates, LinkHints, LinkMode, LinkSetup, LinkTrust, Links, OwnMembership, PeerId,
-    PeerSpec, Quotas, RelayOptions, RelayService, RelaySource, RelayUse, ServePolicy, WakeNotifier,
-    WakeRequest,
+    HostCandidates, LinkMode, LinkSetup, LinkTrust, Links, OwnMembership, PeerId, PeerSpec, Quotas,
+    RelayOptions, RelayService, RelaySource, RelayUse, ServePolicy, WakeNotifier, WakeRequest,
 };
 use ndn_packet::Name;
 use ndn_security::{Certificate, Keyring};
@@ -347,16 +346,6 @@ impl LinkTrust for DaemonTrust {
     }
 }
 
-fn hints() -> LinkHints {
-    LinkHints {
-        enroll: "`ndn-fwd enroll <invite link>`, or by an admin's approval".into(),
-        renew: "`ndn-fwd renew`".into(),
-        refresh: "`ndn-fwd context refresh`".into(),
-        peer_entry: "[[peer]]".into(),
-        expect_key: "add [[peer]] key = \"{key}\" to the other device's config".into(),
-    }
-}
-
 /// Start this device's links whenever it has a key: listen when `[[face]]
 /// kind = "quic"` is configured (and not `listen = false`), link to its
 /// relays (the namespace's and `[[relay]]`) and each `[[peer]]` by its mode,
@@ -462,7 +451,6 @@ pub(crate) fn spawn(
             ],
             socket,
             transport,
-            hints: hints(),
             relays: RelayOptions {
                 count: relays.count,
                 use_namespace: relays.namespace,
