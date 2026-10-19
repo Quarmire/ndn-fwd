@@ -5,8 +5,10 @@
 //! Admission, enrollment links, relays, link modes, routes, redial and the
 //! one-link-per-pair rule are `ndn_link`'s; this module gives it the
 //! daemon's parts: the config, the link socket, the keyring and served
-//! certificates, the engine's faces and RIB, the wake command, and the key
-//! switches of `ActiveIdentity`.
+//! certificates, the device's memberships (every signing identity the
+//! engine's key store holds in a held namespace, with its served chain;
+//! the link key stays the node key), the engine's faces and RIB, the wake
+//! command, and the identity changes of `ActiveIdentity`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,12 +23,13 @@ use ndn_config::{
 use ndn_engine::ForwarderEngine;
 use ndn_face_quic::{KeyFingerprint, LinkEndpoint, LinkKeySource, LinkTransportConfig, RateLimit};
 use ndn_link::{
-    AdvertisedCandidates, ConfiguredEndpoints, DirectOptions, EngineFaces, HoldLimits, HostCandidates, LinkHints,
-    LinkMode, LinkSetup, LinkTrust, Links, PeerId, PeerSpec, Quotas, RelayOptions, RelayService, RelaySource,
-    RelayUse, ServePolicy, WakeNotifier, WakeRequest,
+    AdvertisedCandidates, ConfiguredEndpoints, DirectOptions, EngineFaces, HoldLimits,
+    HostCandidates, LinkHints, LinkMode, LinkSetup, LinkTrust, Links, OwnMembership, PeerId,
+    PeerSpec, Quotas, RelayOptions, RelayService, RelaySource, RelayUse, ServePolicy, WakeNotifier,
+    WakeRequest,
 };
 use ndn_packet::Name;
-use ndn_security::{ActiveSigner, Certificate, Keyring};
+use ndn_security::{Certificate, Keyring};
 use tokio_util::sync::CancellationToken;
 
 use crate::active_identity::ActiveIdentity;
@@ -44,7 +47,8 @@ fn link_mode(mode: LinkModeConfig, idle_secs: u64) -> LinkMode {
 }
 
 fn fingerprint(section: &str, label: &str, hex: &str) -> anyhow::Result<KeyFingerprint> {
-    KeyFingerprint::from_hex(hex).with_context(|| format!("{section} {label}: key is not 64 hex digits"))
+    KeyFingerprint::from_hex(hex)
+        .with_context(|| format!("{section} {label}: key is not 64 hex digits"))
 }
 
 fn parse_name(section: &str, label: &str, s: &str) -> anyhow::Result<Name> {
@@ -69,13 +73,22 @@ fn peer_specs(config: &ForwarderConfig) -> anyhow::Result<Vec<PeerSpec>> {
 
 /// A `[[peer]]`, as `ndn_link` takes it. Its `relay` names another
 /// `[[peer]]` or a `[[relay]]` (whose ids follow the peers').
-fn peer_spec(config: &PeerConfig, peers: &[PeerConfig], relays: &[RelayConfig]) -> anyhow::Result<PeerSpec> {
+fn peer_spec(
+    config: &PeerConfig,
+    peers: &[PeerConfig],
+    relays: &[RelayConfig],
+) -> anyhow::Result<PeerSpec> {
     let label = config.label();
     let relay = config.relay.as_deref().and_then(|r| {
         peers
             .iter()
             .position(|p| !std::ptr::eq(p, config) && p.is_named(r))
-            .or_else(|| relays.iter().position(|q| q.is_named(r)).map(|i| peers.len() + i))
+            .or_else(|| {
+                relays
+                    .iter()
+                    .position(|q| q.is_named(r))
+                    .map(|i| peers.len() + i)
+            })
     });
     Ok(PeerSpec {
         key: config
@@ -93,7 +106,12 @@ fn peer_spec(config: &PeerConfig, peers: &[PeerConfig], relays: &[RelayConfig]) 
         routes: config
             .routes
             .as_ref()
-            .map(|routes| routes.iter().map(|r| parse_name("[[peer]]", &label, r)).collect())
+            .map(|routes| {
+                routes
+                    .iter()
+                    .map(|r| parse_name("[[peer]]", &label, r))
+                    .collect()
+            })
             .transpose()?,
         persistent: config.persistent,
         reliability: config.reliability,
@@ -192,7 +210,11 @@ impl WakeNotifier for WakeCommand {
             return;
         };
         let token: String = request.token.iter().map(|b| format!("{b:02x}")).collect();
-        let device = request.device.as_ref().map(|d| d.to_string()).unwrap_or_default();
+        let device = request
+            .device
+            .as_ref()
+            .map(|d| d.to_string())
+            .unwrap_or_default();
         let mut command = tokio::process::Command::new(program);
         command
             .args(args)
@@ -256,12 +278,12 @@ impl WakeNotifier for WakeCommand {
     }
 }
 
-/// The daemon's trust data: the keyring, the certificates it serves, and
-/// the engine's validated-certificate cache.
+/// The daemon's trust data: the keyring, the certificates it serves, the
+/// identities it signs as, and the engine's validated-certificate cache.
 struct DaemonTrust {
     keyring: Arc<Keyring>,
     own_certs: Arc<OwnCertificates>,
-    signer: Arc<ActiveSigner>,
+    identity: Arc<ActiveIdentity>,
     engine: ForwarderEngine,
 }
 
@@ -270,8 +292,44 @@ impl LinkTrust for DaemonTrust {
         &self.keyring
     }
 
+    /// The chain of the node key, which is the link (TLS) key.
     fn own_chain(&self) -> Vec<Bytes> {
-        self.own_certs.chain_of(self.signer.current().key_name())
+        self.own_certs
+            .chain_of(self.identity.signer().current().key_name())
+    }
+
+    /// Every other identity the engine signs as, in a namespace this device
+    /// holds, whose certificate it serves: shown on each link as a
+    /// membership bound to it.
+    fn own_memberships(&self) -> Vec<OwnMembership> {
+        let node = self.identity.signer().current().key_name().clone();
+        self.identity
+            .signing_identities()
+            .into_iter()
+            .filter(|si| si.key != node)
+            .filter_map(|si| {
+                let ctx = self.keyring.context_for(&si.identity);
+                if ctx.namespace().is_empty() {
+                    return None;
+                }
+                let chain = self.own_certs.chain_of(&si.key);
+                if chain.is_empty() {
+                    tracing::debug!(
+                        target: "face.quic",
+                        key = %si.key,
+                        "no served certificate of {}: its membership of {} is not shown on links",
+                        si.key,
+                        ctx.namespace()
+                    );
+                    return None;
+                }
+                Some(OwnMembership {
+                    namespace: ctx.namespace().clone(),
+                    chain,
+                    signer: si.signer,
+                })
+            })
+            .collect()
     }
 
     fn known_certificate(&self, name: &Name) -> Option<Certificate> {
@@ -313,7 +371,11 @@ pub(crate) fn spawn(
     cancel: CancellationToken,
 ) -> anyhow::Result<Option<Arc<Links>>> {
     let socket = config.faces.iter().find_map(|f| match f {
-        FaceConfig::Quic { bind, listen, advertise } => Some((bind.clone(), *listen, advertise.clone())),
+        FaceConfig::Quic {
+            bind,
+            listen,
+            advertise,
+        } => Some((bind.clone(), *listen, advertise.clone())),
         _ => None,
     });
     let Some(identity) = identity else {
@@ -327,7 +389,8 @@ pub(crate) fn spawn(
         return Ok(None);
     };
     let signer = Arc::clone(identity.signer());
-    let key = LinkKeySource::current(signer.as_ref()).map_err(|e| anyhow::anyhow!("QUIC links: {e}"))?;
+    let key =
+        LinkKeySource::current(signer.as_ref()).map_err(|e| anyhow::anyhow!("QUIC links: {e}"))?;
     tracing::info!(
         target: "face.quic",
         fingerprint = %key.fingerprint(),
@@ -344,8 +407,9 @@ pub(crate) fn spawn(
         Some((_, _, advertise)) => advertise
             .iter()
             .map(|a| {
-                std::net::ToSocketAddrs::to_socket_addrs(a.as_str())
-                    .with_context(|| format!("[[face]] kind = \"quic\": advertise {a:?} does not resolve"))
+                std::net::ToSocketAddrs::to_socket_addrs(a.as_str()).with_context(|| {
+                    format!("[[face]] kind = \"quic\": advertise {a:?} does not resolve")
+                })
             })
             .collect::<anyhow::Result<Vec<_>>>()?
             .into_iter()
@@ -358,13 +422,21 @@ pub(crate) fn spawn(
             let addr: SocketAddr = bind
                 .parse()
                 .with_context(|| format!("[[face]] kind = \"quic\": bind {bind:?}"))?;
-            LinkEndpoint::bind(addr, Arc::clone(&signer) as Arc<dyn LinkKeySource>, &transport, listen)
-                .map(Arc::new)
-                .with_context(|| format!("cannot bind the QUIC link socket to {addr}"))
+            LinkEndpoint::bind(
+                addr,
+                Arc::clone(&signer) as Arc<dyn LinkKeySource>,
+                &transport,
+                listen,
+            )
+            .map(Arc::new)
+            .with_context(|| format!("cannot bind the QUIC link socket to {addr}"))
         })
         .transpose()?;
     if let Some(socket) = &socket {
-        let addr = socket.local_addr().map(|a| a.to_string()).unwrap_or_default();
+        let addr = socket
+            .local_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
         if socket.is_listening() {
             tracing::info!(target: "face.quic", %addr, "listening for QUIC links");
         } else {
@@ -379,7 +451,7 @@ pub(crate) fn spawn(
             trust: Arc::new(DaemonTrust {
                 keyring,
                 own_certs,
-                signer,
+                identity: Arc::clone(identity),
                 engine: engine.clone(),
             }),
             faces: Arc::new(EngineFaces(engine.clone())),
@@ -415,24 +487,30 @@ pub(crate) fn spawn(
             links.set_wake_token(PeerId(i), Some(Bytes::copy_from_slice(token.as_bytes())));
         }
     }
-    tokio::spawn(relink_on_switch(Arc::downgrade(&links), identity.switches(), cancel));
+    tokio::spawn(follow_identity_changes(
+        Arc::downgrade(&links),
+        identity.changes(),
+        cancel,
+    ));
     Ok(Some(links))
 }
 
-/// Each time this device switches to another key (it enrolled), make its
-/// enrollment links for that key's namespace again as full links.
-async fn relink_on_switch(
+/// Each time this device's identities change (it enrolled in a namespace,
+/// a signing identity went, or the node key changed), its links show what
+/// it holds now: enrollment links for a namespace it is now in, and links
+/// whose hello showed other namespaces, are made again.
+async fn follow_identity_changes(
     links: std::sync::Weak<Links>,
-    mut switches: tokio::sync::watch::Receiver<u64>,
+    mut changes: tokio::sync::watch::Receiver<u64>,
     cancel: CancellationToken,
 ) {
     loop {
         tokio::select! {
             () = cancel.cancelled() => return,
-            changed = switches.changed() => if changed.is_err() { return },
+            changed = changes.changed() => if changed.is_err() { return },
         }
         let Some(links) = links.upgrade() else { return };
-        links.key_switched();
+        links.identities_changed();
     }
 }
 
@@ -454,10 +532,18 @@ mod tests {
         .unwrap();
         let specs = peer_specs(&config).unwrap();
         assert_eq!(specs[0].relay, Some(PeerId(1)));
-        assert_eq!(specs[0].mode, LinkMode::OnDemand { idle: Duration::from_secs(30) });
+        assert_eq!(
+            specs[0].mode,
+            LinkMode::OnDemand {
+                idle: Duration::from_secs(30)
+            }
+        );
         assert_eq!(
             specs[1].relay_use,
-            Some(RelayUse { source: RelaySource::User, preference: 3 })
+            Some(RelayUse {
+                source: RelaySource::User,
+                preference: 3
+            })
         );
         assert_eq!(specs[1].mode, LinkMode::Off);
     }
