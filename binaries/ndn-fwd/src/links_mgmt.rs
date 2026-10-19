@@ -13,8 +13,8 @@ use ndn_mgmt::{MgmtContext, MgmtModule, MgmtResponse};
 use ndn_mgmt_wire::control_response::status;
 use ndn_mgmt_wire::nfd_command::{module, verb};
 use ndn_mgmt_wire::{
-    ControlParameters, ControlResponse, LinkAsleepEntry, LinkEntry, LinkListing, LinkModeArg, LinkPathEntry,
-    LinkRelayEntry, parse_link_command,
+    ControlParameters, ControlResponse, LinkAsleepEntry, LinkEntry, LinkListing, LinkModeArg,
+    LinkPathEntry, LinkRelayEntry, parse_link_command,
 };
 
 /// Serves the links module. `links = None` when this daemon runs no QUIC
@@ -89,7 +89,9 @@ fn command(links: &Links, verb_name: &[u8], params: &ControlParameters) -> Contr
     match verb_name {
         v if v == verb::CONNECT => {
             links.connect(peer);
-            ControlResponse::ok_empty(format!("linking to {label}, whatever its mode, until it is disconnected"))
+            ControlResponse::ok_empty(format!(
+                "linking to {label}, whatever its mode, until it is disconnected"
+            ))
         }
         v if v == verb::DISCONNECT => {
             links.disconnect(peer);
@@ -124,7 +126,9 @@ fn set_mode(
     let mode = match mode {
         LinkModeArg::Always => LinkMode::Always,
         LinkModeArg::Off => LinkMode::Off,
-        LinkModeArg::OnDemand { idle_secs: Some(secs) } if !IDLE_SECS.contains(&secs) => {
+        LinkModeArg::OnDemand {
+            idle_secs: Some(secs),
+        } if !IDLE_SECS.contains(&secs) => {
             return ControlResponse::error(
                 status::BAD_PARAMS,
                 format!(
@@ -135,7 +139,9 @@ fn set_mode(
                 ),
             );
         }
-        LinkModeArg::OnDemand { idle_secs: Some(secs) } => LinkMode::OnDemand {
+        LinkModeArg::OnDemand {
+            idle_secs: Some(secs),
+        } => LinkMode::OnDemand {
             idle: Duration::from_secs(secs),
         },
         LinkModeArg::OnDemand { idle_secs: None } => LinkMode::OnDemand {
@@ -146,12 +152,17 @@ fn set_mode(
         },
     };
     links.set_mode(peer, mode);
-    ControlResponse::ok_empty(format!("{label} is now {} (until the daemon restarts)", mode_text(mode)))
+    ControlResponse::ok_empty(format!(
+        "{label} is now {} (until the daemon restarts)",
+        mode_text(mode)
+    ))
 }
 
 fn mode_text(mode: LinkMode) -> String {
     match mode {
-        LinkMode::OnDemand { idle } => format!("on-demand, closing after {} s idle", idle.as_secs()),
+        LinkMode::OnDemand { idle } => {
+            format!("on-demand, closing after {} s idle", idle.as_secs())
+        }
         other => other.as_str().to_owned(),
     }
 }

@@ -63,7 +63,9 @@ fn relay_entry(mode: &str, more: &str) -> String {
 
 /// Whether the relay has a link face to `host`'s address.
 fn relay_links(cx: &mut Cx<'_>, host: u8) -> StepResult<bool> {
-    Ok(quic_faces(cx, "relay")?.iter().any(|(r, _)| *r.ip() == addr(host)))
+    Ok(quic_faces(cx, "relay")?
+        .iter()
+        .any(|(r, _)| *r.ip() == addr(host)))
 }
 
 /// `node`'s link to the relay (its `[[relay]]` or `[[peer]]` entry).
@@ -97,7 +99,10 @@ fn phone_asleep(cx: &mut Cx<'_>) -> StepResult<Option<String>> {
 /// `ndn-ctl link <verb> <relay>` on `node`.
 fn link_cmd(cx: &mut Cx<'_>, node: &str, verb: &str) -> StepResult<()> {
     let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx.tool("ndn-ctl").args(["--socket", &sock, "link", verb]).arg(n("/node/relay"));
+    let op = cx
+        .tool("ndn-ctl")
+        .args(["--socket", &sock, "link", verb])
+        .arg(n("/node/relay"));
     cx.ok(op, &format!("ndn-ctl link {verb}")).map(|_| ())
 }
 
@@ -112,9 +117,17 @@ fn wakes(cx: &Cx<'_>) -> Vec<String> {
 
 /// `node` links to the relay over QUIC only and enrolls by invite over its
 /// enrollment link; `hello` then reaches it over the full link.
-fn link_and_enroll(cx: &mut Cx<'_>, node: &str, host: u8, invite: &Invite, hello: &[u8]) -> StepResult<()> {
+fn link_and_enroll(
+    cx: &mut Cx<'_>,
+    node: &str,
+    host: u8,
+    invite: &Invite,
+    hello: &[u8],
+) -> StepResult<()> {
     cx.start(node)?;
-    wait_for(cx, &format!("the relay links to {node}"), SHORT, |cx| relay_links(cx, host))?;
+    wait_for(cx, &format!("the relay links to {node}"), SHORT, |cx| {
+        relay_links(cx, host)
+    })?;
     enroll(cx, node, invite, node, false, None)?;
     fetch_within(cx, node, &n("/node/relay/hello"), hello, SHORT)
 }
@@ -124,7 +137,14 @@ fn link_and_enroll(cx: &mut Cx<'_>, node: &str, host: u8, invite: &Invite, hello
 fn desk_peek(cx: &Cx<'_>, name: &str, file: &std::path::Path, lifetime_ms: u32) -> crate::run::Op {
     let sock = cx.w.node("desk").sock().display().to_string();
     cx.tool("ndn-peek")
-        .args(["--face-socket", &sock, "--can-be-prefix", "--lifetime", &lifetime_ms.to_string(), "-o"])
+        .args([
+            "--face-socket",
+            &sock,
+            "--can-be-prefix",
+            "--lifetime",
+            &lifetime_ms.to_string(),
+            "-o",
+        ])
         .arg(file.display().to_string())
         .arg(name)
         .timeout(Duration::from_millis(u64::from(lifetime_ms) + 10_000))
@@ -174,8 +194,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         fs::write(&notifier, script).map_err(|e| format!("{}: {e}", notifier.display()))?;
         fs::set_permissions(&notifier, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())
     })?;
-    let root = sc.step("init the root device", |cx| init_root(cx, "root", NS, "home"))?;
-    let invites = sc.step("mint three member invites (desk, phone, tab)", |cx| mint(cx, NS, &root.fp, 3, Some("2h")))?;
+    let root = sc.step("init the root device", |cx| {
+        init_root(cx, "root", NS, "home")
+    })?;
+    let invites = sc.step("mint three member invites (desk, phone, tab)", |cx| {
+        mint(cx, NS, &root.fp, 3, Some("2h"))
+    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
         cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
@@ -287,21 +311,33 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     })?;
 
     let photo = content(3_000, 73);
-    sc.step("while the phone is linked, the desk's fetch of its photo wakes nobody", |cx| {
-        cx.publish("phone", &n("/member/phone/photo"), &photo, None, None)?;
-        link_cmd(cx, "phone", "connect")?;
-        wait_for(cx, "the phone is linked", SHORT, |cx| relay_links(cx, PHONE))?;
-        fetch_within(cx, "desk", &n("/member/phone/photo"), &photo, SHORT)?;
-        let w = wakes(cx);
-        let sent = link_list(cx, "relay")?.wakes_sent;
-        cx.evidence(&format!("wake command lines {}; relay wakes-sent {sent:?}", w.len()));
-        if !w.is_empty() || sent != Some(0) {
-            return Err(format!("the relay woke the linked phone: {w:?}; wakes-sent {sent:?}"));
-        }
-        Ok(())
-    })?;
+    sc.step(
+        "while the phone is linked, the desk's fetch of its photo wakes nobody",
+        |cx| {
+            cx.publish("phone", &n("/member/phone/photo"), &photo, None, None)?;
+            link_cmd(cx, "phone", "connect")?;
+            wait_for(cx, "the phone is linked", SHORT, |cx| {
+                relay_links(cx, PHONE)
+            })?;
+            fetch_within(cx, "desk", &n("/member/phone/photo"), &photo, SHORT)?;
+            let w = wakes(cx);
+            let sent = link_list(cx, "relay")?.wakes_sent;
+            cx.evidence(&format!(
+                "wake command lines {}; relay wakes-sent {sent:?}",
+                w.len()
+            ));
+            if !w.is_empty() || sent != Some(0) {
+                return Err(format!(
+                    "the relay woke the linked phone: {w:?}; wakes-sent {sent:?}"
+                ));
+            }
+            Ok(())
+        },
+    )?;
 
-    let late: Vec<Vec<u8>> = (0..=HOLD_PER_DEVICE as u64).map(|i| content(1_000, 80 + i)).collect();
+    let late: Vec<Vec<u8>> = (0..=HOLD_PER_DEVICE as u64)
+        .map(|i| content(1_000, 80 + i))
+        .collect();
     sc.step(
         "the phone publishes three items and sleeps: its link closes idle, the relay counts it asleep and wakes nobody yet",
         |cx| {

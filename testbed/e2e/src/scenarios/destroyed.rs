@@ -51,27 +51,34 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     );
 
-    let root = sc.step("init the root device", |cx| init_root(cx, "root", NS, "desk"))?;
-    let invites = sc.step("mint a member invite", |cx| mint(cx, NS, &root.fp, 1, Some("2h")))?;
-    sc.step("start the root device (CA) and the relay; relay adopts by fingerprint link", |cx| {
-        cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
-        cx.w.node_mut("root").cfg.ca = Some(CaCfg {
-            prefix: NS.into(),
-            identity: n("/CA"),
-            tokens: invites.iter().map(|i| i.token.clone()).collect(),
-            member_days: None,
-        });
-        cx.start("root")?;
-        cx.start("relay")?;
-        let op = cx
-            .tool("ndn-fwd")
-            .arg("adopt")
-            .arg(&root.link_fp)
-            .arg("-c")
-            .arg(cx.w.node("relay").cfg_arg());
-        cx.ok(op, "adopt")?;
-        cx.expect_version("relay", NS, 1)
+    let root = sc.step("init the root device", |cx| {
+        init_root(cx, "root", NS, "desk")
     })?;
+    let invites = sc.step("mint a member invite", |cx| {
+        mint(cx, NS, &root.fp, 1, Some("2h"))
+    })?;
+    sc.step(
+        "start the root device (CA) and the relay; relay adopts by fingerprint link",
+        |cx| {
+            cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
+            cx.w.node_mut("root").cfg.ca = Some(CaCfg {
+                prefix: NS.into(),
+                identity: n("/CA"),
+                tokens: invites.iter().map(|i| i.token.clone()).collect(),
+                member_days: None,
+            });
+            cx.start("root")?;
+            cx.start("relay")?;
+            let op = cx
+                .tool("ndn-fwd")
+                .arg("adopt")
+                .arg(&root.link_fp)
+                .arg("-c")
+                .arg(cx.w.node("relay").cfg_arg());
+            cx.ok(op, "adopt")?;
+            cx.expect_version("relay", NS, 1)
+        },
+    )?;
     let old_cert = sc.step("phone enrolls with the invite through the relay", |cx| {
         cx.start("phone")?;
         enroll(cx, "phone", &invites[0], "phone", false, None)
@@ -93,26 +100,32 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         words(&out)
     })?;
     let kit = sc.world.dir.join("rd-file.kit");
-    sc.step("create a file recovery kit (root passphrase, kit passphrase)", |cx| {
-        let op = cx
-            .tool("ndn-fwd")
-            .args(["recovery-kit", "create", "--format", "file", "--out"])
-            .arg(kit.display().to_string())
-            .arg("-c")
-            .arg(cx.w.node("root").cfg_arg())
-            .env("NDN_ROOT_PASSPHRASE", ROOT_PASS)
-            .env("NDN_KIT_PASSPHRASE", KIT_PASS);
-        cx.ok(op, "recovery-kit create file")?;
-        cx.expect_version("root", NS, 3)?;
-        if !kit.exists() {
-            return Err("no kit file written".into());
-        }
-        Ok(())
-    })?;
-    sc.step("relay and phone adopt the kits' version by periodic refresh", |cx| {
-        cx.wait_version("relay", NS, 3, SHORT)?;
-        cx.wait_version("phone", NS, 3, SHORT).map(|_| ())
-    })?;
+    sc.step(
+        "create a file recovery kit (root passphrase, kit passphrase)",
+        |cx| {
+            let op = cx
+                .tool("ndn-fwd")
+                .args(["recovery-kit", "create", "--format", "file", "--out"])
+                .arg(kit.display().to_string())
+                .arg("-c")
+                .arg(cx.w.node("root").cfg_arg())
+                .env("NDN_ROOT_PASSPHRASE", ROOT_PASS)
+                .env("NDN_KIT_PASSPHRASE", KIT_PASS);
+            cx.ok(op, "recovery-kit create file")?;
+            cx.expect_version("root", NS, 3)?;
+            if !kit.exists() {
+                return Err("no kit file written".into());
+            }
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "relay and phone adopt the kits' version by periodic refresh",
+        |cx| {
+            cx.wait_version("relay", NS, 3, SHORT)?;
+            cx.wait_version("phone", NS, 3, SHORT).map(|_| ())
+        },
+    )?;
     sc.step("both kits check out on the relay (nothing signed)", |cx| {
         let cfg = cx.w.node("relay").cfg_arg();
         let op = cx
@@ -136,31 +149,44 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.stop("phone");
         Ok(())
     })?;
-    sc.step("the root device is destroyed (daemon stopped, PIB deleted)", |cx| {
-        cx.concept("root device lost");
-        cx.stop("root");
-        let pib = cx.w.node("root").pib();
-        fs::remove_dir_all(&pib).map_err(|e| e.to_string())?;
-        if pib.exists() {
-            return Err("root PIB still present".into());
-        }
-        // The relay's content store may still hold the root's last answers
-        // (the trust-context metadata is fresh for 1 s), which would answer
-        // the next step's "is v3 the newest?" as a live node would. A device
-        // recovering minutes after the loss sees no such copy; erase them.
-        let sock = cx.w.node("relay").sock().display().to_string();
-        let erase = cx
-            .tool("ndn-ctl")
-            .args(["--socket", &sock, "cs", "erase", NS]);
-        cx.ok(erase, "erase the relay's cached copies")?;
-        Ok(())
-    })?;
+    sc.step(
+        "the root device is destroyed (daemon stopped, PIB deleted)",
+        |cx| {
+            cx.concept("root device lost");
+            cx.stop("root");
+            let pib = cx.w.node("root").pib();
+            fs::remove_dir_all(&pib).map_err(|e| e.to_string())?;
+            if pib.exists() {
+                return Err("root PIB still present".into());
+            }
+            // The relay's content store may still hold the root's last answers
+            // (the trust-context metadata is fresh for 1 s), which would answer
+            // the next step's "is v3 the newest?" as a live node would. A device
+            // recovering minutes after the loss sees no such copy; erase them.
+            let sock = cx.w.node("relay").sock().display().to_string();
+            let erase = cx
+                .tool("ndn-ctl")
+                .args(["--socket", &sock, "cs", "erase", NS]);
+            cx.ok(erase, "erase the relay's cached copies")?;
+            Ok(())
+        },
+    )?;
     let recover_op = |cx: &crate::step::Cx<'_>, from_held: bool| {
         let mut op = cx
             .tool("ndn-fwd")
             .args([
-                "recover", "--kit", "words", "--old-root", "destroyed", "--namespace", NS,
-                "--root-store", "sealed-file", "--device", "relay", "-c",
+                "recover",
+                "--kit",
+                "words",
+                "--old-root",
+                "destroyed",
+                "--namespace",
+                NS,
+                "--root-store",
+                "sealed-file",
+                "--device",
+                "relay",
+                "-c",
             ])
             .arg(cx.w.node("relay").cfg_arg())
             .env("NDN_KIT_WORDS", words.join(" "))
@@ -171,48 +197,63 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         }
         op
     };
-    sc.step("recover without --from-held stops: nothing answers for the namespace", |cx| {
-        let op = recover_op(cx, false);
-        cx.refused(op, "recover")?;
-        cx.expect_version("relay", NS, 3)?;
-        if cx.w.node("relay").pib().join("root").exists() {
-            return Err("a root store was written on the relay".into());
-        }
-        Ok(())
-    })?;
-    let new_root = sc.step("the relay recovers with the words: --old-root destroyed --from-held", |cx| {
-        let op = recover_op(cx, true);
-        let out = cx.ok(op, "recover")?;
-        cx.expect_version("relay", NS, 5)?;
-        let info = root_info(&out)?;
-        if info.fp == root.fp {
-            return Err("the namespace's fingerprint did not change".into());
-        }
-        Ok(info)
-    })?;
+    sc.step(
+        "recover without --from-held stops: nothing answers for the namespace",
+        |cx| {
+            let op = recover_op(cx, false);
+            cx.refused(op, "recover")?;
+            cx.expect_version("relay", NS, 3)?;
+            if cx.w.node("relay").pib().join("root").exists() {
+                return Err("a root store was written on the relay".into());
+            }
+            Ok(())
+        },
+    )?;
+    let new_root = sc.step(
+        "the relay recovers with the words: --old-root destroyed --from-held",
+        |cx| {
+            let op = recover_op(cx, true);
+            let out = cx.ok(op, "recover")?;
+            cx.expect_version("relay", NS, 5)?;
+            let info = root_info(&out)?;
+            if info.fp == root.fp {
+                return Err("the namespace's fingerprint did not change".into());
+            }
+            Ok(info)
+        },
+    )?;
     let new_invites = sc.step("mint invites for the new root's fingerprint", |cx| {
         mint(cx, NS, &new_root.fp, 2, Some("2h"))
     })?;
-    sc.step("restart the relay as the root device with the printed [security]/[ca] lines", |cx| {
-        cx.stop("relay");
-        let relay = cx.w.node_mut("relay");
-        relay.cfg.identity = Some(new_root.identity.clone());
-        relay.cfg.ca = Some(CaCfg {
-            prefix: NS.into(),
-            identity: n("/CA"),
-            tokens: new_invites.iter().map(|i| i.token.clone()).collect(),
-            member_days: None,
-        });
-        cx.start("relay")
-    })?;
-    sc.step("the offline member comes back and catches up v3 -> v5 by itself", |cx| {
-        cx.start("phone")?;
-        cx.wait_version("phone", NS, 5, SHORT).map(|_| ())
-    })?;
-    sc.step("its Data (old CA's certificate) still validates at the relay, cold cache", |cx| {
-        cx.publish("phone", &n("/member/phone/doc1"), &doc1, None, None)?;
-        cx.fetch_ok("relay", &n("/member/phone/doc1"), &doc1)
-    })?;
+    sc.step(
+        "restart the relay as the root device with the printed [security]/[ca] lines",
+        |cx| {
+            cx.stop("relay");
+            let relay = cx.w.node_mut("relay");
+            relay.cfg.identity = Some(new_root.identity.clone());
+            relay.cfg.ca = Some(CaCfg {
+                prefix: NS.into(),
+                identity: n("/CA"),
+                tokens: new_invites.iter().map(|i| i.token.clone()).collect(),
+                member_days: None,
+            });
+            cx.start("relay")
+        },
+    )?;
+    sc.step(
+        "the offline member comes back and catches up v3 -> v5 by itself",
+        |cx| {
+            cx.start("phone")?;
+            cx.wait_version("phone", NS, 5, SHORT).map(|_| ())
+        },
+    )?;
+    sc.step(
+        "its Data (old CA's certificate) still validates at the relay, cold cache",
+        |cx| {
+            cx.publish("phone", &n("/member/phone/doc1"), &doc1, None, None)?;
+            cx.fetch_ok("relay", &n("/member/phone/doc1"), &doc1)
+        },
+    )?;
     sc.step("phone renews at the new CA", |cx| {
         let pib = cx.w.node("phone").pib();
         let before = cx.certs("phone");
@@ -240,10 +281,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         Ok(())
     })?;
     let doc2 = content(7_000, 12);
-    sc.step("Data signed after the renewal validates at the relay", |cx| {
-        cx.publish("phone", &n("/member/phone/doc2"), &doc2, None, None)?;
-        cx.fetch_ok("relay", &n("/member/phone/doc2"), &doc2)
-    })?;
+    sc.step(
+        "Data signed after the renewal validates at the relay",
+        |cx| {
+            cx.publish("phone", &n("/member/phone/doc2"), &doc2, None, None)?;
+            cx.fetch_ok("relay", &n("/member/phone/doc2"), &doc2)
+        },
+    )?;
     sc.step("a fresh device is refused the old root's link", |cx| {
         cx.start("fresh")?;
         let op = cx
@@ -269,10 +313,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.expect_version("fresh", NS, 5)
     })?;
     let doc3 = content(4_000, 13);
-    sc.step("the fresh device enrolls with a new invite; its Data validates", |cx| {
-        enroll(cx, "fresh", &new_invites[0], "tablet", false, None)?;
-        cx.publish("fresh", &n("/member/tablet/doc"), &doc3, None, None)?;
-        cx.fetch_ok("relay", &n("/member/tablet/doc"), &doc3)
-    })?;
+    sc.step(
+        "the fresh device enrolls with a new invite; its Data validates",
+        |cx| {
+            enroll(cx, "fresh", &new_invites[0], "tablet", false, None)?;
+            cx.publish("fresh", &n("/member/tablet/doc"), &doc3, None, None)?;
+            cx.fetch_ok("relay", &n("/member/tablet/doc"), &doc3)
+        },
+    )?;
     Ok(())
 }

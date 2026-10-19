@@ -63,7 +63,10 @@ impl Phone {
     fn start(program: &std::path::Path, log: std::path::PathBuf) -> StepResult<Phone> {
         let stderr = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let mut child = Command::new(program)
-            .env("RUST_LOG", std::env::var("NDN_E2E_LOG").unwrap_or_else(|_| "info".into()))
+            .env(
+                "RUST_LOG",
+                std::env::var("NDN_E2E_LOG").unwrap_or_else(|_| "info".into()),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr)
@@ -89,7 +92,12 @@ impl Phone {
     }
 
     /// Run `command`; the lines after `ok`, or why it failed.
-    fn call(&mut self, cx: &mut Cx<'_>, command: &str, within: Duration) -> StepResult<Vec<String>> {
+    fn call(
+        &mut self,
+        cx: &mut Cx<'_>,
+        command: &str,
+        within: Duration,
+    ) -> StepResult<Vec<String>> {
         cx.note(&format!("phone> {command}"));
         writeln!(self.stdin, "{command}")
             .and_then(|()| self.stdin.flush())
@@ -102,10 +110,17 @@ impl Phone {
                 Ok(line) if line == "." => break,
                 Ok(line) => answer.push(line),
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!("phone> {command}: no answer within {}s{}", within.as_secs(), self.tail()));
+                    return Err(format!(
+                        "phone> {command}: no answer within {}s{}",
+                        within.as_secs(),
+                        self.tail()
+                    ));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(format!("phone> {command}: phone_host exited{}", self.tail()));
+                    return Err(format!(
+                        "phone> {command}: phone_host exited{}",
+                        self.tail()
+                    ));
                 }
             }
         }
@@ -140,14 +155,20 @@ impl Phone {
 
     /// Whether the phone's link to its relay is up (a `path link` line).
     fn relay_linked(&mut self, cx: &mut Cx<'_>) -> StepResult<bool> {
-        Ok(self.link(cx, "home")?.iter().any(|l| l.starts_with("path link")))
+        Ok(self
+            .link(cx, "home")?
+            .iter()
+            .any(|l| l.starts_with("path link")))
     }
 
     fn tail(&self) -> String {
         let text = fs::read_to_string(&self.log).unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
         let from = lines.len().saturating_sub(30);
-        format!("\n    ── tail of phone_host log ──\n    | {}", lines[from..].join("\n    | "))
+        format!(
+            "\n    ── tail of phone_host log ──\n    | {}",
+            lines[from..].join("\n    | ")
+        )
     }
 }
 
@@ -175,10 +196,11 @@ fn relay_links_from(cx: &mut Cx<'_>, ip: Ipv4Addr) -> StepResult<bool> {
 /// Whether the relay's link list shows a path to an address of `ip`: the
 /// connection's address now, which follows a QUIC migration.
 fn relay_reaches_at(cx: &mut Cx<'_>, ip: Ipv4Addr) -> StepResult<bool> {
-    Ok(link_list(cx, "relay")?
-        .links
-        .iter()
-        .any(|l| l.paths.iter().any(|p| p.remote.is_some_and(|r| *r.ip() == ip))))
+    Ok(link_list(cx, "relay")?.links.iter().any(|l| {
+        l.paths
+            .iter()
+            .any(|p| p.remote.is_some_and(|r| *r.ip() == ip))
+    }))
 }
 
 /// The wake requests the relay's wake command recorded: `<token> <device>`.
@@ -200,7 +222,8 @@ fn metadata_version(content: &[u8]) -> Result<String, String> {
         _ => return Err(bad()),
     };
     let value = value.get(..len).ok_or_else(bad)?;
-    let name = ndn_packet::Name::decode(value.to_vec().into()).map_err(|e| format!("{}: {e}", bad()))?;
+    let name =
+        ndn_packet::Name::decode(value.to_vec().into()).map_err(|e| format!("{}: {e}", bad()))?;
     Ok(name.to_string())
 }
 
@@ -210,7 +233,13 @@ fn metadata_version(content: &[u8]) -> Result<String, String> {
 /// ndn-peek then fetches. ndn-peek alone discovers ndn-put's segments by
 /// `CanBePrefix`, which an RDR producer does not answer. The answers are
 /// written beside `files`.
-fn fetch_object(peek: &Op, sock: &str, name: &str, lifetime_ms: u32, files: &Path) -> Result<Vec<u8>, String> {
+fn fetch_object(
+    peek: &Op,
+    sock: &str,
+    name: &str,
+    lifetime_ms: u32,
+    files: &Path,
+) -> Result<Vec<u8>, String> {
     let meta = files.with_extension("meta");
     let asked = peek
         .clone()
@@ -228,7 +257,16 @@ fn fetch_object(peek: &Op, sock: &str, name: &str, lifetime_ms: u32, files: &Pat
     let object = files.with_extension("bin");
     let got = peek
         .clone()
-        .args(["--face-socket", sock, "--can-be-prefix", "--lifetime", "4000", "-p", "4", "-o"])
+        .args([
+            "--face-socket",
+            sock,
+            "--can-be-prefix",
+            "--lifetime",
+            "4000",
+            "-p",
+            "4",
+            "-o",
+        ])
         .arg(object.display().to_string())
         .arg(format!("{version}/seg=0"))
         .timeout(Duration::from_secs(30))
@@ -241,7 +279,13 @@ fn fetch_object(peek: &Op, sock: &str, name: &str, lifetime_ms: u32, files: &Pat
 
 /// Fetch the app's object `name` at `node` until it is delivered, within
 /// `within`.
-fn fetch_object_within(cx: &mut Cx<'_>, node: &str, name: &str, expect: &[u8], within: Duration) -> StepResult<()> {
+fn fetch_object_within(
+    cx: &mut Cx<'_>,
+    node: &str,
+    name: &str,
+    expect: &[u8],
+    within: Duration,
+) -> StepResult<()> {
     cx.concept("fetch");
     cx.input(format!("Data name ({name})"));
     let peek = cx.tool("ndn-peek");
@@ -252,14 +296,24 @@ fn fetch_object_within(cx: &mut Cx<'_>, node: &str, name: &str, expect: &[u8], w
         let files = cx.w.node(node).dir.join(format!("object-{seq}"));
         let why = match fetch_object(&peek, &sock, name, 4000, &files) {
             Ok(got) if got == expect => {
-                cx.note(&format!("{node} fetched {name} after {:.2}s", start.elapsed().as_secs_f64()));
+                cx.note(&format!(
+                    "{node} fetched {name} after {:.2}s",
+                    start.elapsed().as_secs_f64()
+                ));
                 return Ok(());
             }
-            Ok(got) => format!("{} bytes fetched, {} expected (bytes differ)", got.len(), expect.len()),
+            Ok(got) => format!(
+                "{} bytes fetched, {} expected (bytes differ)",
+                got.len(),
+                expect.len()
+            ),
             Err(e) => e,
         };
         if start.elapsed() > within {
-            return Err(format!("after {}s: fetch of {name} at {node} failed: {why}", within.as_secs()));
+            return Err(format!(
+                "after {}s: fetch of {name} at {node} failed: {why}",
+                within.as_secs()
+            ));
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -301,8 +355,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     );
 
-    let root = sc.step("init the root device", |cx| init_root(cx, "root", NS, "home"))?;
-    let invites = sc.step("mint two member invites (desk, phone)", |cx| mint(cx, NS, &root.fp, 2, Some("2h")))?;
+    let root = sc.step("init the root device", |cx| {
+        init_root(cx, "root", NS, "home")
+    })?;
+    let invites = sc.step("mint two member invites (desk, phone)", |cx| {
+        mint(cx, NS, &root.fp, 2, Some("2h"))
+    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
         cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
@@ -313,28 +371,36 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         });
         cx.start("root")
     })?;
-    sc.step("start the relay (listening, holding, waking), adopt, and become a node device on approval", |cx| {
-        cx.start("relay")?;
-        let op = cx
-            .tool("ndn-fwd")
-            .arg("adopt")
-            .arg(&root.link_fp)
-            .arg("-c")
-            .arg(cx.w.node("relay").cfg_arg());
-        cx.ok(op, "adopt")?;
-        cx.expect_version("relay", NS, 1)?;
-        enroll_by_approval(cx, NS, &root.link_fp, "relay")
-    })?;
+    sc.step(
+        "start the relay (listening, holding, waking), adopt, and become a node device on approval",
+        |cx| {
+            cx.start("relay")?;
+            let op = cx
+                .tool("ndn-fwd")
+                .arg("adopt")
+                .arg(&root.link_fp)
+                .arg("-c")
+                .arg(cx.w.node("relay").cfg_arg());
+            cx.ok(op, "adopt")?;
+            cx.expect_version("relay", NS, 1)?;
+            enroll_by_approval(cx, NS, &root.link_fp, "relay")
+        },
+    )?;
     let relay_hello = content(1_500, 41);
     sc.step("the relay serves a greeting under its device name", |cx| {
         cx.publish("relay", &n("/node/relay/hello"), &relay_hello, None, None)
     })?;
-    sc.step("desk links to the relay over QUIC and enrolls by invite over its enrollment link", |cx| {
-        cx.start("desk")?;
-        wait_for(cx, "the relay links to desk", SHORT, |cx| relay_links_from(cx, addr(3)))?;
-        enroll(cx, "desk", &invites[0], "desk", false, None)?;
-        fetch_within(cx, "desk", &n("/node/relay/hello"), &relay_hello, SHORT)
-    })?;
+    sc.step(
+        "desk links to the relay over QUIC and enrolls by invite over its enrollment link",
+        |cx| {
+            cx.start("desk")?;
+            wait_for(cx, "the relay links to desk", SHORT, |cx| {
+                relay_links_from(cx, addr(3))
+            })?;
+            enroll(cx, "desk", &invites[0], "desk", false, None)?;
+            fetch_within(cx, "desk", &n("/node/relay/hello"), &relay_hello, SHORT)
+        },
+    )?;
     // One segment, as the relay's greeting: the app gets `<name>/seg=0` by
     // its exact name (the FFI's `get`; ndn-put serves no RDR metadata for
     // the app's `fetch_object`).
@@ -364,23 +430,36 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.evidence(&format!("the phone links with key {} from {}", key.join(""), addr(4)));
         Ok(())
     })?;
-    sc.step("the app enrolls by invite over the enrollment link; the link becomes a full one by itself", |cx| {
-        cx.input("app: invite link (QR)");
-        let cert = phone.call(cx, &format!("enroll {} phone", invites[1].link), Duration::from_secs(60))?;
-        cx.evidence(&format!("issued {}", cert.join("")));
-        let took = wait_for(cx, "the phone's relay link is a full link", SHORT, |cx| {
-            let lines = phone.link(cx, "home")?;
-            Ok(lines.iter().any(|l| l.starts_with("relay linked")) && lines.iter().any(|l| l.starts_with("path link")))
-        })?;
-        cx.evidence(&format!("relay link up as an enrolled member {:.2}s after enrolling", took.as_secs_f64()));
-        Ok(())
-    })?;
+    sc.step(
+        "the app enrolls by invite over the enrollment link; the link becomes a full one by itself",
+        |cx| {
+            cx.input("app: invite link (QR)");
+            let cert = phone.call(
+                cx,
+                &format!("enroll {} phone", invites[1].link),
+                Duration::from_secs(60),
+            )?;
+            cx.evidence(&format!("issued {}", cert.join("")));
+            let took = wait_for(cx, "the phone's relay link is a full link", SHORT, |cx| {
+                let lines = phone.link(cx, "home")?;
+                Ok(lines.iter().any(|l| l.starts_with("relay linked"))
+                    && lines.iter().any(|l| l.starts_with("path link")))
+            })?;
+            cx.evidence(&format!(
+                "relay link up as an enrolled member {:.2}s after enrolling",
+                took.as_secs_f64()
+            ));
+            Ok(())
+        },
+    )?;
     sc.step("the app reaches the desk through the relay", |cx| {
         let start = Instant::now();
         loop {
             match phone.call(cx, &format!("get {}/seg=0", n("/member/desk/notes")), SHORT) {
                 Ok(got) if got.concat() == hex(&desk_notes) => break,
-                Ok(_) => return Err("the phone fetched the desk's notes, but the bytes differ".into()),
+                Ok(_) => {
+                    return Err("the phone fetched the desk's notes, but the bytes differ".into());
+                }
                 Err(e) if start.elapsed() > SHORT => return Err(e),
                 Err(_) => thread::sleep(Duration::from_millis(500)),
             }
@@ -389,68 +468,114 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         Ok(())
     })?;
     let photo = "a photo taken on the phone";
-    sc.step("the desk reaches the app: the app publishes, the desk fetches", |cx| {
-        phone.call(cx, &format!("publish {} {photo}", n("/member/phone/photo")), SHORT)?;
-        fetch_object_within(cx, "desk", &n("/member/phone/photo"), photo.as_bytes(), SHORT)
-    })?;
-    sc.step("the app and the desk get a direct path by membership (no peer entry names either)", |cx| {
-        let took = wait_for(cx, "a direct path between the phone and the desk", Duration::from_secs(45), |cx| {
-            let desk_side = link_list(cx, "desk")?.links.iter().any(|l| {
-                l.device.as_deref() == Some(n("/member/phone").as_str()) && l.paths.iter().any(|p| p.kind == "direct")
-            });
-            let phone_side = phone.status(cx)?.iter().any(|l| l.trim().starts_with("path direct"));
-            Ok(desk_side && phone_side)
-        })?;
-        cx.evidence(&format!("direct path up after {:.2}s", took.as_secs_f64()));
-        Ok(())
-    })?;
-    sc.step("a link turned off closes and stays closed until the app asks for it", |cx| {
-        cx.input("app: link mode off");
-        phone.call(cx, "mode home off", SHORT)?;
-        wait_for(cx, "the relay's link to the phone is gone", SHORT, |cx| {
-            Ok(!relay_links_from(cx, addr(4))?)
-        })?;
-        // A link that dialled again by itself would be up within the first
-        // backoff (0.5 s) and a dial (0.25 s here, as the connect below
-        // shows): 1.5 s covers it twice.
-        thread::sleep(Duration::from_millis(1500));
-        if relay_links_from(cx, addr(4))? || phone.relay_linked(cx)? {
-            return Err("the off link linked again by itself".into());
-        }
-        phone.call(cx, "connect home", SHORT)?;
-        let took = wait_for(cx, "the app's connect links it again", SHORT, |cx| relay_links_from(cx, addr(4)))?;
-        cx.evidence(&format!("off: closed and stayed closed; linked {:.2}s after the app asked", took.as_secs_f64()));
-        phone.call(cx, "disconnect home", SHORT)?;
-        wait_for(cx, "the app's disconnect closes it", SHORT, |cx| Ok(!relay_links_from(cx, addr(4))?))?;
-        Ok(())
-    })?;
-    sc.step("an on-demand link closes idle in the background and links again for an outgoing Interest", |cx| {
-        cx.input("app: link mode on-demand (idle 3 s)");
-        phone.call(cx, "mode home on-demand:3", SHORT)?;
-        wait_for(cx, "the on-demand link links while the app is active", SHORT, |cx| {
-            relay_links_from(cx, addr(4))
-        })?;
-        phone.call(cx, "active false", SHORT)?;
-        let idle = wait_for(cx, "the on-demand link closes idle in the background", SHORT, |cx| {
-            Ok(!relay_links_from(cx, addr(4))?)
-        })?;
-        // Only the relay serves this name: the Interest needs the relay link.
-        let got = phone.call(cx, &format!("get {}/seg=0", n("/node/relay/hello")), SHORT)?;
-        if got.concat() != hex(&relay_hello) {
-            return Err("the relay's greeting came back different".into());
-        }
-        if !relay_links_from(cx, addr(4))? {
-            return Err("the fetch succeeded but the relay shows no link from the phone".into());
-        }
-        cx.evidence(&format!(
-            "closed {:.2}s after going to the background; linked again for the fetch",
-            idle.as_secs_f64()
-        ));
-        if !wakes(cx).is_empty() {
-            return Err(format!("the relay woke an awake phone: {:?}", wakes(cx)));
-        }
-        Ok(())
-    })?;
+    sc.step(
+        "the desk reaches the app: the app publishes, the desk fetches",
+        |cx| {
+            phone.call(
+                cx,
+                &format!("publish {} {photo}", n("/member/phone/photo")),
+                SHORT,
+            )?;
+            fetch_object_within(
+                cx,
+                "desk",
+                &n("/member/phone/photo"),
+                photo.as_bytes(),
+                SHORT,
+            )
+        },
+    )?;
+    sc.step(
+        "the app and the desk get a direct path by membership (no peer entry names either)",
+        |cx| {
+            let took = wait_for(
+                cx,
+                "a direct path between the phone and the desk",
+                Duration::from_secs(45),
+                |cx| {
+                    let desk_side = link_list(cx, "desk")?.links.iter().any(|l| {
+                        l.device.as_deref() == Some(n("/member/phone").as_str())
+                            && l.paths.iter().any(|p| p.kind == "direct")
+                    });
+                    let phone_side = phone
+                        .status(cx)?
+                        .iter()
+                        .any(|l| l.trim().starts_with("path direct"));
+                    Ok(desk_side && phone_side)
+                },
+            )?;
+            cx.evidence(&format!("direct path up after {:.2}s", took.as_secs_f64()));
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "a link turned off closes and stays closed until the app asks for it",
+        |cx| {
+            cx.input("app: link mode off");
+            phone.call(cx, "mode home off", SHORT)?;
+            wait_for(cx, "the relay's link to the phone is gone", SHORT, |cx| {
+                Ok(!relay_links_from(cx, addr(4))?)
+            })?;
+            // A link that dialled again by itself would be up within the first
+            // backoff (0.5 s) and a dial (0.25 s here, as the connect below
+            // shows): 1.5 s covers it twice.
+            thread::sleep(Duration::from_millis(1500));
+            if relay_links_from(cx, addr(4))? || phone.relay_linked(cx)? {
+                return Err("the off link linked again by itself".into());
+            }
+            phone.call(cx, "connect home", SHORT)?;
+            let took = wait_for(cx, "the app's connect links it again", SHORT, |cx| {
+                relay_links_from(cx, addr(4))
+            })?;
+            cx.evidence(&format!(
+                "off: closed and stayed closed; linked {:.2}s after the app asked",
+                took.as_secs_f64()
+            ));
+            phone.call(cx, "disconnect home", SHORT)?;
+            wait_for(cx, "the app's disconnect closes it", SHORT, |cx| {
+                Ok(!relay_links_from(cx, addr(4))?)
+            })?;
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "an on-demand link closes idle in the background and links again for an outgoing Interest",
+        |cx| {
+            cx.input("app: link mode on-demand (idle 3 s)");
+            phone.call(cx, "mode home on-demand:3", SHORT)?;
+            wait_for(
+                cx,
+                "the on-demand link links while the app is active",
+                SHORT,
+                |cx| relay_links_from(cx, addr(4)),
+            )?;
+            phone.call(cx, "active false", SHORT)?;
+            let idle = wait_for(
+                cx,
+                "the on-demand link closes idle in the background",
+                SHORT,
+                |cx| Ok(!relay_links_from(cx, addr(4))?),
+            )?;
+            // Only the relay serves this name: the Interest needs the relay link.
+            let got = phone.call(cx, &format!("get {}/seg=0", n("/node/relay/hello")), SHORT)?;
+            if got.concat() != hex(&relay_hello) {
+                return Err("the relay's greeting came back different".into());
+            }
+            if !relay_links_from(cx, addr(4))? {
+                return Err(
+                    "the fetch succeeded but the relay shows no link from the phone".into(),
+                );
+            }
+            cx.evidence(&format!(
+                "closed {:.2}s after going to the background; linked again for the fetch",
+                idle.as_secs_f64()
+            ));
+            if !wakes(cx).is_empty() {
+                return Err(format!("the relay woke an awake phone: {:?}", wakes(cx)));
+            }
+            Ok(())
+        },
+    )?;
     sc.step("a network change moves the links to the new address", |cx| {
         phone.call(cx, "active true", SHORT)?;
         phone.call(cx, "mode home always", SHORT)?;

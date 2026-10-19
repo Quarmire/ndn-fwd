@@ -68,7 +68,8 @@ impl Scenario {
             transcript: String::new(),
         };
         let r = f(&mut cx);
-        let (inputs, concepts, evidence, transcript) = (cx.inputs, cx.concepts, cx.evidence, cx.transcript);
+        let (inputs, concepts, evidence, transcript) =
+            (cx.inputs, cx.concepts, cx.evidence, cx.transcript);
         let dur = start.elapsed();
         let n = self.steps.len() + 1;
         match r {
@@ -122,7 +123,10 @@ impl Scenario {
 
     pub fn skip(&mut self, name: &str, reason: &str) {
         let n = self.steps.len() + 1;
-        println!("[{}] SKIP           {n:>2}. {name}\n    reason: {reason}", self.name);
+        println!(
+            "[{}] SKIP           {n:>2}. {name}\n    reason: {reason}",
+            self.name
+        );
         self.steps.push(StepRecord {
             name: name.to_owned(),
             status: Status::Skip(reason.to_owned()),
@@ -134,7 +138,10 @@ impl Scenario {
     }
 
     pub fn passed(&self) -> bool {
-        !self.steps.iter().any(|s| matches!(s.status, Status::Fail(_)))
+        !self
+            .steps
+            .iter()
+            .any(|s| matches!(s.status, Status::Fail(_)))
     }
 
     pub fn to_json(&self, total: Duration, aborted: bool) -> Value {
@@ -240,7 +247,10 @@ impl Cx<'_> {
         if out.success() {
             Ok(out)
         } else {
-            Err(format!("{what}: expected success, got {}", out.status_text()))
+            Err(format!(
+                "{what}: expected success, got {}",
+                out.status_text()
+            ))
         }
     }
 
@@ -248,7 +258,10 @@ impl Cx<'_> {
     pub fn refused(&mut self, op: Op, what: &str) -> StepResult<Out> {
         let out = self.op(op);
         if out.timed_out {
-            Err(format!("{what}: expected a refusal, but it hung ({})", out.status_text()))
+            Err(format!(
+                "{what}: expected a refusal, but it hung ({})",
+                out.status_text()
+            ))
         } else if out.success() {
             Err(format!("{what}: expected a refusal, but it succeeded"))
         } else {
@@ -299,7 +312,10 @@ impl Cx<'_> {
         loop {
             if self.version(node, ns).is_some_and(|v| v >= want) {
                 let took = start.elapsed();
-                self.note(&format!("{node} holds {ns} v{want} after {:.2}s", took.as_secs_f64()));
+                self.note(&format!(
+                    "{node} holds {ns} v{want} after {:.2}s",
+                    took.as_secs_f64()
+                ));
                 return Ok(took);
             }
             if start.elapsed() > within {
@@ -414,7 +430,11 @@ impl Cx<'_> {
             out.status_text(),
             got.len(),
             expect.len(),
-            if got.is_empty() || got == expect { "" } else { " (bytes differ)" }
+            if got.is_empty() || got == expect {
+                ""
+            } else {
+                " (bytes differ)"
+            }
         ))
     }
 
@@ -443,7 +463,11 @@ impl Cx<'_> {
             ));
         }
         let token = format!("refused: {reason}");
-        let finality = if refusal.is_final() { "final" } else { "refused for now" };
+        let finality = if refusal.is_final() {
+            "final"
+        } else {
+            "refused for now"
+        };
         let next = format!("{finality}: {}", refusal.next_step());
         let mut lines = out.stderr.lines().map(str::trim);
         let told = lines.by_ref().any(|l| l == token) && lines.next() == Some(next.as_str());
@@ -461,11 +485,37 @@ impl Cx<'_> {
 
 /// Flags that take a value, across the tools.
 const VALUE_FLAGS: &[&str] = &[
-    "-c", "--config", "--pib", "--namespace", "--device", "--root-store", "--old-root",
-    "--format", "--out", "--kit", "--keep-kit", "--anchor-fp", "--role", "--ttl", "--ca",
-    "--count", "--identity", "--face-socket", "--lifetime", "-p", "-o", "--socket", "--face",
-    "--words-file", "--kit-passphrase-file", "--passphrase-file", "--chunk-size",
-    "--freshness", "--timeout", "--bytes", "--reason",
+    "-c",
+    "--config",
+    "--pib",
+    "--namespace",
+    "--device",
+    "--root-store",
+    "--old-root",
+    "--format",
+    "--out",
+    "--kit",
+    "--keep-kit",
+    "--anchor-fp",
+    "--role",
+    "--ttl",
+    "--ca",
+    "--count",
+    "--identity",
+    "--face-socket",
+    "--lifetime",
+    "-p",
+    "-o",
+    "--socket",
+    "--face",
+    "--words-file",
+    "--kit-passphrase-file",
+    "--passphrase-file",
+    "--chunk-size",
+    "--freshness",
+    "--timeout",
+    "--bytes",
+    "--reason",
 ];
 
 /// Human inputs and concepts of one command, from its tool, subcommand,
@@ -493,7 +543,10 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
         }
     }
     if op.foreign_user {
-        add(&mut concepts, "another local user (not the daemon's user or groups)".into());
+        add(
+            &mut concepts,
+            "another local user (not the daemon's user or groups)".into(),
+        );
     }
 
     let mut positionals = Vec::new();
@@ -614,7 +667,10 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
             add(&mut inputs, "invite link".into());
         } else if p.starts_with("ndn-trust://anchor/") {
             if p.len() < 400 {
-                add(&mut inputs, "anchor link (namespace + expected fingerprint)".into());
+                add(
+                    &mut inputs,
+                    "anchor link (namespace + expected fingerprint)".into(),
+                );
             } else {
                 add(&mut inputs, "anchor link (inline trust context)".into());
             }

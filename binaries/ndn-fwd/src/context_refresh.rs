@@ -73,32 +73,58 @@ mod tests {
             &[5; 32],
             "/home/bob/KEY/stranger".parse().unwrap(),
         ));
-        let forged = SignedTrustContext::decode_content(node.context_data.content().unwrap(), 2)
+        let forged =
+            SignedTrustContext::decode_content(node.context_data.content().unwrap(), 2).unwrap();
+        forged.add_anchor(
+            ndn_cert::recovery_anchor(Arc::clone(&stranger))
+                .await
+                .unwrap(),
+        );
+        let forged = forged
+            .sign_into_data_async(stranger.as_ref())
+            .await
             .unwrap();
-        forged.add_anchor(ndn_cert::recovery_anchor(Arc::clone(&stranger)).await.unwrap());
-        let forged = forged.sign_into_data_async(stranger.as_ref()).await.unwrap();
-        let refused = apply_update(&node.admin, forged.raw().clone()).await.unwrap_err();
+        let refused = apply_update(&node.admin, forged.raw().clone())
+            .await
+            .unwrap_err();
         assert_eq!(refused.status_code, 403, "{}", refused.reason);
         assert_eq!(node.admin.ns.keyring().version_of(&ns), Some(1));
-        assert!(ndn_cert::read_stored_context(device.path(), &ns).unwrap().is_none());
+        assert!(
+            ndn_cert::read_stored_context(device.path(), &ns)
+                .unwrap()
+                .is_none()
+        );
 
         let pib = FilePib::open(root_dev.path()).unwrap();
-        let root = RootStore::open(&pib).unwrap().unwrap().signer(None).await.unwrap();
+        let root = RootStore::open(&pib)
+            .unwrap()
+            .unwrap()
+            .signer(None)
+            .await
+            .unwrap();
         let seed = ndn_cert::RecoverySeed::generate().unwrap();
-        let kit = ndn_cert::recovery_anchor(Arc::new(seed.signer(&ns))).await.unwrap();
+        let kit = ndn_cert::recovery_anchor(Arc::new(seed.signer(&ns)))
+            .await
+            .unwrap();
         let bump = ndn_cert::add_recovery_anchor(root.as_ref(), &node.context_data, &kit)
             .await
             .unwrap();
-        let info = apply_update(&node.admin, bump.data.raw().clone()).await.unwrap();
+        let info = apply_update(&node.admin, bump.data.raw().clone())
+            .await
+            .unwrap();
         assert_eq!((info.held_version, info.version), (1, 2));
-        let (stored, _) = ndn_cert::read_stored_context(device.path(), &ns).unwrap().unwrap();
+        let (stored, _) = ndn_cert::read_stored_context(device.path(), &ns)
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.version(), 2);
         assert!(stored.has_key_role(&kit.key_name(), ndn_security::KeyRole::RECOVERY_ANCHOR));
 
         // Handed over again (a CLI that got no answer asks again): taken,
         // never refused — a refusal would make the CLI undo what this node
         // holds. Another v2 is still refused.
-        let again = apply_update(&node.admin, bump.data.raw().clone()).await.unwrap();
+        let again = apply_update(&node.admin, bump.data.raw().clone())
+            .await
+            .unwrap();
         assert_eq!((info.version, again.version), (2, 2));
         let other_kit = ndn_cert::recovery_anchor(Arc::new(
             ndn_cert::RecoverySeed::generate().unwrap().signer(&ns),
@@ -108,10 +134,14 @@ mod tests {
         let other = ndn_cert::add_recovery_anchor(root.as_ref(), &node.context_data, &other_kit)
             .await
             .unwrap();
-        let refused = apply_update(&node.admin, other.data.raw().clone()).await.unwrap_err();
+        let refused = apply_update(&node.admin, other.data.raw().clone())
+            .await
+            .unwrap_err();
         assert_eq!(refused.status_code, 403, "{}", refused.reason);
         assert_eq!(node.admin.ns.keyring().version_of(&ns), Some(2));
-        let (stored, data) = ndn_cert::read_stored_context(device.path(), &ns).unwrap().unwrap();
+        let (stored, data) = ndn_cert::read_stored_context(device.path(), &ns)
+            .unwrap()
+            .unwrap();
         assert!(stored.has_key_role(&kit.key_name(), ndn_security::KeyRole::RECOVERY_ANCHOR));
         assert_eq!(data.raw(), bump.data.raw());
         node.shutdown.shutdown().await;

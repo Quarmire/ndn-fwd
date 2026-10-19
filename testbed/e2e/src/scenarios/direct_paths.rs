@@ -110,7 +110,10 @@ impl LinkList {
             let t = line.trim();
             let (word, rest) = t.split_once(' ').unwrap_or((t, ""));
             let value = (rest != "-").then(|| rest.to_owned());
-            let count = || rest.parse::<u64>().map_err(|_| format!("unreadable line {t:?}"));
+            let count = || {
+                rest.parse::<u64>()
+                    .map_err(|_| format!("unreadable line {t:?}"))
+            };
             if line.starts_with(' ') {
                 let Some(link) = l.links.last_mut() else {
                     return Err(format!("{t:?} before any `link` line"));
@@ -154,9 +157,9 @@ impl LinkList {
 
     /// The link to the device named `device`, or holding `key`.
     pub(super) fn to(&self, device: &str, key: Option<&str>) -> Option<&Link> {
-        self.links
-            .iter()
-            .find(|l| l.device.as_deref() == Some(device) || (key.is_some() && l.key.as_deref() == key))
+        self.links.iter().find(|l| {
+            l.device.as_deref() == Some(device) || (key.is_some() && l.key.as_deref() == key)
+        })
     }
 }
 
@@ -219,11 +222,21 @@ fn wait_direct_up(
         let la = link_list(cx, a)?;
         let lb = link_list(cx, b)?;
         let (pa, pb) = (direct_path(&la, &lb, b), direct_path(&lb, &la, a));
-        let at = |p: Option<&PathLine>, ip: Ipv4Addr| p.and_then(|p| p.remote).is_some_and(|r| *r.ip() == ip);
+        let at = |p: Option<&PathLine>, ip: Ipv4Addr| {
+            p.and_then(|p| p.remote).is_some_and(|r| *r.ip() == ip)
+        };
         if at(pa, b_public) && at(pb, a_public) {
             let took = start.elapsed();
-            cx.evidence(&format!("after {:.2}s: {a} → {b}: {}", took.as_secs_f64(), shown(pa)));
-            cx.evidence(&format!("after {:.2}s: {b} → {a}: {}", took.as_secs_f64(), shown(pb)));
+            cx.evidence(&format!(
+                "after {:.2}s: {a} → {b}: {}",
+                took.as_secs_f64(),
+                shown(pa)
+            ));
+            cx.evidence(&format!(
+                "after {:.2}s: {b} → {a}: {}",
+                took.as_secs_f64(),
+                shown(pb)
+            ));
             return Ok(took);
         }
         if start.elapsed() > within {
@@ -248,7 +261,10 @@ fn wait_direct_gone(cx: &mut Cx<'_>, a: &str, b: &str, within: Duration) -> Step
         let (pa, pb) = (direct_path(&la, &lb, b), direct_path(&lb, &la, a));
         if pa.is_none() && pb.is_none() {
             let took = start.elapsed();
-            cx.evidence(&format!("after {:.2}s: no direct path between {a} and {b}", took.as_secs_f64()));
+            cx.evidence(&format!(
+                "after {:.2}s: no direct path between {a} and {b}",
+                took.as_secs_f64()
+            ));
             return Ok(took);
         }
         if start.elapsed() > within {
@@ -289,14 +305,20 @@ pub(super) fn quic_faces(cx: &mut Cx<'_>, node: &str) -> StepResult<Vec<(SocketA
                 let v = ["interests=", "data=", "nacks="]
                     .iter()
                     .find_map(|k| w.strip_prefix(k))
-                    .map(|v| v.parse::<u64>().map_err(|_| format!("face list on {node}: unreadable {t:?}")));
+                    .map(|v| {
+                        v.parse::<u64>()
+                            .map_err(|_| format!("face list on {node}: unreadable {t:?}"))
+                    });
                 if let Some(v) = v {
                     row.1 += v?;
                 }
             }
         }
     }
-    Ok(rows.into_iter().filter_map(|(r, p)| r.map(|r| (r, p))).collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(|(r, p)| r.map(|r| (r, p)))
+        .collect())
 }
 
 /// Packets the relay exchanged on its links with the boxes `publics`.
@@ -310,15 +332,28 @@ fn relay_packets(cx: &mut Cx<'_>, publics: &[Ipv4Addr]) -> StepResult<u64> {
 
 /// Wait until the relay has a link face to an address of `public`; that
 /// address.
-fn wait_relay_sees(cx: &mut Cx<'_>, public: Ipv4Addr, within: Duration) -> StepResult<SocketAddrV4> {
+fn wait_relay_sees(
+    cx: &mut Cx<'_>,
+    public: Ipv4Addr,
+    within: Duration,
+) -> StepResult<SocketAddrV4> {
     let start = Instant::now();
     loop {
-        if let Some((r, _)) = quic_faces(cx, "relay")?.into_iter().find(|(r, _)| *r.ip() == public) {
-            cx.note(&format!("the relay links to {r} after {:.2}s", start.elapsed().as_secs_f64()));
+        if let Some((r, _)) = quic_faces(cx, "relay")?
+            .into_iter()
+            .find(|(r, _)| *r.ip() == public)
+        {
+            cx.note(&format!(
+                "the relay links to {r} after {:.2}s",
+                start.elapsed().as_secs_f64()
+            ));
             return Ok(r);
         }
         if start.elapsed() > within {
-            return Err(format!("the relay has no link from {public} after {}s", within.as_secs()));
+            return Err(format!(
+                "the relay has no link from {public} after {}s",
+                within.as_secs()
+            ));
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -327,11 +362,19 @@ fn wait_relay_sees(cx: &mut Cx<'_>, public: Ipv4Addr, within: Duration) -> StepR
 /// `node`, behind box `public`, links to the relay over QUIC only and
 /// enrolls by invite over its enrollment link; `hello` (the relay's Data)
 /// then reaches it over the full link.
-fn link_and_enroll(cx: &mut Cx<'_>, node: &str, public: Ipv4Addr, invite: &Invite, hello: &[u8]) -> StepResult<()> {
+fn link_and_enroll(
+    cx: &mut Cx<'_>,
+    node: &str,
+    public: Ipv4Addr,
+    invite: &Invite,
+    hello: &[u8],
+) -> StepResult<()> {
     cx.start(node)?;
     let seen = wait_relay_sees(cx, public, SHORT)?;
     let lan = cx.w.node(node).ip;
-    cx.evidence(&format!("{node} binds {lan}; the relay sees it at {seen} (its box's public address)"));
+    cx.evidence(&format!(
+        "{node} binds {lan}; the relay sees it at {seen} (its box's public address)"
+    ));
     enroll(cx, node, invite, node, false, None)?;
     fetch_within(cx, node, &n("/node/relay/hello"), hello, SHORT)
 }
@@ -359,26 +402,42 @@ fn fetch_counted(
 
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     if let Some(why) = Nat::missing() {
-        sc.skip("build NAT boxes (nested network namespaces with nftables)", &why);
+        sc.skip(
+            "build NAT boxes (nested network namespaces with nftables)",
+            &why,
+        );
         return Ok(());
     }
-    sc.step("build NAT boxes A, B (port-restricted cone) and C, D (symmetric)", |cx| {
-        let mut nat = Nat::new(cx.w.dir.join("nat"))?;
-        for kind in [NatKind::Cone, NatKind::Cone, NatKind::Symmetric, NatKind::Symmetric] {
-            let k = nat.add_box(kind)?;
-            let b = nat.nat_box(k);
-            cx.evidence(&format!(
-                "box {k} ({}): public {}, device {} on its LAN",
-                b.kind.label(),
-                b.public,
-                b.device_ip
-            ));
-        }
-        cx.w.nat = Some(nat);
-        Ok(())
-    })?;
+    sc.step(
+        "build NAT boxes A, B (port-restricted cone) and C, D (symmetric)",
+        |cx| {
+            let mut nat = Nat::new(cx.w.dir.join("nat"))?;
+            for kind in [
+                NatKind::Cone,
+                NatKind::Cone,
+                NatKind::Symmetric,
+                NatKind::Symmetric,
+            ] {
+                let k = nat.add_box(kind)?;
+                let b = nat.nat_box(k);
+                cx.evidence(&format!(
+                    "box {k} ({}): public {}, device {} on its LAN",
+                    b.kind.label(),
+                    b.public,
+                    b.device_ip
+                ));
+            }
+            cx.w.nat = Some(nat);
+            Ok(())
+        },
+    )?;
     let public = |sc: &Scenario, k: u8| sc.world.nat.as_ref().expect("NAT boxes").nat_box(k).public;
-    let (pub_a, pub_b, pub_c, pub_d) = (public(sc, BOX_A), public(sc, BOX_B), public(sc, BOX_C), public(sc, BOX_D));
+    let (pub_a, pub_b, pub_c, pub_d) = (
+        public(sc, BOX_A),
+        public(sc, BOX_B),
+        public(sc, BOX_C),
+        public(sc, BOX_D),
+    );
 
     // Few background packets on the relay: the trust context is pulled
     // rarely.
@@ -420,8 +479,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     sc.world.add_behind("car", BOX_C, dialling);
     sc.world.add_behind("tv", BOX_D, listening);
 
-    let root = sc.step("init the root device", |cx| init_root(cx, "root", NS, "desk"))?;
-    let invites = sc.step("mint four member invites", |cx| mint(cx, NS, &root.fp, 4, Some("2h")))?;
+    let root = sc.step("init the root device", |cx| {
+        init_root(cx, "root", NS, "desk")
+    })?;
+    let invites = sc.step("mint four member invites", |cx| {
+        mint(cx, NS, &root.fp, 4, Some("2h"))
+    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
         cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
@@ -432,44 +495,55 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         });
         cx.start("root")
     })?;
-    let stranger_key = sc.step("stranger (never enrolled, no trust context) makes a key of its own: its link key", |cx| {
-        // A key in its PIB (not the daemon's ephemeral one), so the key the
-        // relay is told to accept is the one it links with after a restart.
-        let pib = cx.w.node("stranger").pib().display().to_string();
-        let op = cx.tool("ndn-sec").args(["--pib", &pib, "keygen", "/stranger"]);
-        cx.ok(op, "ndn-sec keygen")?;
-        cx.w.node_mut("stranger").cfg.identity = Some("/stranger".into());
-        cx.start("stranger")?;
-        let key = own_key(cx, "stranger")?;
-        cx.stop("stranger");
-        cx.evidence(&format!("stranger's link key {key}"));
-        Ok(key)
-    })?;
-    sc.step("start the relay (listening for QUIC links), adopt, and become a node device on approval", |cx| {
-        cx.start("relay")?;
-        let op = cx
-            .tool("ndn-fwd")
-            .arg("adopt")
-            .arg(&root.link_fp)
-            .arg("-c")
-            .arg(cx.w.node("relay").cfg_arg());
-        cx.ok(op, "adopt")?;
-        cx.expect_version("relay", NS, 1)?;
-        enroll_by_approval(cx, NS, &root.link_fp, "relay")
-    })?;
+    let stranger_key = sc.step(
+        "stranger (never enrolled, no trust context) makes a key of its own: its link key",
+        |cx| {
+            // A key in its PIB (not the daemon's ephemeral one), so the key the
+            // relay is told to accept is the one it links with after a restart.
+            let pib = cx.w.node("stranger").pib().display().to_string();
+            let op = cx
+                .tool("ndn-sec")
+                .args(["--pib", &pib, "keygen", "/stranger"]);
+            cx.ok(op, "ndn-sec keygen")?;
+            cx.w.node_mut("stranger").cfg.identity = Some("/stranger".into());
+            cx.start("stranger")?;
+            let key = own_key(cx, "stranger")?;
+            cx.stop("stranger");
+            cx.evidence(&format!("stranger's link key {key}"));
+            Ok(key)
+        },
+    )?;
+    sc.step(
+        "start the relay (listening for QUIC links), adopt, and become a node device on approval",
+        |cx| {
+            cx.start("relay")?;
+            let op = cx
+                .tool("ndn-fwd")
+                .arg("adopt")
+                .arg(&root.link_fp)
+                .arg("-c")
+                .arg(cx.w.node("relay").cfg_arg());
+            cx.ok(op, "adopt")?;
+            cx.expect_version("relay", NS, 1)?;
+            enroll_by_approval(cx, NS, &root.link_fp, "relay")
+        },
+    )?;
     let hello = content(2_000, 30);
-    let relay_key = sc.step("the relay accepts stranger by its key and restarts: its link key", |cx| {
-        cx.w.node_mut("relay").cfg.peers = vec![PeerCfg {
-            key: Some(stranger_key.clone()),
-            ..Default::default()
-        }];
-        cx.stop("relay");
-        cx.start("relay")?;
-        let key = own_key(cx, "relay")?;
-        cx.evidence(&format!("the relay's link key {key}"));
-        cx.publish("relay", &n("/node/relay/hello"), &hello, None, None)?;
-        Ok(key)
-    })?;
+    let relay_key = sc.step(
+        "the relay accepts stranger by its key and restarts: its link key",
+        |cx| {
+            cx.w.node_mut("relay").cfg.peers = vec![PeerCfg {
+                key: Some(stranger_key.clone()),
+                ..Default::default()
+            }];
+            cx.stop("relay");
+            cx.start("relay")?;
+            let key = own_key(cx, "relay")?;
+            cx.evidence(&format!("the relay's link key {key}"));
+            cx.publish("relay", &n("/node/relay/hello"), &hello, None, None)?;
+            Ok(key)
+        },
+    )?;
 
     sc.step("phone behind cone box A links to the relay, seen at A's public address, and enrolls by invite", |cx| {
         link_and_enroll(cx, "phone", pub_a, &invites[0], &hello)
@@ -528,12 +602,26 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     })?;
 
     let healed = content(200_000, 33);
-    sc.step("A and B reach each other again: the direct path comes back by itself", |cx| {
-        cx.w.nat.as_mut().expect("NAT boxes").heal()?;
-        wait_direct_up(cx, ("phone", pub_a), ("tab", pub_b), Duration::from_secs(75))?;
-        fetch_counted(cx, ("phone", "tab"), &n("/member/phone/healed"), &healed, &[pub_a, pub_b])?;
-        Ok(())
-    })?;
+    sc.step(
+        "A and B reach each other again: the direct path comes back by itself",
+        |cx| {
+            cx.w.nat.as_mut().expect("NAT boxes").heal()?;
+            wait_direct_up(
+                cx,
+                ("phone", pub_a),
+                ("tab", pub_b),
+                Duration::from_secs(75),
+            )?;
+            fetch_counted(
+                cx,
+                ("phone", "tab"),
+                &n("/member/phone/healed"),
+                &healed,
+                &[pub_a, pub_b],
+            )?;
+            Ok(())
+        },
+    )?;
 
     sc.step("car behind symmetric box C links to the relay, seen at C's public address, and enrolls by invite", |cx| {
         link_and_enroll(cx, "car", pub_c, &invites[2], &hello)

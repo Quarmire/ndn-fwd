@@ -63,7 +63,10 @@ fn member_toml(more: &str) -> String {
 /// A `[[relay]]` the user adds: the relay's expected fingerprint and
 /// endpoint.
 fn user_relay(key: &str, host: u8) -> String {
-    format!("[[relay]]\nkey = \"{key}\"\nendpoint = \"{}\"\n", endpoint(host))
+    format!(
+        "[[relay]]\nkey = \"{key}\"\nendpoint = \"{}\"\n",
+        endpoint(host)
+    )
 }
 
 /// The link in `list` labelled `label` (a device name or a key).
@@ -73,7 +76,10 @@ fn labelled<'a>(list: &'a LinkList, label: &str) -> Option<&'a Link> {
 
 /// The first word of a link's `relay` line: linked, trying, down, standby, off.
 fn relay_state(l: &Link) -> &str {
-    l.relay.as_deref().and_then(|r| r.split_whitespace().next()).unwrap_or("")
+    l.relay
+        .as_deref()
+        .and_then(|r| r.split_whitespace().next())
+        .unwrap_or("")
 }
 
 fn shown(l: Option<&Link>) -> String {
@@ -83,13 +89,22 @@ fn shown(l: Option<&Link>) -> String {
             "relay {}; {} path(s){}",
             l.relay.as_deref().unwrap_or("-"),
             l.paths.len(),
-            l.down.as_deref().map(|d| format!("; down {d}")).unwrap_or_default()
+            l.down
+                .as_deref()
+                .map(|d| format!("; down {d}"))
+                .unwrap_or_default()
         ),
     }
 }
 
 /// Wait until `node`'s link `label` is a relay in `state`; its `relay` line.
-fn wait_relay(cx: &mut Cx<'_>, node: &str, label: &str, state: &str, within: Duration) -> StepResult<(Duration, String)> {
+fn wait_relay(
+    cx: &mut Cx<'_>,
+    node: &str,
+    label: &str,
+    state: &str,
+    within: Duration,
+) -> StepResult<(Duration, String)> {
     let start = Instant::now();
     loop {
         let list = link_list(cx, node)?;
@@ -125,7 +140,13 @@ fn relay_packets(cx: &mut Cx<'_>, relay: &str, hosts: &[u8]) -> StepResult<u64> 
 
 /// m2 fetches `data` (published by m1 under `name`) within `within`; the
 /// packets `relay` carried for m1 and m2 meanwhile must cover every segment.
-fn fetch_through(cx: &mut Cx<'_>, relay: &str, name: &str, data: &[u8], within: Duration) -> StepResult<()> {
+fn fetch_through(
+    cx: &mut Cx<'_>,
+    relay: &str,
+    name: &str,
+    data: &[u8],
+    within: Duration,
+) -> StepResult<()> {
     let before = relay_packets(cx, relay, &[M1, M2])?;
     fetch_within(cx, "m2", name, data, within)?;
     let after = relay_packets(cx, relay, &[M1, M2])?;
@@ -135,7 +156,9 @@ fn fetch_through(cx: &mut Cx<'_>, relay: &str, name: &str, data: &[u8], within: 
         "{name}: {segments} segments; {relay}'s packets on m1's and m2's links {before} → {after} (+{delta})"
     ));
     if delta < segments {
-        return Err(format!("{relay} carried {delta} packets for {segments} segments: the fetch did not go through it"));
+        return Err(format!(
+            "{relay} carried {delta} packets for {segments} segments: the fetch did not go through it"
+        ));
     }
     Ok(())
 }
@@ -172,7 +195,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         links: vec![link("root", 1)],
         routes: vec![route(NS, "root")],
         quic_listen: true,
-        extra_toml: format!("[relays]\nnamespace = false\n\n[relay_service]\nhold = true\n\n{FAST_LINKS}"),
+        extra_toml: format!(
+            "[relays]\nnamespace = false\n\n[relay_service]\nhold = true\n\n{FAST_LINKS}"
+        ),
         ..base.clone()
     };
     sc.world.add("r1", R1, relay.clone());
@@ -221,7 +246,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         }
         Ok(info)
     })?;
-    let invites = sc.step("mint two member invites (m1, m2)", |cx| mint(cx, NS, &root.fp, 2, Some("2h")))?;
+    let invites = sc.step("mint two member invites (m1, m2)", |cx| {
+        mint(cx, NS, &root.fp, 2, Some("2h"))
+    })?;
     sc.step("start the root device's daemon with its CA", |cx| {
         let root_node = cx.w.node_mut("root");
         root_node.cfg.identity = Some(root.identity.clone());
@@ -230,21 +257,26 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         }
         cx.start("root")
     })?;
-    let r1_key = sc.step("r1 and r2 start (listening for QUIC links), adopt, and become node devices on approval", |cx| {
-        for r in ["r1", "r2"] {
-            cx.start(r)?;
-            let op = cx
-                .tool("ndn-fwd")
-                .arg("adopt")
-                .arg(&root.link_fp)
-                .arg("-c")
-                .arg(cx.w.node(r).cfg_arg());
-            cx.ok(op, "adopt")?;
-            cx.expect_version(r, NS, 1)?;
-            enroll_by_approval(cx, NS, &root.link_fp, r)?;
-        }
-        link_list(cx, "r1")?.key.ok_or_else(|| "r1's link list shows no key".to_owned())
-    })?;
+    let r1_key = sc.step(
+        "r1 and r2 start (listening for QUIC links), adopt, and become node devices on approval",
+        |cx| {
+            for r in ["r1", "r2"] {
+                cx.start(r)?;
+                let op = cx
+                    .tool("ndn-fwd")
+                    .arg("adopt")
+                    .arg(&root.link_fp)
+                    .arg("-c")
+                    .arg(cx.w.node(r).cfg_arg());
+                cx.ok(op, "adopt")?;
+                cx.expect_version(r, NS, 1)?;
+                enroll_by_approval(cx, NS, &root.link_fp, r)?;
+            }
+            link_list(cx, "r1")?
+                .key
+                .ok_or_else(|| "r1's link list shows no key".to_owned())
+        },
+    )?;
 
     sc.step(
         "m1 and m2 enroll by invite and, with no [[relay]] or [[peer]], link to r1, the relay /ra advertises first",
@@ -281,76 +313,104 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     })?;
 
     let moved = content(100_000, 62);
-    sc.step("r1 stops: m1 and m2 move to r2 (preference 1), and m2's fetch of m1's Data with them", |cx| {
-        cx.publish("m1", &n("/member/m1/moved"), &moved, None, None)?;
-        cx.stop("r1");
-        let start = Instant::now();
-        for m in ["m1", "m2"] {
-            let (_, line) = wait_relay(cx, m, &n("/node/r2"), "linked", Duration::from_secs(60))?;
-            let list = link_list(cx, m)?;
-            let r1 = labelled(&list, &n("/node/r1"));
-            cx.evidence(&format!(
-                "{m} linked to r2 {:.2}s after r1 stopped: relay {line}; r1: {}",
-                start.elapsed().as_secs_f64(),
-                shown(r1)
-            ));
-            // r1 said it shuts down: r2 stands in at once, not after a redial
-            // of r1 fails.
-            if !shown(r1).contains("shutting down") {
-                return Err(format!("{m}'s r1 does not say it shut down: {}", shown(r1)));
+    sc.step(
+        "r1 stops: m1 and m2 move to r2 (preference 1), and m2's fetch of m1's Data with them",
+        |cx| {
+            cx.publish("m1", &n("/member/m1/moved"), &moved, None, None)?;
+            cx.stop("r1");
+            let start = Instant::now();
+            for m in ["m1", "m2"] {
+                let (_, line) =
+                    wait_relay(cx, m, &n("/node/r2"), "linked", Duration::from_secs(60))?;
+                let list = link_list(cx, m)?;
+                let r1 = labelled(&list, &n("/node/r1"));
+                cx.evidence(&format!(
+                    "{m} linked to r2 {:.2}s after r1 stopped: relay {line}; r1: {}",
+                    start.elapsed().as_secs_f64(),
+                    shown(r1)
+                ));
+                // r1 said it shuts down: r2 stands in at once, not after a redial
+                // of r1 fails.
+                if !shown(r1).contains("shutting down") {
+                    return Err(format!("{m}'s r1 does not say it shut down: {}", shown(r1)));
+                }
             }
-        }
-        fetch_through(cx, "r2", &n("/member/m1/moved"), &moved, SHORT)?;
-        cx.evidence(&format!("m2 fetched through r2 {:.2}s after r1 stopped", start.elapsed().as_secs_f64()));
-        Ok(())
-    })?;
+            fetch_through(cx, "r2", &n("/member/m1/moved"), &moved, SHORT)?;
+            cx.evidence(&format!(
+                "m2 fetched through r2 {:.2}s after r1 stopped",
+                start.elapsed().as_secs_f64()
+            ));
+            Ok(())
+        },
+    )?;
 
     let back = content(100_000, 63);
-    sc.step("r1 is back: m1 and m2 link to it again and release r2, which does not count them asleep", |cx| {
-        cx.publish("m1", &n("/member/m1/back"), &back, None, None)?;
-        cx.start("r1")?;
-        let start = Instant::now();
-        for m in ["m1", "m2"] {
-            let (_, line) = wait_relay(cx, m, &n("/node/r1"), "linked", Duration::from_secs(90))?;
-            cx.evidence(&format!("{m} linked to r1 again {:.2}s after it restarted: relay {line}", start.elapsed().as_secs_f64()));
-        }
-        // Released, r2 forgets them: no path, and not asleep there,
-        // although both asked their relays to hold their Interests.
-        wait_for(cx, "r2 has neither m1 nor m2 linked or asleep", SHORT, |cx| {
-            let list = link_list(cx, "r2")?;
-            Ok(["m1", "m2"].iter().all(|m| {
-                list.links
-                    .iter()
-                    .filter(|l| l.device.as_deref() == Some(n(&format!("/member/{m}")).as_str()))
-                    .all(|l| l.paths.is_empty() && l.asleep.is_none())
-            }))
-        })?;
-        for m in ["m1", "m2"] {
-            let (_, line) = wait_relay(cx, m, &n("/node/r2"), "standby", SHORT)?;
-            cx.evidence(&format!("{m} → r2: relay {line}"));
-        }
-        let log = fs::read_to_string(cx.w.node("r2").log()).unwrap_or_default();
-        if let Some(l) = log.lines().filter(|l| l.contains("link down") && l.contains(&n("/member/m1"))).last() {
-            cx.evidence(&format!("r2's log: {}", l.trim()));
-        }
-        fetch_through(cx, "r1", &n("/member/m1/back"), &back, SHORT)
-    })?;
+    sc.step(
+        "r1 is back: m1 and m2 link to it again and release r2, which does not count them asleep",
+        |cx| {
+            cx.publish("m1", &n("/member/m1/back"), &back, None, None)?;
+            cx.start("r1")?;
+            let start = Instant::now();
+            for m in ["m1", "m2"] {
+                let (_, line) =
+                    wait_relay(cx, m, &n("/node/r1"), "linked", Duration::from_secs(90))?;
+                cx.evidence(&format!(
+                    "{m} linked to r1 again {:.2}s after it restarted: relay {line}",
+                    start.elapsed().as_secs_f64()
+                ));
+            }
+            // Released, r2 forgets them: no path, and not asleep there,
+            // although both asked their relays to hold their Interests.
+            wait_for(
+                cx,
+                "r2 has neither m1 nor m2 linked or asleep",
+                SHORT,
+                |cx| {
+                    let list = link_list(cx, "r2")?;
+                    Ok(["m1", "m2"].iter().all(|m| {
+                        list.links
+                            .iter()
+                            .filter(|l| {
+                                l.device.as_deref() == Some(n(&format!("/member/{m}")).as_str())
+                            })
+                            .all(|l| l.paths.is_empty() && l.asleep.is_none())
+                    }))
+                },
+            )?;
+            for m in ["m1", "m2"] {
+                let (_, line) = wait_relay(cx, m, &n("/node/r2"), "standby", SHORT)?;
+                cx.evidence(&format!("{m} → r2: relay {line}"));
+            }
+            let log = fs::read_to_string(cx.w.node("r2").log()).unwrap_or_default();
+            if let Some(l) = log
+                .lines()
+                .filter(|l| l.contains("link down") && l.contains(&n("/member/m1")))
+                .last()
+            {
+                cx.evidence(&format!("r2's log: {}", l.trim()));
+            }
+            fetch_through(cx, "r1", &n("/member/m1/back"), &back, SHORT)
+        },
+    )?;
 
-    sc.step("init /rb's root device, mint two member invites, start its CA; b1 and b2 enroll", |cx| {
-        let info = init_root(cx, "broot", NS_B, "home")?;
-        let invites = mint(cx, NS_B, &info.fp, 2, Some("2h"))?;
-        let broot = cx.w.node_mut("broot");
-        broot.cfg.identity = Some(info.identity.clone());
-        broot.cfg.ca = Some(CaCfg {
-            prefix: NS_B.into(),
-            identity: format!("{NS_B}/CA"),
-            tokens: invites.iter().map(|i| i.token.clone()).collect(),
-            member_days: None,
-        });
-        cx.start("broot")?;
-        enroll_member(cx, "b1", &invites[0])?;
-        enroll_member(cx, "b2", &invites[1])
-    })?;
+    sc.step(
+        "init /rb's root device, mint two member invites, start its CA; b1 and b2 enroll",
+        |cx| {
+            let info = init_root(cx, "broot", NS_B, "home")?;
+            let invites = mint(cx, NS_B, &info.fp, 2, Some("2h"))?;
+            let broot = cx.w.node_mut("broot");
+            broot.cfg.identity = Some(info.identity.clone());
+            broot.cfg.ca = Some(CaCfg {
+                prefix: NS_B.into(),
+                identity: format!("{NS_B}/CA"),
+                tokens: invites.iter().map(|i| i.token.clone()).collect(),
+                member_days: None,
+            });
+            cx.start("broot")?;
+            enroll_member(cx, "b1", &invites[0])?;
+            enroll_member(cx, "b2", &invites[1])
+        },
+    )?;
     sc.step("b1 adds r1 as its relay by r1's expected fingerprint: r1 serves only /ra and refuses it, saying why", |cx| {
         cx.w.node_mut("b1").cfg.extra_toml = user_relay(&r1_key, R1);
         cx.stop("b1");
@@ -387,38 +447,55 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.evidence(&format!("club: serve {}", list.serve.as_deref().unwrap_or("-")));
         list.key.ok_or_else(|| "club's link list shows no key".to_owned())
     })?;
-    sc.step("the open relay admits b1 of /rb and refuses b2, its namespace's quota being used", |cx| {
-        cx.w.node_mut("b1").cfg.extra_toml = user_relay(&club_key, CLUB);
-        cx.stop("b1");
-        cx.start("b1")?;
-        let (took, line) = wait_relay(cx, "b1", &club_key, "linked", SHORT)?;
-        cx.evidence(&format!("b1 → club after {:.2}s: relay {line}", took.as_secs_f64()));
-        cx.w.node_mut("b2").cfg.extra_toml = user_relay(&club_key, CLUB);
-        cx.stop("b2");
-        cx.start("b2")?;
-        let mut seen = String::new();
-        wait_for(cx, "b2's relay club is down with the quota reason", SHORT, |cx| {
-            let list = link_list(cx, "b2")?;
-            let Some(l) = labelled(&list, &club_key) else { return Ok(false) };
-            seen = shown(Some(l));
-            Ok(relay_state(l) == "down" && l.paths.is_empty() && l.relay.as_deref().is_some_and(|r| r.contains(NS_B)))
-        })
-        .map_err(|e| format!("{e}; b2 → club: {seen}"))?;
-        cx.evidence(&format!("b2 → club: {seen}"));
-        let club = link_list(cx, "club")?;
-        let served: Vec<&str> = club
-            .links
-            .iter()
-            .filter(|l| !l.paths.is_empty())
-            .filter_map(|l| l.device.as_deref())
-            .filter(|d| d.starts_with(&format!("{NS_B}/")))
-            .collect();
-        cx.evidence(&format!("club links with /rb devices {served:?}"));
-        if served != [format!("{NS_B}/member/b1").as_str()] {
-            return Err(format!("club links with /rb devices {served:?}, expected b1 only"));
-        }
-        Ok(())
-    })?;
+    sc.step(
+        "the open relay admits b1 of /rb and refuses b2, its namespace's quota being used",
+        |cx| {
+            cx.w.node_mut("b1").cfg.extra_toml = user_relay(&club_key, CLUB);
+            cx.stop("b1");
+            cx.start("b1")?;
+            let (took, line) = wait_relay(cx, "b1", &club_key, "linked", SHORT)?;
+            cx.evidence(&format!(
+                "b1 → club after {:.2}s: relay {line}",
+                took.as_secs_f64()
+            ));
+            cx.w.node_mut("b2").cfg.extra_toml = user_relay(&club_key, CLUB);
+            cx.stop("b2");
+            cx.start("b2")?;
+            let mut seen = String::new();
+            wait_for(
+                cx,
+                "b2's relay club is down with the quota reason",
+                SHORT,
+                |cx| {
+                    let list = link_list(cx, "b2")?;
+                    let Some(l) = labelled(&list, &club_key) else {
+                        return Ok(false);
+                    };
+                    seen = shown(Some(l));
+                    Ok(relay_state(l) == "down"
+                        && l.paths.is_empty()
+                        && l.relay.as_deref().is_some_and(|r| r.contains(NS_B)))
+                },
+            )
+            .map_err(|e| format!("{e}; b2 → club: {seen}"))?;
+            cx.evidence(&format!("b2 → club: {seen}"));
+            let club = link_list(cx, "club")?;
+            let served: Vec<&str> = club
+                .links
+                .iter()
+                .filter(|l| !l.paths.is_empty())
+                .filter_map(|l| l.device.as_deref())
+                .filter(|d| d.starts_with(&format!("{NS_B}/")))
+                .collect();
+            cx.evidence(&format!("club links with /rb devices {served:?}"));
+            if served != [format!("{NS_B}/member/b1").as_str()] {
+                return Err(format!(
+                    "club links with /rb devices {served:?}, expected b1 only"
+                ));
+            }
+            Ok(())
+        },
+    )?;
 
     let community = content(100_000, 64);
     sc.step(

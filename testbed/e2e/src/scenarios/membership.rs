@@ -55,11 +55,24 @@ fn relay_packets(cx: &mut Cx<'_>, publics: &[Ipv4Addr]) -> StepResult<u64> {
 /// `node` behind the box with address `public` links to the relay, seen at
 /// that address, and enrolls by `invite` as `device`; `hello` (the relay's
 /// Data) then reaches it over the full link.
-fn link_and_enroll(cx: &mut Cx<'_>, node: &str, public: Ipv4Addr, invite: &Invite, hello: &[u8]) -> StepResult<()> {
+fn link_and_enroll(
+    cx: &mut Cx<'_>,
+    node: &str,
+    public: Ipv4Addr,
+    invite: &Invite,
+    hello: &[u8],
+) -> StepResult<()> {
     cx.start(node)?;
-    wait_for(cx, &format!("the relay links to {node} at {public}"), SHORT, |cx| {
-        Ok(quic_faces(cx, "relay")?.iter().any(|(r, _)| *r.ip() == public))
-    })?;
+    wait_for(
+        cx,
+        &format!("the relay links to {node} at {public}"),
+        SHORT,
+        |cx| {
+            Ok(quic_faces(cx, "relay")?
+                .iter()
+                .any(|(r, _)| *r.ip() == public))
+        },
+    )?;
     enroll(cx, node, invite, node, false, None)?;
     fetch_within(cx, node, &n("/node/relay/hello"), hello, SHORT)
 }
@@ -75,7 +88,10 @@ fn remotes(list: &LinkList) -> Vec<String> {
 
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     if let Some(why) = Nat::missing() {
-        sc.skip("build NAT boxes (nested network namespaces with nftables)", &why);
+        sc.skip(
+            "build NAT boxes (nested network namespaces with nftables)",
+            &why,
+        );
         return Ok(());
     }
     sc.step("build NAT boxes A, B and C (port-restricted cone)", |cx| {
@@ -83,7 +99,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         for _ in 0..3 {
             let k = nat.add_box(NatKind::Cone)?;
             let b = nat.nat_box(k);
-            cx.evidence(&format!("box {k}: public {}, device {} on its LAN", b.public, b.device_ip));
+            cx.evidence(&format!(
+                "box {k}: public {}, device {} on its LAN",
+                b.public, b.device_ip
+            ));
         }
         cx.w.nat = Some(nat);
         Ok(())
@@ -128,7 +147,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     );
     sc.world.add_behind("visitor", BOX_C, dialling);
 
-    let root = sc.step("init the root device (default direct-path role matrix)", |cx| init_root(cx, "root", NS, "home"))?;
+    let root = sc.step(
+        "init the root device (default direct-path role matrix)",
+        |cx| init_root(cx, "root", NS, "home"),
+    )?;
     let (members, guests) = sc.step("mint two member invites and one guest invite", |cx| {
         Ok((
             mint(cx, NS, &root.fp, 2, Some("2h"))?,
@@ -140,7 +162,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         cx.w.node_mut("root").cfg.ca = Some(CaCfg {
             prefix: NS.into(),
             identity: n("/CA"),
-            tokens: members.iter().chain(&guests).map(|i| i.token.clone()).collect(),
+            tokens: members
+                .iter()
+                .chain(&guests)
+                .map(|i| i.token.clone())
+                .collect(),
             member_days: None,
         });
         cx.start("root")
@@ -197,25 +223,31 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     let warm = content(2_000, 91);
     let album = content(400_000, 92);
-    sc.step("m2 fetches m1's 400 KB object over the direct path: the relay carries none of it", |cx| {
-        // The first fetch brings m1's certificate to m2; the counted one
-        // needs nothing else.
-        cx.publish("m1", &n("/member/m1/warm"), &warm, None, None)?;
-        fetch_within(cx, "m2", &n("/member/m1/warm"), &warm, SHORT)?;
-        cx.publish("m1", &n("/member/m1/album"), &album, None, None)?;
-        let before = relay_packets(cx, &[pub_a, pub_b])?;
-        fetch_within(cx, "m2", &n("/member/m1/album"), &album, SHORT)?;
-        let after = relay_packets(cx, &[pub_a, pub_b])?;
-        cx.evidence(&format!(
-            "{} segments; relay packets on m1's and m2's links {before} → {after} (+{})",
-            album.len().div_ceil(SEGMENT),
-            after.saturating_sub(before)
-        ));
-        if after != before {
-            return Err(format!("the relay carried {} packets of the fetch", after.saturating_sub(before)));
-        }
-        Ok(())
-    })?;
+    sc.step(
+        "m2 fetches m1's 400 KB object over the direct path: the relay carries none of it",
+        |cx| {
+            // The first fetch brings m1's certificate to m2; the counted one
+            // needs nothing else.
+            cx.publish("m1", &n("/member/m1/warm"), &warm, None, None)?;
+            fetch_within(cx, "m2", &n("/member/m1/warm"), &warm, SHORT)?;
+            cx.publish("m1", &n("/member/m1/album"), &album, None, None)?;
+            let before = relay_packets(cx, &[pub_a, pub_b])?;
+            fetch_within(cx, "m2", &n("/member/m1/album"), &album, SHORT)?;
+            let after = relay_packets(cx, &[pub_a, pub_b])?;
+            cx.evidence(&format!(
+                "{} segments; relay packets on m1's and m2's links {before} → {after} (+{})",
+                album.len().div_ceil(SEGMENT),
+                after.saturating_sub(before)
+            ));
+            if after != before {
+                return Err(format!(
+                    "the relay carried {} packets of the fetch",
+                    after.saturating_sub(before)
+                ));
+            }
+            Ok(())
+        },
+    )?;
 
     let note = content(30_000, 93);
     sc.step("the guest gets no direct path and learns of no member; it reaches m1's Data through the relay", |cx| {

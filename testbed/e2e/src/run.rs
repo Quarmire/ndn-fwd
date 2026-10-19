@@ -241,7 +241,10 @@ impl Out {
 
     pub fn status_text(&self) -> String {
         if self.timed_out {
-            format!("killed at the deadline after {:.1}s", self.elapsed.as_secs_f64())
+            format!(
+                "killed at the deadline after {:.1}s",
+                self.elapsed.as_secs_f64()
+            )
         } else {
             match self.code {
                 Some(c) => format!("exit {c} after {:.2}s", self.elapsed.as_secs_f64()),

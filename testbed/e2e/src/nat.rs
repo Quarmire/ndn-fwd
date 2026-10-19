@@ -78,17 +78,24 @@ impl Holder {
         let mut h = Holder { child };
         // unshare(2) runs before it execs sleep: wait until the process
         // is in a namespace other than ours.
-        let ours = fs::read_link("/proc/self/ns/net").map_err(|e| format!("/proc/self/ns/net: {e}"))?;
+        let ours =
+            fs::read_link("/proc/self/ns/net").map_err(|e| format!("/proc/self/ns/net: {e}"))?;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if fs::read_link(h.netns()).is_ok_and(|ns| ns != ours) {
                 return Ok(h);
             }
             if !matches!(h.child.try_wait(), Ok(None)) {
-                return Err("`unshare --net sleep infinity` exited: cannot create a network namespace".into());
+                return Err(
+                    "`unshare --net sleep infinity` exited: cannot create a network namespace"
+                        .into(),
+                );
             }
             if Instant::now() > deadline {
-                return Err(format!("{} did not enter a new network namespace within 5 s", h.netns().display()));
+                return Err(format!(
+                    "{} did not enter a new network namespace within 5 s",
+                    h.netns().display()
+                ));
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -203,7 +210,11 @@ impl Nat {
     fn run(&self, netns: Option<&Path>, argv: &[&str]) -> Result<String, String> {
         let mut full: Vec<String> = Vec::new();
         if let Some(ns) = netns {
-            full.extend(["nsenter".to_owned(), format!("--net={}", ns.display()), "--".to_owned()]);
+            full.extend([
+                "nsenter".to_owned(),
+                format!("--net={}", ns.display()),
+                "--".to_owned(),
+            ]);
         }
         full.extend(argv.iter().map(|s| (*s).to_owned()));
         let line = full.join(" ");
@@ -244,22 +255,75 @@ impl Nat {
         let lan_gw = format!("192.168.{k}.1");
 
         // The box's wan, from the harness's side.
-        self.run(None, &["ip", "link", "add", &w, "type", "veth", "peer", "name", "wan", "netns", &b.gateway.pid().to_string()])?;
+        self.run(
+            None,
+            &[
+                "ip",
+                "link",
+                "add",
+                &w,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                "wan",
+                "netns",
+                &b.gateway.pid().to_string(),
+            ],
+        )?;
         self.run(None, &["ip", "addr", "add", &format!("{up}/24"), "dev", &w])?;
         self.run(None, &["ip", "link", "set", &w, "up"])?;
         // The box.
         self.run(gw, &["ip", "link", "set", "lo", "up"])?;
-        self.run(gw, &["ip", "addr", "add", &format!("{}/24", b.public), "dev", "wan"])?;
+        self.run(
+            gw,
+            &[
+                "ip",
+                "addr",
+                "add",
+                &format!("{}/24", b.public),
+                "dev",
+                "wan",
+            ],
+        )?;
         self.run(gw, &["ip", "link", "set", "wan", "up"])?;
         self.run(gw, &["ip", "route", "add", "default", "via", &up])?;
-        self.run(gw, &["ip", "link", "add", "lan", "type", "veth", "peer", "name", "eth0", "netns", &b.device.pid().to_string()])?;
-        self.run(gw, &["ip", "addr", "add", &format!("{lan_gw}/24"), "dev", "lan"])?;
+        self.run(
+            gw,
+            &[
+                "ip",
+                "link",
+                "add",
+                "lan",
+                "type",
+                "veth",
+                "peer",
+                "name",
+                "eth0",
+                "netns",
+                &b.device.pid().to_string(),
+            ],
+        )?;
+        self.run(
+            gw,
+            &["ip", "addr", "add", &format!("{lan_gw}/24"), "dev", "lan"],
+        )?;
         self.run(gw, &["ip", "link", "set", "lan", "up"])?;
         // /proc/sys/net is the reader's namespace's, so write it from inside.
         self.run(gw, &["sh", "-c", &format!("echo 1 > {FORWARD}")])?;
         // The device.
         self.run(dev, &["ip", "link", "set", "lo", "up"])?;
-        self.run(dev, &["ip", "addr", "add", &format!("{}/24", b.device_ip), "dev", "eth0"])?;
+        self.run(
+            dev,
+            &[
+                "ip",
+                "addr",
+                "add",
+                &format!("{}/24", b.device_ip),
+                "dev",
+                "eth0",
+            ],
+        )?;
         self.run(dev, &["ip", "link", "set", "eth0", "up"])?;
         self.run(dev, &["ip", "route", "add", "default", "via", &lan_gw])?;
         // NAT and the stateful firewall. (`fwd` is an nft keyword.)
@@ -332,8 +396,23 @@ impl Nat {
         self.run(
             Some(&gw),
             &[
-                "nft", "add", "rule", "inet", "fw", "forward_filter", "iifname", "lan", "ip", "daddr",
-                &dst.to_string(), "meta", "l4proto", "udp", "counter", "name", name,
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                "fw",
+                "forward_filter",
+                "iifname",
+                "lan",
+                "ip",
+                "daddr",
+                &dst.to_string(),
+                "meta",
+                "l4proto",
+                "udp",
+                "counter",
+                "name",
+                name,
             ],
         )?;
         Ok(())

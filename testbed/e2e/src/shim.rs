@@ -21,7 +21,11 @@ impl Shim {
     /// flipped while `flip` is set (for packets large enough to carry Data:
     /// the last byte of an NDNLPv2 packet whose fragment is a Data is in its
     /// SignatureValue).
-    pub fn start(at: SocketAddr, consumer: SocketAddr, producer: SocketAddr) -> std::io::Result<Self> {
+    pub fn start(
+        at: SocketAddr,
+        consumer: SocketAddr,
+        producer: SocketAddr,
+    ) -> std::io::Result<Self> {
         let sock = UdpSocket::bind(at)?;
         sock.set_read_timeout(Some(Duration::from_millis(100)))?;
         let flip = Arc::new(AtomicBool::new(false));
@@ -31,7 +35,9 @@ impl Shim {
         let thread = thread::spawn(move || {
             let mut buf = vec![0u8; 65536];
             while !s.load(Ordering::Relaxed) {
-                let Ok((len, from)) = sock.recv_from(&mut buf) else { continue };
+                let Ok((len, from)) = sock.recv_from(&mut buf) else {
+                    continue;
+                };
                 let pkt = &mut buf[..len];
                 if from == consumer {
                     let _ = sock.send_to(pkt, producer);
