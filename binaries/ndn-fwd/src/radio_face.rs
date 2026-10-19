@@ -203,8 +203,9 @@ pub fn mount_radio_face(
         // Seed the actuator with what bring-up tuned (channel + the channel's width) so a radio
         // already on the right channel is not re-tuned on tick 1 — decisive on the coupled-width
         // MT7612U whose re-tune is the storm-prone blob replay (field 2026-09-11).
-        let mut actuator = MediumActuator::new(b.bearer.id, b.bearer.radio.clone(), b.knobs.clone())
-            .with_fec_redundancy(fec_redundancy.clone(), fec_floor);
+        let mut actuator =
+            MediumActuator::new(b.bearer.id, b.bearer.radio.clone(), b.knobs.clone())
+                .with_fec_redundancy(fec_redundancy.clone(), fec_floor);
         // Seed ONLY coupled-width parts (width_actuated=false): their bring-up width IS the
         // channel's single captured width (= max_bw), so seeding avoids the storm-prone re-tune.
         // A width-actuated radio (e.g. RTL8812EU) brings up at its default width (Bw20), NOT

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ndn_config::ForwarderConfig;
+use ndn_config::boot;
 use ndn_packet::Name;
 use ndn_security::{FilePib, SecurityManager};
 
@@ -18,8 +19,9 @@ pub(crate) struct SecurityInit {
 }
 
 /// Priority: 1) configured `[security].identity` — its key under
-/// `<identity>/KEY/` — from the PIB; 2) else the PIB's default identity (set
-/// by `ndn-fwd enroll`; the config file is never edited); 3) on PIB failure,
+/// `<identity>/KEY/` — from the PIB (loaded by [`boot::load_identity`], as
+/// `ndn-sim` boots a node); 2) else the PIB's default identity (set by
+/// `ndn-fwd enroll`; the config file is never edited); 3) on PIB failure,
 /// interactive recovery menu if stdin is a TTY else ephemeral fallback; 4) no
 /// identity ⇒ ephemeral in-memory key. A malformed `[security].identity` is a
 /// startup error.
@@ -52,64 +54,30 @@ pub fn load_security(cfg: &ForwarderConfig) -> anyhow::Result<SecurityInit> {
     };
     let identity_uri = identity_uri.as_str();
 
-    // `auto_init` mints a key for a configured identity the PIB lacks; the
-    // PIB's own default identity always has one, so it is only loaded.
-    if cfg.security.auto_init && cfg.security.identity.is_some() {
-        match SecurityManager::auto_init(&identity, &pib_path) {
-            Ok((mgr, generated)) => {
-                if generated {
-                    tracing::info!(
-                        target: "security",
-                        identity = %identity_uri,
-                        pib = %pib_path.display(),
-                        "auto-initialized new security identity"
-                    );
-                } else {
-                    tracing::info!(
-                        target: "security",
-                        identity = %identity_uri,
-                        pib = %pib_path.display(),
-                        "loaded existing security identity from PIB"
-                    );
-                }
-                return Ok(SecurityInit {
-                    mgr: Arc::new(mgr),
-                    pib_path: Some(pib_path),
-                    is_ephemeral: false,
-                });
-            }
-            Err(e) => {
-                return Ok(recover_from_pib_error(
-                    &identity,
-                    identity_uri,
-                    &e.to_string(),
-                    &pib_path,
-                    cfg,
-                ));
-            }
-        }
-    }
-
-    let pib = match FilePib::open(&pib_path) {
-        Ok(p) => p,
-        Err(e) => {
-            return Ok(recover_from_pib_error(
-                &identity,
-                identity_uri,
-                &e.to_string(),
-                &pib_path,
-                cfg,
-            ));
-        }
+    // A configured identity loads as `ndn-sim` boots a node, `auto_init`
+    // minting a key the PIB lacks. The PIB's own default identity always has
+    // one, so it is only loaded.
+    let loaded = if cfg.security.identity.is_some() {
+        boot::load_identity(cfg, &pib_path)
+    } else {
+        FilePib::open(&pib_path)
+            .map_err(Into::into)
+            .and_then(|pib| SecurityManager::from_pib(&pib, &identity))
+            .map(|mgr| Some((mgr, false)))
     };
 
-    match SecurityManager::from_pib(&pib, &identity) {
-        Ok(mgr) => {
+    match loaded {
+        Ok(Some((mgr, generated))) => {
             tracing::info!(
                 target: "security",
                 identity = %identity_uri,
                 pib = %pib_path.display(),
-                "loaded security identity from PIB"
+                "{}",
+                if generated {
+                    "auto-initialized new security identity"
+                } else {
+                    "loaded security identity from PIB"
+                }
             );
             Ok(SecurityInit {
                 mgr: Arc::new(mgr),
@@ -117,6 +85,7 @@ pub fn load_security(cfg: &ForwarderConfig) -> anyhow::Result<SecurityInit> {
                 is_ephemeral: false,
             })
         }
+        Ok(None) => Ok(make_ephemeral(cfg, None)),
         Err(e) => Ok(recover_from_pib_error(
             &identity,
             identity_uri,
@@ -195,29 +164,17 @@ pub fn recover_from_pib_error(
     make_ephemeral(cfg, Some(identity_uri))
 }
 
-/// Name comes from `[security].ephemeral_prefix`, then `$HOSTNAME`, then
-/// the PID.
+/// [`boot::ephemeral_identity`] (the same fallback `ndn-sim` boots a node
+/// with), named from `[security].ephemeral_prefix`, then `$HOSTNAME`, then the
+/// PID.
 pub fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) -> SecurityInit {
-    let name_str = if let Some(prefix) = &cfg.security.ephemeral_prefix {
-        prefix.clone()
-    } else {
-        let host =
-            std::env::var("HOSTNAME").unwrap_or_else(|_| format!("pid-{}", std::process::id()));
-        format!("/ndn-fwd/{host}")
-    };
-
-    // ECDSA-P256 is the lowest common denominator for ndn-cxx interop:
-    // ndn-cxx's `KeyType` enum has RSA + EC + AES + HMAC but no Ed25519,
-    // so mgmt responses signed with Ed25519 fail to verify against an
-    // ndn-cxx trust schema.
-    match ndn_security::KeyChain::ephemeral_ecdsa(&name_str) {
-        Ok(kc) => {
-            let mgr = kc.into_manager_arc();
-
+    let host = std::env::var("HOSTNAME").unwrap_or_else(|_| format!("pid-{}", std::process::id()));
+    match boot::ephemeral_identity(cfg, &host) {
+        Ok((mgr, name)) => {
             if let Some(id) = configured_identity {
                 tracing::warn!(
                     target: "security",
-                    ephemeral_identity = %name_str,
+                    ephemeral_identity = %name,
                     configured_identity = %id,
                     "PIB error — using ephemeral identity; \
                      data signed this session will not be verifiable across restarts"
@@ -225,13 +182,13 @@ pub fn make_ephemeral(cfg: &ForwarderConfig, configured_identity: Option<&str>) 
             } else {
                 tracing::warn!(
                     target: "security",
-                    ephemeral_identity = %name_str,
+                    ephemeral_identity = %name,
                     "no [security] identity configured — using ephemeral in-memory key; \
                      add `identity = \"/your/name\"` to the [security] config to persist signing"
                 );
             }
             SecurityInit {
-                mgr,
+                mgr: Arc::new(mgr),
                 pib_path: None,
                 is_ephemeral: true,
             }

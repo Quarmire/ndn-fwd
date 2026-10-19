@@ -2687,9 +2687,12 @@ name = "ndn-config"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ndn-engine",
  "ndn-mgmt",
  "ndn-mgmt-wire",
  "ndn-packet",
+ "ndn-security",
+ "ndn-store",
  "ndn-tlv",
  "ndn-transport",
  "portable-atomic",
