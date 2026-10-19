@@ -49,7 +49,8 @@ OPTIONS:
 
 SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
            recovery-compromised, negatives, approval, quic-links,
-           direct-paths, phone-links, relays, on-demand, membership
+           direct-paths, phone-links, relays, on-demand, membership,
+           multi-prefix
 ";
 
 #[derive(Clone, Debug, Default)]

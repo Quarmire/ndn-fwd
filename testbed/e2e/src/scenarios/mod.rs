@@ -13,6 +13,7 @@ mod destroyed;
 mod direct_paths;
 mod lifecycle;
 mod membership;
+mod multi_prefix;
 mod negatives;
 mod on_demand;
 mod phone_links;
@@ -32,6 +33,7 @@ pub const ALL: &[&str] = &[
     "relays",
     "on-demand",
     "membership",
+    "multi-prefix",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -48,6 +50,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "relays" => relays::run(sc),
         "on-demand" => on_demand::run(sc),
         "membership" => membership::run(sc),
+        "multi-prefix" => multi_prefix::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }
@@ -143,13 +146,21 @@ pub fn init_root_with(
         .env("NDN_ROOT_PASSPHRASE", ROOT_PASS);
     if config {
         let n = cx.w.node(node);
-        std::fs::write(n.config(), n.render()).map_err(|e| format!("{}: {e}", n.config().display()))?;
+        std::fs::write(n.config(), n.render())
+            .map_err(|e| format!("{}: {e}", n.config().display()))?;
         op = op.arg("-c").arg(n.cfg_arg());
     }
     let out = cx.ok(op, "init")?;
     cx.expect_version(node, ns, 1)?;
-    if !pib.join("root").join("root.safebag").exists() {
-        return Err("init: no sealed root (root/root.safebag) in the PIB".into());
+    // Each trusted prefix's root store sits in its own directory
+    // (`<pib>/root/<hex of the prefix>/`), beside the others of the PIB.
+    let ns_name: ndn_packet::Name = ns.parse().map_err(|e| format!("{ns}: {e:?}"))?;
+    let sealed = ndn_cert::root_store_dir(&pib, &ns_name).join("root.safebag");
+    if !sealed.exists() {
+        return Err(format!(
+            "init: no sealed root ({}) in the PIB",
+            sealed.display()
+        ));
     }
     let info = root_info(&out)?;
     // The root's private key is sealed, never a PIB key.
@@ -159,7 +170,9 @@ pub fn init_root_with(
         .filter(|c| c.starts_with(&format!("{ns}/KEY/")))
         .collect();
     if !root_keys.is_empty() {
-        return Err(format!("init: a root key sits in the PIB in plaintext: {root_keys:?}"));
+        return Err(format!(
+            "init: a root key sits in the PIB in plaintext: {root_keys:?}"
+        ));
     }
     Ok((info, out))
 }
@@ -194,7 +207,17 @@ pub fn mint_as(
 ) -> StepResult<Vec<Invite>> {
     let mut op = cx
         .tool("ndn-fwd-tokens")
-        .args(["new", "--ca", ns, "--namespace", ns, "--anchor-fp", fp, "--role", role])
+        .args([
+            "new",
+            "--ca",
+            ns,
+            "--namespace",
+            ns,
+            "--anchor-fp",
+            fp,
+            "--role",
+            role,
+        ])
         .arg("--count")
         .arg(count.to_string());
     if let Some(t) = ttl {
@@ -208,7 +231,9 @@ pub fn mint_as(
         .collect();
     let links = out.kv_all("invite");
     if tokens.len() != count as usize || links.len() != count as usize {
-        return Err(format!("expected {count} tokens and invites, got {tokens:?} / {links:?}"));
+        return Err(format!(
+            "expected {count} tokens and invites, got {tokens:?} / {links:?}"
+        ));
     }
     Ok(tokens
         .into_iter()
@@ -246,8 +271,26 @@ pub fn enroll(
     Ok(new_cert)
 }
 
-/// `node` becomes a `node` device of `ns` on the root device's approval.
-pub fn enroll_by_approval(cx: &mut Cx<'_>, ns: &str, root_link: &str, node: &str) -> StepResult<()> {
+/// `node` becomes a `node` device of `ns` on the approval of the node
+/// named `root` (the root device running `ns`'s CA).
+pub fn enroll_by_approval(
+    cx: &mut Cx<'_>,
+    ns: &str,
+    root_link: &str,
+    node: &str,
+) -> StepResult<()> {
+    enroll_by_approval_at(cx, ns, root_link, "root", node)
+}
+
+/// `node` becomes a `node` device of `ns` on the approval of `root`, the
+/// node running `ns`'s CA.
+pub fn enroll_by_approval_at(
+    cx: &mut Cx<'_>,
+    ns: &str,
+    root_link: &str,
+    root: &str,
+    node: &str,
+) -> StepResult<()> {
     let before = cx.certs(node);
     let op = cx
         .tool("ndn-fwd")
@@ -262,7 +305,7 @@ pub fn enroll_by_approval(cx: &mut Cx<'_>, ns: &str, root_link: &str, node: &str
         .args(["approvals", "approve"])
         .args(code.split_whitespace())
         .arg("-c")
-        .arg(cx.w.node("root").cfg_arg());
+        .arg(cx.w.node(root).cfg_arg());
     cx.ok(approve, "approve")?;
     let device = format!("{ns}/node/{node}");
     let start = Instant::now();
@@ -273,7 +316,10 @@ pub fn enroll_by_approval(cx: &mut Cx<'_>, ns: &str, root_link: &str, node: &str
             return Ok(());
         }
         if start.elapsed() > SHORT {
-            return Err(format!("{node} holds no {device} certificate {}s after the approval", SHORT.as_secs()));
+            return Err(format!(
+                "{node} holds no {device} certificate {}s after the approval",
+                SHORT.as_secs()
+            ));
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -328,7 +374,9 @@ pub fn words(out: &crate::run::Out) -> StepResult<Vec<String>> {
             let (n, word) = l.trim().split_once(". ")?;
             n.parse::<u32>().ok()?;
             let word = word.trim();
-            word.chars().all(|c| c.is_ascii_lowercase()).then(|| word.to_owned())
+            word.chars()
+                .all(|c| c.is_ascii_lowercase())
+                .then(|| word.to_owned())
         })
         .collect();
     if w.len() == 24 {
@@ -348,15 +396,26 @@ pub fn fetch_all(cx: &mut Cx<'_>, nodes: &[&str], name: &str, expect: &[u8]) -> 
 
 /// Fetch `name` at `node` until it is delivered, within `within`: the link
 /// or path it needs comes up (or becomes a full link) on its own.
-pub fn fetch_within(cx: &mut Cx<'_>, node: &str, name: &str, expect: &[u8], within: Duration) -> StepResult<()> {
+pub fn fetch_within(
+    cx: &mut Cx<'_>,
+    node: &str,
+    name: &str,
+    expect: &[u8],
+    within: Duration,
+) -> StepResult<()> {
     let start = Instant::now();
     loop {
         match cx.fetch_ok(node, name, expect) {
             Ok(()) => {
-                cx.note(&format!("{node} fetched {name} after {:.2}s", start.elapsed().as_secs_f64()));
+                cx.note(&format!(
+                    "{node} fetched {name} after {:.2}s",
+                    start.elapsed().as_secs_f64()
+                ));
                 return Ok(());
             }
-            Err(e) if start.elapsed() > within => return Err(format!("after {}s: {e}", within.as_secs())),
+            Err(e) if start.elapsed() > within => {
+                return Err(format!("after {}s: {e}", within.as_secs()));
+            }
             Err(_) => thread::sleep(Duration::from_millis(250)),
         }
     }

@@ -40,7 +40,7 @@ impl Bins {
     }
 }
 
-/// `[ca]` of a node that runs the namespace CA.
+/// `[ca]` (or one `[[ca]]` table) of a node that runs a namespace CA.
 #[derive(Clone, Debug)]
 pub struct CaCfg {
     pub prefix: String,
@@ -48,6 +48,49 @@ pub struct CaCfg {
     pub tokens: Vec<String>,
     /// `[ca.cert_validity_days] member`: a short per-role lifetime.
     pub member_days: Option<u32>,
+}
+
+impl CaCfg {
+    /// The table under `header` (`[ca]` or `[[ca]]`); its
+    /// `[ca.cert_validity_days]` belongs to it (in an array, to the last
+    /// table).
+    fn render(&self, header: &str) -> String {
+        let toks: Vec<String> = self.tokens.iter().map(|t| format!("\"{t}\"")).collect();
+        let mut s = format!(
+            "{header}\nenabled = true\nprefix = \"{}\"\nidentity = \"{}\"\ntokens = [{}]\n\n",
+            self.prefix,
+            self.identity,
+            toks.join(", ")
+        );
+        if let Some(d) = self.member_days {
+            s.push_str(&format!("[ca.cert_validity_days]\nmember = {d}\n\n"));
+        }
+        s
+    }
+
+    /// The touchpoints: what the operator wrote under `header` (each
+    /// `[[ca]]` table's tokens apart).
+    fn settings(&self, header: &str) -> Vec<String> {
+        let table = if header == "[ca]" {
+            header.to_owned()
+        } else {
+            format!("{header} {}", self.prefix)
+        };
+        let mut v = vec![
+            format!(
+                "config: {header} namespace CA {} (identity {})",
+                self.prefix, self.identity
+            ),
+            format!(
+                "config: {table} tokens ({} invite tokens)",
+                self.tokens.len()
+            ),
+        ];
+        if let Some(d) = self.member_days {
+            v.push(format!("config: [ca.cert_validity_days] member = {d}"));
+        }
+        v
+    }
 }
 
 /// The parts of `ndn-fwd.toml` the scenarios vary.
@@ -60,6 +103,9 @@ pub struct NodeCfg {
     pub routes: Vec<(String, String)>,
     pub identity: Option<String>,
     pub ca: Option<CaCfg>,
+    /// The CAs of a root device of several trusted prefixes: one `[[ca]]`
+    /// table each (not together with `ca`, the single `[ca]` table).
+    pub cas: Vec<CaCfg>,
     pub refresh_secs: u64,
     pub context_sync: bool,
     /// `[[face]] kind = "quic"` on this node's address, [`QUIC_PORT`].
@@ -224,16 +270,10 @@ impl Node {
         s.push_str(&format!("context_refresh_secs = {}\n", c.refresh_secs));
         s.push_str(&format!("context_sync = {}\n\n", c.context_sync));
         if let Some(ca) = &c.ca {
-            let toks: Vec<String> = ca.tokens.iter().map(|t| format!("\"{t}\"")).collect();
-            s.push_str(&format!(
-                "[ca]\nenabled = true\nprefix = \"{}\"\nidentity = \"{}\"\ntokens = [{}]\n\n",
-                ca.prefix,
-                ca.identity,
-                toks.join(", ")
-            ));
-            if let Some(d) = ca.member_days {
-                s.push_str(&format!("[ca.cert_validity_days]\nmember = {d}\n\n"));
-            }
+            s.push_str(&ca.render("[ca]"));
+        }
+        for ca in &c.cas {
+            s.push_str(&ca.render("[[ca]]"));
         }
         // NDN_E2E_LOG overrides the daemons' tracing filter (e.g. "info,security=debug").
         let level = std::env::var("NDN_E2E_LOG").unwrap_or_else(|_| "info".to_owned());
@@ -259,10 +299,16 @@ impl Node {
             v.push(format!("config: [[route]] {prefix} -> {link}"));
         }
         if c.quic_listen {
-            v.push(format!("config: [[face]] kind = \"quic\" (listen for links on {}:{QUIC_PORT})", self.ip));
+            v.push(format!(
+                "config: [[face]] kind = \"quic\" (listen for links on {}:{QUIC_PORT})",
+                self.ip
+            ));
         }
         if c.quic_dial_only {
-            v.push(format!("config: [[face]] kind = \"quic\" listen = false (dial links from {})", self.ip));
+            v.push(format!(
+                "config: [[face]] kind = \"quic\" listen = false (dial links from {})",
+                self.ip
+            ));
         }
         for peer in &c.peers {
             v.push(peer.setting());
@@ -273,11 +319,10 @@ impl Node {
             ));
         }
         if let Some(ca) = &c.ca {
-            v.push(format!("config: [ca] namespace CA {} (identity {})", ca.prefix, ca.identity));
-            v.push(format!("config: [ca] tokens ({} invite tokens)", ca.tokens.len()));
-            if let Some(d) = ca.member_days {
-                v.push(format!("config: [ca.cert_validity_days] member = {d}"));
-            }
+            v.extend(ca.settings("[ca]"));
+        }
+        for ca in &c.cas {
+            v.extend(ca.settings("[[ca]]"));
         }
         v.push(format!(
             "config: [security] context_refresh_secs = {}",
@@ -286,7 +331,12 @@ impl Node {
         if c.context_sync {
             v.push("config: [security] context_sync = true".to_owned());
         }
-        for line in c.extra_toml.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        for line in c
+            .extra_toml
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
             v.push(format!("config: {line}"));
         }
         v
@@ -327,7 +377,11 @@ impl World {
     /// A node whose daemon runs on the LAN of NAT box `nat_box` (see
     /// [`Nat::add_box`]), its faces bound to its LAN address.
     pub fn add_behind(&mut self, name: &str, nat_box: u8, cfg: NodeCfg) {
-        let b = self.nat.as_ref().expect("add_behind: no NAT boxes").nat_box(nat_box);
+        let b = self
+            .nat
+            .as_ref()
+            .expect("add_behind: no NAT boxes")
+            .nat_box(nat_box);
         let (ip, netns) = (b.device_ip, b.device_netns());
         self.insert(name, ip, Some(netns), cfg);
     }
@@ -575,7 +629,9 @@ fn tlv(b: &[u8]) -> Option<(u64, &[u8], &[u8])> {
 /// The KeyLocator name of a certificate (a Data packet), as a URI of its
 /// generic components: the key that issued it.
 pub fn issuer_of(data: &[u8]) -> Option<String> {
-    let (0x06, mut body, _) = tlv(data)? else { return None };
+    let (0x06, mut body, _) = tlv(data)? else {
+        return None;
+    };
     while let Some((t, v, rest)) = tlv(body) {
         body = rest;
         if t != 0x16 {
@@ -587,7 +643,9 @@ pub fn issuer_of(data: &[u8]) -> Option<String> {
             if t != 0x1c {
                 continue; // KeyLocator
             }
-            let (0x07, mut name, _) = tlv(v)? else { return None };
+            let (0x07, mut name, _) = tlv(v)? else {
+                return None;
+            };
             let mut uri = String::new();
             while let Some((_, c, rest)) = tlv(name) {
                 name = rest;
@@ -603,8 +661,16 @@ pub fn issuer_of(data: &[u8]) -> Option<String> {
 /// The issuers (KeyLocator key names) of every certificate in a PIB's keys.
 pub fn cert_issuers(pib: &Path) -> Vec<String> {
     let mut v = Vec::new();
-    for k in fs::read_dir(pib.join("keys")).into_iter().flatten().flatten() {
-        for c in fs::read_dir(k.path().join("certs")).into_iter().flatten().flatten() {
+    for k in fs::read_dir(pib.join("keys"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for c in fs::read_dir(k.path().join("certs"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             if let Some(i) = fs::read(c.path()).ok().and_then(|d| issuer_of(&d)) {
                 v.push(i);
             }
