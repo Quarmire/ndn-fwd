@@ -1,7 +1,10 @@
-//! The namespace root key on its root device: where `ndn-fwd init` puts it,
-//! how a root operation gets it unlocked, `ndn-fwd root-key status|move`,
-//! and what the daemon reports and warns about. The mechanism is
-//! [`ndn_cert::root_store`]; this is the operator's side.
+//! The namespace root keys on their root device: where `ndn-fwd init` puts
+//! one, how a root operation gets it unlocked, `ndn-fwd root-key
+//! status|move`, and what the daemon reports and warns about. The
+//! mechanism is [`ndn_cert::root_store`]; this is the operator's side. A
+//! device can hold the roots of several trusted prefixes, one store each: a
+//! command acting on one root takes `--namespace <prefix>`, and picks the
+//! root itself only when the PIB holds one.
 //!
 //! - **Choosing a store** (`init --root-store`): `os-keyring` when an OS
 //!   keychain is reachable (the default; refused with advice when none is),
@@ -24,9 +27,48 @@ use ndn_cert::{
     NewRootStore, RootSecret, RootStore, RootStoreKind, RootUnlockKind, os_keychain_reachable,
     read_root_secret,
 };
+use ndn_packet::Name;
 use ndn_security::FilePib;
 
 use crate::onboard::{flag, pib_dir, positionals};
+
+/// `--namespace <prefix>`, when given: the trusted prefix whose root a
+/// root command acts on.
+pub(crate) fn namespace_arg(args: &[String]) -> Result<Option<Name>> {
+    flag(args, &["--namespace"])
+        .map(|ns| {
+            ns.parse::<Name>()
+                .map_err(|e| anyhow::anyhow!("--namespace {ns:?} is not an NDN name: {e}"))
+        })
+        .transpose()
+}
+
+/// The root store a root command acts on: that of `--namespace`, else the
+/// only one the PIB holds. Refused with what to do when the PIB holds none
+/// (of that prefix) or several and none is named.
+pub(crate) fn chosen_root(pib: &FilePib, args: &[String], work: &str) -> Result<RootStore> {
+    let namespace = namespace_arg(args)?;
+    if let Some(store) = RootStore::open_named(pib, namespace.as_ref())? {
+        return Ok(store);
+    }
+    let held: Vec<String> = RootStore::open_all(pib)?
+        .iter()
+        .map(|s| s.namespace().to_string())
+        .collect();
+    match namespace {
+        Some(ns) if !held.is_empty() => bail!(
+            "{} holds no root of {ns} (it holds the roots of {}): {work} on the root device of \
+             {ns}, or name one of those with --namespace",
+            pib.root().display(),
+            held.join(", ")
+        ),
+        _ => bail!(
+            "{} holds no namespace root: {work} on the root device (where `ndn-fwd init` ran, \
+             or a device that ran `ndn-fwd recover`)",
+            pib.root().display()
+        ),
+    }
+}
 
 /// The passphrase or PIN a root operation on a `kind` store needs, asked of
 /// the operator (`confirm`: choosing a new one, asked twice). `None` for a
@@ -127,69 +169,94 @@ pub(crate) fn describe_new_root(store: &RootStore, pib: &Path) -> Vec<String> {
     ]
 }
 
+/// What `root-key status` prints about one root store; `several`: the PIB
+/// holds other roots too, so the commands it suggests name this one.
+fn print_status(store: &RootStore, pib_dir: &Path, several: bool) {
+    let named = if several {
+        format!(" --namespace {}", store.namespace())
+    } else {
+        String::new()
+    };
+    println!("namespace      = {}", store.namespace());
+    println!("root_key       = {}", store.key_name());
+    println!("root_store     = {}", store.kind());
+    println!("location       = {}", store.location());
+    println!("unlock         = {}", store.unlock_kind().as_str());
+    match ndn_cert::read_stored_context(pib_dir, store.namespace()) {
+        Ok(Some((ctx, _))) => {
+            let kits = ctx
+                .keys_with_role(ndn_security::KeyRole::RECOVERY_ANCHOR)
+                .count();
+            println!(
+                "recovery_kits  = {kits} (recovery anchors of the held context v{})",
+                ctx.version()
+            );
+            if kits == 0 {
+                println!(
+                    "# No recovery kit: losing this device loses the namespace. Create one: \
+                     ndn-fwd recovery-kit create --format words|file|yubikey{named}"
+                );
+            }
+        }
+        Ok(None) => println!(
+            "recovery_kits  = ? (no stored trust context of {})",
+            store.namespace()
+        ),
+        Err(e) => println!("recovery_kits  = ? (stored trust context unreadable: {e})"),
+    }
+    if store.kind() == RootStoreKind::File {
+        println!();
+        println!(
+            "# The root key is unprotected{}. Seal it:",
+            if store.is_legacy() {
+                " (this namespace was made before root stores)"
+            } else {
+                ""
+            }
+        );
+        println!(
+            "#   ndn-fwd root-key move --to os-keyring{named} --pib {}",
+            pib_dir.display()
+        );
+        println!("# or, without an OS keychain:");
+        println!(
+            "#   ndn-fwd root-key move --to sealed-file{named} --pib {}",
+            pib_dir.display()
+        );
+    }
+}
+
 /// `ndn-fwd root-key status|move`.
 pub(crate) async fn run(args: &[String]) -> Result<()> {
     let positional = positionals(args);
     let pib_dir = pib_dir(args)?;
-    let pib = FilePib::open(&pib_dir)
-        .with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let store = RootStore::open(&pib)?;
+    let pib =
+        FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
     match positional.first().copied() {
         Some("status") => {
-            let Some(store) = store else {
+            // Every root, or the one `--namespace` names.
+            let all = RootStore::open_all(&pib)?;
+            let several = all.len() > 1;
+            let shown = match namespace_arg(args)? {
+                Some(_) => vec![chosen_root(&pib, args, "its root key is reported")?],
+                None => all,
+            };
+            if shown.is_empty() {
                 println!(
                     "# {} holds no namespace root (this is not a root device)",
                     pib_dir.display()
                 );
-                return Ok(());
-            };
-            println!("namespace      = {}", store.namespace());
-            println!("root_key       = {}", store.key_name());
-            println!("root_store     = {}", store.kind());
-            println!("location       = {}", store.location());
-            println!("unlock         = {}", store.unlock_kind().as_str());
-            match ndn_cert::read_stored_context(&pib_dir, store.namespace()) {
-                Ok(Some((ctx, _))) => {
-                    let kits = ctx
-                        .keys_with_role(ndn_security::KeyRole::RECOVERY_ANCHOR)
-                        .count();
-                    println!(
-                        "recovery_kits  = {kits} (recovery anchors of the held context v{})",
-                        ctx.version()
-                    );
-                    if kits == 0 {
-                        println!(
-                            "# No recovery kit: losing this device loses the namespace. Create \
-                             one: ndn-fwd recovery-kit create --format words|file|yubikey"
-                        );
-                    }
-                }
-                Ok(None) => println!(
-                    "recovery_kits  = ? (no stored trust context of {})",
-                    store.namespace()
-                ),
-                Err(e) => println!("recovery_kits  = ? (stored trust context unreadable: {e})"),
             }
-            if store.kind() == RootStoreKind::File {
-                println!();
-                println!(
-                    "# The root key is unprotected{}. Seal it:",
-                    if store.is_legacy() {
-                        " (this namespace was made before root stores)"
-                    } else {
-                        ""
-                    }
-                );
-                println!("#   ndn-fwd root-key move --to os-keyring --pib {}", pib_dir.display());
-                println!("# or, without an OS keychain:");
-                println!("#   ndn-fwd root-key move --to sealed-file --pib {}", pib_dir.display());
+            for (i, store) in shown.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                print_status(store, &pib_dir, several);
             }
             Ok(())
         }
         Some("move") => {
-            let store = store.with_context(|| {
-                format!("{} holds no namespace root to move", pib_dir.display())
-            })?;
+            let store = chosen_root(&pib, args, "a root key is moved")?;
             let to: RootStoreKind = flag(args, &["--to"])
                 .context("root-key move needs --to <os-keyring | sealed-file>")?
                 .parse()
@@ -203,8 +270,12 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
                 && to != from
                 && from != RootStoreKind::YubikeyPiv;
             let (current, new_passphrase) = if movable {
-                let current =
-                    operator_secret(args, store.unlock_kind(), "Unlocking the namespace root", false)?;
+                let current = operator_secret(
+                    args,
+                    store.unlock_kind(),
+                    "Unlocking the namespace root",
+                    false,
+                )?;
                 let new_passphrase = match to {
                     RootStoreKind::SealedFile => operator_secret(
                         args,
@@ -237,38 +308,53 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         }
         other => bail!(
             "unknown `ndn-fwd root-key` command {other:?}; usage: ndn-fwd root-key status \
-             [--pib <dir>] | ndn-fwd root-key move --to <os-keyring|sealed-file> [--pib <dir>] \
-             [--passphrase-file <path>]"
+             [--namespace <prefix>] [--pib <dir>] | ndn-fwd root-key move --to \
+             <os-keyring|sealed-file> [--namespace <prefix>] [--pib <dir>] [--passphrase-file \
+             <path>]"
         ),
     }
 }
 
-/// This PIB's root store, for `security/identity-status`.
-pub(crate) fn status_info(pib_root: &Path) -> Option<ndn_mgmt::RootStoreInfo> {
-    let pib = FilePib::open(pib_root).ok()?;
-    let store = RootStore::open(&pib).ok()??;
-    Some(ndn_mgmt::RootStoreInfo {
-        kind: store.kind().to_string(),
-        key: store.key_name().clone(),
-    })
+/// This PIB's root stores, by namespace, for `security/identity-status`.
+pub(crate) fn status_info(pib_root: &Path) -> Vec<ndn_mgmt::RootStoreInfo> {
+    let Ok(pib) = FilePib::open(pib_root) else {
+        return Vec::new();
+    };
+    RootStore::open_all(&pib)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|store| ndn_mgmt::RootStoreInfo {
+            namespace: store.namespace().clone(),
+            kind: store.kind().to_string(),
+            key: store.key_name().clone(),
+        })
+        .collect()
 }
 
-/// At startup on a root device: warn when the root key is plaintext.
+/// At startup on a root device: warn about each root key that is
+/// plaintext.
 pub(crate) fn warn_if_unprotected(pib_root: &Path) {
     let Ok(pib) = FilePib::open(pib_root) else {
         return;
     };
-    match RootStore::open(&pib) {
-        Ok(Some(store)) if store.kind() == RootStoreKind::File => tracing::warn!(
+    let stores = match RootStore::open_all(&pib) {
+        Ok(stores) => stores,
+        Err(e) => {
+            tracing::warn!(target: "security", error = %e, "cannot read the root stores");
+            return;
+        }
+    };
+    for store in stores.iter().filter(|s| s.kind() == RootStoreKind::File) {
+        tracing::warn!(
             target: "security",
             namespace = %store.namespace(),
             root_key = %store.key_name(),
             pib = %pib_root.display(),
             "the namespace root key is stored unprotected (plaintext in the PIB); seal it with \
-             `ndn-fwd root-key move --to os-keyring --pib {}` (or `--to sealed-file`)",
+             `ndn-fwd root-key move --to os-keyring --namespace {} --pib {}` (or `--to \
+             sealed-file`)",
+            store.namespace(),
             pib_root.display()
-        ),
-        Ok(_) => {}
-        Err(e) => tracing::warn!(target: "security", error = %e, "cannot read the root store"),
+        );
     }
 }

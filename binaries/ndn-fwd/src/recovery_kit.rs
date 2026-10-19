@@ -141,7 +141,10 @@ pub(crate) async fn open_kit(
                     kit.namespace
                 );
             }
-            (Arc::new(kit.open(&kit_passphrase(args, purpose, false)?)?), None)
+            (
+                Arc::new(kit.open(&kit_passphrase(args, purpose, false)?)?),
+                None,
+            )
         }
         KitSpec::Yubikey => {
             let (signer, serial) = yubikey_kit(args)?
@@ -172,18 +175,54 @@ pub(crate) fn kit_namespace(
 }
 
 /// This PIB's root store and the context it is the root of
-/// ([`ndn_cert::root_device`]). `work` says what is done only on the root
-/// device, for the refusal on any other device.
+/// ([`ndn_cert::root_device`]): of the trusted prefix `--namespace` names,
+/// else of the only one whose root the PIB holds (several: refused, listing
+/// them). `work` says what is done only on the root device, for the
+/// refusal on any other device.
 pub(crate) fn root_device(
     pib: &FilePib,
+    args: &[String],
     work: &str,
 ) -> Result<(RootStore, SignedTrustContext, Data)> {
+    let namespace = crate::root_key::namespace_arg(args)?;
     let ndn_cert::RootDevice {
         store,
         context,
         data,
-    } = ndn_cert::root_device(pib, work)?;
+    } = ndn_cert::root_device(pib, namespace.as_ref(), work)?;
     Ok((store, context, data))
+}
+
+/// [`root_device`] for a command that names a key: of `--namespace` when
+/// given, else of the trusted prefix covering `name` among those whose
+/// root the PIB holds ([`ndn_cert::root_device_covering`]).
+pub(crate) fn root_device_for(
+    pib: &FilePib,
+    args: &[String],
+    name: &Name,
+    work: &str,
+) -> Result<(RootStore, SignedTrustContext, Data)> {
+    if crate::root_key::namespace_arg(args)?.is_some() {
+        return root_device(pib, args, work);
+    }
+    match ndn_cert::root_device_covering(pib, name, work)? {
+        Some(ndn_cert::RootDevice {
+            store,
+            context,
+            data,
+        }) => Ok((store, context, data)),
+        None => {
+            let held: Vec<String> = RootStore::open_all(pib)?
+                .iter()
+                .map(|s| s.namespace().to_string())
+                .collect();
+            bail!(
+                "{name} is not in a trusted prefix whose root this device holds ({}): {work} on \
+                 the root device of its prefix",
+                held.join(", ")
+            )
+        }
+    }
 }
 
 /// Why a version handed to the daemon ([`hand_over`]) was not taken:
@@ -346,9 +385,10 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         Some("revoke") => revoke(args).await,
         other => bail!(
             "unknown `ndn-fwd recovery-kit` command {other:?}; usage: ndn-fwd recovery-kit \
-             create --format words|file|yubikey [--out <path>] | list [--namespace <ns>] | check \
-             words|yubikey|<kit-file> [--namespace <ns>] | revoke <recovery-key-name> \
-             (each takes --pib <dir> or -c <config>)"
+             create --format words|file|yubikey [--out <path>] [--namespace <prefix>] | list \
+             [--namespace <prefix>] | check words|yubikey|<kit-file> [--namespace <prefix>] | \
+             revoke <recovery-key-name> [--namespace <prefix>] (each takes --pib <dir> or -c \
+             <config>; --namespace names the trusted prefix when the PIB holds several roots)"
         ),
     }
 }
@@ -373,7 +413,7 @@ async fn create(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
     let pib =
         FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) = root_device(&pib, "recovery kits are made and revoked")?;
+    let (store, ctx, held_data) = root_device(&pib, args, "recovery kits are made and revoked")?;
     let namespace = store.namespace().clone();
     let purpose = format!("Creating a recovery kit for {namespace}");
 
@@ -635,7 +675,8 @@ async fn revoke(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
     let pib =
         FilePib::open(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, ctx, held_data) = root_device(&pib, "recovery kits are made and revoked")?;
+    let (store, ctx, held_data) =
+        root_device_for(&pib, args, &key, "recovery kits are made and revoked")?;
     let namespace = store.namespace().clone();
     if !ctx.has_key_role(&key, KeyRole::RECOVERY_ANCHOR) {
         bail!(
@@ -654,16 +695,20 @@ async fn revoke(args: &[String]) -> Result<()> {
     drop(unlock);
     let bump = remove_recovery_anchor(root.as_ref(), &held_data, &key).await?;
     drop(root);
-    let handed = hand_over(args, &pib_dir, &bump).await.map_err(|not| match not {
-        NotTaken::Refused(e) => e.context("the kit was not revoked; the trust context is unchanged"),
-        NotTaken::Unknown(e) => e.context(format!(
-            "whether the daemon adopted v{} (without the kit) is not known: `ndn-fwd \
+    let handed = hand_over(args, &pib_dir, &bump)
+        .await
+        .map_err(|not| match not {
+            NotTaken::Refused(e) => {
+                e.context("the kit was not revoked; the trust context is unchanged")
+            }
+            NotTaken::Unknown(e) => e.context(format!(
+                "whether the daemon adopted v{} (without the kit) is not known: `ndn-fwd \
              recovery-kit list --pib {}` stops listing {key} once it did; if it still lists it \
              once the daemon is idle, revoke it again",
-            bump.context.version(),
-            pib_dir.display()
-        )),
-    })?;
+                bump.context.version(),
+                pib_dir.display()
+            )),
+        })?;
     println!("# ndn-fwd recovery-kit revoke");
     println!("namespace      = {namespace}");
     println!("revoked_key    = {key}");

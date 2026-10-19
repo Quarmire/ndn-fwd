@@ -152,12 +152,14 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     };
     let pib =
         FilePib::new(&pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    if let Some(store) = ndn_cert::RootStore::open(&pib)? {
+    // Refused only when this PIB already holds the root of this namespace:
+    // the roots of other trusted prefixes stay beside the recovered one.
+    if let Some(store) = ndn_cert::RootStore::open_for(&pib, &namespace)? {
         bail!(
-            "{} holds the root of {} ({} root store): this already is a root device. Recover \
-             on a replacement device whose PIB holds no root",
+            "{} holds the root of {namespace} ({} root store): this already is a root device of \
+             it. Recover on a replacement device whose PIB holds no root of {namespace} (the \
+             roots of other trusted prefixes may stay)",
             pib_dir.display(),
-            store.namespace(),
             store.kind()
         );
     }
@@ -378,21 +380,20 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     }
     println!();
     println!("# Restart this device's daemon with these lines in ndn-fwd.toml, so it signs as its");
+    println!("# admin identity and runs the namespace CA (the endpoint stays {namespace}/CA; one");
     println!(
-        "# admin identity and runs the namespace CA (the endpoint stays {namespace}/CA); copy"
+        "# [[ca]] table per trusted prefix this device is the root of); copy the [[ca.challenge]]"
     );
-    println!("# the [[ca.challenge]] set of the old root device (token and device-approval):");
+    println!("# set of the old root device (token and device-approval):");
     println!("[security]");
     println!("identity = \"{}\"", recovered.device_identity);
     println!("pib_path = \"{}\"", pib_abs.display());
-    println!("[ca]");
+    println!("[[ca]]");
     println!("enabled  = true");
     println!("prefix   = \"{namespace}\"");
     println!("identity = \"{namespace}/CA\"");
     println!();
-    println!(
-        "# Every other node adopts v{next} and v{settled} at its next refresh ([security]"
-    );
+    println!("# Every other node adopts v{next} and v{settled} at its next refresh ([security]");
     println!(
         "# context_refresh_secs) or at once with `ndn-fwd context refresh`: v{next} is signed by"
     );
@@ -430,7 +431,9 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             println!(
                 "# create`: the root signs the newest version, and its fingerprint ({root_fp})"
             );
-            println!("# becomes the namespace's expected fingerprint for anchor links and invites.");
+            println!(
+                "# becomes the namespace's expected fingerprint for anchor links and invites."
+            );
         }
     }
     match old_root {

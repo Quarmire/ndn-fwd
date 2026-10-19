@@ -225,8 +225,9 @@ struct UpdatePlan {
     update: SchemaUpdatePlan,
 }
 
-/// The `[ca]` section of `-c`, else the defaults.
-fn ca_config(args: &[String]) -> Result<CaTomlConfig> {
+/// The `[ca]` / `[[ca]]` entry of `-c` for the CA of `namespace`
+/// ([`crate::ca::config_for`]), else the defaults (no stated policy).
+fn ca_config(args: &[String], namespace: &Name) -> Result<CaTomlConfig> {
     let Some(path) = flag(args, &["-c", "--config"]) else {
         return Ok(CaTomlConfig::default());
     };
@@ -234,34 +235,26 @@ fn ca_config(args: &[String]) -> Result<CaTomlConfig> {
     let cfg: ForwarderConfig = toml
         .parse()
         .with_context(|| format!("parse config {path}"))?;
-    Ok(cfg.ca)
+    Ok(crate::ca::config_for(&cfg.ca, namespace)
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// Every check that needs no key: this PIB is the root device of the
-/// namespace (`--namespace`, when given, names it), and the update does not
-/// narrow what devices may do unless `--accept-narrowing`. The enrollment
-/// hint is the held version's own when it advertises a policy (refused, as
-/// the CA's start refuses, when `[ca]` of `-c` states another), else the
-/// policy the CA enforces for it; the link policy is `[ca]`'s when it
-/// differs from the held one ([`ndn_cert::plan_schema_update`]).
+/// namespace (`--namespace` names it; needed when the PIB holds several
+/// roots), and the update does not narrow what devices may do unless
+/// `--accept-narrowing`. The enrollment hint is the held version's own when
+/// it advertises a policy (refused, as the CA's start refuses, when the
+/// namespace's `[ca]` entry of `-c` states another), else the policy the
+/// CA enforces for it; the link policy is that entry's when it differs from
+/// the held one ([`ndn_cert::plan_schema_update`]).
 fn plan_update(pib_dir: &Path, args: &[String]) -> Result<UpdatePlan> {
     let pib =
         FilePib::open(pib_dir).with_context(|| format!("open PIB at {}", pib_dir.display()))?;
-    let (store, held, held_data) = root_device(&pib, "a namespace's schema is updated")?;
-    let namespace = held.namespace().clone();
-    if let Some(raw) = flag(args, &["--namespace"]) {
-        let asked = parse_name(raw, "--namespace")?;
-        if asked != namespace {
-            bail!(
-                "{} holds the root of {namespace}, not of {asked}: update the schema of {asked} \
-                 on its root device (where `ndn-fwd init --namespace {asked}` ran). Nothing was \
-                 signed",
-                pib_dir.display()
-            );
-        }
-    }
-    let stated = crate::ca::policy_input(&ca_config(args).context("nothing was signed")?)
-        .context("nothing was signed")?;
+    let (store, held, held_data) = root_device(&pib, args, "a namespace's schema is updated")?;
+    let stated =
+        crate::ca::policy_input(&ca_config(args, held.namespace()).context("nothing was signed")?)
+            .context("nothing was signed")?;
     let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
     let update = ndn_cert::plan_schema_update(&held, &stated, accept_narrowing)?;
     Ok(UpdatePlan {
@@ -384,7 +377,10 @@ async fn update(args: &[String]) -> Result<()> {
     );
     print_rules("rules_added", &change.added, '+');
     if change.removed.is_empty() {
-        println!("narrowed       = none (every rule of v{} is kept)", held.version());
+        println!(
+            "narrowed       = none (every rule of v{} is kept)",
+            held.version()
+        );
     } else {
         print_rules("rules_removed", &change.removed, '-');
         println!(
@@ -427,7 +423,10 @@ async fn update(args: &[String]) -> Result<()> {
             );
         }
     } else if !change.relays.is_empty() {
-        println!("relays         = {} advertised (unchanged)", change.relays.len());
+        println!(
+            "relays         = {} advertised (unchanged)",
+            change.relays.len()
+        );
     }
     println!("handed_over    = {handed}");
     println!();
@@ -447,7 +446,7 @@ async fn update(args: &[String]) -> Result<()> {
 mod tests {
     use bytes::Bytes;
     use ndn_cert::{
-        ApprovalPoll, ApprovalPolicy, ApprovalRecord, ApproverError, Decision, RefusalKind,
+        ApprovalPolicy, ApprovalPoll, ApprovalRecord, ApproverError, Decision, RefusalKind,
         namespace_schema,
     };
     use ndn_mgmt::EnrollOutcome;
@@ -508,7 +507,7 @@ mod tests {
             own_certs: None,
             dv_keeps_startup_key: false,
             configured_identity: None,
-            ca: Some(Arc::clone(&node.ca)),
+            cas: vec![Arc::clone(&node.ca)],
             context_sync: None,
         })
     }
@@ -547,7 +546,10 @@ mod tests {
             .unwrap();
         let validator = Validator::with_keyring(Arc::clone(keyring), cache, None, 4);
         let data = Data::decode(wire).unwrap();
-        matches!(validator.validate_chain_cached(&data).await.0, ValidationResult::Valid(_))
+        matches!(
+            validator.validate_chain_cached(&data).await.0,
+            ValidationResult::Valid(_)
+        )
     }
 
     /// A request pending at the CA, opened as a relay's daemon opens one.
@@ -590,11 +592,12 @@ mod tests {
     async fn a_schema_update_handed_over_lets_the_running_ca_take_remote_denials() {
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let node = node(root_dev.path(), device.path(), &["member-a"]).await;
-        let EnrollOutcome::Enrolled(phone) =
-            crate::enroll::enroll(&node.admin, request(&node, "member", "member-a", "phone", true))
-                .await
-                .unwrap()
-        else {
+        let EnrollOutcome::Enrolled(phone) = crate::enroll::enroll(
+            &node.admin,
+            request(&node, "member", "member-a", "phone", true),
+        )
+        .await
+        .unwrap() else {
             panic!("an invite enrolls at once")
         };
         let phone_key: Name = phone.key.parse().unwrap();
@@ -607,13 +610,22 @@ mod tests {
             .unwrap();
 
         // The namespace as an earlier `ndn-fwd init` left it.
-        let (_, v1) = ndn_cert::read_stored_context(root_dev.path(), &ns()).unwrap().unwrap();
-        let (old_schema, old_hint) = old_generated_schema();
-        let old =
-            ndn_cert::bump_context_schema(root.as_ref(), &v1, &old_schema, &old_hint, None, None, true)
-            .await
+        let (_, v1) = ndn_cert::read_stored_context(root_dev.path(), &ns())
             .unwrap()
             .unwrap();
+        let (old_schema, old_hint) = old_generated_schema();
+        let old = ndn_cert::bump_context_schema(
+            root.as_ref(),
+            &v1,
+            &old_schema,
+            &old_hint,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         crate::context_refresh::apply_update(&daemon, old.bump.data.raw().clone())
             .await
             .unwrap();
@@ -624,9 +636,8 @@ mod tests {
         let deny = Decision::Deny {
             reason: "not my relay".into(),
         };
-        let list = || {
-            ndn_identity::fetch_pending_via_engine(engine, keyring, &ns, &ns, &admin, &chain)
-        };
+        let list =
+            || ndn_identity::fetch_pending_via_engine(engine, keyring, &ns, &ns, &admin, &chain);
         assert_unauthorized(&list().await);
         assert_unauthorized(
             &ndn_identity::push_decision_via_engine(
@@ -638,9 +649,18 @@ mod tests {
         assert!(produces(&node, keyring, device.path(), &phone_key).await);
 
         let plan = plan_update(root_dev.path(), &[]).unwrap();
-        assert_eq!(plan.update.change.added.len(), 2, "{:?}", plan.update.change.added);
+        assert_eq!(
+            plan.update.change.added.len(),
+            2,
+            "{:?}",
+            plan.update.change.added
+        );
         assert!(plan.update.change.removed.is_empty());
-        assert_eq!(plan.update.policy, ApprovalPolicy::default(), "what the CA enforces");
+        assert_eq!(
+            plan.update.policy,
+            ApprovalPolicy::default(),
+            "what the CA enforces"
+        );
         let update = ndn_cert::bump_context_schema(
             root.as_ref(),
             &plan.held_data,
@@ -667,7 +687,13 @@ mod tests {
         .unwrap();
         assert!(!denied.is_pending(), "{denied:?}");
         assert!(produces(&node, keyring, device.path(), &phone_key).await);
-        assert!(plan_update(root_dev.path(), &[]).unwrap().update.change.is_empty());
+        assert!(
+            plan_update(root_dev.path(), &[])
+                .unwrap()
+                .update
+                .change
+                .is_empty()
+        );
         node.shutdown.shutdown().await;
     }
 }

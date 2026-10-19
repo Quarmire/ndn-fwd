@@ -143,10 +143,13 @@ fn main() -> Result<()> {
                     let pib = FilePib::open(&pib)
                         .with_context(|| format!("open PIB {}", pib.display()))?;
                     let key = parse_name(&key)?;
-                    // The namespace root signs from its root store, unlocked
-                    // for this one signature; any other anchor key from the PIB.
-                    let root = ndn_cert::RootStore::open(&pib)?
-                        .filter(|store| *store.key_name() == key);
+                    // A namespace root signs from its root store (the PIB may
+                    // hold the roots of several trusted prefixes: the one of
+                    // that key), unlocked for this one signature; any other
+                    // anchor key from the PIB.
+                    let root = ndn_cert::RootStore::open_all(&pib)?
+                        .into_iter()
+                        .find(|store| *store.key_name() == key);
                     let signer = match root {
                         Some(store) => {
                             let file = match store.unlock_kind() {
@@ -216,7 +219,10 @@ fn main() -> Result<()> {
                 context_content,
             } = envelope
             else {
-                bail!("expected an anchor envelope, got a {} envelope", kind.as_str());
+                bail!(
+                    "expected an anchor envelope, got a {} envelope",
+                    kind.as_str()
+                );
             };
             if let Some(fp) = fingerprint {
                 let hex: String = fp.iter().map(|b| format!("{b:02x}")).collect();

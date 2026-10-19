@@ -311,7 +311,11 @@ mod tests {
 
         // A key that is not one of the context's anchors cannot sign it.
         let stranger = Ed25519Signer::from_seed(&[8u8; 32], "/home/eve/KEY/k".parse().unwrap());
-        assert!(build_signed_anchor_envelope(&spec, &stranger).await.is_err());
+        assert!(
+            build_signed_anchor_envelope(&spec, &stranger)
+                .await
+                .is_err()
+        );
     }
 
     proptest::proptest! {
