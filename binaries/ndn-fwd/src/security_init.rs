@@ -21,8 +21,9 @@ pub(crate) struct SecurityInit {
 /// `<identity>/KEY/` — from the PIB; 2) else the PIB's default identity (set
 /// by `ndn-fwd enroll`; the config file is never edited); 3) on PIB failure,
 /// interactive recovery menu if stdin is a TTY else ephemeral fallback; 4) no
-/// identity ⇒ ephemeral in-memory key.
-pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
+/// identity ⇒ ephemeral in-memory key. A malformed `[security].identity` is a
+/// startup error.
+pub fn load_security(cfg: &ForwarderConfig) -> anyhow::Result<SecurityInit> {
     let pib_path = cfg
         .security
         .pib_path
@@ -31,7 +32,11 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
         .unwrap_or_else(default_pib_path);
 
     let (identity_uri, identity) = match cfg.security.identity.as_ref() {
-        Some(uri) => (uri.clone(), parse_name(uri)),
+        Some(uri) => {
+            let identity = parse_name(uri)
+                .map_err(|e| e.context("[security].identity is not a valid NDN name"))?;
+            (uri.clone(), identity)
+        }
         None => match pib_default_identity(&pib_path) {
             Some(identity) => {
                 tracing::info!(
@@ -42,7 +47,7 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
                 );
                 (identity.to_string(), identity)
             }
-            None => return make_ephemeral(cfg, None),
+            None => return Ok(make_ephemeral(cfg, None)),
         },
     };
     let identity_uri = identity_uri.as_str();
@@ -67,14 +72,20 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
                         "loaded existing security identity from PIB"
                     );
                 }
-                return SecurityInit {
+                return Ok(SecurityInit {
                     mgr: Arc::new(mgr),
                     pib_path: Some(pib_path),
                     is_ephemeral: false,
-                };
+                });
             }
             Err(e) => {
-                return recover_from_pib_error(identity_uri, &e.to_string(), &pib_path, cfg);
+                return Ok(recover_from_pib_error(
+                    &identity,
+                    identity_uri,
+                    &e.to_string(),
+                    &pib_path,
+                    cfg,
+                ));
             }
         }
     }
@@ -82,7 +93,13 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
     let pib = match FilePib::open(&pib_path) {
         Ok(p) => p,
         Err(e) => {
-            return recover_from_pib_error(identity_uri, &e.to_string(), &pib_path, cfg);
+            return Ok(recover_from_pib_error(
+                &identity,
+                identity_uri,
+                &e.to_string(),
+                &pib_path,
+                cfg,
+            ));
         }
     };
 
@@ -94,17 +111,24 @@ pub fn load_security(cfg: &ForwarderConfig) -> SecurityInit {
                 pib = %pib_path.display(),
                 "loaded security identity from PIB"
             );
-            SecurityInit {
+            Ok(SecurityInit {
                 mgr: Arc::new(mgr),
                 pib_path: Some(pib_path),
                 is_ephemeral: false,
-            }
+            })
         }
-        Err(e) => recover_from_pib_error(identity_uri, &e.to_string(), &pib_path, cfg),
+        Err(e) => Ok(recover_from_pib_error(
+            &identity,
+            identity_uri,
+            &e.to_string(),
+            &pib_path,
+            cfg,
+        )),
     }
 }
 
 pub fn recover_from_pib_error(
+    identity: &Name,
     identity_uri: &str,
     error: &str,
     pib_path: &std::path::Path,
@@ -133,7 +157,7 @@ pub fn recover_from_pib_error(
         let mut input = String::new();
         let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input);
         match input.trim() {
-            "1" => match SecurityManager::auto_init(&parse_name(identity_uri), pib_path) {
+            "1" => match SecurityManager::auto_init(identity, pib_path) {
                 Ok((mgr, _)) => {
                     eprintln!();
                     eprintln!("  Generated new identity '{identity_uri}' in PIB.");
@@ -269,7 +293,7 @@ mod tests {
         let mut cfg = ForwarderConfig::default();
         cfg.security.identity = Some(node.to_string());
         cfg.security.pib_path = Some(pib_path.display().to_string());
-        let init = load_security(&cfg);
+        let init = load_security(&cfg).unwrap();
 
         assert!(!init.is_ephemeral, "configured identity must load from the PIB");
         assert_eq!(init.mgr.any_signer().unwrap().key_name(), &node_key);
@@ -292,7 +316,7 @@ mod tests {
 
         let mut cfg = ForwarderConfig::default();
         cfg.security.pib_path = Some(pib_path.display().to_string());
-        let init = load_security(&cfg);
+        let init = load_security(&cfg).unwrap();
         assert!(!init.is_ephemeral);
         assert_eq!(
             init.mgr.any_signer().unwrap().key_name(),
@@ -300,7 +324,7 @@ mod tests {
         );
 
         cfg.security.identity = Some(ident.to_string());
-        let init = load_security(&cfg);
+        let init = load_security(&cfg).unwrap();
         assert_eq!(
             init.mgr.any_signer().unwrap().key_name(),
             &root_mgr.identity_key_name(&ident).unwrap()

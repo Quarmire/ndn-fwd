@@ -11,6 +11,8 @@ use ndn_packet::Name;
 use ndn_transport::FaceId;
 use tokio_util::sync::CancellationToken;
 
+use crate::parse_name;
+
 pub struct NlsrInstaller {
     cfg: ndn_routing::NlsrConfig,
     own_router: Name,
@@ -20,30 +22,40 @@ pub struct NlsrInstaller {
 }
 
 /// Opens one UDP face per configured neighbour and stages it on the
-/// builder. Returns `None` if NLSR is disabled.
+/// builder. Returns `None` if NLSR is disabled; an error if the network or
+/// router name is malformed. A neighbour or advertised prefix with a
+/// malformed name is skipped with an error log.
 pub async fn prepare(
     fwd_config: &ndn_config::ForwarderConfig,
     builder: &mut EngineBuilder,
-) -> Option<NlsrInstaller> {
+) -> anyhow::Result<Option<NlsrInstaller>> {
     if !fwd_config.routing.nlsr.enabled {
-        return None;
+        return Ok(None);
     }
     let nlsr_toml = &fwd_config.routing.nlsr;
-    let network: Name = nlsr_toml
-        .network
-        .parse()
-        .unwrap_or_else(|_| "/ndn".parse().unwrap());
-    let own_router: Name = nlsr_toml.router.parse().unwrap_or_else(|_| {
-        tracing::warn!(target: "routing.nlsr", router = %nlsr_toml.router, "NLSR: invalid router name");
-        Name::root()
-    });
+    let network = parse_name(&nlsr_toml.network)
+        .map_err(|e| e.context("[routing.nlsr].network is not a valid NDN name"))?;
+    let own_router = parse_name(&nlsr_toml.router)
+        .map_err(|e| e.context("[routing.nlsr].router is not a valid NDN name"))?;
     let lsa_prefix = ndn_routing::NlsrConfig::default_lsa_prefix(&network);
     let sync_prefix = ndn_routing::NlsrConfig::default_sync_prefix(&network);
-    let neighbors = nlsr_toml
+    // Neighbours whose name is malformed are dropped from both the NLSR
+    // adjacency config and the UDP face setup below.
+    let named_neighbors: Vec<(Name, &ndn_config::NlsrNeighborConfig)> = nlsr_toml
         .neighbors
         .iter()
-        .map(|n| ndn_routing::NeighborConfig {
-            name: n.name.parse().unwrap_or_else(|_| Name::root()),
+        .filter_map(|n| match parse_name(&n.name) {
+            Ok(name) => Some((name, n)),
+            Err(e) => {
+                tracing::error!(target: "routing.nlsr", neighbor = %n.name, error = %e, "NLSR: skipping neighbour with invalid name");
+                None
+            }
+        })
+        .collect();
+    let neighbors = named_neighbors
+        .iter()
+        .map(|(name, n)| ndn_routing::NeighborConfig {
+            name: name.clone(),
             face_uri: n.face_uri.clone(),
             link_cost: n.link_cost,
         })
@@ -51,7 +63,13 @@ pub async fn prepare(
     let name_prefixes: Vec<Name> = nlsr_toml
         .name_prefixes
         .iter()
-        .filter_map(|s| s.parse().ok())
+        .filter_map(|s| match parse_name(s) {
+            Ok(name) => Some(name),
+            Err(e) => {
+                tracing::error!(target: "routing.nlsr", prefix = %s, error = %e, "NLSR: not advertising invalid name prefix");
+                None
+            }
+        })
         .collect();
     let cfg = ndn_routing::NlsrConfig {
         own_router: own_router.clone(),
@@ -71,7 +89,7 @@ pub async fn prepare(
     };
 
     let mut neighbour_face_ids: Vec<(Name, FaceId)> = Vec::new();
-    for n in &nlsr_toml.neighbors {
+    for (neighbour_name, n) in named_neighbors {
         let uri = &n.face_uri;
         let addr_str = uri
             .strip_prefix("udp4://")
@@ -93,7 +111,6 @@ pub async fn prepare(
         match ndn_face::net::UdpFace::bind(local, peer, face_id).await {
             Ok(face) => {
                 builder.add_face(face);
-                let neighbour_name = n.name.parse().unwrap_or_else(|_| Name::root());
                 neighbour_face_ids.push((neighbour_name.clone(), face_id));
                 tracing::info!(
                     target: "routing.nlsr",
@@ -109,11 +126,11 @@ pub async fn prepare(
         }
     }
 
-    Some(NlsrInstaller {
+    Ok(Some(NlsrInstaller {
         cfg,
         own_router,
         neighbour_face_ids,
-    })
+    }))
 }
 
 impl InstallableProtocol for NlsrInstaller {

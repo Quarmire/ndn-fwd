@@ -490,11 +490,9 @@ async fn main() -> Result<()> {
     // subscriber before any spans open. Installed on the engine after build.
     let obs_publisher: Option<Arc<ndn_observability::SpanPublisher>> =
         if fwd_config.observability.publish_to_ndn {
-            use std::str::FromStr;
             let obs_cfg = &fwd_config.observability;
-            let prefix = ndn_packet::Name::from_str(&obs_cfg.ndn_prefix).unwrap_or_else(|_| {
-                ndn_packet::Name::from_str("/localhost/nfd/observability").expect("static")
-            });
+            let prefix = parse_name(&obs_cfg.ndn_prefix)
+                .map_err(|e| e.context("[observability].ndn_prefix is not a valid NDN name"))?;
             let retention = build_obs_retention(obs_cfg);
             Some(ndn_observability::SpanPublisher::new(prefix, retention))
         } else {
@@ -565,7 +563,7 @@ async fn main() -> Result<()> {
         ..EngineConfig::default()
     };
 
-    let security_init = load_security(&fwd_config);
+    let security_init = load_security(&fwd_config)?;
     load_adopted_contexts(&fwd_config, &security_init.mgr);
     // The key the daemon signs its own packets with — management responses
     // and discovery records — captured before `security_init.mgr` moves into
@@ -996,7 +994,7 @@ async fn main() -> Result<()> {
     // binds) in `prepare`; InProcFace pairs, FIB writes, neighbour seeds,
     // and Producer mounts run via `install` + `PostBuildQueue`.
     let mut post_build = ndn_engine::PostBuildQueue::new();
-    if let Some(installer) = installs::nlsr::prepare(&fwd_config, &mut builder).await {
+    if let Some(installer) = installs::nlsr::prepare(&fwd_config, &mut builder).await? {
         builder = builder.install(std::sync::Arc::new(installer), &mut post_build);
     }
     let dv_installer = installs::dv::prepare(
@@ -1004,7 +1002,7 @@ async fn main() -> Result<()> {
         &mut builder,
         active_identity.as_ref().map(|identity| Arc::clone(identity.signer())),
     )
-    .await;
+    .await?;
     if let Some(installer) = dv_installer {
         builder = builder.install(std::sync::Arc::new(installer), &mut post_build);
     }
@@ -1073,7 +1071,21 @@ async fn main() -> Result<()> {
             );
             continue;
         };
-        let name = parse_name(&route.prefix);
+        // A malformed prefix is refused, never installed as `/` (which would
+        // send every Interest with no better match out this face).
+        let name = match parse_name(&route.prefix) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(
+                    target: "engine",
+                    prefix = %route.prefix,
+                    face_index = route.face,
+                    error = %e,
+                    "route prefix is not a valid NDN name; skipping",
+                );
+                continue;
+            }
+        };
         // Install as a RIB route with origin STATIC, not a bare FIB nexthop.
         //
         // The RIB computes each FIB entry from the routes it tracks and writes
@@ -1125,8 +1137,20 @@ async fn main() -> Result<()> {
     // worked because best-route retries other nexthops on nack/timeout and
     // group fan-out cannot.
     for choice in &fwd_config.strategies {
-        let prefix = parse_name(&choice.prefix);
-        let strategy_name = parse_name(&choice.strategy);
+        let (prefix, strategy_name) =
+            match (parse_name(&choice.prefix), parse_name(&choice.strategy)) {
+                (Ok(p), Ok(s)) => (p, s),
+                (Err(e), _) | (_, Err(e)) => {
+                    tracing::error!(
+                        target: "engine",
+                        prefix = %choice.prefix,
+                        strategy = %choice.strategy,
+                        error = %e,
+                        "[[strategy]] entry is not a valid NDN name; skipping",
+                    );
+                    continue;
+                }
+            };
         let Some(strategy) = ndn_mgmt::create_strategy_by_name(&strategy_name) else {
             tracing::error!(
                 target: "engine",

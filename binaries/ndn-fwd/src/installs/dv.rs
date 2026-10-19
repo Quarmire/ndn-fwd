@@ -19,7 +19,9 @@ pub struct DvInstaller {
     pfs_routes: Vec<(Name, FaceId)>,
 }
 
-/// `node_signer` is the node's key; the `static` and `lvs`
+/// Returns `None` if DV is disabled; an error if the network or router name
+/// is malformed. A neighbour or trusted key with a malformed name is skipped
+/// with an error log. `node_signer` is the node's key; the `static` and `lvs`
 /// trust modes sign with the key it holds at startup and keep it: DV
 /// neighbours accept only the keys in their `[routing.dv.trust]
 /// trusted_keys`, so a key the node switches to at runtime (`ndn-fwd
@@ -29,13 +31,15 @@ pub async fn prepare(
     fwd_config: &ndn_config::ForwarderConfig,
     builder: &mut EngineBuilder,
     node_signer: Option<Arc<ndn_security::ActiveSigner>>,
-) -> Option<DvInstaller> {
+) -> anyhow::Result<Option<DvInstaller>> {
     if !fwd_config.routing.dv.enabled {
-        return None;
+        return Ok(None);
     }
     let dv_toml = &fwd_config.routing.dv;
-    let dv_network = parse_name(&dv_toml.network);
-    let dv_router = parse_name(&dv_toml.router);
+    let dv_network = parse_name(&dv_toml.network)
+        .map_err(|e| e.context("[routing.dv].network is not a valid NDN name"))?;
+    let dv_router = parse_name(&dv_toml.router)
+        .map_err(|e| e.context("[routing.dv].router is not a valid NDN name"))?;
     let dv_boot = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -63,7 +67,13 @@ pub async fn prepare(
     let mut neighbour_seeds: Vec<(Name, FaceId)> = Vec::new();
     let mut pfs_routes: Vec<(Name, FaceId)> = Vec::new();
     for n in &dv_toml.neighbors {
-        let neighbour_name = parse_name(&n.name);
+        let neighbour_name = match parse_name(&n.name) {
+            Ok(name) => name,
+            Err(e) => {
+                tracing::error!(target: "routing.dv", neighbor = %n.name, error = %e, "DV: skipping neighbour with invalid name");
+                continue;
+            }
+        };
         let uri = &n.face_uri;
         let addr_str = uri
             .strip_prefix("udp4://")
@@ -118,11 +128,11 @@ pub async fn prepare(
         "ndn-dv routing protocol enabled",
     );
 
-    Some(DvInstaller {
+    Ok(Some(DvInstaller {
         dv,
         neighbour_seeds,
         pfs_routes,
-    })
+    }))
 }
 
 fn build_trust(
@@ -154,7 +164,13 @@ fn build_trust(
                 };
                 let mut lt = DvLvs::new(model, node_signer.clone());
                 for tk in &dv_toml.trust.trusted_keys {
-                    let key_name = parse_name(&tk.name);
+                    let key_name = match parse_name(&tk.name) {
+                        Ok(name) => name,
+                        Err(e) => {
+                            tracing::error!(target: "routing.dv", key = %tk.name, error = %e, "DV trusted key skipped: invalid key name (lvs mode)");
+                            continue;
+                        }
+                    };
                     match std::fs::read(&tk.public_key_file) {
                         Ok(bytes) => {
                             lt = lt.trust_key(key_name.clone(), bytes::Bytes::from(bytes));
@@ -177,7 +193,13 @@ fn build_trust(
             use ndn_routing::protocols::dv::signing::DvStaticKeys;
             let mut st = DvStaticKeys::new(node_signer.clone());
             for tk in &dv_toml.trust.trusted_keys {
-                let key_name = parse_name(&tk.name);
+                let key_name = match parse_name(&tk.name) {
+                    Ok(name) => name,
+                    Err(e) => {
+                        tracing::error!(target: "routing.dv", key = %tk.name, error = %e, "DV trusted key skipped: invalid key name — packets signed with this key will be rejected");
+                        continue;
+                    }
+                };
                 match std::fs::read(&tk.public_key_file) {
                     Ok(bytes) => {
                         st = st.trust_key(key_name.clone(), bytes::Bytes::from(bytes));

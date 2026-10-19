@@ -18,8 +18,12 @@ pub fn parse_bind_addr(bind: &str, label: &str) -> Option<std::net::SocketAddr> 
     }
 }
 
-pub fn parse_name(uri: &str) -> Name {
-    uri.parse().unwrap_or_else(|_| Name::root())
+/// Parse a config-supplied NDN name URI. A malformed URI is an error naming
+/// the offending text — never silently the root name `/`, which would turn a
+/// typo into a route, strategy, or identity for the whole namespace.
+pub fn parse_name(uri: &str) -> Result<Name> {
+    uri.parse()
+        .map_err(|e| anyhow::anyhow!("invalid NDN name `{uri}`: {e}"))
 }
 
 /// Anchor-only validator loaded from the PIB at `pib_path`. The schema is
@@ -371,7 +375,7 @@ mod discovery_verifier_tests {
                 ..ServiceDiscoveryConfig::default()
             };
             ServiceDiscoveryProtocol::new(
-                parse_name("/ndn/fwd/here"),
+                ndn_packet::name!("/ndn/fwd/here"),
                 ndn_discovery::sd_root().clone(),
                 cfg,
             )
@@ -382,7 +386,10 @@ mod discovery_verifier_tests {
         };
         let installed = |sd: &ServiceDiscoveryProtocol, prefix: &str, ts: u64, keyed: bool| {
             let ctx = fresh_ctx();
-            let rec = ServiceRecord::new(parse_name(prefix), parse_name("/ndn/fwd/peerA"));
+            let rec = ServiceRecord::new(
+                prefix.parse().unwrap(),
+                ndn_packet::name!("/ndn/fwd/peerA"),
+            );
             let pkt = if keyed {
                 rec.build_data_signed(ts, &signer)
             } else {
@@ -396,7 +403,7 @@ mod discovery_verifier_tests {
         let added = installed(&build_sd(), "/ndn/fwd/peerA/svc", 1, true);
         assert_eq!(
             added,
-            vec![parse_name("/ndn/fwd/peerA/svc")],
+            vec![ndn_packet::name!("/ndn/fwd/peerA/svc")],
             "authentic, name-bound record installs FIB"
         );
 
