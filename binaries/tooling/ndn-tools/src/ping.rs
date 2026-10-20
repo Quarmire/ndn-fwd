@@ -11,7 +11,7 @@ use ndn_tools_core::ping::{PingClientParams, PingServerParams};
 #[derive(Args, Clone)]
 struct ConnectOpts {
     /// Forwarder face socket path.
-    #[arg(long, default_value = "/run/nfd/nfd.sock")]
+    #[arg(long, default_value = ndn_transport::DEFAULT_FACE_SOCKET)]
     face_socket: String,
 
     /// Disable SHM and use Unix socket for data plane.

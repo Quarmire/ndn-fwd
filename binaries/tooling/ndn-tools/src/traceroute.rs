@@ -15,7 +15,7 @@ use ndn_tools_core::traceroute::{TracerouteParams, run_client};
 )]
 struct Cli {
     /// Forwarder face socket path.
-    #[arg(long, default_value = "/run/nfd/nfd.sock")]
+    #[arg(long, default_value = ndn_transport::DEFAULT_FACE_SOCKET)]
     face_socket: String,
 
     /// Disable SHM and use the Unix socket for the data plane.

@@ -24,7 +24,7 @@ use ndn_packet::{Name, NameComponent};
 #[command(version, about = "Forward NDN-native spans to an OTLP backend")]
 struct Cli {
     /// Forwarder Unix socket (matches ndn-fwd's `[management] face_socket`).
-    #[arg(long, default_value = "/run/nfd/nfd.sock")]
+    #[arg(long, default_value = ndn_app::DEFAULT_FACE_SOCKET)]
     socket: PathBuf,
 
     /// NDN prefix the publisher serves under.

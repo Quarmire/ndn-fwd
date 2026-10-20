@@ -30,7 +30,7 @@ use ndn_transport::{FaceId, Transport};
 )]
 struct Cli {
     /// ndn-fwd Unix management socket.
-    #[arg(long, default_value = "/run/ndn-fwd/ndn-fwd.sock")]
+    #[arg(long, default_value = ndn_transport::DEFAULT_FACE_SOCKET)]
     socket: String,
 
     /// PIB containing the management response signing trust anchor.

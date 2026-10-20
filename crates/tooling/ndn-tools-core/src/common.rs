@@ -156,12 +156,8 @@ pub struct ConnectConfig {
 
 impl Default for ConnectConfig {
     fn default() -> Self {
-        #[cfg(unix)]
-        let face_socket = "/run/nfd/nfd.sock".to_string();
-        #[cfg(windows)]
-        let face_socket = r"\\.\pipe\ndn".to_string();
         Self {
-            face_socket,
+            face_socket: ndn_transport::DEFAULT_FACE_SOCKET.to_owned(),
             use_shm: true,
             mtu: None,
         }

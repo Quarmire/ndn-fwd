@@ -3097,6 +3097,7 @@ dependencies = [
  "bytes",
  "dashmap 6.2.1",
  "ndn-discovery-core",
+ "ndn-mgmt-wire",
  "ndn-packet",
  "ndn-pathcontrol",
  "ndn-runtime",
