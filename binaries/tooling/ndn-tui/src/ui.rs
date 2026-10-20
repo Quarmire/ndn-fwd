@@ -211,6 +211,9 @@ fn hints_for(app: &App) -> String {
     }
     let common = "d details · u check now · j join/follow · q quit";
     match &app.screen {
+        Screen::Prefixes if first_run(app) => {
+            "j join/follow · n new trusted prefix · r recover · u check now · q quit".to_owned()
+        }
         Screen::Prefixes => format!(
             "↑↓ select · Enter open · a decide requests · n new trusted prefix · r recover · {common}"
         ),
@@ -346,14 +349,11 @@ fn draw_prefixes(f: &mut Frame, app: &App, area: Rect) {
         warn_area,
     );
 
-    let rows = app.model.prefixes();
-    if rows.is_empty()
-        && app.model.memberships.get().is_some()
-        && app.model.memberships.failure.is_none()
-    {
+    if first_run(app) {
         draw_first_run(f, app, table_area);
         return;
     }
+    let rows = app.model.prefixes();
     let mut header = vec!["Trusted prefix", "This device", "Trust", "Waiting"];
     if app.details {
         header.extend(["Signs as", "Root fingerprint"]);
@@ -415,6 +415,13 @@ fn draw_prefixes(f: &mut Frame, app: &App, area: Rect) {
         .row_highlight_style(selected());
     let mut state = TableState::default().with_selected((!rows.is_empty()).then_some(app.selected));
     f.render_stateful_widget(table, table_area, &mut state);
+}
+
+/// The daemon answered that this device holds no trusted prefix.
+fn first_run(app: &App) -> bool {
+    app.model.prefixes().is_empty()
+        && app.model.memberships.get().is_some()
+        && app.model.memberships.failure.is_none()
 }
 
 /// The home screen of a device that holds no trusted prefix yet: what it
@@ -1583,7 +1590,7 @@ fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
                 text.push(Line::from(format!("How devices join: {enrollment}")));
             }
             if let Some((before, after)) = &p.links {
-                text.push(Line::from(format!("Links: {before} → {after}")));
+                text.push(Line::from(format!("Link policy: {before} → {after}")));
             }
             if let Some((before, after)) = &p.relays {
                 let list = |l: &[String]| {
@@ -1736,8 +1743,14 @@ fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
             dialog(f, "I lost my main device", Text::from(text), width, h);
         }
         Modal::RecoverUnconfirmed { failure, .. } => {
+            // The refusal's sentence alone: its next step ("try again
+            // later") is what the lines below spell out.
+            let why = failure
+                .refusal()
+                .map(crate::words::refusal)
+                .unwrap_or_else(|| failure.words());
             let text = vec![
-                Line::from(failure.words()),
+                Line::from(why),
                 Line::from(""),
                 Line::from(
                     "Recovering from an older version than the newest would split the trusted prefix in two.",

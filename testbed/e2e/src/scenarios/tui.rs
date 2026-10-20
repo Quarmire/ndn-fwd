@@ -6,8 +6,8 @@
 //!
 //! Topology: root (.1, main device + CA of /tu, listening for QUIC links)
 //! linked to laptop (.2, also dials root over QUIC), phone (.3) and spare
-//! (.4, a device with no trusted prefix: it starts /tu2, then recovers /tu
-//! with a recovery kit made on the main device).
+//! (.4, a device with no trusted prefix: it starts /tu2, then, once the main
+//! device is lost, recovers /tu with a recovery kit made on it).
 //!
 //! The screens each step leaves are drawn on a test backend and written to
 //! `<run dir>/tui/*.txt` (kept with `--keep`); nothing asserts their words.
@@ -717,7 +717,27 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "I lost my main device (r): spare recovers /tu with the words typed into its TUI; it becomes the main device, and the old one takes the new versions",
+        "the main device is lost (its daemon stopped); spare's cached copies of /tu erased",
+        |cx| {
+            cx.concept("root device lost");
+            cx.stop("root");
+            // A device recovering minutes after the loss holds no fresh copy
+            // of the main device's last answers (the trust-context metadata is
+            // fresh for 1 s); erase spare's so nothing answers.
+            let sock = sock(cx, "spare");
+            let erase = cx
+                .tool("ndn-ctl")
+                .args(["--socket", &sock, "cs", "erase", NS]);
+            cx.ok(erase, "erase spare's cached copies").map(|_| ())
+        },
+    )?;
+    let words = kit_words.clone();
+    let answer = move |kind| match kind {
+        SecretKind::KitWords => words.clone(),
+        _ => NEW_ROOT_PASS.into(),
+    };
+    sc.step(
+        "I lost my main device (r): spare recovers /tu with the words typed into its TUI; nothing answers, so it asks before vouching for the version it holds",
         |cx| {
             spare.handle(Msg::Key(Key::Char('r')));
             // Kit: 24 words (the first choice); the file field is skipped.
@@ -726,22 +746,35 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             spare.handle(Msg::Key(Key::Tab));
             retype(&mut spare, "spare");
             capture(cx, &spare, "recover", 100, 30)?;
-            let words = kit_words.clone();
             rt.block_on(async {
                 spare.handle(Msg::Key(Key::Enter));
-                let recovered = answer_secrets(
-                    &mut spare,
-                    |kind| match kind {
-                        SecretKind::KitWords => words.clone(),
-                        _ => NEW_ROOT_PASS.into(),
-                    },
-                    |app| {
-                        matches!(app.modal, Some(Modal::Started(_)))
-                            && app.model.membership(NS).is_some_and(|m| {
-                                m.relation == MembershipRelation::Owner && m.version == v1 + 4
-                            })
-                    },
-                )
+                let asked = answer_secrets(&mut spare, &answer, |app| {
+                    matches!(app.modal, Some(Modal::RecoverUnconfirmed { .. }))
+                })
+                .await;
+                if !asked {
+                    return Err(format!(
+                        "spare's TUI does not ask about the unconfirmed version: {:?} {:?}",
+                        spare.app.modal, spare.app.status
+                    ));
+                }
+                Ok(())
+            })?;
+            capture(cx, &spare, "recover-unconfirmed", 100, 30)?;
+            cx.expect_version("spare", NS, v1 + 2)
+        },
+    )?;
+    sc.step(
+        "recover from the version spare holds (h): it becomes the main device of /tu",
+        |cx| {
+            rt.block_on(async {
+                spare.handle(Msg::Key(Key::Char('h')));
+                let recovered = answer_secrets(&mut spare, &answer, |app| {
+                    matches!(app.modal, Some(Modal::Started(_)))
+                        && app.model.membership(NS).is_some_and(|m| {
+                            m.relation == MembershipRelation::Owner && m.version == v1 + 4
+                        })
+                })
                 .await;
                 if !recovered {
                     return Err(format!(
@@ -754,8 +787,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 Ok(())
             })?;
             capture(cx, &spare, "recovered", 110, 50)?;
-            cx.expect_version("spare", NS, v1 + 4)?;
-            cx.wait_version("root", NS, v1 + 4, SHORT).map(|_| ())
+            cx.expect_version("spare", NS, v1 + 4)
         },
     )?;
     drop(rt);

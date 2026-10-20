@@ -1202,9 +1202,9 @@ fn root_phrase(w: &W<'_>) -> Option<String> {
             w.because("detail")
         ),
         "newest-unconfirmed" => format!(
-            "nothing answered{}: whether {} of {ns} is the newest is unknown",
-            w.because("detail"),
-            w.version_or("held_version", "the version held")
+            "whether {} of {ns} is the newest is unknown{}",
+            w.version_or("held_version", "the version held"),
+            w.because("detail")
         ),
         "recover-on-root-device" => {
             format!("this device is the main device of {ns}: nothing to recover")
