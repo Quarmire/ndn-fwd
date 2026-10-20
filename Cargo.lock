@@ -3743,6 +3743,7 @@ dependencies = [
  "ndn-sync",
  "ndn-tlv",
  "ndn-transport",
+ "parking_lot",
  "portable-atomic",
  "tokio",
  "tokio-util",
