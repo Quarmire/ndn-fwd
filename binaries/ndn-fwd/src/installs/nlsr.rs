@@ -102,11 +102,7 @@ pub async fn prepare(
                 continue;
             }
         };
-        let local: std::net::SocketAddr = if peer.is_ipv4() {
-            "0.0.0.0:0".parse().unwrap()
-        } else {
-            "[::]:0".parse().unwrap()
-        };
+        let local = super::neighbour_bind(&fwd_config.faces, peer);
         let face_id = builder.alloc_face_id();
         match ndn_face::net::UdpFace::bind(local, peer, face_id).await {
             Ok(face) => {

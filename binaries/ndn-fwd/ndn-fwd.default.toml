@@ -76,6 +76,11 @@ profile   = "default"
 # pfx_sync_secs  = 30
 # router_dead_secs = 60
 #
+# One UDP socket per neighbour, on an ephemeral port of the address the
+# first `[[face]] kind = "udp"` listener binds (of the neighbour's family);
+# with that listener on 0.0.0.0, of the address that routes to the neighbour.
+# The same holds for `[[routing.nlsr.neighbor]]`.
+#
 # [[routing.dv.neighbor]]
 # name     = "/ndn/site/router2"
 # face_uri = "udp4://10.0.0.2:6363"
