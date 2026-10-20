@@ -1,7 +1,9 @@
 //! ndn-dv install adapter. [`prepare`] runs the async pre-build (UDP
 //! neighbour binds, trust-anchor reads) and returns an installer that
 //! registers `DvProtocol` on the routing and discovery slots and queues
-//! neighbour seeds plus PFS multicast FIB entries.
+//! its neighbour seeds. DV installs every route it needs itself: Pfx Sync
+//! Interests go to each neighbour face directly, and Prefix Data is fetched
+//! over the per-router routes it computes.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +18,6 @@ use crate::parse_name;
 pub struct DvInstaller {
     dv: Arc<ndn_routing::protocols::dv::DvProtocol>,
     neighbour_seeds: Vec<(Name, FaceId)>,
-    pfs_routes: Vec<(Name, FaceId)>,
 }
 
 /// Returns `None` if DV is disabled; an error if the network or router name
@@ -60,14 +61,7 @@ pub async fn prepare(
     builder.add_face(fetch_face);
     builder.add_face(produce_face);
 
-    let pfs_group = {
-        let mut n = dv_network.clone();
-        n = n.append(b"DV" as &[u8]).append(b"PFS" as &[u8]);
-        n
-    };
-
     let mut neighbour_seeds: Vec<(Name, FaceId)> = Vec::new();
-    let mut pfs_routes: Vec<(Name, FaceId)> = Vec::new();
     for n in &dv_toml.neighbors {
         let neighbour_name = match parse_name(&n.name) {
             Ok(name) => name,
@@ -94,7 +88,6 @@ pub async fn prepare(
             Ok(face) => {
                 builder.add_face(face);
                 neighbour_seeds.push((neighbour_name.clone(), face_id));
-                pfs_routes.push((pfs_group.clone(), face_id));
                 tracing::info!(
                     target: "routing.dv",
                     peer = %neighbour_name,
@@ -129,7 +122,6 @@ pub async fn prepare(
     Ok(Some(DvInstaller {
         dv,
         neighbour_seeds,
-        pfs_routes,
     }))
 }
 
@@ -228,15 +220,6 @@ impl InstallableProtocol for DvInstaller {
 
         for (peer, face_id) in &self.neighbour_seeds {
             post_build.seed_neighbor(peer.clone(), *face_id);
-        }
-        for (prefix, face_id) in &self.pfs_routes {
-            post_build.add_fib_entry(prefix.clone(), *face_id, 0);
-            tracing::info!(
-                target: "routing.dv",
-                prefix = %prefix,
-                face = face_id.0,
-                "DV Pfx Sync multicast FIB entry queued",
-            );
         }
 
         // Status bridge at `/localhost/nlsr/status` wire-compatible with
