@@ -140,7 +140,10 @@ pub enum Update {
     Requests(Result<Vec<OutgoingRequest>, Failure>),
     Links(Result<LinkListing, Failure>),
     Routes(Result<Routes, Failure>),
+    /// The first page of what the content store holds.
     Cached(Result<CsListing, Failure>),
+    /// The page after the cached names listed so far.
+    CachedPage(Result<CsListing, Failure>),
     Refreshed(Result<Vec<ContextRefreshInfo>, Failure>),
     Roots(Result<Vec<RootFacts>, Failure>),
     /// Event number `seq` of the trust stream.
@@ -276,6 +279,31 @@ pub fn under(name: &str, prefix: &str) -> bool {
 }
 
 impl Model {
+    /// Where the next page of cached names starts (`None`: every name is
+    /// listed, or none was read yet).
+    pub fn cached_next(&self) -> Option<Name> {
+        self.cached.get()?.next_after().cloned()
+    }
+
+    /// Append `page`, the names after those listed so far. A page read
+    /// before the first page was read again adds only names past the
+    /// last one listed (names come in canonical order).
+    fn more_cached(&mut self, page: CsListing) {
+        let Some(listed) = self.cached.value.as_mut() else {
+            self.cached.value = Some(page);
+            return;
+        };
+        let last = listed.entries.last().map(|e| e.name.clone());
+        listed.entries.extend(
+            page.entries
+                .into_iter()
+                .filter(|e| last.as_ref().is_none_or(|last| e.name > *last)),
+        );
+        listed.total = page.total;
+        listed.more = page.more;
+        self.cached.failure = None;
+    }
+
     /// Take `update` in; returns the listings to read again because of it.
     pub fn apply(&mut self, update: Update) -> Vec<Listing> {
         match update {
@@ -288,6 +316,8 @@ impl Model {
             Update::Links(r) => self.links.set(r),
             Update::Routes(r) => self.routes.set(r),
             Update::Cached(r) => self.cached.set(r),
+            Update::CachedPage(Ok(page)) => self.more_cached(page),
+            Update::CachedPage(Err(failure)) => self.cached.failure = Some(failure),
             Update::Roots(r) => self.roots.set(r),
             Update::Refreshed(Ok(results)) => {
                 self.refresh_failure = None;

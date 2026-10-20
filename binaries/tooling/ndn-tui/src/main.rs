@@ -17,29 +17,25 @@ use ndn_tui::ui;
 #[command(version)]
 struct Args {
     /// The daemon's configuration file: its management socket is read
-    /// from it.
+    /// from it, and the policy its certificate-authority entries state goes
+    /// into a new trusted prefix and a schema update.
     #[arg(short = 'c', long = "config")]
     config: Option<PathBuf>,
-    /// The daemon's management socket (instead of reading the config).
+    /// The daemon's management socket (instead of the configuration's).
     #[arg(long)]
     socket: Option<String>,
 }
 
-fn socket_of(args: &Args) -> Result<String, String> {
-    if let Some(socket) = &args.socket {
-        return Ok(socket.clone());
-    }
-    match &args.config {
-        Some(path) => {
-            let toml = std::fs::read_to_string(path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let cfg: ndn_config::ForwarderConfig = toml
-                .parse()
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            Ok(cfg.management.face_socket)
-        }
-        None => Ok(ndn_config::ManagementConfig::default().face_socket),
-    }
+/// The configuration `-c` names, read.
+fn config_of(args: &Args) -> Result<Option<ndn_config::ForwarderConfig>, String> {
+    let Some(path) = &args.config else {
+        return Ok(None);
+    };
+    let toml = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    toml.parse()
+        .map(Some)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 fn key_of(e: event::KeyEvent) -> Option<Key> {
@@ -62,13 +58,19 @@ fn key_of(e: event::KeyEvent) -> Option<Key> {
 
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
-    let socket = match socket_of(&args) {
-        Ok(s) => s,
+    let config = match config_of(&args) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
             return std::process::ExitCode::from(2);
         }
     };
+    let socket = args.socket.clone().unwrap_or_else(|| {
+        config.as_ref().map_or_else(
+            || ndn_config::ManagementConfig::default().face_socket,
+            |c| c.management.face_socket.clone(),
+        )
+    });
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -76,7 +78,7 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(socket)) {
+    match runtime.block_on(run(socket, config)) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
@@ -85,8 +87,8 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-async fn run(socket: String) -> Result<(), String> {
-    let mut driver = Driver::connect(&socket)
+async fn run(socket: String, config: Option<ndn_config::ForwarderConfig>) -> Result<(), String> {
+    let mut driver = Driver::connect(&socket, config)
         .await
         .map_err(|f| format!("No daemon to manage at {socket}. {}", f.words()))?;
     let mut terminal = ratatui::init();

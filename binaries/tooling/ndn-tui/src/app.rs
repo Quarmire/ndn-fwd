@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::daemon::Failure;
 use crate::model::{Listing, Model, Update};
-use crate::root::{KitSpecArg, RootDone, RootOp, SecretAsk};
+use crate::root::{KitSpecArg, RootDone, RootOp, SchemaPreview, SecretAsk};
 use crate::words;
 
 /// A screen.
@@ -53,18 +53,55 @@ impl Section {
 /// A command for the daemon or this device's key storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    CreateInvite { ca: Name, request: InviteRequest },
-    WithdrawInvite { ca: Name, id: String },
-    Approve { request: String },
-    Deny { request: String, reason: String },
-    Follow { link: String },
-    Join { link: String, identity: Name },
-    LinkMode { label: String, mode: LinkModeArg },
-    LinkConnect { label: String },
-    LinkDisconnect { label: String },
-    Inspect { name: Name },
-    Schema { namespace: Name },
-    Refresh { namespace: Option<Name> },
+    CreateInvite {
+        ca: Name,
+        request: InviteRequest,
+    },
+    WithdrawInvite {
+        ca: Name,
+        id: String,
+    },
+    Approve {
+        request: String,
+    },
+    Deny {
+        request: String,
+        reason: String,
+    },
+    Follow {
+        link: String,
+    },
+    Join {
+        link: String,
+        identity: Name,
+    },
+    LinkMode {
+        label: String,
+        mode: LinkModeArg,
+    },
+    LinkConnect {
+        label: String,
+    },
+    LinkDisconnect {
+        label: String,
+    },
+    Inspect {
+        name: Name,
+    },
+    /// Read the page of cached names after `after`.
+    MoreCached {
+        after: Name,
+    },
+    Schema {
+        namespace: Name,
+    },
+    /// Work out what a schema update would change (nothing signed).
+    PreviewSchema {
+        namespace: Name,
+    },
+    Refresh {
+        namespace: Option<Name>,
+    },
     Root(RootOp),
 }
 
@@ -87,6 +124,7 @@ pub enum Outcome {
     Link(Result<Detail, Failure>),
     Inspected(Result<DataInspection, Failure>),
     Schema(Name, Result<Vec<String>, Failure>),
+    SchemaPreview(Result<SchemaPreview, Failure>),
     Root(Result<RootDone, Failure>),
 }
 
@@ -157,6 +195,129 @@ pub const EXPIRIES: [(&str, Option<u64>); 5] = [
 pub const INVITE_ROLES: [&str; 2] = ["member", "guest"];
 /// The roles a device asks an admin's approval for.
 pub const APPROVAL_ROLES: [&str; 4] = ["admin", "node", "member", "guest"];
+/// Where a new main key may be kept, in the order offered.
+pub const NEW_ROOT_STORES: [RootStoreKind; 3] = [
+    RootStoreKind::SealedFile,
+    RootStoreKind::OsKeyring,
+    RootStoreKind::YubikeyPiv,
+];
+/// The kinds of recovery kit, in the order offered.
+pub const KIT_KINDS: [KitFormat; 3] = [KitFormat::Words, KitFormat::File, KitFormat::Yubikey];
+
+/// A new trusted prefix being set up ("start a new trusted prefix").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPrefixForm {
+    /// The prefix, e.g. `/home`.
+    pub prefix: Input,
+    /// This device's name in it.
+    pub device: Input,
+    /// Where the main key is kept ([`NEW_ROOT_STORES`]).
+    pub store: usize,
+    /// 0 prefix, 1 device, 2 store.
+    pub field: usize,
+    /// Why the form cannot go on yet.
+    pub problem: Option<String>,
+}
+
+impl NewPrefixForm {
+    const FIELDS: usize = 3;
+
+    /// The prefix typed, when it is one.
+    pub fn prefix(&self) -> Result<Name, String> {
+        prefix_of(&self.prefix.text)
+    }
+}
+
+/// A trusted prefix being recovered onto this device ("I lost my main
+/// device").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverForm {
+    /// The kind of kit ([`KIT_KINDS`]).
+    pub kit: usize,
+    /// A file kit's path.
+    pub file: Input,
+    /// The prefix; a file kit names its own, else the only one this device
+    /// follows is taken.
+    pub prefix: Input,
+    /// This device's name in it.
+    pub device: Input,
+    /// The old main device may be in someone else's hands.
+    pub compromised: bool,
+    /// Where the new main key is kept ([`NEW_ROOT_STORES`]).
+    pub store: usize,
+    /// 0 kit, 1 file, 2 prefix, 3 device, 4 old device, 5 store.
+    pub field: usize,
+    pub problem: Option<String>,
+}
+
+impl RecoverForm {
+    const FIELDS: usize = 6;
+
+    /// The operation the form asks for, or why it cannot go on yet.
+    pub fn op(&self, from_held: bool) -> Result<RootOp, String> {
+        let kit = match KIT_KINDS[self.kit] {
+            KitFormat::Words => KitSpecArg::Words,
+            KitFormat::Yubikey => KitSpecArg::SecurityKey,
+            KitFormat::File => {
+                let path = self.file.text.trim();
+                if path.is_empty() {
+                    return Err("Type where the kit file is.".into());
+                }
+                KitSpecArg::File(PathBuf::from(path))
+            }
+        };
+        let namespace = match self.prefix.text.trim() {
+            "" => None,
+            typed => Some(prefix_of(typed)?),
+        };
+        let device = device_of(&self.device.text)?;
+        Ok(RootOp::Recover {
+            namespace,
+            kit,
+            device,
+            compromised: self.compromised,
+            from_held,
+            store: NEW_ROOT_STORES[self.store],
+        })
+    }
+}
+
+/// A typed trusted prefix, when it is one.
+fn prefix_of(text: &str) -> Result<Name, String> {
+    let text = text.trim();
+    if !text.starts_with('/') || text.len() < 2 {
+        return Err("A trusted prefix is a name that starts with /, e.g. /home.".into());
+    }
+    text.parse()
+        .map_err(|_| format!("{text} is not a name this device can use."))
+}
+
+/// A typed device name, when it is one.
+fn device_of(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty()
+        || !text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("A device name is letters, digits, - _ or . (e.g. desk).".into());
+    }
+    Ok(text.to_owned())
+}
+
+/// A trusted prefix this device started or recovered, as its dialog shows
+/// it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Started {
+    pub title: String,
+    pub lines: Vec<String>,
+    /// The short anchor link to scan (QR) or share.
+    pub link: Option<String>,
+    /// The prefix's expected fingerprint (hex), shown in details.
+    pub fingerprint: String,
+    /// The daemon's configuration lines, shown in details.
+    pub settings: Vec<String>,
+}
 
 /// The invite being made.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +461,17 @@ pub enum Modal {
         lines: Vec<String>,
         scroll: usize,
     },
+    /// What a schema update would change, before it is signed.
+    SchemaPreview(SchemaPreview),
+    NewPrefix(NewPrefixForm),
+    Recover(RecoverForm),
+    /// A recovery stopped because nothing answered whether a newer version
+    /// exists: the person may vouch for the held one.
+    RecoverUnconfirmed {
+        op: RootOp,
+        failure: Failure,
+    },
+    Started(Started),
     Secret(SecretDialog),
     Ask {
         name: Input,
@@ -344,6 +516,11 @@ pub struct App {
     pub pib: Option<PathBuf>,
     /// The waiting join, kept when its dialog is closed.
     pub waiting: Option<Waiting>,
+    /// The recovery under way, offered again (vouching for the held
+    /// version) when nothing answered whether a newer one exists.
+    pub recovering: Option<RootOp>,
+    /// The page of cached names being read (from after this name).
+    pub paging: Option<Name>,
 }
 
 impl App {
@@ -360,6 +537,8 @@ impl App {
             socket: socket.to_owned(),
             pib: None,
             waiting: None,
+            recovering: None,
+            paging: None,
         }
     }
 
@@ -368,12 +547,31 @@ impl App {
         Listing::ALL.iter().map(|l| Effect::Load(*l)).collect()
     }
 
+    /// On the data screen, read the next page of cached names once the
+    /// selection is within a screen of the end of those listed.
+    fn page_cached(&mut self) -> Vec<Effect> {
+        const AHEAD: usize = 40;
+        if self.screen != Screen::Data || self.selected + AHEAD < self.rows() {
+            return Vec::new();
+        }
+        match self.model.cached_next() {
+            Some(after) if self.paging.as_ref() != Some(&after) => {
+                self.paging = Some(after.clone());
+                vec![Effect::Run(Command::MoreCached { after })]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Take `msg` in.
     pub fn handle(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Key(key) => self.key(key),
             Msg::Update(update) => {
                 let identity = matches!(update, Update::Identity(Ok(_)));
+                if matches!(update, Update::Cached(_) | Update::CachedPage(_)) {
+                    self.paging = None;
+                }
                 let mut effects: Vec<Effect> = self
                     .model
                     .apply(update)
@@ -519,7 +717,33 @@ impl App {
                 });
                 Vec::new()
             }
-            Outcome::Root(Ok(done)) => self.root_done(done),
+            Outcome::SchemaPreview(Ok(preview)) => {
+                if preview.is_empty() {
+                    self.modal = Some(Modal::Message {
+                        title: format!("Schema of {}", preview.namespace),
+                        lines: vec![format!(
+                            "Nothing to update: version {} of {} already carries this build's trust rules and the policy stated for it. Nothing was signed.",
+                            preview.held, preview.namespace
+                        )],
+                    });
+                } else {
+                    self.modal = Some(Modal::SchemaPreview(preview));
+                }
+                Vec::new()
+            }
+            Outcome::Root(Ok(done)) => {
+                self.recovering = None;
+                self.root_done(done)
+            }
+            Outcome::Root(Err(f))
+                if self.recovering.is_some()
+                    && f.refusal()
+                        .is_some_and(|r| r.is(ndn_cert::report::code::NEWEST_UNCONFIRMED)) =>
+            {
+                let op = self.recovering.take().expect("a recovery under way");
+                self.modal = Some(Modal::RecoverUnconfirmed { op, failure: f });
+                Vec::new()
+            }
             Outcome::InviteMade(Err(f))
             | Outcome::InviteWithdrawn(Err(f))
             | Outcome::Decided(Err(f))
@@ -528,7 +752,9 @@ impl App {
             | Outcome::Link(Err(f))
             | Outcome::Inspected(Err(f))
             | Outcome::Schema(_, Err(f))
+            | Outcome::SchemaPreview(Err(f))
             | Outcome::Root(Err(f)) => {
+                self.recovering = None;
                 self.fail(&f);
                 Vec::new()
             }
@@ -542,7 +768,102 @@ impl App {
                 "The daemon is not running: the version is kept for its next start ({location})."
             ),
         };
+        let authority = |namespace: &str, identity: &str| {
+            format!(
+                "For devices to join {namespace} (invites, approvals), the daemon must run its certificate authority and sign as {identity}: that takes the settings shown in details (d), then a restart of the daemon."
+            )
+        };
         match done {
+            RootDone::Initialized {
+                namespace,
+                version,
+                identity,
+                store,
+                fingerprint,
+                short_link,
+                settings,
+                followed,
+                ..
+            } => {
+                let lines = vec![
+                    format!(
+                        "{namespace} is a new trusted prefix (version {version}), and this device is its main device as {identity}."
+                    ),
+                    format!("Its main key is kept in {}.", words::root_store(&store)),
+                    match &followed {
+                        Some(Ok(_)) | None => {
+                            "The daemon holds its trust rules now: other devices follow it with the link below.".to_owned()
+                        }
+                        Some(Err(f)) => format!(
+                            "The daemon has not taken its trust rules yet ({}); it loads them at its next start.",
+                            f.words()
+                        ),
+                    },
+                    authority(&namespace, &identity),
+                    "Next: make a recovery kit (open it and press k), so losing this device does not lose the prefix.".to_owned(),
+                ];
+                self.say(format!("Started {namespace}."));
+                self.modal = Some(Modal::Started(Started {
+                    title: format!("{namespace} started"),
+                    lines,
+                    link: Some(short_link),
+                    fingerprint,
+                    settings,
+                }));
+            }
+            RootDone::Recovered {
+                namespace,
+                previous,
+                version,
+                confirmed,
+                compromised,
+                identity,
+                fingerprint,
+                revoked,
+                handed: h,
+                root_handed,
+                short_link,
+                settings,
+            } => {
+                let mut lines = vec![
+                    format!("This device is now the main device of {namespace}, as {identity}."),
+                    if compromised {
+                        format!(
+                            "Version {version} replaces version {previous}: it revokes {revoked} key{} of the old main device and the kits not used, so devices certified through the old main device join again.",
+                            if revoked == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        format!(
+                            "Version {version} replaces version {previous}: the old main device's certificates stay valid, so the other devices keep working."
+                        )
+                    },
+                ];
+                if !confirmed {
+                    lines.push(format!(
+                        "No device answered that version {previous} was the newest: you vouched for it."
+                    ));
+                }
+                lines.push(handed(&h));
+                match &root_handed {
+                    Ok(_) => lines.push(
+                        "The new main key signs it: share the link below from now on.".to_owned(),
+                    ),
+                    Err(r) => lines.push(format!(
+                        "The version signed by the new main key is not known to be taken yet: {} Until it is, share no anchor link: one made now would stop working once it is.",
+                        words::refusal(r)
+                    )),
+                }
+                lines.push(authority(&namespace, &identity));
+                lines.push("Next: make a new recovery kit (open it and press k).".to_owned());
+                self.say(format!("Recovered {namespace}."));
+                self.modal = Some(Modal::Started(Started {
+                    title: format!("{namespace} recovered"),
+                    lines,
+                    link: short_link,
+                    fingerprint,
+                    settings,
+                }));
+            }
             RootDone::Revoked {
                 namespace,
                 version,
@@ -641,17 +962,23 @@ impl App {
                 version,
                 added,
                 removed,
+                narrowed,
                 handed: h,
             } => {
+                let mut lines = vec![format!(
+                    "Version {version} of {namespace}: {added} rule{} added, {removed} removed.",
+                    if added == 1 { "" } else { "s" }
+                )];
+                if narrowed > 0 {
+                    lines.push(format!(
+                        "It narrows what devices may do ({narrowed} change{}, as accepted): a device relying on them is refused once it holds version {version}.",
+                        if narrowed == 1 { "" } else { "s" }
+                    ));
+                }
+                lines.push(handed(&h));
                 self.modal = Some(Modal::Message {
                     title: "Schema updated".into(),
-                    lines: vec![
-                        format!(
-                            "Version {version} of {namespace}: {added} rule{} added, {removed} removed.",
-                            if added == 1 { "" } else { "s" }
-                        ),
-                        handed(&h),
-                    ],
+                    lines,
                 });
             }
         }
@@ -713,6 +1040,7 @@ impl App {
                 if self.selected + 1 < self.rows() {
                     self.selected += 1;
                 }
+                return self.page_cached();
             }
             Key::Esc => {
                 if let Screen::Prefix(_) = self.screen {
@@ -807,6 +1135,33 @@ impl App {
                         }
                         self.modal = Some(Modal::Approve(row));
                     }
+                }
+                Key::Char('n') => {
+                    self.modal = Some(Modal::NewPrefix(NewPrefixForm {
+                        prefix: Input::default(),
+                        device: Input { text: hostname() },
+                        store: 0,
+                        field: 0,
+                        problem: None,
+                    }));
+                }
+                Key::Char('r') => {
+                    // The prefix this device follows, when it follows one only.
+                    let prefixes = self.model.prefixes();
+                    let prefix = match prefixes.as_slice() {
+                        [only] => only.namespace.clone(),
+                        _ => String::new(),
+                    };
+                    self.modal = Some(Modal::Recover(RecoverForm {
+                        kit: 0,
+                        file: Input::default(),
+                        prefix: Input { text: prefix },
+                        device: Input { text: hostname() },
+                        compromised: false,
+                        store: 0,
+                        field: 0,
+                        problem: None,
+                    }));
                 }
                 _ => {}
             },
@@ -1353,13 +1708,12 @@ impl App {
                     let Ok(ns) = namespace.parse() else {
                         return (None, none());
                     };
-                    self.modal = Some(Modal::Busy("Updating the schema…".into()));
+                    self.modal = Some(Modal::Busy(
+                        "Working out what the update changes (nothing is signed yet)…".into(),
+                    ));
                     (
                         None,
-                        vec![Effect::Run(Command::Root(RootOp::SchemaUpdate {
-                            namespace: ns,
-                            accept_narrowing: false,
-                        }))],
+                        vec![Effect::Run(Command::PreviewSchema { namespace: ns })],
                     )
                 }
                 _ => (
@@ -1392,6 +1746,164 @@ impl App {
                 Key::Esc | Key::Enter => (None, none()),
                 _ => (Some(Modal::Inspected(inspection)), none()),
             },
+            Modal::SchemaPreview(preview) => {
+                let sign = match key {
+                    Key::Char('y') if !preview.narrows() => Some(false),
+                    Key::Char('a') if preview.narrows() => Some(true),
+                    Key::Esc | Key::Char('n') => return (None, none()),
+                    _ => None,
+                };
+                match (sign, preview.namespace.parse()) {
+                    (Some(accept_narrowing), Ok(ns)) => {
+                        self.modal = Some(Modal::Busy("Updating the schema…".into()));
+                        (
+                            None,
+                            vec![Effect::Run(Command::Root(RootOp::SchemaUpdate {
+                                namespace: ns,
+                                accept_narrowing,
+                            }))],
+                        )
+                    }
+                    _ => (Some(Modal::SchemaPreview(preview)), none()),
+                }
+            }
+            Modal::NewPrefix(mut form) => match key {
+                Key::Esc => (None, none()),
+                Key::Tab | Key::Down => {
+                    form.field = (form.field + 1) % NewPrefixForm::FIELDS;
+                    (Some(Modal::NewPrefix(form)), none())
+                }
+                Key::BackTab | Key::Up => {
+                    form.field = (form.field + NewPrefixForm::FIELDS - 1) % NewPrefixForm::FIELDS;
+                    (Some(Modal::NewPrefix(form)), none())
+                }
+                Key::Char('<') | Key::Char('>') if form.field == 2 => {
+                    form.store = step(form.store, NEW_ROOT_STORES.len(), key);
+                    (Some(Modal::NewPrefix(form)), none())
+                }
+                Key::Enter => {
+                    let op = form.prefix().and_then(|namespace| {
+                        Ok(RootOp::Init {
+                            namespace,
+                            device: device_of(&form.device.text)?,
+                            store: NEW_ROOT_STORES[form.store],
+                        })
+                    });
+                    match op {
+                        Ok(op) => {
+                            form.problem = None;
+                            self.covered = Some(Box::new(Modal::NewPrefix(form)));
+                            self.modal = Some(Modal::Busy("Starting the trusted prefix…".into()));
+                            (None, vec![Effect::Run(Command::Root(op))])
+                        }
+                        Err(problem) => {
+                            form.problem = Some(problem);
+                            (Some(Modal::NewPrefix(form)), none())
+                        }
+                    }
+                }
+                other => {
+                    match form.field {
+                        0 => form.prefix.edit(other),
+                        1 => form.device.edit(other),
+                        _ => false,
+                    };
+                    (Some(Modal::NewPrefix(form)), none())
+                }
+            },
+            Modal::Recover(mut form) => {
+                // The file field is there only for a file kit.
+                let skip = |form: &RecoverForm, field: usize| {
+                    field == 1 && KIT_KINDS[form.kit] != KitFormat::File
+                };
+                match key {
+                    Key::Esc => (None, none()),
+                    Key::Tab | Key::Down | Key::BackTab | Key::Up => {
+                        let n = RecoverForm::FIELDS;
+                        let forward = matches!(key, Key::Tab | Key::Down);
+                        loop {
+                            form.field = if forward {
+                                (form.field + 1) % n
+                            } else {
+                                (form.field + n - 1) % n
+                            };
+                            if !skip(&form, form.field) {
+                                break;
+                            }
+                        }
+                        (Some(Modal::Recover(form)), none())
+                    }
+                    Key::Char('<') | Key::Char('>') if matches!(form.field, 0 | 4 | 5) => {
+                        match form.field {
+                            0 => form.kit = step(form.kit, KIT_KINDS.len(), key),
+                            4 => form.compromised = !form.compromised,
+                            _ => form.store = step(form.store, NEW_ROOT_STORES.len(), key),
+                        }
+                        (Some(Modal::Recover(form)), none())
+                    }
+                    Key::Enter => match form.op(false) {
+                        Ok(op) => {
+                            form.problem = None;
+                            self.recovering = Some(op.clone());
+                            self.covered = Some(Box::new(Modal::Recover(form)));
+                            self.modal = Some(Modal::Busy(
+                                "Recovering: checking for the newest version first…".into(),
+                            ));
+                            (None, vec![Effect::Run(Command::Root(op))])
+                        }
+                        Err(problem) => {
+                            form.problem = Some(problem);
+                            (Some(Modal::Recover(form)), none())
+                        }
+                    },
+                    other => {
+                        match form.field {
+                            1 => form.file.edit(other),
+                            2 => form.prefix.edit(other),
+                            3 => form.device.edit(other),
+                            _ => false,
+                        };
+                        (Some(Modal::Recover(form)), none())
+                    }
+                }
+            }
+            Modal::RecoverUnconfirmed { op, failure } => match (key, op) {
+                (
+                    Key::Char('h'),
+                    RootOp::Recover {
+                        namespace,
+                        kit,
+                        device,
+                        compromised,
+                        store,
+                        ..
+                    },
+                ) => {
+                    let op = RootOp::Recover {
+                        namespace,
+                        kit,
+                        device,
+                        compromised,
+                        from_held: true,
+                        store,
+                    };
+                    self.recovering = Some(op.clone());
+                    self.modal = Some(Modal::Busy(
+                        "Recovering from the version this device holds…".into(),
+                    ));
+                    (None, vec![Effect::Run(Command::Root(op))])
+                }
+                (Key::Esc | Key::Enter, _) => (None, none()),
+                (_, op) => (Some(Modal::RecoverUnconfirmed { op, failure }), none()),
+            },
+            Modal::Started(started) => match key {
+                Key::Esc | Key::Enter => (None, none()),
+                Key::Char('d') => {
+                    self.details = !self.details;
+                    (Some(Modal::Started(started)), none())
+                }
+                _ => (Some(Modal::Started(started)), none()),
+            },
             Modal::Message { title, lines } => match key {
                 Key::Esc | Key::Enter => (None, none()),
                 _ => (Some(Modal::Message { title, lines }), none()),
@@ -1416,4 +1928,13 @@ fn home_file(namespace: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     format!("{base}/{name}-recovery-kit")
+}
+
+/// The choice after (`>`) or before (`<`) `at` of `n`.
+fn step(at: usize, n: usize, key: Key) -> usize {
+    if key == Key::Char('>') {
+        (at + 1) % n
+    } else {
+        (at + n - 1) % n
+    }
 }

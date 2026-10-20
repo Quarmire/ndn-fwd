@@ -13,6 +13,10 @@ use crate::root::{self, TuiSecrets};
 pub struct Runner {
     pub daemon: Arc<Daemon>,
     pub secrets: Arc<TuiSecrets>,
+    /// The daemon's configuration, when given: the policy its
+    /// certificate-authority entry states for a prefix goes into a new
+    /// prefix and a schema update.
+    pub config: Option<ndn_config::ForwarderConfig>,
 }
 
 /// The key storage is not known yet (the daemon has not said where).
@@ -49,6 +53,9 @@ impl Runner {
                 done(Outcome::Link(d.disconnect_link(&label).await))
             }
             Command::Inspect { name } => done(Outcome::Inspected(d.inspect(&name).await)),
+            Command::MoreCached { after } => {
+                Msg::Update(Update::CachedPage(d.cached(None, Some(&after)).await))
+            }
             Command::Refresh { namespace } => {
                 Msg::Update(Update::Refreshed(d.refresh(namespace.as_ref()).await))
             }
@@ -59,11 +66,23 @@ impl Runner {
                 };
                 done(Outcome::Schema(namespace, lines))
             }
+            Command::PreviewSchema { namespace } => done(Outcome::SchemaPreview(match &pib {
+                Some(pib) => root::preview_schema(pib, &namespace, self.config.as_ref()),
+                None => Err(no_pib()),
+            })),
             Command::Root(op) => {
-                let result = match &pib {
-                    Some(pib) => root::run(op, pib, d.socket(), &self.secrets).await,
+                let mut result = match &pib {
+                    Some(pib) => {
+                        root::run(op, pib, d.socket(), self.config.as_ref(), &self.secrets).await
+                    }
                     None => Err(no_pib()),
                 };
+                // A new prefix is in the key storage; the running daemon
+                // follows it once handed its anchor link (the trust rules
+                // inline, nothing fetched).
+                if let Ok(root::RootDone::Initialized { link, followed, .. }) = &mut result {
+                    *followed = Some(d.follow(link).await.map(|info| info.version));
+                }
                 done(Outcome::Root(result))
             }
         }

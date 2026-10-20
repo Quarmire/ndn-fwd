@@ -175,9 +175,14 @@ impl Daemon {
         })
     }
 
-    /// What the content store holds under `prefix`, at most `limit` names.
-    pub async fn cached(&self, prefix: Option<&Name>, limit: u64) -> Result<CsListing, Failure> {
-        Ok(self.client.cs_list(prefix, limit).await?)
+    /// One page of what the content store holds under `prefix`: the first
+    /// [`CACHED_PAGE`] names after `after` (from the first when `None`).
+    pub async fn cached(
+        &self,
+        prefix: Option<&Name>,
+        after: Option<&Name>,
+    ) -> Result<CsListing, Failure> {
+        Ok(self.client.cs_list(prefix, after, CACHED_PAGE).await?)
     }
 
     /// Fetch the Data `name` names and check it.
@@ -271,7 +276,7 @@ impl Daemon {
             Listing::Requests => Update::Requests(self.requests().await),
             Listing::Links => Update::Links(self.links().await),
             Listing::Routes => Update::Routes(self.routes().await),
-            Listing::Cached => Update::Cached(self.cached(None, CACHED_LIMIT).await),
+            Listing::Cached => Update::Cached(self.cached(None, None).await),
             Listing::Refresh => Update::Refreshed(self.refresh(None).await),
             Listing::Roots => Update::Roots(match pib {
                 Some(pib) => read_roots(pib),
@@ -281,8 +286,9 @@ impl Daemon {
     }
 }
 
-/// How many cached names the data screen lists.
-pub const CACHED_LIMIT: u64 = 500;
+/// How many cached names the data screen reads at a time: the next page
+/// is read as the selection nears the end of the list.
+pub const CACHED_PAGE: u64 = 200;
 
 /// The root keys this device's key storage at `pib` holds, with the
 /// recovery kits of each prefix (empty on a device that is no main device).

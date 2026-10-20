@@ -1,11 +1,13 @@
 //! tui: the admin TUI's state layer (`ndn_tui::driver::Driver`, the model
 //! and the commands behind its keys) against running daemons — no
-//! terminal, no keystrokes except the main-key passphrase typed into its
-//! secret prompt. Each TUI follows its daemon's trust and links streams
-//! and must see every change by itself, without being told to reload.
+//! terminal; keystrokes for the forms and the secrets typed into its
+//! prompts. Each TUI follows its daemon's trust and links streams and must
+//! see every change by itself, without being told to reload.
 //!
 //! Topology: root (.1, main device + CA of /tu, listening for QUIC links)
-//! linked to laptop (.2, also dials root over QUIC) and phone (.3).
+//! linked to laptop (.2, also dials root over QUIC), phone (.3) and spare
+//! (.4, a device with no trusted prefix: it starts /tu2, then recovers /tu
+//! with a recovery kit made on the main device).
 //!
 //! The screens each step leaves are drawn on a test backend and written to
 //! `<run dir>/tui/*.txt` (kept with `--keep`); nothing asserts their words.
@@ -13,7 +15,8 @@
 use std::path::PathBuf;
 
 use ndn_cert::report::{DataVerdict, MembershipRelation};
-use ndn_cert::{InviteRequest, InviteState};
+use ndn_cert::{InviteRequest, InviteState, KitFormat};
+use ndn_namespace::root::SecretKind;
 use ndn_packet::Name;
 use ndn_tui::app::{Command, Effect, Key, Modal, Msg, Screen, Section};
 use ndn_tui::driver::Driver;
@@ -26,6 +29,8 @@ use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
 
 const NS: &str = "/tu";
+/// The trusted prefix spare starts in its TUI.
+const NS2: &str = "/tu2";
 
 fn n(s: &str) -> String {
     format!("{NS}{s}")
@@ -64,7 +69,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "root",
         1,
         NodeCfg {
-            links: vec![link("laptop", 2), link("phone", 3)],
+            links: vec![link("laptop", 2), link("phone", 3), link("spare", 4)],
             routes: vec![
                 route(n("/admin/laptop"), "laptop"),
                 route(n("/member/phone"), "phone"),
@@ -96,12 +101,21 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             ..base.clone()
         },
     );
+    sc.world.add(
+        "spare",
+        4,
+        NodeCfg {
+            links: vec![link("root", 1)],
+            routes: vec![route(NS, "root")],
+            ..base.clone()
+        },
+    );
 
     let root = sc.step("init the main device", |cx| {
         init_root(cx, "root", NS, "desk")
     })?;
     sc.step(
-        "start the main device's daemon with its CA, and laptop and phone",
+        "start the main device's daemon with its CA, and laptop, phone and spare",
         |cx| {
             cx.w.node_mut("root").cfg.identity = Some(root.identity.clone());
             cx.w.node_mut("root").cfg.ca = Some(CaCfg {
@@ -111,7 +125,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             });
             cx.start("root")?;
             cx.start("laptop")?;
-            cx.start("phone")
+            cx.start("phone")?;
+            cx.start("spare")
         },
     )?;
 
@@ -125,7 +140,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let socket = sock(cx, "root");
             let driver =
                 rt.block_on(async {
-                    let mut d = Driver::connect(&socket).await.map_err(|f| f.words())?;
+                    let mut d = Driver::connect(&socket, None)
+                        .await
+                        .map_err(|f| f.words())?;
                     let ok = d
                         .settle(wait, |app| {
                             app.model.prefixes().iter().any(|p| {
@@ -203,7 +220,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let socket = sock(cx, "phone");
             let link = invite_link.clone();
             rt.block_on(async {
-                let mut d = Driver::connect(&socket).await.map_err(|f| f.words())?;
+                let mut d = Driver::connect(&socket, None)
+                    .await
+                    .map_err(|f| f.words())?;
                 d.execute(vec![Effect::Run(Command::Join {
                     link,
                     identity: name(&n("/member/phone")),
@@ -252,7 +271,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let socket = sock(cx, "laptop");
             let link = root.link_fp.clone();
             rt.block_on(async {
-                let mut d = Driver::connect(&socket).await.map_err(|f| f.words())?;
+                let mut d = Driver::connect(&socket, None)
+                    .await
+                    .map_err(|f| f.words())?;
                 d.execute(vec![Effect::Run(Command::Join {
                     link,
                     identity: name(&n("/admin/laptop")),
@@ -509,8 +530,277 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             capture(cx, &desk, "home-details", 140, 30)
         },
     )?;
+    desk.handle(Msg::Key(Key::Char('d')));
+
+    let v1 = sc.world.held_version("root", NS).unwrap_or(0);
+    sc.step(
+        "a schema update from a TUI given a config whose [ca] entry narrows the link policy: shown before signing, signed only once the narrowing is accepted",
+        |cx| {
+            let socket = sock(cx, "root");
+            let config = ndn_config::ForwarderConfig {
+                ca: vec![ndn_config::CaTomlConfig {
+                    prefix: NS.into(),
+                    identity: n("/CA"),
+                    link_roles: Some(vec!["admin".into(), "node".into()]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let d = rt.block_on(async {
+                let mut d = Driver::connect(&socket, Some(config))
+                    .await
+                    .map_err(|f| f.words())?;
+                if !d.settle(wait, |app| app.model.powers(NS).root).await {
+                    return Err(format!("the TUI is not the main device of {NS}"));
+                }
+                d.app.screen = Screen::Prefix(NS.into());
+                d.handle(Msg::Key(Key::Char('s')));
+                if !d
+                    .settle(wait, |app| matches!(app.modal, Some(Modal::Schema { .. })))
+                    .await
+                {
+                    return Err(format!("no schema shown: {:?}", d.app.status));
+                }
+                d.handle(Msg::Key(Key::Char('u')));
+                let previewed = d
+                    .settle(wait, |app| {
+                        matches!(&app.modal, Some(Modal::SchemaPreview(p)) if p.narrows() && !p.links_narrowed.is_empty())
+                    })
+                    .await;
+                if !previewed {
+                    return Err(format!(
+                        "no narrowing shown before signing: {:?} {:?}",
+                        d.app.modal, d.app.status
+                    ));
+                }
+                Ok(d)
+            })?;
+            capture(cx, &d, "schema-narrowing", 110, 30)?;
+            let mut d = d;
+            rt.block_on(async {
+                // A narrowing is signed only with its own key.
+                d.handle(Msg::Key(Key::Char('y')));
+                if !matches!(d.app.modal, Some(Modal::SchemaPreview(_))) {
+                    return Err("y signed a narrowing".into());
+                }
+                d.handle(Msg::Key(Key::Char('a')));
+                let signed = answer_secrets(&mut d, |_| ROOT_PASS.into(), |app| {
+                    matches!(&app.modal, Some(Modal::Message { title, .. }) if title == "Schema updated")
+                        && app.model.membership(NS).is_some_and(|m| m.version == v1 + 1)
+                })
+                .await;
+                if !signed {
+                    return Err(format!(
+                        "the update was not signed and taken: {:?} {:?}",
+                        d.app.modal, d.app.status
+                    ));
+                }
+                Ok(())
+            })?;
+            capture(cx, &d, "schema-updated", 110, 24)?;
+            cx.expect_version("root", NS, v1 + 1)
+        },
+    )?;
+
+    let kit_words = sc.step(
+        "make a words recovery kit in the main device's TUI: the words shown once",
+        |cx| {
+            let words = rt.block_on(async {
+                desk.execute(vec![Effect::Run(Command::Root(RootOp::KitCreate {
+                    namespace: name(NS),
+                    format: KitFormat::Words,
+                    out: None,
+                }))]);
+                let made = answer_secrets(
+                    &mut desk,
+                    |_| ROOT_PASS.into(),
+                    |app| matches!(app.modal, Some(Modal::KitWords { .. })),
+                )
+                .await;
+                match &desk.app.modal {
+                    Some(Modal::KitWords { words, .. }) if made => Ok(words.to_string()),
+                    _ => Err(format!("no recovery words shown: {:?}", desk.app.status)),
+                }
+            })?;
+            capture(cx, &desk, "kit-words", 100, 24)?;
+            desk.handle(Msg::Key(Key::Enter));
+            cx.expect_version("root", NS, v1 + 2)?;
+            Ok(words)
+        },
+    )?;
+
+    let mut spare = sc.step(
+        "spare's TUI, on a device that holds no trusted prefix, opens on the first-run screen",
+        |cx| {
+            let socket = sock(cx, "spare");
+            let d = rt.block_on(async {
+                let mut d = Driver::connect(&socket, None)
+                    .await
+                    .map_err(|f| f.words())?;
+                let empty = d
+                    .settle(wait, |app| {
+                        app.pib.is_some() && app.model.memberships.get().is_some_and(Vec::is_empty)
+                    })
+                    .await;
+                if !empty {
+                    return Err(format!(
+                        "spare's TUI lists prefixes: {:?}",
+                        d.app.model.prefixes()
+                    ));
+                }
+                Ok(d)
+            })?;
+            capture(cx, &d, "first-run", 100, 30)?;
+            Ok(d)
+        },
+    )?;
+
+    sc.step(
+        "start /tu2 in spare's TUI (n): its passphrase typed twice; spare's daemon lists /tu2 as owned",
+        |cx| {
+            spare.handle(Msg::Key(Key::Char('n')));
+            typ(&mut spare, "/tu2");
+            spare.handle(Msg::Key(Key::Tab));
+            retype(&mut spare, "spare");
+            capture(cx, &spare, "new-prefix", 100, 24)?;
+            rt.block_on(async {
+                spare.handle(Msg::Key(Key::Enter));
+                let started = answer_secrets(&mut spare, |_| ROOT_PASS.into(), |app| {
+                    matches!(app.modal, Some(Modal::Started(_)))
+                        && app.model.prefixes().iter().any(|p| {
+                            p.namespace == NS2 && p.relation == MembershipRelation::Owner
+                        })
+                })
+                .await;
+                if !started {
+                    return Err(format!(
+                        "/tu2 is not listed as owned: {:?} {:?}",
+                        spare.app.status,
+                        spare.app.model.prefixes()
+                    ));
+                }
+                Ok(())
+            })?;
+            capture(cx, &spare, "started", 100, 50)?;
+            spare.handle(Msg::Key(Key::Char('d')));
+            capture(cx, &spare, "started-details", 120, 60)?;
+            spare.handle(Msg::Key(Key::Char('d')));
+            spare.handle(Msg::Key(Key::Enter));
+            cx.expect_version("spare", NS2, 1)
+        },
+    )?;
+
+    sc.step(
+        "spare follows /tu with its anchor link, at the version the main device holds",
+        |_cx| {
+            let link = root.link_fp.clone();
+            rt.block_on(async {
+                spare.execute(vec![Effect::Run(Command::Follow { link })]);
+                let following = spare
+                    .settle(wait, |app| {
+                        app.model.membership(NS).is_some_and(|m| {
+                            m.relation == MembershipRelation::Following && m.version == v1 + 2
+                        })
+                    })
+                    .await;
+                if !following {
+                    return Err(format!(
+                        "spare does not follow {NS} at v{}: {:?} {:?}",
+                        v1 + 2,
+                        spare.app.status,
+                        spare.app.model.membership(NS)
+                    ));
+                }
+                Ok(())
+            })
+        },
+    )?;
+
+    sc.step(
+        "I lost my main device (r): spare recovers /tu with the words typed into its TUI; it becomes the main device, and the old one takes the new versions",
+        |cx| {
+            spare.handle(Msg::Key(Key::Char('r')));
+            // Kit: 24 words (the first choice); the file field is skipped.
+            spare.handle(Msg::Key(Key::Tab));
+            typ(&mut spare, NS);
+            spare.handle(Msg::Key(Key::Tab));
+            retype(&mut spare, "spare");
+            capture(cx, &spare, "recover", 100, 30)?;
+            let words = kit_words.clone();
+            rt.block_on(async {
+                spare.handle(Msg::Key(Key::Enter));
+                let recovered = answer_secrets(
+                    &mut spare,
+                    |kind| match kind {
+                        SecretKind::KitWords => words.clone(),
+                        _ => NEW_ROOT_PASS.into(),
+                    },
+                    |app| {
+                        matches!(app.modal, Some(Modal::Started(_)))
+                            && app.model.membership(NS).is_some_and(|m| {
+                                m.relation == MembershipRelation::Owner && m.version == v1 + 4
+                            })
+                    },
+                )
+                .await;
+                if !recovered {
+                    return Err(format!(
+                        "spare is not the main device of {NS}: {:?} {:?} {:?}",
+                        spare.app.modal,
+                        spare.app.status,
+                        spare.app.model.membership(NS)
+                    ));
+                }
+                Ok(())
+            })?;
+            capture(cx, &spare, "recovered", 110, 50)?;
+            cx.expect_version("spare", NS, v1 + 4)?;
+            cx.wait_version("root", NS, v1 + 4, SHORT).map(|_| ())
+        },
+    )?;
     drop(rt);
     Ok(())
+}
+
+/// Type `text` into the field that has the focus.
+fn typ(d: &mut Driver, text: &str) {
+    for c in text.chars() {
+        d.handle(Msg::Key(Key::Char(c)));
+    }
+}
+
+/// Replace what the focused field holds with `text`.
+fn retype(d: &mut Driver, text: &str) {
+    for _ in 0..64 {
+        d.handle(Msg::Key(Key::Backspace));
+    }
+    typ(d, text);
+}
+
+/// Type `answer(kind)` into every secret prompt `d` shows (twice for a new
+/// secret) until `done` holds of its app: whether it did within [`SHORT`].
+async fn answer_secrets(
+    d: &mut Driver,
+    answer: impl Fn(SecretKind) -> String,
+    done: impl Fn(&ndn_tui::app::App) -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + SHORT;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        d.settle(left, |app| {
+            done(app) || matches!(app.modal, Some(Modal::Secret(_)))
+        })
+        .await;
+        let kind = match &d.app.modal {
+            Some(Modal::Secret(s)) => s.ask.request.kind,
+            _ => return done(&d.app),
+        };
+        typ(d, &answer(kind));
+        d.handle(Msg::Key(Key::Enter));
+    }
 }
 
 /// A capture as a step of its own (for a driver borrowed elsewhere).

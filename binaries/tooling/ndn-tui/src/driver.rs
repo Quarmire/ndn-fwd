@@ -31,8 +31,12 @@ pub struct Driver {
 
 impl Driver {
     /// Connect to the daemon at `socket`, follow its streams, and start the
-    /// first load.
-    pub async fn connect(socket: &str) -> Result<Self, Failure> {
+    /// first load; `config` is the daemon's configuration, when known (the
+    /// policy a new prefix or a schema update states).
+    pub async fn connect(
+        socket: &str,
+        config: Option<ndn_config::ForwarderConfig>,
+    ) -> Result<Self, Failure> {
         let daemon = Arc::new(Daemon::connect(socket).await?);
         let (tx, rx) = mpsc::channel::<Msg>(256);
         let (updates, mut updates_rx) = mpsc::channel(256);
@@ -57,6 +61,7 @@ impl Driver {
         let runner = Arc::new(Runner {
             daemon,
             secrets: Arc::new(TuiSecrets::new(asks)),
+            config,
         });
         let app = App::new(socket);
         let mut driver = Self {

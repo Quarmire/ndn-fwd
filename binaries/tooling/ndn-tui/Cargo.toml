@@ -20,7 +20,8 @@ path = "src/main.rs"
 
 [dependencies]
 ndn-cert           = { workspace = true }
-ndn-config         = { workspace = true }
+# `ca-policy`: a schema update applies the policy the `[ca]` entry states.
+ndn-config         = { workspace = true, features = ["ca-policy"] }
 ndn-ipc            = { workspace = true }
 ndn-mgmt-wire      = { workspace = true }
 ndn-namespace      = { workspace = true }

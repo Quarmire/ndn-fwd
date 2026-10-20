@@ -30,8 +30,12 @@ ndn-security = { workspace = true }
 # The `negatives` scenario's tampered invite: a real invite whose link a
 # sender altered to carry another namespace's fingerprint.
 ndn-trust-envelope = { workspace = true }
-# The `tui` scenario drives the admin TUI's state layer in process.
+# The `tui` scenario drives the admin TUI's state layer in process: a
+# configuration whose `[ca]` entry states a link policy, the kinds of
+# secret its prompts ask for.
 ndn-tui = { path = "../../binaries/tooling/ndn-tui" }
+ndn-config    = { workspace = true }
+ndn-namespace = { workspace = true }
 
 [lints]
 workspace = true

@@ -8,11 +8,12 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
-use ndn_cert::InviteState;
 use ndn_cert::report::{DataVerdict, MembershipRelation, RefreshState};
+use ndn_cert::{InviteState, KitFormat};
 
 use crate::app::{
-    APPROVAL_ROLES, App, EXPIRIES, INVITE_ROLES, KitAction, LinkKind, Modal, Screen, Section,
+    APPROVAL_ROLES, App, EXPIRIES, INVITE_ROLES, KIT_KINDS, KitAction, LinkKind, Modal,
+    NEW_ROOT_STORES, Screen, Section, Started,
 };
 use crate::model::{Stream, Warning, now_secs};
 use crate::words;
@@ -210,7 +211,9 @@ fn hints_for(app: &App) -> String {
     }
     let common = "d details · u check now · j join/follow · q quit";
     match &app.screen {
-        Screen::Prefixes => format!("↑↓ select · Enter open · a decide requests · {common}"),
+        Screen::Prefixes => format!(
+            "↑↓ select · Enter open · a decide requests · n new trusted prefix · r recover · {common}"
+        ),
         Screen::Prefix(ns) => {
             let powers = app.model.powers(ns);
             let mut keys = vec!["Esc back", "Tab section"];
@@ -344,6 +347,13 @@ fn draw_prefixes(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let rows = app.model.prefixes();
+    if rows.is_empty()
+        && app.model.memberships.get().is_some()
+        && app.model.memberships.failure.is_none()
+    {
+        draw_first_run(f, app, table_area);
+        return;
+    }
     let mut header = vec!["Trusted prefix", "This device", "Trust", "Waiting"];
     if app.details {
         header.extend(["Signs as", "Root fingerprint"]);
@@ -396,7 +406,7 @@ fn draw_prefixes(f: &mut Frame, app: &App, area: Rect) {
     }
     let title = match (&app.model.memberships.failure, rows.is_empty()) {
         (Some(f), _) => format!("Trusted prefixes — {}", f.words()),
-        (None, true) => "Trusted prefixes — none yet: press j to follow or join one".into(),
+        (None, true) => "Trusted prefixes — reading…".into(),
         (None, false) => "Trusted prefixes".into(),
     };
     let table = Table::new(table_rows, widths)
@@ -405,6 +415,62 @@ fn draw_prefixes(f: &mut Frame, app: &App, area: Rect) {
         .row_highlight_style(selected());
     let mut state = TableState::default().with_selected((!rows.is_empty()).then_some(app.selected));
     f.render_stateful_widget(table, table_area, &mut state);
+}
+
+/// The home screen of a device that holds no trusted prefix yet: what it
+/// can do first.
+fn draw_first_run(f: &mut Frame, app: &App, area: Rect) {
+    let node = app.model.identity.get().and_then(|s| s.identity.clone());
+    let choice = |key: &str, what: &str, how: &str| {
+        vec![
+            Line::from(vec![
+                Span::styled(format!(" {key} "), Style::new().fg(Color::Black).bg(ACCENT)),
+                Span::styled(format!("  {what}"), bold()),
+            ]),
+            Line::from(Span::raw(format!("     {how}"))),
+            Line::from(""),
+        ]
+    };
+    let mut text = vec![
+        Line::from(
+            "This device holds no trusted prefix yet. A trusted prefix is a name, like /home, that your devices share: each trusts the data the others publish under it.",
+        ),
+        Line::from(""),
+    ];
+    text.extend(choice(
+        "j",
+        "Join or follow a trusted prefix",
+        "Paste an invite, or an anchor link from a device that has the prefix.",
+    ));
+    text.extend(choice(
+        "n",
+        "Start a new trusted prefix",
+        "This device becomes its main device: it holds the main key and lets other devices in.",
+    ));
+    text.extend(choice(
+        "r",
+        "I lost my main device",
+        "Make this device the main device of a trusted prefix again, with its recovery kit.",
+    ));
+    if app.details {
+        text.push(Line::from(Span::styled(
+            format!(
+                "node identity {} · key storage {}",
+                node.unwrap_or_else(|| "none".into()),
+                app.pib
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "not known yet".into())
+            ),
+            dim(),
+        )));
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(text))
+            .block(block("Welcome"))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// A titled list of lines, the selected one highlighted when the section
@@ -751,12 +817,13 @@ fn draw_data(f: &mut Frame, app: &App, area: Rect) {
     }
     let mut title = "Data — what this device serves and holds".to_owned();
     if let Some(c) = cached
-        && c.total as usize > c.entries.len()
+        && c.total > 0
     {
+        // The list reads further pages as the selection nears its end.
         title.push_str(&format!(
-            " ({} of {} cached names)",
-            c.entries.len(),
-            c.total
+            " ({} cached name{})",
+            c.total,
+            if c.total == 1 { "" } else { "s" }
         ));
     }
     if let Some(failure) = &app.model.cached.failure {
@@ -1457,6 +1524,245 @@ fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
                 h,
             );
         }
+        Modal::SchemaPreview(p) => {
+            let next = p.held + 1;
+            let warn = Style::new().fg(WARN);
+            let mut text = vec![Line::from(format!(
+                "Updating {} signs version {next} with the main key (you unlock it next). Nothing is signed yet.",
+                p.namespace
+            ))];
+            text.push(Line::from(Span::styled(
+                if p.stated {
+                    format!(
+                        "Policy: as the configuration given states it for {}.",
+                        p.namespace
+                    )
+                } else {
+                    format!(
+                        "Policy: version {}'s is kept (the configuration given states none for {}).",
+                        p.held, p.namespace
+                    )
+                },
+                dim(),
+            )));
+            text.push(Line::from(""));
+            if p.narrows() {
+                text.push(Line::from(Span::styled(
+                    format!(
+                        "⚠ This update NARROWS what devices may do. A device relying on what it removes is refused once it holds version {next}:"
+                    ),
+                    warn.add_modifier(Modifier::BOLD),
+                )));
+                for rule in &p.removed {
+                    text.push(Line::from(Span::styled(format!("  − rule {rule}"), warn)));
+                }
+                for lost in &p.links_narrowed {
+                    text.push(Line::from(Span::styled(format!("  − links: {lost}"), warn)));
+                }
+                for relay in &p.relays_dropped {
+                    text.push(Line::from(Span::styled(format!("  − relay {relay}"), warn)));
+                }
+                text.push(Line::from(""));
+            }
+            if !p.added.is_empty() {
+                text.push(Line::from(format!(
+                    "Devices gain {} rule{}:",
+                    p.added.len(),
+                    if p.added.len() == 1 { "" } else { "s" }
+                )));
+                for rule in &p.added {
+                    text.push(Line::from(Span::styled(format!("  + {rule}"), dim())));
+                }
+            }
+            if p.becomes_authoritative {
+                text.push(Line::from(
+                    "Data is then checked by these rules alone, on every certificate.",
+                ));
+            }
+            if let Some(enrollment) = &p.enrollment {
+                text.push(Line::from(format!("How devices join: {enrollment}")));
+            }
+            if let Some((before, after)) = &p.links {
+                text.push(Line::from(format!("Links: {before} → {after}")));
+            }
+            if let Some((before, after)) = &p.relays {
+                let list = |l: &[String]| {
+                    if l.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        l.join("; ")
+                    }
+                };
+                text.push(Line::from(format!(
+                    "Relays: {} → {}",
+                    list(before),
+                    list(after)
+                )));
+            }
+            text.push(Line::from(""));
+            text.push(Line::from(Span::styled(
+                if p.narrows() {
+                    "a accept the narrowing and sign · Esc cancel (nothing changes)"
+                } else {
+                    "y sign · Esc cancel"
+                },
+                bold(),
+            )));
+            let h = (text.len() as u16 + 4).min(f.area().height);
+            dialog(
+                f,
+                format!("Update the schema of {}", p.namespace),
+                Text::from(text),
+                width,
+                h,
+            );
+        }
+        Modal::NewPrefix(form) => {
+            let mut text = vec![
+                Line::from(
+                    "This device becomes the main device of the new trusted prefix: it keeps the main key, which decides which devices belong.",
+                ),
+                Line::from(""),
+                field("Prefix", format!("{}▏", form.prefix.text), form.field == 0),
+                Line::from(Span::styled(
+                    "  a name that starts with /, e.g. /home",
+                    dim(),
+                )),
+                field(
+                    "Device name",
+                    format!("{}▏", form.device.text),
+                    form.field == 1,
+                ),
+                field(
+                    "Main key in",
+                    format!(
+                        "‹ {} ›",
+                        words::root_store(NEW_ROOT_STORES[form.store].as_str())
+                    ),
+                    form.field == 2,
+                ),
+            ];
+            if let (Ok(ns), device) = (form.prefix(), form.device.text.trim())
+                && !device.is_empty()
+            {
+                text.push(Line::from(Span::styled(
+                    format!("This device will be {ns}/admin/{device}."),
+                    dim(),
+                )));
+            }
+            if let Some(problem) = &form.problem {
+                text.push(Line::from(Span::styled(
+                    problem.clone(),
+                    Style::new().fg(BAD),
+                )));
+            }
+            text.push(Line::from(""));
+            text.push(Line::from(Span::styled(
+                "Tab field · on Main key: < > change · Enter start · Esc cancel",
+                bold(),
+            )));
+            dialog(f, "Start a new trusted prefix", Text::from(text), width, 14);
+        }
+        Modal::Recover(form) => {
+            let kit = match KIT_KINDS[form.kit] {
+                KitFormat::Words => "24 recovery words",
+                KitFormat::File => "a file protected by a passphrase",
+                KitFormat::Yubikey => "a key on a security key (YubiKey)",
+            };
+            let mut text = vec![
+                Line::from(
+                    "For a trusted prefix whose main device is lost: this device becomes its main device, with a new main key. The recovery kit signs the change.",
+                ),
+                Line::from(""),
+                field("Kit", format!("‹ {kit} ›"), form.field == 0),
+            ];
+            if KIT_KINDS[form.kit] == KitFormat::File {
+                text.push(field(
+                    "Kit file",
+                    format!("{}▏", form.file.text),
+                    form.field == 1,
+                ));
+            }
+            text.push(field(
+                "Prefix",
+                format!("{}▏", form.prefix.text),
+                form.field == 2,
+            ));
+            text.push(Line::from(Span::styled(
+                "  empty: the one a kit file names, else the only one this device follows",
+                dim(),
+            )));
+            text.push(field(
+                "Device name",
+                format!("{}▏", form.device.text),
+                form.field == 3,
+            ));
+            text.push(field(
+                "Old device",
+                format!(
+                    "‹ {} ›",
+                    if form.compromised {
+                        "may be in someone else's hands: its keys are revoked"
+                    } else {
+                        "lost or destroyed: what it certified stays valid"
+                    }
+                ),
+                form.field == 4,
+            ));
+            text.push(field(
+                "New main key",
+                format!(
+                    "‹ {} ›",
+                    words::root_store(NEW_ROOT_STORES[form.store].as_str())
+                ),
+                form.field == 5,
+            ));
+            text.push(Line::from(""));
+            text.push(Line::from(
+                "This device must follow the prefix and reach a device that holds it: it recovers from the newest version.",
+            ));
+            if let Some(problem) = &form.problem {
+                text.push(Line::from(Span::styled(
+                    problem.clone(),
+                    Style::new().fg(BAD),
+                )));
+            }
+            text.push(Line::from(""));
+            text.push(Line::from(Span::styled(
+                "Tab field · on ‹ ›: < > change · Enter recover · Esc cancel",
+                bold(),
+            )));
+            let h = (text.len() as u16 + 5).min(f.area().height);
+            dialog(f, "I lost my main device", Text::from(text), width, h);
+        }
+        Modal::RecoverUnconfirmed { failure, .. } => {
+            let text = vec![
+                Line::from(failure.words()),
+                Line::from(""),
+                Line::from(
+                    "Recovering from an older version than the newest would split the trusted prefix in two.",
+                ),
+                Line::from(
+                    "If no device that holds it can be reached, and you are sure no newer version was made than the one this device holds, recover from it.",
+                ),
+                Line::from(
+                    "Otherwise connect this device to one that holds the prefix, then try again.",
+                ),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "h recover from the version held here · Esc cancel",
+                    bold(),
+                )),
+            ];
+            dialog(
+                f,
+                "Is the version held here the newest?",
+                Text::from(text),
+                width,
+                14,
+            );
+        }
+        Modal::Started(started) => draw_started(f, app, started),
         Modal::Secret(s) => {
             let mut text = vec![
                 Line::from(s.prompt.clone()),
@@ -1683,6 +1989,86 @@ fn draw_invite(f: &mut Frame, app: &App, invite: &ndn_cert::CreatedInvite) {
                     .borders(Borders::ALL)
                     .border_style(Style::new().fg(ACCENT))
                     .title(Span::styled(" Invite made ", bold())),
+            )
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
+/// A trusted prefix started or recovered here: what happened, its anchor
+/// link as a QR code, and in details the daemon's configuration lines.
+fn draw_started(f: &mut Frame, app: &App, started: &Started) {
+    let area = f.area();
+    let mut text: Vec<Line> = Vec::new();
+    for line in &started.lines {
+        text.push(Line::from(line.clone()));
+    }
+    text.push(Line::from(""));
+    if let Some(link) = &started.link {
+        let qr = qr_lines(link);
+        let shown = text.len() as u16
+            + if app.details {
+                started.settings.len() as u16
+            } else {
+                0
+            };
+        match qr {
+            Some(lines)
+                if lines.len() as u16 + shown + 8 <= area.height
+                    && lines[0].chars().count() as u16 + 4 <= area.width =>
+            {
+                let qr_style = Style::new().fg(Color::Black).bg(Color::White);
+                for l in lines {
+                    text.push(Line::from(Span::styled(l, qr_style)).alignment(Alignment::Center));
+                }
+            }
+            _ => text.push(Line::from(Span::styled(
+                "(Enlarge the window to show the QR code.)",
+                dim(),
+            ))),
+        }
+        text.push(Line::from(vec![
+            Span::styled("Anchor link ", dim()),
+            Span::raw(link.clone()),
+        ]));
+    }
+    if app.details {
+        text.push(Line::from(""));
+        text.push(Line::from(Span::styled(
+            format!("expected fingerprint {}", started.fingerprint),
+            dim(),
+        )));
+        text.push(Line::from(Span::styled(
+            "The daemon's configuration, for its certificate authority (then restart it):",
+            dim(),
+        )));
+        for line in &started.settings {
+            text.push(Line::from(Span::styled(format!("  {line}"), bold())));
+        }
+    }
+    text.push(Line::from(""));
+    text.push(Line::from(Span::styled(
+        if app.details {
+            "d hide details · Enter close"
+        } else {
+            "d details · Enter close"
+        },
+        bold(),
+    )));
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        width: area.width,
+        height: area.height,
+    };
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(Text::from(text))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::new().fg(ACCENT))
+                    .title(Span::styled(format!(" {} ", started.title), bold())),
             )
             .wrap(Wrap { trim: false }),
         rect,
