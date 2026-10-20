@@ -48,7 +48,7 @@ use ndn_packet::Name;
 
 use crate::onboard::{flag, pib_dir, positionals};
 use crate::root_host::{
-    Daemon, Secrets, handed_text, listed, namespace_arg, render, render_before_signing,
+    Secrets, daemon, handed_text, listed, namespace_arg, render, render_before_signing,
 };
 
 const USAGE: &str = "usage: ndn-fwd schema show [-c <config>] [--pib <dir>] [--namespace <ns>]\n       \
@@ -220,7 +220,7 @@ fn explain(args: &[String]) -> Result<()> {
 }
 
 /// The `[ca]` / `[[ca]]` entry of `-c` for the CA of `namespace`
-/// ([`crate::ca::config_for`]), else the defaults (no stated policy).
+/// ([`ForwarderConfig::ca_for`]), else the defaults (no stated policy).
 fn ca_config(args: &[String], namespace: &Name) -> Result<CaTomlConfig> {
     let Some(path) = flag(args, &["-c", "--config"]) else {
         return Ok(CaTomlConfig::default());
@@ -229,9 +229,7 @@ fn ca_config(args: &[String], namespace: &Name) -> Result<CaTomlConfig> {
     let cfg: ForwarderConfig = toml
         .parse()
         .with_context(|| format!("parse config {path}"))?;
-    Ok(crate::ca::config_for(&cfg.ca, namespace)
-        .cloned()
-        .unwrap_or_default())
+    Ok(cfg.ca_for(namespace).cloned().unwrap_or_default())
 }
 
 /// Every check that needs no key: this PIB is the root device of the
@@ -244,10 +242,10 @@ fn ca_config(args: &[String], namespace: &Name) -> Result<CaTomlConfig> {
 /// the held one ([`ndn_namespace::root::schema::plan_update`]).
 fn plan_update(pib_dir: &Path, args: &[String]) -> Result<SchemaUpdate> {
     let root = schema::root_of(pib_dir, namespace_arg(args)?.as_ref()).map_err(render)?;
-    let stated = crate::ca::policy_input(
-        &ca_config(args, root.context.namespace()).context("nothing was signed")?,
-    )
-    .context("nothing was signed")?;
+    let stated = ca_config(args, root.context.namespace())
+        .context("nothing was signed")?
+        .policy_input()
+        .context("nothing was signed")?;
     let accept_narrowing = args.iter().any(|a| a == "--accept-narrowing");
     schema::plan_update(root, &stated, accept_narrowing).map_err(render)
 }
@@ -321,7 +319,7 @@ async fn update(args: &[String]) -> Result<()> {
         print_relays("relays", &change.relays);
         return Ok(());
     }
-    let daemon = Daemon::new(args, &pib_dir);
+    let daemon = daemon(args)?;
     let updated = schema::update(planned, &pib_dir, &daemon, &Secrets { args })
         .await
         .map_err(|e| update_refused(e, &namespace, held, &pib_dir))?;

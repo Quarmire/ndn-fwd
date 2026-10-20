@@ -1,40 +1,24 @@
 //! The CLI's side of the root-device operations of
 //! [`ndn_namespace::root`]: where secrets come from ([`Secrets`]), the
-//! running daemon that takes the versions signed here ([`Daemon`]), and
+//! running daemon that takes the versions signed here ([`daemon`]), and
 //! the CLI's wording of the refusals every root command shares
 //! ([`render`]). Each command module words its own outcomes and the
 //! refusals only it gives.
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 
-use anyhow::Context;
 use ndn_cert::recovery::{KIT_PASSPHRASE_ENV, KIT_PIN_ENV, KIT_WORDS_ENV};
-use ndn_cert::report::{TrustRefusal, code};
+use ndn_cert::report::code;
 use ndn_cert::{RootSecret, RootUnlockKind, read_root_secret, read_secret};
-use ndn_mgmt::ContextRefreshInfo;
-use ndn_mgmt_wire::control_response::status;
-use ndn_namespace::admin::{HandedOver, SinkError};
+use ndn_namespace::admin::HandedOver;
+use ndn_namespace::root::daemon::MgmtDevice;
 use ndn_namespace::root::{
-    DeviceSession, Reach, RootError, RunningDevice, SecretKind, SecretPurpose, SecretRequest,
-    SecretSource, VersionChange,
+    RootError, SecretKind, SecretPurpose, SecretRequest, SecretSource, VersionChange,
 };
-use ndn_packet::{Data, Name};
-use ndn_trust_envelope::TrustEnvelope;
+use ndn_packet::Name;
 
 use crate::context_adopt::namespace_words;
 use crate::onboard::flag;
-
-/// How long one request waits for the daemon to take a new version (local
-/// work: verify, store, publish — after any other change of the namespace
-/// running there). Without an answer the same version is handed over again;
-/// the answer to that one says what became of it. After
-/// [`ndn_namespace::admin::HAND_OVER_WAITS`] waits (about five minutes) the
-/// outcome is reported as not known.
-const DAEMON_UPDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// How long the CLI waits for the daemon to fetch the newest version.
-const DAEMON_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// `--namespace <prefix>`, when given: the trusted prefix a root command
 /// acts on.
@@ -137,260 +121,30 @@ impl SecretSource for Secrets<'_> {
 
 /// The running daemon that uses the PIB a command works on, reached over
 /// its management socket (`[management] face_socket` of `-c`, else the
-/// default — read when first reached).
-pub(crate) struct Daemon<'a> {
-    args: &'a [String],
-    pib_dir: PathBuf,
-    socket: OnceLock<String>,
-}
-
-impl<'a> Daemon<'a> {
-    pub(crate) fn new(args: &'a [String], pib_dir: &Path) -> Self {
-        Self {
-            args,
-            pib_dir: pib_dir.to_path_buf(),
-            socket: OnceLock::new(),
-        }
-    }
-
-    fn socket(&self) -> Result<&str, RootError> {
-        if let Some(socket) = self.socket.get() {
-            return Ok(socket);
-        }
-        let socket = crate::onboard::face_socket(self.args).map_err(host_error)?;
-        Ok(self.socket.get_or_init(|| socket))
-    }
-}
-
-/// A failure of the CLI itself (reading its config): shown as it is.
-fn host_error(e: anyhow::Error) -> RootError {
-    RootError::new(code::ROOT_LOCAL_FAILURE, e.to_string())
-        .with("error", format!("{e:#}"))
-        .caused_by(e)
-}
-
-/// A failure in an exchange with the daemon, shown as `e` says it.
-fn daemon_failed(socket: &str, e: anyhow::Error) -> RootError {
-    RootError::new(code::DEVICE_FAILED, e.to_string())
-        .with("address", socket)
-        .with("error", format!("{e:#}"))
-        .caused_by(e)
-}
-
-#[async_trait::async_trait]
-impl RunningDevice for Daemon<'_> {
-    fn address(&self) -> String {
-        self.socket.get().cloned().unwrap_or_default()
-    }
-
-    fn peer(&self) -> String {
-        format!("the daemon at {}", self.address())
-    }
-
-    async fn reach(&self) -> Result<Reach, RootError> {
-        let socket = self.socket()?.to_string();
-        match ndn_ipc::MgmtClient::connect(&socket).await {
-            Ok(client) => Ok(Reach::Running(Box::new(Session { client, socket }))),
-            Err(ndn_ipc::ForwarderError::Io(e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                Ok(Reach::NotRunning {
-                    error: ndn_ipc::ForwarderError::Io(e).to_string(),
-                })
-            }
-            Err(e) => {
-                let why = anyhow::anyhow!(
-                    "cannot use the daemon's socket {socket} ({e}): run this as a user the \
-                     daemon accepts, or pass -c with the config of the daemon that uses {}",
-                    self.pib_dir.display()
-                );
-                Err(RootError::new(
-                    code::DEVICE_UNREACHABLE,
-                    "the running device cannot be used",
-                )
-                .with("address", &socket)
-                .with("pib", self.pib_dir.display())
-                .with("error", e)
-                .caused_by(why))
-            }
-        }
-    }
-
-    fn no_answer_yet(&self, version: u64) {
-        eprintln!(
-            "# no answer yet from the daemon at {} on v{version} (another change of the \
-             namespace may be running there); asking again with the same version",
-            self.address()
-        );
-    }
-}
-
-/// One connection to the daemon.
-struct Session {
-    client: ndn_ipc::MgmtClient,
-    socket: String,
-}
-
-impl Session {
-    /// The PIB directory the daemon reports (`security/identity-status`).
-    async fn daemon_pib(&self) -> anyhow::Result<PathBuf> {
-        let socket = &self.socket;
-        match self.client.security_identity_status().await {
-            Ok(status) => Ok(PathBuf::from(status.pib_path)),
-            Err(ndn_ipc::ForwarderError::Command { code, text }) => {
-                let text = ndn_ipc::trust_refusal_of(code, &text)
-                    .map_or(text, |r| namespace_words().render(&r));
-                anyhow::bail!(
-                    "the daemon at {socket} does not say which PIB it uses ({code}): {text}"
-                )
-            }
-            Err(e) => {
-                Err(e).with_context(|| format!("ask the daemon at {socket} which PIB it uses"))
-            }
-        }
-    }
-}
-
-/// `refusal` with its sentence in the CLI's words.
-fn worded(mut refusal: TrustRefusal) -> TrustRefusal {
-    refusal.reason = namespace_words().render(&refusal);
-    refusal
-}
-
-/// A refusal the daemon answered, in the CLI's words (a structured
-/// refusal's, else the text as answered).
-fn refusal_text(resp: &ndn_mgmt_wire::ControlResponse) -> String {
-    ndn_ipc::trust_refusal(resp).map_or_else(
-        || resp.status_text.clone(),
-        |r| namespace_words().render(&r),
-    )
-}
-
-#[async_trait::async_trait]
-impl DeviceSession for Session {
-    async fn pib(&self) -> Result<PathBuf, RootError> {
-        self.daemon_pib().await.map_err(|e| {
-            RootError::new(
-                code::DEVICE_PIB_UNKNOWN,
-                "the running device did not say which PIB it uses",
-            )
-            .with("address", &self.socket)
-            .with("error", format!("{e:#}"))
-            .caused_by(e)
-        })
-    }
-
-    async fn take(&self, data: &Data) -> Result<ContextRefreshInfo, SinkError<RootError>> {
-        match self
-            .client
-            .security_context_update(data.raw().clone(), DAEMON_UPDATE_TIMEOUT)
-            .await
-        {
-            Ok(resp) if resp.is_ok() => {
-                serde_json::from_str(&resp.status_text).map_err(|e| SinkError::Unreadable {
-                    error: e.to_string(),
-                    answer: resp.status_text.clone(),
-                })
-            }
-            Ok(resp) => Err(SinkError::Refused(
-                ndn_ipc::trust_refusal(&resp)
-                    .map(worded)
-                    .unwrap_or_else(|| {
-                        let mut refusal =
-                            TrustRefusal::new(code::HAND_OVER_REFUSED, resp.status_text.clone());
-                        refusal.status_code = resp.status_code;
-                        refusal
-                    }),
-            )),
-            Err(ndn_ipc::ForwarderError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
-                Err(SinkError::NoAnswer)
-            }
-            Err(e) => Err(SinkError::Failed(daemon_failed(&self.socket, e.into()))),
-        }
-    }
-
-    async fn refresh(&self, namespace: &Name) -> Result<Option<ContextRefreshInfo>, RootError> {
-        let socket = &self.socket;
-        let refreshed = async {
-            let resp = self
-                .client
-                .security_context_refresh(Some(namespace), DAEMON_FETCH_TIMEOUT)
-                .await
-                .with_context(|| format!("ask the daemon at {socket} for the newest version"))?;
-            if resp.is_ok() {
-                let results: Vec<ContextRefreshInfo> = serde_json::from_str(&resp.status_text)
-                    .with_context(|| {
-                        format!("unreadable answer from the daemon: {}", resp.status_text)
-                    })?;
-                return results
-                    .into_iter()
-                    .next()
-                    .context("the daemon answered no refresh result")
-                    .map(Some);
-            }
-            if resp.status_code != status::NOT_FOUND {
-                anyhow::bail!(
-                    "the daemon at {socket} could not refresh {namespace} ({}): {}",
-                    resp.status_code,
-                    refusal_text(&resp)
-                );
-            }
-            Ok(None)
-        };
-        refreshed.await.map_err(|e| daemon_failed(socket, e))
-    }
-
-    async fn adopt(&self, namespace: &Name, fingerprint: &[u8; 32]) -> Result<u64, RootError> {
-        let socket = &self.socket;
-        let link = TrustEnvelope::Anchor {
-            namespace: Some(namespace.to_string()),
-            fingerprint: Some(*fingerprint),
-            version: None,
-            context_data: None,
-            context_content: None,
-        }
-        .to_uri();
-        let resp = self
-            .client
-            .security_context_adopt(&link, DAEMON_FETCH_TIMEOUT)
-            .await
-            .with_context(|| format!("ask the daemon at {socket} to adopt {namespace}"))
-            .map_err(|e| daemon_failed(socket, e))?;
-        if !resp.is_ok() {
-            let reason = refusal_text(&resp);
-            let why = anyhow::anyhow!(
-                "this device holds no trust context for {namespace}, and adopting it with the \
-                 kit's expected fingerprint failed ({}): {reason}. Adopt it with the namespace's \
-                 anchor link (`ndn-fwd adopt`), then retry",
-                resp.status_code,
+/// default). Refusals it answers are in the CLI's words; a version it does
+/// not answer on in time is handed over again, and the CLI says so.
+pub(crate) fn daemon(args: &[String]) -> anyhow::Result<MgmtDevice> {
+    let socket = crate::onboard::face_socket(args)?;
+    let at = socket.clone();
+    Ok(MgmtDevice::new(socket)
+        .named("the daemon")
+        .worded_by(|refusal| namespace_words().render(refusal))
+        .on_no_answer(move |version| {
+            eprintln!(
+                "# no answer yet from the daemon at {at} on v{version} (another change of the \
+                 namespace may be running there); asking again with the same version"
             );
-            return Err(RootError::new(
-                code::NEWEST_NOT_ADOPTED,
-                "adopting the namespace with the kit's expected fingerprint failed",
-            )
-            .with("namespace", namespace)
-            .with("status_code", resp.status_code)
-            .with("reason", reason)
-            .caused_by(why));
-        }
-        let info: ndn_mgmt::AdoptedContextInfo = serde_json::from_str(&resp.status_text)
-            .with_context(|| format!("unreadable answer from the daemon: {}", resp.status_text))
-            .map_err(|e| daemon_failed(socket, e))?;
-        Ok(info.version)
-    }
+        }))
 }
 
 /// Where a version handed over went, as the CLI says it.
 pub(crate) fn handed_text(
     handed: &HandedOver,
-    daemon: &Daemon<'_>,
+    daemon: &MgmtDevice,
     version: u64,
     pib_dir: &Path,
 ) -> String {
-    let socket = daemon.address();
+    let socket = daemon.socket();
     match handed {
         HandedOver::Taken(info) => format!(
             "the daemon at {socket} {}",
@@ -430,6 +184,39 @@ pub(crate) fn render(e: RootError) -> anyhow::Error {
              must go to the daemon that uses it. Pass -c with that daemon's config (its \
              [management] face_socket), or --pib {theirs} to work on the PIB of the daemon at \
              {socket}"
+        );
+    }
+    if e.is(code::DEVICE_UNREACHABLE) {
+        return anyhow::anyhow!(
+            "cannot use the daemon's socket {} ({}): run this as a user the daemon accepts, or \
+             pass -c with the config of the daemon that uses {}",
+            p("address"),
+            p("error"),
+            p("pib")
+        );
+    }
+    if e.is(code::DEVICE_PIB_UNKNOWN) {
+        return anyhow::anyhow!(
+            "the daemon at {} does not say which PIB it uses: {}",
+            p("address"),
+            p("error")
+        );
+    }
+    if e.is(code::DEVICE_FAILED) {
+        return anyhow::anyhow!(
+            "an exchange with the daemon at {} failed: {}",
+            p("address"),
+            p("error")
+        );
+    }
+    if e.is(code::NEWEST_NOT_ADOPTED) {
+        let namespace = p("namespace");
+        return anyhow::anyhow!(
+            "this device holds no trust context for {namespace}, and adopting it with the kit's \
+             expected fingerprint failed ({}): {}. Adopt it with the namespace's anchor link \
+             (`ndn-fwd adopt`), then retry",
+            p("status_code"),
+            p("reason")
         );
     }
     if e.is(code::KIT_OTHER_NAMESPACE) && e.underlying().is_none() {

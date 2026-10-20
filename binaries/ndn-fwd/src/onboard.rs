@@ -590,8 +590,8 @@ async fn run_init(args: &[String]) -> Result<()> {
             let cfg: ForwarderConfig = toml
                 .parse()
                 .with_context(|| format!("parse config {path}"))?;
-            match crate::ca::config_for(&cfg.ca, &namespace) {
-                Some(ca) => crate::ca::policy_input(ca)?,
+            match cfg.ca_for(&namespace) {
+                Some(ca) => ca.policy_input()?,
                 None => PolicyInput::default(),
             }
         }

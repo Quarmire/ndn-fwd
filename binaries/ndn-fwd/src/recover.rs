@@ -55,7 +55,7 @@ use ndn_packet::Name;
 use crate::context_adopt::namespace_words;
 use crate::onboard::{flag, pib_dir};
 use crate::recovery_kit::kit_spec;
-use crate::root_host::{Daemon, Secrets, handed_text, namespace_arg, render};
+use crate::root_host::{Secrets, daemon, handed_text, namespace_arg, render};
 
 /// The answer the anti-fork check refused on, in the CLI's words: the
 /// detail it carries as its cause.
@@ -195,7 +195,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
     let root = crate::root_key::root_store_choice(args)?;
-    let daemon = Daemon::new(args, &pib_dir);
+    let daemon = daemon(args)?;
     let done = recover::recover(
         RecoverRequest {
             pib_dir: pib_dir.clone(),

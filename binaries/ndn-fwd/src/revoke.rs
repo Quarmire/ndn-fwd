@@ -42,7 +42,7 @@ use ndn_packet::Name;
 
 use crate::onboard::{pib_dir, positionals};
 use crate::root_host::{
-    Daemon, Secrets, handed_text, namespace_arg, render, render_before_signing,
+    Secrets, daemon, handed_text, namespace_arg, render, render_before_signing,
 };
 
 /// A refused revocation of `name` (on the PIB at `pib_dir`, the held
@@ -109,7 +109,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         println!("trust_context  = v{held} (already revokes every key named; nothing signed)");
         return Ok(());
     }
-    let daemon = Daemon::new(args, &pib_dir);
+    let daemon = daemon(args)?;
     let revoked = root::revoke::revoke(planned, &name, &pib_dir, &daemon, &Secrets { args })
         .await
         .map_err(|e| refused(e, &name, &pib_dir, held))?;

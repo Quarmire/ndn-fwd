@@ -57,15 +57,15 @@ use ndn_cert::roles::Role;
 use ndn_cert::{
     AllIssuance, ApprovalPolicy, CaInvites, CaStore, ChallengeHandler, ChallengeSlot,
     EmailChallenge, EmailSender, FileCaStore, InviteIssuer, IssuancePolicy, NopChallenge,
-    PinChallenge, PolicyInput, RequireAttestationKind, RolePolicy, TokenChallenge, TokenStore,
+    PinChallenge, RequireAttestationKind, RolePolicy, TokenChallenge, TokenStore,
 };
-use ndn_config::{CaRelayConfig, CaTomlConfig};
+use ndn_config::CaTomlConfig;
 use ndn_engine::ForwarderEngine;
 use ndn_face::local::{InProcFace, InProcHandle};
 use ndn_identity::NdncertCa;
 use ndn_packet::Name;
 use ndn_security::{
-    AdvertisedRelay, Certificate, FilePib, KeyChain, SecurityManager, SignedTrustContext, Validator,
+    Certificate, FilePib, KeyChain, SecurityManager, SignedTrustContext, Validator,
 };
 use ndn_transport::FaceId;
 
@@ -79,19 +79,6 @@ pub(crate) fn ca_face_id(index: usize) -> FaceId {
 const CA_FACE_ID_BASE: u64 = 0xFFFF_0100;
 /// The most CAs one daemon runs (the face ids reserved for them).
 pub(crate) const MAX_CAS: usize = 0x100;
-
-/// The entry of `cas` (`[ca]` / `[[ca]]`) for the CA of `namespace`: the one
-/// whose identity is `<namespace>/CA`, else whose prefix is `namespace`.
-pub(crate) fn config_for<'a>(
-    cas: &'a [CaTomlConfig],
-    namespace: &Name,
-) -> Option<&'a CaTomlConfig> {
-    let ca_identity = namespace.clone().append("CA");
-    let is = |raw: &str, name: &Name| raw.parse::<Name>().is_ok_and(|n| &n == name);
-    cas.iter()
-        .find(|c| is(&c.identity, &ca_identity))
-        .or_else(|| cas.iter().find(|c| is(&c.prefix, namespace)))
-}
 
 /// [`prepare`] every enabled CA of `cas`, in config order: each with its
 /// own face. An error names the CA it is about.
@@ -223,7 +210,7 @@ pub(crate) async fn prepare(
     let approval_policy = match &namespace {
         Some(ns) => {
             let held = newest_context(pib_path, ns)?;
-            Some(policy_input(cfg)?.enforced_policy(held.as_ref())?)
+            Some(cfg.policy_input()?.enforced_policy(held.as_ref())?)
         }
         None => None,
     };
@@ -290,70 +277,6 @@ fn newest_context(pib_path: &Path, namespace: &Name) -> Result<Option<SignedTrus
         .filter(|(ctx, _)| ctx.namespace() == namespace)
         .max_by_key(|(ctx, _)| ctx.version())
         .map(|(ctx, _)| ctx))
-}
-
-/// What `[ca] approval_roles` / `approval_requires_invite` / `link_roles` /
-/// `relay_roles` / `enrollment_links` / `direct_paths` / `direct_pairs` /
-/// `[[ca.relay]]` state. A namespace CA enforces what its trust context
-/// advertises and refuses to start when they state another policy
-/// ([`PolicyInput::enforced_policy`]); `ndn-fwd init` and `ndn-fwd schema
-/// update -c <config>` write them into the context.
-pub(crate) fn policy_input(cfg: &CaTomlConfig) -> Result<PolicyInput> {
-    let relays = cfg
-        .relays
-        .as_ref()
-        .map(|relays| {
-            relays
-                .iter()
-                .map(advertised_relay)
-                .collect::<Result<Vec<_>>>()
-        })
-        .transpose()?;
-    Ok(PolicyInput {
-        approval_roles: cfg.approval_roles.clone(),
-        approval_requires_invite: cfg.approval_requires_invite,
-        link_roles: cfg.link_roles.clone(),
-        relay_roles: cfg.relay_roles.clone(),
-        enrollment_links: cfg.enrollment_links,
-        direct_paths: cfg.direct_paths,
-        direct_pairs: cfg.direct_pairs.clone(),
-        relays,
-    })
-}
-
-/// One `[[ca.relay]]` entry as the trust context carries it.
-fn advertised_relay(relay: &CaRelayConfig) -> Result<AdvertisedRelay> {
-    let device: Name = relay
-        .device
-        .parse()
-        .with_context(|| format!("[[ca.relay]] device {:?} is not an NDN name", relay.device))?;
-    let key = relay
-        .key
-        .as_deref()
-        .map(|hex| {
-            fingerprint(hex).with_context(|| {
-                format!("[[ca.relay]] {device}: key must be 64 hex digits, not {hex:?}")
-            })
-        })
-        .transpose()?;
-    Ok(AdvertisedRelay {
-        device,
-        key,
-        endpoints: relay.endpoint.clone(),
-        preference: relay.preference,
-    })
-}
-
-/// 64 hex digits as the 32 octets of a fingerprint.
-fn fingerprint(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
-    }
-    Some(out)
 }
 
 /// `[ca].prefix` is the CA namespace; `NdncertCa` appends `/CA` itself
@@ -886,7 +809,7 @@ mod tests {
     use std::time::Duration;
 
     use ndn_cert::CaExchange;
-    use ndn_config::ChallengeConfig;
+    use ndn_config::{CaRelayConfig, ChallengeConfig};
     use ndn_engine::{EngineBuilder, EngineConfig, ShutdownHandle};
     use ndn_identity::NdncertClient;
     use ndn_mgmt::ApprovalMgmtBackend;
@@ -1694,7 +1617,8 @@ mod tests {
         };
         cfg.relays = Some(vec![relay.clone()]);
         let ns: Name = "/home/bob".parse().unwrap();
-        let policies = policy_input(&cfg)
+        let policies = cfg
+            .policy_input()
             .unwrap()
             .new_namespace_policies(&ns)
             .unwrap();
@@ -1720,7 +1644,7 @@ mod tests {
             direct_pairs: vec![("admin".into(), "node".into())],
         };
         assert_eq!(ctx.stated_link_policy(), Some(&expected));
-        assert_eq!(ctx.relays(), [advertised_relay(&relay).unwrap()]);
+        assert_eq!(ctx.relays(), [relay.advertised().unwrap()]);
 
         prepare(&cfg, 0, dir.path())
             .await

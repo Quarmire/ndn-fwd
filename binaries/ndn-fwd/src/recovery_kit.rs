@@ -32,7 +32,7 @@ use ndn_namespace::root::kit::{self, KitLocation, KitRequest, KitSpec};
 use ndn_packet::Name;
 
 use crate::onboard::{flag, pib_dir, positionals};
-use crate::root_host::{Daemon, Secrets, handed_text, listed, namespace_arg, render};
+use crate::root_host::{Secrets, daemon, handed_text, listed, namespace_arg, render};
 
 /// A kit named on the command line: `words`, `yubikey` (the token and slot
 /// of `--kit-yubikey-*`), or a kit file.
@@ -111,7 +111,7 @@ async fn create(args: &[String]) -> Result<()> {
         },
     };
     let pib_dir = pib_dir(args)?;
-    let daemon = Daemon::new(args, &pib_dir);
+    let daemon = daemon(args)?;
     let created = kit::create(
         KitRequest {
             pib_dir: pib_dir.clone(),
@@ -335,7 +335,7 @@ async fn revoke(args: &[String]) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("{target:?} is not an NDN name: {e}"))?;
     let pib_dir = pib_dir(args)?;
     let namespace = namespace_arg(args)?;
-    let daemon = Daemon::new(args, &pib_dir);
+    let daemon = daemon(args)?;
     let revoked = kit::revoke(
         &pib_dir,
         &key,

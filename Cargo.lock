@@ -3011,6 +3011,7 @@ name = "ndn-config"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "ndn-cert",
  "ndn-engine",
  "ndn-mgmt",
  "ndn-mgmt-wire",
@@ -3075,7 +3076,9 @@ version = "0.1.0"
 dependencies = [
  "bip39",
  "ndn-cert",
+ "ndn-config",
  "ndn-ipc",
+ "ndn-namespace",
  "ndn-packet",
  "ndn-security",
  "ndn-trust-envelope",
@@ -3512,6 +3515,7 @@ dependencies = [
  "ndn-engine",
  "ndn-face",
  "ndn-identity",
+ "ndn-ipc",
  "ndn-mgmt-wire",
  "ndn-packet",
  "ndn-security",
@@ -3521,6 +3525,7 @@ dependencies = [
  "ndn-transport",
  "ndn-trust-envelope",
  "parking_lot",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
