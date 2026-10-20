@@ -11,6 +11,7 @@ mod approval;
 mod compromised;
 mod destroyed;
 mod direct_paths;
+mod dv;
 mod lifecycle;
 mod membership;
 mod multi_prefix;
@@ -36,6 +37,7 @@ pub const ALL: &[&str] = &[
     "membership",
     "multi-prefix",
     "tui",
+    "dv",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -54,6 +56,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "membership" => membership::run(sc),
         "multi-prefix" => multi_prefix::run(sc),
         "tui" => tui::run(sc),
+        "dv" => dv::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

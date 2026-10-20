@@ -110,7 +110,7 @@ fn stays_unlinked(cx: &mut Cx<'_>, node: &str, ip: Ipv4Addr, span: Duration) -> 
 }
 
 /// A fetch at `node` that must not deliver `name` (nothing reaches it).
-fn fetch_fails(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
+pub(super) fn fetch_fails(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
     let seq = cx.w.next_seq();
     let file = cx.w.node(node).dir.join(format!("fetch-{seq}.bin"));
     let sock = cx.w.node(node).sock().display().to_string();
