@@ -5,8 +5,11 @@
 //! a line, each a DV router of /dvnet (`[routing.dv]`, `/dvnet/<node>`) with
 //! a `[[routing.dv.neighbor]]` per neighbour (the daemon opens a UDP socket
 //! to the neighbour's listener). No `[[face]]` links and no `[[route]]`:
-//! every route between them is DV's. Adv and Pfx sync run every 1 s and a
-//! neighbour silent for 3 s is dead, so the scenario converges in seconds.
+//! every route between them is DV's. Adv sync runs every 1 s and a
+//! neighbour silent for 3 s is dead (checked every 750 ms), so routes
+//! between routers converge in seconds. Pfx Sync keeps its default 30 s
+//! period: a prefix (or its withdrawal) reaching a in seconds was relayed
+//! by b at once, not carried by b's periodic Pfx Sync.
 //! DV's own trust is its default, `insecure` (Adv/Pfx Data signed
 //! DigestSha256), so the daemons need no DV key exchange; the forwarders
 //! still validate every Data. c is the root device of /dvapp and serves
@@ -38,6 +41,7 @@ use std::fs;
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use super::quic_links::fetch_fails;
 use crate::run::Op;
@@ -48,11 +52,15 @@ use crate::world::{NodeCfg, PORT, addr};
 const NS: &str = "/dvapp";
 /// The DV network; router names are `/dvnet/<node>`.
 const NET: &str = "/dvnet";
-/// `adv_sync_secs` and `pfx_sync_secs`.
-const SYNC_SECS: u64 = 1;
+/// `adv_sync_secs`; `pfx_sync_secs` stays at its default (30).
+const ADV_SYNC_SECS: u64 = 1;
 /// `router_dead_secs`: a neighbour silent this long is dropped (checked
-/// every 10 s).
+/// every quarter of it).
 const DEAD_SECS: u64 = 3;
+/// How long a route change may take to show: well under the 30 s Pfx Sync
+/// period, so a prefix route that appears or goes within it got there by
+/// relayed Pfx Sync, not a periodic one.
+const CONVERGE: Duration = Duration::from_secs(10);
 /// The nftables table that cuts a–c.
 const CUT_TABLE: &str = "ndn_e2e_dv_cut";
 /// What `ndn-ctl route rib-list` shows for origin 127 (DVR).
@@ -72,7 +80,7 @@ fn host(node: &str) -> u8 {
 fn dv_toml(node: &str, neighbours: &[&str]) -> String {
     let mut s = format!(
         "[routing.dv]\nenabled = true\nnetwork = \"{NET}\"\nrouter = \"{NET}/{node}\"\n\
-         adv_sync_secs = {SYNC_SECS}\npfx_sync_secs = {SYNC_SECS}\nrouter_dead_secs = {DEAD_SECS}\n"
+         adv_sync_secs = {ADV_SYNC_SECS}\nrouter_dead_secs = {DEAD_SECS}\n"
     );
     for n in neighbours {
         s.push_str(&format!(
@@ -211,7 +219,7 @@ fn wait_best(
     let what = format!("{node} routes {prefix} via its face to {via} at cost {cost}");
     let mut seen = Vec::new();
     let mut face = None;
-    let took = wait_for(cx, &what, SHORT, |cx| {
+    let took = wait_for(cx, &what, CONVERGE, |cx| {
         face = face_to(cx, node, via).ok();
         seen = routes(cx, node, prefix)?;
         let Some((f, _)) = face else { return Ok(false) };
@@ -239,7 +247,7 @@ fn wait_best(
 fn wait_gone(cx: &mut Cx<'_>, node: &str, prefix: &str, origin: &str) -> StepResult<()> {
     let what = format!("{node}'s {origin} route for {prefix} gone");
     let mut seen = Vec::new();
-    let took = wait_for(cx, &what, SHORT, |cx| {
+    let took = wait_for(cx, &what, CONVERGE, |cx| {
         seen = routes(cx, node, prefix)?;
         Ok(!seen.iter().any(|r| r.origin == origin))
     })
@@ -338,8 +346,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let prefix = format!("{}/app", root.identity);
     sc.step(
         &format!(
-            "start a, b and c as DV routers of {NET} in a line (a–b, b–c; sync every \
-             {SYNC_SECS} s, dead after {DEAD_SECS} s)"
+            "start a, b and c as DV routers of {NET} in a line (a–b, b–c; Adv sync every \
+             {ADV_SYNC_SECS} s, Pfx Sync at its default 30 s, dead after {DEAD_SECS} s)"
         ),
         |cx| {
             cx.w.node_mut("c").cfg.identity = Some(root.identity.clone());
