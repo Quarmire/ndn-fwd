@@ -37,14 +37,11 @@
 //! erase`): the bytes a gets come from c's producer over the route under
 //! test.
 
-use std::fs;
 use std::net::SocketAddrV4;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use super::quic_links::fetch_fails;
-use crate::run::Op;
 use crate::scenarios::*;
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{NodeCfg, PORT, addr};
@@ -287,47 +284,6 @@ fn fetch_from_c(cx: &mut Cx<'_>, prefix: &str, expect: &[u8]) -> StepResult<()> 
     Ok(())
 }
 
-/// The nftables table dropping a–c's UDP; deleted on drop.
-struct Cut;
-
-impl Drop for Cut {
-    fn drop(&mut self) {
-        let _ = Command::new("nft")
-            .args(["delete", "table", "inet", CUT_TABLE])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
-/// Drop UDP between a's and c's addresses, both ways, as it leaves a socket
-/// in the harness's namespace (on `lo` nothing is forwarded). Each DV socket
-/// sends from its daemon's listener address and each listener answers from
-/// it, so this cuts a–c and leaves a–b and b–c.
-fn cut(cx: &mut Cx<'_>) -> StepResult<Cut> {
-    let (a, c) = (addr(host("a")), addr(host("c")));
-    let ruleset = format!(
-        "table inet {CUT_TABLE} {{\n\
-         \tchain output {{\n\
-         \t\ttype filter hook output priority 0;\n\
-         \t\tip saddr {a} ip daddr {c} meta l4proto udp drop;\n\
-         \t\tip saddr {c} ip daddr {a} meta l4proto udp drop;\n\
-         \t}}\n\
-         }}\n"
-    );
-    let file = cx.w.dir.join("cut.nft");
-    fs::write(&file, ruleset).map_err(|e| format!("{}: {e}", file.display()))?;
-    let op = Op::new("nft", PathBuf::from("nft"))
-        .arg("-f")
-        .arg(file.display().to_string());
-    let out = cx.exec(op);
-    if !out.success() {
-        return Err(format!("nft -f {}: {}", file.display(), out.status_text()));
-    }
-    Ok(Cut)
-}
-
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let node = |name: &str, neighbours: &[&str]| NodeCfg {
         extra_toml: dv_toml(name, neighbours),
@@ -450,7 +406,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let _cut = sc.step(
         "cut a–c: nftables drops UDP between a's and c's addresses",
         |cx| {
-            let cut = cut(cx)?;
+            // Each DV socket sends from its daemon's listener address and
+            // each listener answers from it, so this cuts a–c and leaves a–b
+            // and b–c.
+            let cut = cut_udp(cx, CUT_TABLE, addr(host("a")), addr(host("c")))?;
             cx.evidence(&format!(
                 "dropping UDP between {} (a) and {} (c), both ways",
                 addr(host("a")),

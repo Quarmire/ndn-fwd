@@ -1,6 +1,6 @@
 # ndn-tools
 
-Operator CLIs for working with an NDN forwarder. One crate, twelve
+Operator CLIs for working with an NDN forwarder. One crate, thirteen
 binaries:
 
 | Binary | Purpose |
@@ -17,6 +17,7 @@ binaries:
 | `ndn-mgmt-response-verify` | Check a mgmt control response is signed by a trust anchor |
 | `ndn-mgmt-notification-fetch` | Fetch one NFD-style mgmt notification Data |
 | `ndn-safebag-witness` | Testbed-only SafeBag interop witness vs `ndnsec` |
+| `ndn-data` | Host one device's data layer on a running forwarder; verbs on stdin, JSON lines out |
 
 ## Get started
 
@@ -44,7 +45,7 @@ detail.
 
 ```bash
 cargo build --release -p ndn-tools
-# Produces all twelve binaries from the table above.
+# Produces all thirteen binaries from the table above.
 ```
 
 ## Run
@@ -176,6 +177,12 @@ The remaining binaries back the `testbed/` harness; each takes
   notification Data packet.
 - `ndn-safebag-witness` — testbed-only SafeBag interop witness against
   ndn-cxx `ndnsec export`/`import`.
+- `ndn-data` — one device's data layer (`ndn_data::Device`) attached to a
+  running `ndn-fwd` over its socket, signing with the device's key from
+  the daemon's PIB and verifying with the PIB's trust contexts; reads
+  `share`/`put`/`get`/`watch` lines on stdin and answers one JSON object
+  per line (the `notes` e2e scenario's host). The verbs over forwarder
+  management come with the data layer's slice 7.
 
 ## License
 

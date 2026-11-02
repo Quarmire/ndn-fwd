@@ -1,6 +1,6 @@
 [package]
 name = "ndn-tools"
-description = "NDN command-line tools: ndn-peek, ndn-put, ndn-ping, ndn-ls"
+description = "NDN command-line tools: ndn-peek, ndn-put, ndn-ping, ndn-ls, ndn-data"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,6 +15,10 @@ path = "src/peek.rs"
 [[bin]]
 name = "ndn-put"
 path = "src/put.rs"
+
+[[bin]]
+name = "ndn-data"
+path = "src/data.rs"
 
 [[bin]]
 name = "ndn-ping"
@@ -66,6 +70,7 @@ ndn-mgmt-wire  = { workspace = true }
 ndn-packet     = { workspace = true, features = ["std"] }
 ndn-security   = { workspace = true }
 ndn-sync       = { workspace = true }
+ndn-data       = { workspace = true }
 ndn-config     = { workspace = true }
 ndn-transport  = { workspace = true }
 ndn-face     = { workspace = true }
@@ -73,7 +78,8 @@ bytes          = { workspace = true, features = ["std"] }
 base64         = { workspace = true, features = ["std"] }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
-tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "io-util"] }
+futures        = { workspace = true }
+tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "net", "io-util", "io-std"] }
 tokio-util     = { workspace = true, features = ["codec"] }
 tracing        = { workspace = true }
 tracing-subscriber = { workspace = true }

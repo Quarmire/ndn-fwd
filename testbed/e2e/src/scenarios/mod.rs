@@ -1,9 +1,13 @@
 //! The scenarios, and the steps several of them share.
 
+use std::fs;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::run::Op;
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{addr, now_unix, parse_utc};
 
@@ -16,6 +20,7 @@ mod lifecycle;
 mod membership;
 mod multi_prefix;
 mod negatives;
+mod notes;
 mod on_demand;
 mod phone_links;
 mod quic_links;
@@ -38,6 +43,7 @@ pub const ALL: &[&str] = &[
     "multi-prefix",
     "tui",
     "dv",
+    "notes",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -57,6 +63,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "multi-prefix" => multi_prefix::run(sc),
         "tui" => tui::run(sc),
         "dv" => dv::run(sc),
+        "notes" => notes::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }
@@ -467,3 +474,50 @@ pub fn wait_for(
 }
 
 pub const SHORT: Duration = Duration::from_secs(30);
+
+/// UDP between two addresses dropped by nftables table `table` in the
+/// harness's namespace; the table is deleted (the cut restored) on drop.
+pub struct UdpCut {
+    table: &'static str,
+}
+
+impl Drop for UdpCut {
+    fn drop(&mut self) {
+        let _ = Command::new("nft")
+            .args(["delete", "table", "inet", self.table])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Drop UDP between `a` and `b`, both ways, as it leaves a socket in the
+/// harness's namespace (on `lo` nothing is forwarded): the daemons bound to
+/// those addresses stop hearing each other, every other pair still does.
+pub fn cut_udp(
+    cx: &mut Cx<'_>,
+    table: &'static str,
+    a: Ipv4Addr,
+    b: Ipv4Addr,
+) -> StepResult<UdpCut> {
+    let ruleset = format!(
+        "table inet {table} {{\n\
+         \tchain output {{\n\
+         \t\ttype filter hook output priority 0;\n\
+         \t\tip saddr {a} ip daddr {b} meta l4proto udp drop;\n\
+         \t\tip saddr {b} ip daddr {a} meta l4proto udp drop;\n\
+         \t}}\n\
+         }}\n"
+    );
+    let file = cx.w.dir.join(format!("{table}.nft"));
+    fs::write(&file, ruleset).map_err(|e| format!("{}: {e}", file.display()))?;
+    let op = Op::new("nft", PathBuf::from("nft"))
+        .arg("-f")
+        .arg(file.display().to_string());
+    let out = cx.exec(op);
+    if !out.success() {
+        return Err(format!("nft -f {}: {}", file.display(), out.status_text()));
+    }
+    Ok(UdpCut { table })
+}

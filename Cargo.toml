@@ -99,6 +99,7 @@ ndn-config    = { path = "../ndn-rs/crates/platform/ndn-config" }
 ndn-discovery = { path = "../ndn-ext/crates/discovery/ndn-discovery", default-features = false }
 ndn-routing    = { path = "../ndn-ext/crates/routing/ndn-routing" }
 ndn-sync      = { path = "../ndn-rs/crates/protocols/ndn-sync" }
+ndn-data      = { path = "../ndn-rs/crates/app/ndn-data" }
 ndn-cert     = { path = "../ndn-rs/crates/security/ndn-cert" }
 ndn-identity = { path = "../ndn-rs/crates/security/ndn-identity" }
 ndn-namespace = { path = "../ndn-rs/crates/security/ndn-namespace" }
