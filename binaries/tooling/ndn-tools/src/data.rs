@@ -14,10 +14,10 @@
 //! the life of the process.
 //!
 //! Two connections to the forwarder: a `Node` (fetching, and serving the
-//! device's prefix) and a raw one for State Vector Sync. Each is a client
-//! whose management replies are split off its data by one reader, so a
-//! prefix the layer registers while its receive loops run is answered to
-//! the registration, not to them. The forwarder must route the namespace's
+//! device's prefix) and a second one for State Vector Sync. A forwarder
+//! client's one reader splits its management replies off its data, so a
+//! prefix the layer registers while its receive loops run is answered to the
+//! registration, not to them. The forwarder must route the namespace's
 //! sync group `<ns>/32=sync` toward the other devices with the `multicast`
 //! strategy (this connection's registration of the group otherwise shadows
 //! any default route), and route the other devices' prefixes to them.
@@ -50,36 +50,18 @@ use futures::StreamExt;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use ndn_app::{AppError, CERT_FETCH_TIMEOUT, Connection, Consumer, IpcConnection, Node};
+use ndn_app::{IpcConnection, Node, demux_cert_fetcher};
 use ndn_data::{
     Age, Audience, Change, Config, Content, DataError, DataLayer, Device, Frontier, Got, Keep,
     NextStep, Payload, PutOptions, Rule, Share, Transport, TypeId, Version, VersionId,
 };
 use ndn_ipc::ForwarderClient;
 use ndn_packet::Name;
-use ndn_packet::encode::InterestBuilder;
-use ndn_security::{
-    CertCache, CertFetcher, FetchFn, FetchMiss, FilePib, SecurityManager, Validator,
-};
+use ndn_security::{CertCache, FilePib, SecurityManager, Validator};
 use ndn_sync::MemoryStore;
 
 /// Longest certificate chain the validator walks (device → CA → root).
 const MAX_CHAIN: usize = 5;
-
-/// A connection to the forwarder at `socket` whose management replies and
-/// data are split by one reader ([`ForwarderClient::from_raw_fd`], the
-/// management + data seam): a `rib/register` made while a receive loop runs
-/// on the connection gets its reply. A client from
-/// [`ForwarderClient::connect`] reads both from one socket with no such
-/// split, so a receive loop already waiting takes the reply and the
-/// registration never completes.
-fn connect(socket: &str) -> Result<Arc<dyn Connection>> {
-    let stream = std::os::unix::net::UnixStream::connect(socket)
-        .with_context(|| format!("connect to the forwarder at {socket}"))?;
-    let client = ForwarderClient::from_raw_fd(std::os::fd::IntoRawFd::into_raw_fd(stream))
-        .map_err(|e| anyhow!("connect to the forwarder at {socket}: {e}"))?;
-    Ok(Arc::new(IpcConnection::new(client)))
-}
 
 #[derive(Parser)]
 #[command(
@@ -129,11 +111,16 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow!("PIB {}: {e}", cli.pib))?;
     let keys = Arc::new(keys);
 
-    let node = Node::from_connection(connect(&cli.face_socket)?);
-    let sync = connect(&cli.face_socket)?;
+    let node = Node::connect(&cli.face_socket)
+        .await
+        .map_err(|e| anyhow!("connect to the forwarder at {}: {e}", cli.face_socket))?;
+    let sync = ForwarderClient::connect(&cli.face_socket)
+        .await
+        .map_err(|e| anyhow!("connect to the forwarder at {}: {e}", cli.face_socket))?;
+    let sync = Arc::new(IpcConnection::new(sync));
 
     let cache = Arc::new(CertCache::new());
-    let fetcher = cert_fetcher(node.connection(), Arc::clone(&cache));
+    let fetcher = demux_cert_fetcher(node.demux(), Arc::clone(&cache));
     let validator = Arc::new(Validator::with_keyring(
         Arc::clone(keys.keyring()),
         cache,
@@ -306,34 +293,6 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
         ("watch", _) => usage("usage: watch <collection>"),
         _ => usage("verbs: share, put, get, watch, quit"),
     }
-}
-
-/// A [`CertFetcher`] over the device's own connection to its forwarder,
-/// filling `cache`: the cert Interest `ndn_app::engine_fetch_fn` expresses
-/// (`CanBePrefix`, so the key's certificate answers; `MustBeFresh`, so a
-/// renewed one does), read as that fetcher reads its outcomes.
-fn cert_fetcher(conn: Arc<dyn Connection>, cache: Arc<CertCache>) -> Arc<CertFetcher> {
-    let fetch: FetchFn = Arc::new(move |name: Name| {
-        let mut consumer = Consumer::new(Arc::clone(&conn));
-        Box::pin(async move {
-            let wire = InterestBuilder::new(name)
-                .can_be_prefix()
-                .must_be_fresh()
-                .lifetime(CERT_FETCH_TIMEOUT)
-                .build();
-            consumer
-                .fetch_wire(wire, CERT_FETCH_TIMEOUT)
-                .await
-                .map_err(|e| match e {
-                    AppError::Refused { reason } => FetchMiss::Refused(reason),
-                    AppError::Nacked {
-                        reason: Some(ndn_packet::NackReason::NoRoute),
-                    } => FetchMiss::Absent,
-                    _ => FetchMiss::Unanswered,
-                })
-        })
-    });
-    Arc::new(CertFetcher::new(cache, fetch, CERT_FETCH_TIMEOUT))
 }
 
 /// A line split into words: whitespace separates them, double quotes keep
