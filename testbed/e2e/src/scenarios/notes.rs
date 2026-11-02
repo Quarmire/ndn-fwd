@@ -3,12 +3,11 @@
 //!
 //! Topology, on the harness's `lo`: laptop (10.200.0.1, the root device of
 //! /nt with its CA) ↔ phone (.2, a member enrolled by invite), one UDP link.
-//! Routes: the laptop sends `/nt/member/phone` to the phone, the phone sends
-//! `/nt` (the laptop's device prefix, its CA) to the laptop, and each sends
-//! the namespace's sync group `/nt/32=sync` over the link with the
-//! `multicast` strategy: the data layer registers the group on its own sync
-//! connection, which would otherwise shadow any shorter route, and a sync
-//! Interest must reach every other member.
+//! Routes: what the link between them gives each, the laptop sends
+//! `/nt/member/phone` to the phone and the phone sends `/nt` (the laptop's
+//! device prefix, its CA) to the laptop. Nothing routes the namespace's sync
+//! group `/nt/32=sync` or sets its strategy: each daemon carries it to the
+//! other device over those routes by itself (data-layer spec §12).
 //!
 //! Each device runs `ndn-data` (ndn-tools) on its daemon's socket: the
 //! device's data layer with the key `ndn-fwd init`/`enroll` put in the PIB,
@@ -363,15 +362,12 @@ fn unanswered(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
 }
 
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
-    let group = n("/32=sync");
-    let multicast = format!("[[strategy]]\nprefix = \"{group}\"\nstrategy = \"multicast\"\n");
     sc.world.add(
         "laptop",
         1,
         NodeCfg {
             links: vec![link("phone", 2)],
-            routes: vec![route(PHONE, "phone"), route(&group, "phone")],
-            extra_toml: multicast.clone(),
+            routes: vec![route(PHONE, "phone")],
             ..Default::default()
         },
     );
@@ -380,8 +376,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         2,
         NodeCfg {
             links: vec![link("laptop", 1)],
-            routes: vec![route(NS, "laptop"), route(&group, "laptop")],
-            extra_toml: multicast,
+            routes: vec![route(NS, "laptop")],
             ..Default::default()
         },
     );
