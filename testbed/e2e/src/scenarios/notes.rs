@@ -49,8 +49,9 @@ use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
 
 const NS: &str = "/nt";
-/// The note collection, in the person's namespace.
-const NOTES: &str = "/nt/notes/trip";
+/// The note collection, in the person's namespace: `<ns>/32=data/<path>`
+/// (data-layer spec §3).
+const NOTES: &str = "/nt/32=data/notes/trip";
 const PHONE: &str = "/nt/member/phone";
 /// The laptop's device name: `ndn-fwd init --device laptop` on /nt.
 const LAPTOP: &str = "/nt/admin/laptop";
@@ -280,7 +281,7 @@ impl Host {
         let got = ok["version"].take();
         if got["id"]["writer"] != v.writer.as_str()
             || got["id"]["seq"] != v.seq
-            || got["collection"] != NOTES
+            || name(got["collection"].as_str().unwrap_or_default())? != name(NOTES)?
             || name(got["name"].as_str().unwrap_or_default())? != name(&v.name)?
         {
             return Err(format!(

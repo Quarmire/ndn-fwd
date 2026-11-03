@@ -181,8 +181,10 @@ The remaining binaries back the `testbed/` harness; each takes
   running `ndn-fwd` over its socket, signing with the device's key from
   the daemon's PIB and verifying with the PIB's trust contexts; reads
   `share`/`put`/`get`/`watch` lines on stdin and answers one JSON object
-  per line (the `notes` e2e scenario's host). The verbs over forwarder
-  management come with the data layer's slice 7.
+  per line (the `notes` e2e scenario's host). Collections are named
+  `<ns>/32=data/<path>` (e.g. `/nt/32=data/notes/trip`), `<ns>` the
+  namespace of the trust context that governs the device. The verbs over
+  forwarder management come with the data layer's slice 7.
 
 ## License
 

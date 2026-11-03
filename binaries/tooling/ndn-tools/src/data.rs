@@ -24,17 +24,25 @@
 //! registration of it; the other devices' prefixes are routed to them as
 //! those links route them.
 //!
+//! The device's namespace `<ns>` is that of the trust context governing its
+//! name in the PIB (`/nt` for `/nt/member/phone`; `/home/bob` for
+//! `/home/bob/member/phone` once the PIB holds `/home/bob`'s context). A
+//! collection is named `<ns>/32=data/<path>` (`/home/bob/32=data/notes/trip`):
+//! the keyword `32=data` marks where the namespace ends. A folder is
+//! `<ns>/32=data[/<path>]`; a name without the marker is refused with why.
+//!
 //! Verbs (one per line; values with spaces in double quotes, `\"` and `\\`
 //! escaped inside them):
 //!
 //! - `share <collection>`: the members record of a collection of this
-//!   device's namespace (`<ns>`, its first component): merge rule
-//!   `/merge/yrs`, writers and readers every key and device of `<ns>`.
+//!   device's namespace: merge rule `/merge/yrs`, writers and readers every
+//!   key and device of `<ns>`.
 //! - `put <collection> <field>=<value>...`: a version of type
 //!   `/types/note` revision 1, kept forever; an empty value removes the field.
 //! - `get <name>`: a collection's merged state, or an exact version or
 //!   state by its name.
-//! - `watch <collection>`: from now on, every change as its own line.
+//! - `watch <collection or folder>`: from now on, every change as its own
+//!   line.
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -194,7 +202,7 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
                 Ok(c) => c,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            let ns = ndn_data::wire::namespace_of(layer.name()).expect("a device has a name");
+            let ns = layer.namespace().clone();
             layer
                 .share(
                     &collection,
@@ -366,6 +374,7 @@ fn next_token(n: NextStep) -> &'static str {
         NextStep::UseOwnerDevice => "use-owner-device",
         NextStep::EditInstead => "edit-instead",
         NextStep::FixLocal => "fix-local",
+        NextStep::FixName => "fix-name",
     }
 }
 
@@ -379,6 +388,7 @@ fn next_step(n: NextStep) -> &'static str {
         NextStep::UseOwnerDevice => "do it on a device that holds the owner's key",
         NextStep::EditInstead => "remove it with an edit to the collection: it is not yours",
         NextStep::FixLocal => "fix this device: its storage or its keys",
+        NextStep::FixName => "ask again with a well-formed name: the message says how",
     }
 }
 
