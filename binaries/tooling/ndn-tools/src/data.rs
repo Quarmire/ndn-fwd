@@ -7,11 +7,13 @@
 //! process attached over the face socket exposes them on a real daemon while
 //! ndn-fwd itself carries no data-layer code. It wires the library and does
 //! nothing else: the device's key and trust contexts come from the daemon's
-//! PIB exactly as `ndn-put --pib` loads them; the validator is the trust
-//! contexts' keyring (their anchors and schemas) with a certificate fetcher
-//! over the device's own connection, so a peer's certificate chain is
-//! fetched and walked to the anchor on first use; entries live in memory for
-//! the life of the process.
+//! PIB exactly as `ndn-put --pib` loads them, and the device's X25519 seal
+//! (recipient) secret is kept in that PIB beside its key
+//! (`SecurityManager::put_secret`), made on the first run; the validator is
+//! the trust contexts' keyring (their anchors and schemas) with a
+//! certificate fetcher over the device's own connection, so a peer's
+//! certificate chain is fetched and walked to the anchor on first use;
+//! entries live in memory for the life of the process.
 //!
 //! Two connections to the forwarder: a `Node` (fetching, and serving the
 //! device's prefix) and a second one for State Vector Sync. A forwarder
