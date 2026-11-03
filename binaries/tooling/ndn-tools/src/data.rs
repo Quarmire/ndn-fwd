@@ -34,13 +34,22 @@
 //! Verbs (one per line; values with spaces in double quotes, `\"` and `\\`
 //! escaped inside them):
 //!
-//! - `share <collection>`: the members record of a collection of this
-//!   device's namespace: merge rule `/merge/yrs`, writers and readers every
-//!   key and device of `<ns>`.
+//! - `share <collection> [rule=merge|log] [writers=<prefix>,<prefix>...]
+//!   [readers=<kind>:<name>,...]`: the members record of a collection of
+//!   this device's namespace, its first revision or the next. `rule=merge`
+//!   (the default) merges with `/merge/yrs`, `rule=log` keeps every member's
+//!   versions (the newest is the latest). Writers are key-name prefixes
+//!   (default: `<ns>`); readers are `person:<namespace>`,
+//!   `device:<device name>` or `group:<group name>` (default:
+//!   `person:<ns>`), and a collection that lists readers is sealed to them;
+//!   `readers=` with nothing after it lists none (not sealed). Sharing again
+//!   without a writer or reader removes it: the owner cuts a removed writer
+//!   at what this device has seen of it, and seals later versions in a new
+//!   epoch a removed reader cannot open.
 //! - `put <collection> <field>=<value>...`: a version of type
 //!   `/types/note` revision 1, kept forever; an empty value removes the field.
-//! - `get <name>`: a collection's merged state, or an exact version or
-//!   state by its name.
+//! - `get <name>`: a collection's merged state (its newest version under
+//!   the log rule), or an exact version or state by its name.
 //! - `watch <collection or folder>`: from now on, every change as its own
 //!   line.
 //! - `quit` (or end of input).
@@ -197,28 +206,19 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
             .map_err(|e| format!("{s:?} is no name: {e}"))
     };
     match (verb, args) {
-        ("share", [collection]) => {
+        ("share", [collection, options @ ..]) => {
             let collection = match name(collection) {
                 Ok(c) => c,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            let ns = layer.namespace().clone();
-            layer
-                .share(
-                    &collection,
-                    Share {
-                        rule: Rule::Merge {
-                            function: "/merge/yrs".parse().expect("a valid name"),
-                        },
-                        writers: vec![ns.clone()],
-                        readers: vec![Audience::Person(ns)],
-                        readmit: Vec::new(),
-                    },
-                )
-                .await?;
+            let share = match share_options(layer.namespace(), options) {
+                Ok(s) => s,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {SHARE_USAGE}"))),
+            };
+            layer.share(&collection, share).await?;
             Ok(Verb::Done(json!({"collection": collection.to_string()})))
         }
-        ("share", _) => usage("usage: share <collection>"),
+        ("share", _) => usage(SHARE_USAGE),
         ("put", [collection, fields @ ..]) if !fields.is_empty() => {
             let collection = match name(collection) {
                 Ok(c) => c,
@@ -303,6 +303,54 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
         ("watch", _) => usage("usage: watch <collection>"),
         _ => usage("verbs: share, put, get, watch, quit"),
     }
+}
+
+const SHARE_USAGE: &str = "usage: share <collection> [rule=merge|log] \
+                           [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...] (kind \
+                           person, device or group)";
+
+/// A `share` line's options over the defaults: the merge rule `/merge/yrs`,
+/// writers the namespace `ns`, readers the person `ns`. `readers=` with
+/// nothing after it lists no readers (the collection is not sealed).
+fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
+    let merge = || Rule::Merge {
+        function: "/merge/yrs".parse().expect("a valid name"),
+    };
+    let name = |s: &str| {
+        s.parse::<Name>()
+            .map_err(|e| format!("{s:?} is no name: {e}"))
+    };
+    fn list(v: &str) -> impl Iterator<Item = &str> {
+        v.split(',').filter(|s| !s.is_empty())
+    }
+    let mut share = Share {
+        rule: merge(),
+        writers: vec![ns.clone()],
+        readers: vec![Audience::Person(ns.clone())],
+        readmit: Vec::new(),
+    };
+    for o in options {
+        match o.split_once('=') {
+            Some(("rule", "merge")) => share.rule = merge(),
+            Some(("rule", "log")) => share.rule = Rule::Log,
+            Some(("rule", r)) => return Err(format!("rule {r:?} is neither merge nor log")),
+            Some(("writers", v)) => share.writers = list(v).map(name).collect::<Result<_, _>>()?,
+            Some(("readers", v)) => {
+                share.readers = list(v)
+                    .map(|r| match r.split_once(':') {
+                        Some(("person", n)) => name(n).map(Audience::Person),
+                        Some(("device", n)) => name(n).map(Audience::Device),
+                        Some(("group", n)) => name(n).map(Audience::Group),
+                        _ => Err(format!(
+                            "reader {r:?} is not <kind>:<name> with kind person, device or group"
+                        )),
+                    })
+                    .collect::<Result<_, _>>()?;
+            }
+            _ => return Err(format!("{o:?} is not rule=, writers= or readers=")),
+        }
+    }
+    Ok(share)
 }
 
 /// A line split into words: whitespace separates them, double quotes keep
