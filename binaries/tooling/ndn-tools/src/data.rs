@@ -59,18 +59,21 @@
 //!   bytes.
 //! - `watch <collection or folder>`: from now on, every change as its own
 //!   line.
-//! - `hold <collection> copies=<n> until=<ms since the epoch>`: ask holders
-//!   to keep the collection, audit every live lease and repair: the
-//!   custody, each live lease (holder key, name, what it holds, until when,
-//!   this device's last audit) and the leases this call found broken or
-//!   unanswered, and the versions asked for that no kept lease holds and
-//!   this device does not hold whole (`unkept`: lost unless a copy turns
-//!   up).
+//! - `hold <collection> copies=<n> until=<ms since the epoch>
+//!   holders=<device>[,<device>...]`: ask the named holder devices (at
+//!   least `copies` of them, none this device) to keep the collection,
+//!   audit every live lease and repair: the custody, each live lease (holder
+//!   key, name, what it holds, until when, this device's last audit) and the
+//!   leases this call found broken or unanswered, and the versions asked for
+//!   that no kept lease holds and this device does not hold whole (`unkept`:
+//!   lost unless a copy turns up).
 //! - `prune <collection or version> upto=<writer key>:<seq>[,...]`: drop
 //!   this device's own versions up to that point.
 //! - `release <collection or version>`: drop this device's copies of the
-//!   pieces of large versions that a live lease it audited as kept covers
-//!   (the host's storage policy): how many versions, pieces and octets.
+//!   pieces of large versions once enough named holders prove, to a fresh
+//!   audit over every piece while this device serves none of them, that
+//!   they keep them (the host's storage policy): how many versions, pieces
+//!   and octets, and the versions kept here (`kept`: each name with why).
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -366,6 +369,11 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
                 "versions": r.versions,
                 "pieces": r.pieces,
                 "bytes": r.bytes,
+                "kept": r
+                    .kept
+                    .iter()
+                    .map(|(v, why)| json!({"name": v.to_string(), "why": why}))
+                    .collect::<Vec<_>>(),
             })))
         }
         ("release", _) => usage("usage: release <collection or version>"),
@@ -424,7 +432,8 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
 const PUT_USAGE: &str = "usage: put <collection> <field>=<value>... (a value @<path> is the \
                          file's bytes, @@... a value starting with @)";
 
-const HOLD_USAGE: &str = "usage: hold <collection> copies=<n> until=<ms since the epoch>";
+const HOLD_USAGE: &str = "usage: hold <collection> copies=<n> until=<ms since the epoch> \
+                          holders=<device>[,<device>...]";
 
 const PRUNE_USAGE: &str =
     "usage: prune <collection or version> upto=<writer key>:<seq>[,<writer key>:<seq>...]";
@@ -442,9 +451,10 @@ async fn field_value(value: &str) -> Result<Bytes, String> {
     }
 }
 
-/// A `hold` line's options: both `copies=` and `until=` are required.
+/// A `hold` line's options: `copies=`, `until=` and `holders=` are all
+/// required.
 fn hold_options(options: &[String]) -> Result<Hold, String> {
-    let (mut copies, mut until) = (None, None);
+    let (mut copies, mut until, mut holders) = (None, None, None);
     for o in options {
         match o.split_once('=') {
             Some(("copies", n)) => {
@@ -455,12 +465,27 @@ fn hold_options(options: &[String]) -> Result<Hold, String> {
                     format!("until {t:?} is no date in ms since the epoch: {e}")
                 })?));
             }
-            _ => return Err(format!("{o:?} is not copies= or until=")),
+            Some(("holders", v)) => {
+                holders = Some(
+                    v.split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(|h| {
+                            h.parse::<Name>()
+                                .map_err(|e| format!("holder {h:?} is no name: {e}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            _ => return Err(format!("{o:?} is not copies=, until= or holders=")),
         }
     }
-    match (copies, until) {
-        (Some(copies), Some(until)) => Ok(Hold { copies, until }),
-        _ => Err("both copies= and until= are required".into()),
+    match (copies, until, holders) {
+        (Some(copies), Some(until), Some(holders)) => Ok(Hold {
+            copies,
+            until,
+            holders,
+        }),
+        _ => Err("copies=, until= and holders= are all required".into()),
     }
 }
 
@@ -567,6 +592,7 @@ fn next_token(n: NextStep) -> &'static str {
         NextStep::FixLocal => "fix-local",
         NextStep::FixName => "fix-name",
         NextStep::HoldFirst => "hold-first",
+        NextStep::FixRequest => "fix-request",
     }
 }
 
@@ -584,6 +610,10 @@ fn next_step(n: NextStep) -> &'static str {
         NextStep::HoldFirst => {
             "ask holders to keep it (hold) and release it once their audit passes: nothing \
              confirms it is kept anywhere else"
+        }
+        NextStep::FixRequest => {
+            "ask again as the message says: the request, as given, asks for something no \
+             device does"
         }
     }
 }
