@@ -3512,6 +3512,7 @@ dependencies = [
  "ndn-face-local",
  "ndn-face-quic",
  "ndn-mgmt-wire",
+ "ndn-namespace",
  "ndn-packet",
  "ndn-security",
  "ndn-tlv",

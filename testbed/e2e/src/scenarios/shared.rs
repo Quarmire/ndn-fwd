@@ -1,20 +1,35 @@
 //! shared: two people share a document and a chat across their trusted
-//! prefixes through a relay that carries them and cannot read them — the
-//! data layer (`ndn_data::Device`) on real daemons.
+//! prefixes through a community relay that carries them and cannot read
+//! them — the data layer (`ndn_data::Device`) on real daemons.
 //!
-//! Topology, on the harness's `lo`: alice (10.200.0.1, the root device of
-//! /sa), bob (.2, the root device of /sb) and a relay (.3, the root device
-//! of /sr, listening for QUIC links and serving the devices of /sa and /sb
-//! by their root fingerprints: `[relay_service] serve = "listed"`). Each
-//! person follows the other's namespace (adopts its inline anchor link
-//! before the daemon first starts) and adds the relay as a `[[relay]]` by
-//! its link-key fingerprint; the relay follows both. No config holds a
-//! route or a UDP link: over a link to a relay the person added, the link
-//! library routes each namespace the device follows as well as its own, so
-//! alice's daemon routes /sb (bob's device and, beneath it, /sb/32=sync) to
-//! the relay; the relay routes each linked device's name and the sync group
-//! of the device's namespace over that device's link; the trust-context
-//! library runs each held namespace's group with the multicast strategy.
+//! Topology, on the harness's `lo`: alice (10.200.0.1), bob (.2) and a
+//! relay (.3). The relay is the root device of /sr, listening for QUIC
+//! links, and an open community relay (`[relay_service] serve = "open"`:
+//! its operator's standing policy, nothing per person). It holds no trust
+//! context of /sa or /sb and lists no root.
+//!
+//! The people's gestures, and nothing else:
+//! 1. each creates their namespace (`ndn-fwd init`): alice /sa, bob /sb,
+//!    the init config advertising the relay in the namespace's trust
+//!    context (`[[ca.relay]]`: its device name, link key and endpoint);
+//! 2. each points at the other: adopts the other's inline anchor link;
+//! 3. alice shares the document and the chat with bob (and later shares
+//!    them again without him);
+//! 4. put, get and watch.
+//!
+//! No config holds a route, a UDP link, a `[[peer]]` or a `[[relay]]`.
+//! Each device links to the relay its namespace advertises, and over it
+//! the link library routes the device's own namespace and each one it
+//! follows: alice's daemon routes /sb (bob's device and, beneath it,
+//! /sb/32=sync) to the relay, bob's /sa. The relay serves each device
+//! offline against the root its hello carries; their Data crosses it in
+//! transit, unvalidated (the devices validate it end to end). Over each
+//! device's link it routes the device's name, the key name of each issuer
+//! its hello showed (so the other person fetches the chain from the
+//! device) and the sync group of the device's namespace, and runs that
+//! group with the multicast strategy while the namespace is in transit; on
+//! alice's and bob's daemons the trust-context library runs each held
+//! namespace's group with multicast.
 //! The data layer publishes each change about a collection into the group
 //! of its namespace and of every namespace its members record names (and,
 //! for a members record, its previous record's), so alice reaches bob in
@@ -26,15 +41,15 @@
 //! Proves: alice shares a document (merge rule) and a chat (log rule) with
 //! bob as writer and reader; each reads what the other wrote, the chat by
 //! watch, every version named `<its device>/32=log/<collection>/seq=<n>`.
-//! The relay fetches and validates the versions (it holds /sa) and their
-//! Content is a sealed record (an epoch and a ciphertext, no fields) that
-//! holds neither plaintext. With UDP between bob and the relay cut, bob
-//! edits the document; alice removes bob as writer and reader. Once the
-//! link is back, alice's state never takes bob's offline edit (refused
-//! outside the cut: ask the owner) and keeps his earlier one; bob's watch
-//! reports his offline version withdrawn by the cut, and outside the
-//! audience his get of the document is sealed; alice's next version is
-//! sealed in a new epoch, which bob cannot open.
+//! The relay fetches the versions (in transit: it holds no context of /sa)
+//! and their Content is a sealed record (an epoch and a ciphertext, no
+//! fields) that holds neither plaintext. With UDP between bob and the relay
+//! cut, bob edits the document; alice removes bob as writer and reader.
+//! Once the link is back, alice's state never takes bob's offline edit
+//! (refused outside the cut: ask the owner) and keeps his earlier one;
+//! bob's watch reports his offline version withdrawn by the cut, and
+//! outside the audience his get of the document is sealed; alice's next
+//! version is sealed in a new epoch, which bob cannot open.
 
 use std::net::Ipv4Addr;
 
@@ -123,10 +138,13 @@ fn routes_over_relay(cx: &mut Cx<'_>, node: &str, other: &str) -> StepResult<Opt
     )))
 }
 
-/// The relay: each person's device name and the group of that person's
-/// namespace over the person's link, both groups run with multicast.
-/// (Alice reaches bob through /sb's group, a member namespace of her
-/// collections, and bob alice through /sa's.)
+/// The relay: each person's device name, the key name of the person's CA
+/// (the issuer their hello showed) and the group of that person's
+/// namespace over the person's link, both groups run with multicast while
+/// their namespace is in transit (the relay holds neither). (Alice reaches
+/// bob through /sb's group, a member namespace of her collections, and bob
+/// alice through /sa's; each fetches the other's CA certificate through
+/// the issuer route.)
 fn relay_routes(cx: &mut Cx<'_>, alice: &str, bob: &str) -> StepResult<Option<String>> {
     let (Some(fa), Some(fb)) = (
         quic_face_to(cx, "relay", ALICE)?,
@@ -139,6 +157,10 @@ fn relay_routes(cx: &mut Cx<'_>, alice: &str, bob: &str) -> StepResult<Option<St
         && on(&rib(cx, "relay", GROUP_A)?, fa)
         && on(&rib(cx, "relay", bob)?, fb)
         && on(&rib(cx, "relay", GROUP_B)?, fb);
+    let (Some(ca_a), Some(ca_b)) = (issuer_route(cx, NS_A, fa)?, issuer_route(cx, NS_B, fb)?)
+    else {
+        return Ok(None);
+    };
     let (Some(a), Some(b)) = (
         multicast_at(cx, "relay", GROUP_A)?,
         multicast_at(cx, "relay", GROUP_B)?,
@@ -147,14 +169,39 @@ fn relay_routes(cx: &mut Cx<'_>, alice: &str, bob: &str) -> StepResult<Option<St
     };
     Ok(routed.then(|| {
         format!(
-            "relay: {alice} and {GROUP_A} → face {fa}; {bob} and {GROUP_B} → face {fb}; \
-             {GROUP_A} runs {a}, {GROUP_B} runs {b}"
+            "relay: {alice}, {ca_a} and {GROUP_A} → face {fa}; {bob}, {ca_b} and {GROUP_B} → face \
+             {fb}; {GROUP_A} runs {a}, {GROUP_B} runs {b}"
         )
     }))
 }
 
+/// The relay's route of `<ns>/CA/KEY/<key-id>` (the issuer of the root
+/// device of `ns`) to `face`, as found.
+fn issuer_route(cx: &mut Cx<'_>, ns: &str, face: u64) -> StepResult<Option<String>> {
+    let ca = name(&format!("{ns}/CA/KEY"))?;
+    let sock = cx.w.node("relay").sock().display().to_string();
+    let op = cx
+        .tool("ndn-ctl")
+        .args(["--socket", &sock, "route", "rib-list"]);
+    let out = cx.exec(op);
+    if !out.success() {
+        return Err(format!("route rib-list on relay: {}", out.status_text()));
+    }
+    // `<prefix>  <face>  <origin>  <cost>  <flags>[  expiry=…]`
+    Ok(out.stdout.lines().find_map(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        match w.as_slice() {
+            [p, f, ..] if f.parse() == Ok(face) && name(p).is_ok_and(|p| p.has_prefix(&ca)) => {
+                Some((*p).to_owned())
+            }
+            _ => None,
+        }
+    }))
+}
+
 /// `name` fetched through `node`'s daemon (which validates it against the
-/// trust context before delivering it): its Content's octets.
+/// trust context before delivering it, or forwards it unvalidated when its
+/// namespace is in transit there): its Content's octets.
 fn content_at(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<Vec<u8>> {
     let sock = cx.w.node(node).sock().display().to_string();
     let op = cx
@@ -183,8 +230,13 @@ fn content_at(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<Vec<u8>> {
 
 /// The relay fetches version `v` and cannot read it: its Content holds
 /// none of `plain`, and it is a version record whose payload is sealed (an
-/// epoch and a ciphertext, no fields). The epoch, as `<creator>/seq`.
+/// epoch and a ciphertext, no fields). The relay holds no context of /sa,
+/// so its daemon carried the version in transit, unvalidated. The epoch,
+/// as `<creator>/seq`.
 fn relay_sees_sealed(cx: &mut Cx<'_>, v: &Put, plain: &[&str]) -> StepResult<String> {
+    if let Some(version) = cx.version("relay", NS_A) {
+        return Err(format!("the relay holds {NS_A} v{version}"));
+    }
     let key = key_locator(cx, "relay", &v.name)?;
     let bytes = content_at(cx, "relay", &v.name)?;
     if let Some(p) = plain
@@ -209,8 +261,9 @@ fn relay_sees_sealed(cx: &mut Cx<'_>, v: &Put, plain: &[&str]) -> StepResult<Str
     }
     let epoch = format!("{}/seq={}", sealed.epoch.creator, sealed.epoch.seq.0);
     cx.evidence(&format!(
-        "relay fetched {} (KeyLocator {key}, validated with /sa held): {} octets, a version \
-         record sealed in epoch {epoch}, {}-octet ciphertext, no fields; none of {plain:?} in it",
+        "relay fetched {} (KeyLocator {key}; in transit, unvalidated: the relay holds no context \
+         of {NS_A}): {} octets, a version record sealed in epoch {epoch}, {}-octet ciphertext, no \
+         fields; none of {plain:?} in it",
         v.name,
         bytes.len(),
         sealed.ciphertext.len()
@@ -294,43 +347,61 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     );
 
-    let (alice_root, bob_root, relay_root) = sc.step(
-        "init alice as the root device of /sa, bob of /sb, the relay of /sr",
+    let (relay_root, relay_key) = sc.step(
+        "the relay, the root device of /sr, starts as an open community relay: serve = open, no \
+         roots listed, no namespace of anyone else adopted",
         |cx| {
-            Ok((
-                init_root(cx, "alice", NS_A, "alice")?,
-                init_root(cx, "bob", NS_B, "bob")?,
-                init_root(cx, "relay", NS_R, "relay")?,
-            ))
-        },
-    )?;
-    let relay_key = sc.step(
-        "the relay follows /sa and /sb (inline anchor links, offline) and starts, serving the \
-         devices of both by their root fingerprints",
-        |cx| {
-            cx.concept("relay serving listed namespaces");
+            cx.concept("open community relay");
+            let relay_root = init_root(cx, "relay", NS_R, "relay")?;
             let relay = cx.w.node_mut("relay");
             relay.cfg.identity = Some(relay_root.identity.clone());
             relay.cfg.extra_toml = format!(
-                "[relays]\nnamespace = false\n\n[relay_service]\nserve = \"listed\"\nroots = \
-                 [\"{}\", \"{}\"]\n\n{FAST_LINKS}",
-                alice_root.fp, bob_root.fp
+                "[relays]\nnamespace = false\n\n[relay_service]\nserve = \"open\"\n\n{FAST_LINKS}"
             );
-            adopt_offline(cx, "relay", NS_A, &alice_root.link_inline)?;
-            adopt_offline(cx, "relay", NS_B, &bob_root.link_inline)?;
             cx.start("relay")?;
             let list = link_list(cx, "relay")?;
             cx.evidence(&format!(
                 "relay: serve {}",
                 list.serve.as_deref().unwrap_or("-")
             ));
-            list.key
-                .ok_or_else(|| "the relay's link list shows no key".to_owned())
+            let key = list
+                .key
+                .ok_or_else(|| "the relay's link list shows no key".to_owned())?;
+            Ok((relay_root, key))
+        },
+    )?;
+    let (alice_root, bob_root) = sc.step(
+        "alice creates /sa and bob /sb (init); each init config advertises the relay in the \
+         namespace's trust context ([[ca.relay]]: its device name, link key and endpoint)",
+        |cx| {
+            let advertised = format!(
+                "[[ca.relay]]\ndevice = \"{}\"\nkey = \"{relay_key}\"\nendpoint = \
+                 \"{}:{QUIC_PORT}\"\n",
+                relay_root.identity,
+                addr(RELAY)
+            );
+            let mut roots = Vec::new();
+            for (node, ns) in [("alice", NS_A), ("bob", NS_B)] {
+                cx.w.node_mut(node).cfg.extra_toml =
+                    format!("[ca]\nprefix = \"{ns}\"\n\n{advertised}");
+                let (root, out) = init_root_with(cx, node, ns, node, true)?;
+                let relays = out.kv_all("relay");
+                if relays.len() != 1 || !relays[0].contains(&relay_root.identity) {
+                    return Err(format!(
+                        "{node}'s init of {ns} advertises {relays:?}, expected the relay {}",
+                        relay_root.identity
+                    ));
+                }
+                cx.evidence(&format!("{node}: init {ns}: relay = {}", relays[0]));
+                roots.push(root);
+            }
+            let bob_root = roots.pop().expect("two roots");
+            let alice_root = roots.pop().expect("two roots");
+            Ok((alice_root, bob_root))
         },
     )?;
     sc.step(
-        "each person follows the other's namespace (inline anchor link, offline), adds the relay \
-         as a [[relay]] by its link-key fingerprint, and starts",
+        "each person points at the other (adopts the other's inline anchor link) and starts",
         |cx| {
             for (node, root, other_ns, other) in [
                 ("alice", &alice_root, NS_B, &bob_root),
@@ -338,11 +409,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             ] {
                 let n = cx.w.node_mut(node);
                 n.cfg.identity = Some(root.identity.clone());
-                n.cfg.extra_toml = format!(
-                    "{NO_DIRECT}\n{FAST_LINKS}\n[[relay]]\nkey = \"{relay_key}\"\nendpoint = \
-                     \"{}:{QUIC_PORT}\"\n",
-                    addr(RELAY)
-                );
+                n.cfg.extra_toml = format!("{NO_DIRECT}\n{FAST_LINKS}");
                 adopt_offline(cx, node, other_ns, &other.link_inline)?;
                 cx.start(node)?;
             }
@@ -350,9 +417,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     sc.step(
-        "each person's daemon routes the other namespace over its relay link and runs both \
-         groups with multicast; the relay routes each device and its namespace's group over its \
-         link; no config holds a route or a UDP link",
+        "each person's daemon links to the relay its namespace advertises, routes the other \
+         namespace over it and runs both groups with multicast; the relay, holding no context of \
+         /sa or /sb, routes each device, its issuer's key name and its namespace's group over its \
+         link and runs both groups with multicast; no config holds a route, a UDP link, a \
+         [[peer]] or a [[relay]]",
         |cx| {
             cx.concept("sync groups of two namespaces carried through a relay");
             for node in ["alice", "bob", "relay"] {
@@ -362,16 +431,54 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     || !n.cfg.links.is_empty()
                     || config.contains("[[route]]")
                     || config.contains("routes =")
+                    || config.contains("[[peer]]")
+                    || config.contains("[[relay]]")
+                    || config.contains("roots =")
                 {
                     return Err(format!(
-                        "{node}'s config holds a route or a UDP link:\n{config}"
+                        "{node}'s config holds a route, a UDP link, a peer, a relay or a roots \
+                         list:\n{config}"
                     ));
                 }
                 cx.evidence(&format!(
-                    "{node}'s config: no [[route]], no `routes`, no UDP [[face]] link"
+                    "{node}'s config: no [[route]], no `routes`, no UDP [[face]] link, no \
+                     [[peer]], no [[relay]], no `roots`"
                 ));
             }
-            for (node, other) in [("alice", NS_B), ("bob", NS_A)] {
+            for ns in [NS_A, NS_B] {
+                if let Some(v) = cx.version("relay", ns) {
+                    return Err(format!("the relay holds {ns} v{v}"));
+                }
+            }
+            cx.expect_version("relay", NS_R, 1)?;
+            cx.evidence(&format!(
+                "relay holds {NS_R} only: no trust context of {NS_A} or {NS_B}"
+            ));
+            for (node, ns, other) in [("alice", NS_A, NS_B), ("bob", NS_B, NS_A)] {
+                let mut line = None;
+                wait_for(
+                    cx,
+                    &format!("{node} links to the relay {ns} advertises"),
+                    SHORT,
+                    |cx| {
+                        let list = link_list(cx, node)?;
+                        line = list
+                            .links
+                            .iter()
+                            .find(|l| l.label == relay_root.identity && !l.paths.is_empty())
+                            .and_then(|l| l.relay.clone())
+                            .filter(|r| {
+                                r.starts_with("linked")
+                                    && r.contains(&format!("source=namespace:{ns}"))
+                            });
+                        Ok(line.is_some())
+                    },
+                )?;
+                cx.evidence(&format!(
+                    "{node} → {}: relay {}",
+                    relay_root.identity,
+                    line.unwrap_or_default()
+                ));
                 let mut found = None;
                 wait_for(
                     cx,
@@ -387,7 +494,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let mut found = None;
             wait_for(
                 cx,
-                "the relay routes each device and its namespace's group over its link",
+                "the relay routes each device, its issuer and its namespace's group over its link",
                 SHORT,
                 |cx| {
                     found = relay_routes(cx, &alice_root.identity, &bob_root.identity)?;
@@ -504,8 +611,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let epoch1 = sc.step(
-        "the relay fetches alice's versions through its own daemon, validating them, and cannot \
-         read them: each is a sealed record without its plaintext",
+        "the relay fetches alice's versions through its own daemon, which carries them in transit \
+         (unvalidated: it holds no context of /sa), and cannot read them: each is a sealed record \
+         without its plaintext",
         |cx| {
             cx.concept("sealed collections: relays carry ciphertext only");
             let plain = ["draft 1", "hi bob"];
