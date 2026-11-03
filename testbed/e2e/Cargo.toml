@@ -36,6 +36,10 @@ ndn-trust-envelope = { workspace = true }
 ndn-tui = { path = "../../binaries/tooling/ndn-tui" }
 ndn-config    = { workspace = true }
 ndn-namespace = { workspace = true }
+# The `shared` scenario reads a sealed version's record as a relay fetched
+# it: ciphertext beside its epoch, no fields.
+bytes    = { workspace = true }
+ndn-data = { workspace = true }
 
 [lints]
 workspace = true

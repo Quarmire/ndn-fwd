@@ -13,6 +13,7 @@ use crate::world::{addr, now_unix, parse_utc};
 
 mod approval;
 mod compromised;
+mod data_host;
 mod destroyed;
 mod direct_paths;
 mod dv;
@@ -25,6 +26,7 @@ mod on_demand;
 mod phone_links;
 mod quic_links;
 mod relays;
+mod shared;
 mod tui;
 
 pub const ALL: &[&str] = &[
@@ -44,6 +46,7 @@ pub const ALL: &[&str] = &[
     "tui",
     "dv",
     "notes",
+    "shared",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -64,6 +67,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "tui" => tui::run(sc),
         "dv" => dv::run(sc),
         "notes" => notes::run(sc),
+        "shared" => shared::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

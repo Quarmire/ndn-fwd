@@ -33,19 +33,13 @@
 //! validating them against /nt's trust context, with the writer device's
 //! key as KeyLocator.
 
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
 
 use serde_json::Value;
 
-use crate::run::Proc;
+use super::data_host::{CONVERGE, Host, carries_group, includes, key_locator, name, unanswered};
 use crate::scenarios::*;
-use crate::step::{Abort, Cx, Scenario, StepResult};
+use crate::step::{Abort, Scenario};
 use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
 
 const NS: &str = "/nt";
@@ -59,382 +53,9 @@ const LAPTOP: &str = "/nt/admin/laptop";
 const GROUP: &str = "/nt/32=sync";
 /// The nftables table that cuts laptop–phone.
 const CUT_TABLE: &str = "ndn_e2e_notes_cut";
-/// SVS's periodic interval for the hosts (default 30 s): how soon two
-/// devices that were apart notice; performance only.
-const SYNC_INTERVAL_MS: u64 = 1000;
-/// One verb's answer (a `get` may wait out a fetch's lifetime first).
-const ANSWER: Duration = Duration::from_secs(30);
-const CONVERGE: Duration = Duration::from_secs(60);
 
 fn n(s: &str) -> String {
     format!("{NS}{s}")
-}
-
-fn name(s: &str) -> StepResult<ndn_packet::Name> {
-    s.parse().map_err(|e| format!("{s:?} is no name: {e:?}"))
-}
-
-/// One device's `ndn-data` host: its stdin, its answers, the changes its
-/// watches delivered.
-struct Host {
-    node: String,
-    device: String,
-    writer: String,
-    stdin: ChildStdin,
-    lines: Receiver<String>,
-    watched: Vec<Value>,
-    log: PathBuf,
-}
-
-impl Host {
-    /// Start `ndn-data` for `device` on `node`'s daemon; ready once it says
-    /// so. The process is the node's producer: stopped with it, its log
-    /// shown when a step fails.
-    fn start(cx: &mut Cx<'_>, node: &str, device: &str) -> StepResult<Host> {
-        let (sock, pib, log) = {
-            let nd = cx.w.node(node);
-            (nd.sock(), nd.pib(), nd.dir.join("ndn-data.log"))
-        };
-        let program = cx.w.bins.dir.join("ndn-data");
-        let args = [
-            "--device".to_owned(),
-            device.to_owned(),
-            "--pib".to_owned(),
-            pib.display().to_string(),
-            "--face-socket".to_owned(),
-            sock.display().to_string(),
-            "--sync-interval-ms".to_owned(),
-            SYNC_INTERVAL_MS.to_string(),
-        ];
-        cx.note(&format!("$ ndn-data {} &", args.join(" ")));
-        let stderr = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
-        let mut child = Command::new(&program)
-            .args(&args)
-            .env(
-                "RUST_LOG",
-                std::env::var("NDN_E2E_LOG").unwrap_or_else(|_| "info".into()),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(stderr)
-            .spawn()
-            .map_err(|e| format!("{}: {e}", program.display()))?;
-        let stdin = child.stdin.take().ok_or("ndn-data: no stdin")?;
-        let stdout = child.stdout.take().ok_or("ndn-data: no stdout")?;
-        let (tx, lines) = channel();
-        thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        cx.w.producers.push((
-            node.to_owned(),
-            Proc {
-                child,
-                label: "ndn-data".into(),
-                log: log.clone(),
-            },
-        ));
-        let mut host = Host {
-            node: node.to_owned(),
-            device: device.to_owned(),
-            writer: String::new(),
-            stdin,
-            lines,
-            watched: Vec::new(),
-            log,
-        };
-        let ready = host.next(cx, "start", Duration::from_secs(20))?;
-        let ready = &ready["ready"];
-        if ready["device"] != device {
-            return Err(format!(
-                "{node}: ndn-data did not start as {device}: {ready}"
-            ));
-        }
-        host.writer = ready["writer"]
-            .as_str()
-            .ok_or_else(|| format!("{node}: no writer in {ready}"))?
-            .to_owned();
-        Ok(host)
-    }
-
-    /// The next line that is not a watched change, as JSON.
-    fn next(&mut self, cx: &mut Cx<'_>, what: &str, within: Duration) -> StepResult<Value> {
-        let deadline = Instant::now() + within;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let line = match self.lines.recv_timeout(left) {
-                Ok(line) => line,
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!(
-                        "{}> {what}: no answer within {}s{}",
-                        self.node,
-                        within.as_secs(),
-                        self.tail()
-                    ));
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(format!(
-                        "{}> {what}: ndn-data exited{}",
-                        self.node,
-                        self.tail()
-                    ));
-                }
-            };
-            cx.note(&format!("{}< {line}", self.node));
-            let v: Value = serde_json::from_str(&line).map_err(|e| {
-                format!("{}: not one JSON object per line ({e}): {line}", self.node)
-            })?;
-            if v.get("watch").is_some() {
-                self.watched.push(v);
-            } else {
-                return Ok(v);
-            }
-        }
-    }
-
-    /// Send one verb line: its `ok` object, or its `error` object.
-    fn call(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<Result<Value, Value>> {
-        cx.note(&format!("{}> {line}", self.node));
-        writeln!(self.stdin, "{line}")
-            .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("{}: ndn-data stdin: {e}{}", self.node, self.tail()))?;
-        let answer = self.next(cx, line, ANSWER)?;
-        let Value::Object(mut fields) = answer else {
-            return Err(format!(
-                "{}> {line}: not a JSON object: {answer}",
-                self.node
-            ));
-        };
-        match (fields.remove("ok"), fields.remove("error")) {
-            (Some(ok), _) => Ok(Ok(ok)),
-            (None, Some(err)) => Ok(Err(err)),
-            _ => Err(format!(
-                "{}> {line}: neither ok nor error: {}",
-                self.node,
-                Value::Object(fields)
-            )),
-        }
-    }
-
-    /// A verb that must succeed.
-    fn ok(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<Value> {
-        self.call(cx, line)?.map_err(|e| {
-            format!(
-                "{}> {line}: {} (next: {})",
-                self.node, e["message"], e["next_step"]
-            )
-        })
-    }
-
-    /// `put` into the notes: the version, its name checked to be
-    /// `<device>/32=log/<collection>/seq=<n>` and its writer this device's
-    /// key.
-    fn put(&mut self, cx: &mut Cx<'_>, fields: &str) -> StepResult<Put> {
-        let ok = self.ok(cx, &format!("put {NOTES} {fields}"))?;
-        let put = Put {
-            writer: ok["writer"].as_str().unwrap_or_default().to_owned(),
-            seq: ok["seq"]
-                .as_u64()
-                .ok_or_else(|| format!("no seq in {ok}"))?,
-            name: ok["name"].as_str().unwrap_or_default().to_owned(),
-        };
-        if put.writer != self.writer {
-            return Err(format!(
-                "{}'s put was written by {}, not its key {}",
-                self.node, put.writer, self.writer
-            ));
-        }
-        let expected = format!("{}/32=log{NOTES}/seq={}", self.device, put.seq);
-        if name(&put.name)? != name(&expected)? {
-            return Err(format!("{} is named {}, not {expected}", fields, put.name));
-        }
-        cx.evidence(&format!(
-            "{} put {fields}: {} (writer {})",
-            self.node, put.name, put.writer
-        ));
-        Ok(put)
-    }
-
-    /// The notes' merged state here (frontier, value); `None` while no path
-    /// answered and nothing is held yet (an error that says retry).
-    fn state(&mut self, cx: &mut Cx<'_>) -> StepResult<Option<(Value, Value)>> {
-        match self.call(cx, &format!("get {NOTES}"))? {
-            Ok(ok) => Ok(Some((
-                ok["state"]["at"].clone(),
-                ok["state"]["value"].clone(),
-            ))),
-            Err(e) if e["retry"] == true => Ok(None),
-            Err(e) => Err(format!(
-                "{}> get {NOTES}: {} (next: {})",
-                self.node, e["message"], e["next_step"]
-            )),
-        }
-    }
-
-    /// Version `v` as this device reads it by its exact name.
-    fn version(&mut self, cx: &mut Cx<'_>, v: &Put) -> StepResult<Value> {
-        let mut ok = self.ok(cx, &format!("get {}", v.name))?;
-        let got = ok["version"].take();
-        if got["id"]["writer"] != v.writer.as_str()
-            || got["id"]["seq"] != v.seq
-            || name(got["collection"].as_str().unwrap_or_default())? != name(NOTES)?
-            || name(got["name"].as_str().unwrap_or_default())? != name(&v.name)?
-        {
-            return Err(format!(
-                "{} reads {} as {got}, not ({}, {})",
-                self.node, v.name, v.writer, v.seq
-            ));
-        }
-        Ok(got)
-    }
-
-    fn tail(&self) -> String {
-        let text = fs::read_to_string(&self.log).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().collect();
-        let from = lines.len().saturating_sub(30);
-        format!(
-            "\n    ── tail of {} ndn-data log ──\n    | {}",
-            self.node,
-            lines[from..].join("\n    | ")
-        )
-    }
-}
-
-impl Drop for Host {
-    fn drop(&mut self) {
-        let _ = writeln!(self.stdin, "quit");
-        let _ = self.stdin.flush();
-    }
-}
-
-/// A version a host put.
-#[derive(Clone, Debug)]
-struct Put {
-    writer: String,
-    seq: u64,
-    name: String,
-}
-
-/// Whether frontier `at` (`[{writer, seq}]`) includes version `v`.
-fn includes(at: &Value, v: &Put) -> bool {
-    at.as_array().is_some_and(|a| {
-        a.iter().any(|e| {
-            e["writer"] == v.writer.as_str() && e["seq"].as_u64().is_some_and(|s| s >= v.seq)
-        })
-    })
-}
-
-/// The KeyLocator `ndn-peek -m` prints for `name` fetched through `node`'s
-/// daemon, which validates it (a non-local face) against the trust context
-/// before delivering it.
-fn key_locator(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<String> {
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-peek")
-        .args(["--face-socket", &sock, "-m", name])
-        .timeout(Duration::from_secs(15));
-    let out = cx.exec(op);
-    if !out.success() {
-        return Err(format!(
-            "ndn-peek of {name} at {node}: {}: {}",
-            out.status_text(),
-            out.stderr.trim()
-        ));
-    }
-    out.stdout
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("key:").map(|k| k.trim().to_owned()))
-        .ok_or_else(|| format!("ndn-peek -m of {name} shows no KeyLocator: {}", out.stdout))
-}
-
-/// `name` fetched through `node`'s daemon gets no Data (a short lifetime:
-/// nothing answers across a cut).
-fn unanswered(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-peek")
-        .args(["--face-socket", &sock, "--lifetime", "1500", "-m", name])
-        .timeout(Duration::from_secs(10));
-    let out = cx.exec(op);
-    if out.timed_out {
-        return Err(format!("ndn-peek of {name} at {node} hung"));
-    }
-    if out.success() {
-        return Err(format!("{name} was delivered at {node} across the cut"));
-    }
-    Ok(())
-}
-
-/// The faces `node`'s RIB routes exactly `prefix` to, with each route's
-/// origin (harness inspection: `ndn-ctl route rib-list`).
-fn rib(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<Vec<(u64, String)>> {
-    let want = name(prefix)?;
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-ctl")
-        .args(["--socket", &sock, "route", "rib-list"]);
-    let out = cx.exec(op);
-    if !out.success() {
-        return Err(format!("route rib-list on {node}: {}", out.status_text()));
-    }
-    // `<prefix>  <face>  <origin>  <cost>  <flags>[  expiry=…]`
-    Ok(out
-        .stdout
-        .lines()
-        .filter_map(|l| {
-            let w: Vec<&str> = l.split_whitespace().collect();
-            match w.as_slice() {
-                [p, face, origin, ..] if name(p).ok().as_ref() == Some(&want) => {
-                    Some((face.parse().ok()?, (*origin).to_owned()))
-                }
-                _ => None,
-            }
-        })
-        .collect())
-}
-
-/// The strategy `node` runs at exactly `prefix`, if one is set there
-/// (harness inspection: `ndn-ctl strategy list`).
-fn strategy_at(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<Option<String>> {
-    let want = name(prefix)?;
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-ctl")
-        .args(["--socket", &sock, "strategy", "list"]);
-    let out = cx.exec(op);
-    if !out.success() {
-        return Err(format!("strategy list on {node}: {}", out.status_text()));
-    }
-    // `<prefix>  <strategy>`
-    Ok(out.stdout.lines().find_map(|l| {
-        let w: Vec<&str> = l.split_whitespace().collect();
-        match w.as_slice() {
-            [p, s] if name(p).ok().as_ref() == Some(&want) => Some((*s).to_owned()),
-            _ => None,
-        }
-    }))
-}
-
-/// `node` routes `GROUP` over the face it routes `peer` (the other device's
-/// name) to, as the link library installs both for the link to it, and
-/// runs `GROUP` with the multicast strategy. The face's routes, as found.
-fn carries_group(cx: &mut Cx<'_>, node: &str, peer: &str) -> StepResult<Option<String>> {
-    let to_peer = rib(cx, node, peer)?;
-    let group = rib(cx, node, GROUP)?;
-    let linked = to_peer
-        .iter()
-        .find(|(face, origin)| group.contains(&(*face, origin.clone())));
-    let strategy = strategy_at(cx, node, GROUP)?;
-    Ok(match (linked, strategy) {
-        (Some((face, origin)), Some(s)) if s.contains("multicast") => Some(format!(
-            "{node}: {peer} and {GROUP} → face {face} ({origin}); {GROUP} runs {s}"
-        )),
-        _ => None,
-    })
 }
 
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
@@ -509,7 +130,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     &format!("{node} carries {GROUP} over its link to {peer}"),
                     SHORT,
                     |cx| {
-                        found = carries_group(cx, node, peer)?;
+                        found = carries_group(cx, node, peer, GROUP)?;
                         Ok(found.is_some())
                     },
                 )?;
@@ -555,7 +176,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "the laptop shares the note collection (owner-signed members record) and writes text=day 1",
         |cx| {
             laptop.ok(cx, &format!("share {NOTES}"))?;
-            laptop.put(cx, "text=\"day 1\"")
+            laptop.put(cx, NOTES, "text=\"day 1\"")
         },
     )?;
     sc.step(
@@ -564,7 +185,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             phone.ok(cx, &format!("watch {NOTES}"))?;
             wait_for(cx, "the phone holds day 1", SHORT, |cx| {
                 Ok(phone
-                    .state(cx)?
+                    .state(cx, NOTES)?
                     .is_some_and(|(at, value)| includes(&at, &day1) && value["text"] == "day 1"))
             })?;
             cx.evidence("the phone's state includes day 1, text = \"day 1\"");
@@ -595,18 +216,18 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "apart: the laptop writes text=on the plane; the phone writes tags=trip, then text=in \
          the taxi; each holds only its own",
         |cx| {
-            let plane = laptop.put(cx, "text=\"on the plane\"")?;
-            let trip = phone.put(cx, "tags=trip")?;
-            let taxi = phone.put(cx, "text=\"in the taxi\"")?;
+            let plane = laptop.put(cx, NOTES, "text=\"on the plane\"")?;
+            let trip = phone.put(cx, NOTES, "tags=trip")?;
+            let taxi = phone.put(cx, NOTES, "text=\"in the taxi\"")?;
             let (at, value) = laptop
-                .state(cx)?
+                .state(cx, NOTES)?
                 .ok_or("the laptop holds no state of its own notes")?;
             if !includes(&at, &plane) || includes(&at, &trip) || includes(&at, &taxi) {
                 return Err(format!("the laptop's state while apart is at {at}"));
             }
             cx.evidence(&format!("laptop apart: at {at}, value {value}"));
             let (at, value) = phone
-                .state(cx)?
+                .state(cx, NOTES)?
                 .ok_or("the phone holds no state of the notes")?;
             if !includes(&at, &trip) || !includes(&at, &taxi) || includes(&at, &plane) {
                 return Err(format!("the phone's state while apart is at {at}"));
@@ -634,7 +255,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let all = [&day1, &plane, &trip, &taxi];
             let mut last = (Value::Null, Value::Null);
             wait_for(cx, "laptop and phone at one state", CONVERGE, |cx| {
-                let (Some(l), Some(p)) = (laptop.state(cx)?, phone.state(cx)?) else {
+                let (Some(l), Some(p)) = (laptop.state(cx, NOTES)?, phone.state(cx, NOTES)?) else {
                     return Ok(false);
                 };
                 let done = all.iter().all(|v| includes(&l.0, v)) && l == p;
@@ -664,10 +285,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     .and_then(|a| a.iter().find(|e| e["writer"] == writer))
                     .and_then(|e| e["seq"].as_u64())
             };
-            let read_day1 = phone.version(cx, &day1)?;
-            let read_plane = phone.version(cx, &plane)?;
-            let read_trip = laptop.version(cx, &trip)?;
-            let read_taxi = laptop.version(cx, &taxi)?;
+            let read_day1 = phone.version(cx, NOTES, &day1)?;
+            let read_plane = phone.version(cx, NOTES, &plane)?;
+            let read_trip = laptop.version(cx, NOTES, &trip)?;
+            let read_taxi = laptop.version(cx, NOTES, &taxi)?;
             cx.evidence(&format!("phone reads {}: {read_day1}", day1.name));
             for (label, v) in [
                 ("on the plane", &read_plane),

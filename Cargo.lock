@@ -3132,8 +3132,10 @@ name = "ndn-e2e"
 version = "0.1.0"
 dependencies = [
  "bip39",
+ "bytes",
  "ndn-cert",
  "ndn-config",
+ "ndn-data",
  "ndn-ipc",
  "ndn-namespace",
  "ndn-packet",
@@ -3847,6 +3849,7 @@ dependencies = [
  "blake3",
  "bytes",
  "cbc",
+ "curve25519-dalek",
  "dashmap 6.2.1",
  "ed25519-dalek",
  "futures",
