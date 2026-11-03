@@ -340,13 +340,17 @@ const HOLDER: &str = "ndn-repo";
 
 impl Holder {
     /// Start `ndn-repo hold` for `device` on `node`'s daemon, holding for
-    /// `hold_for`; ready once it says so. The process is the node's
-    /// producer: stopped with it, its log shown when a step fails.
+    /// `hold_for`; ready once it says so. `in_namespace` passes
+    /// `--in-namespace`: the operator accepts that a holder enrolled in a
+    /// namespace it holds for reads what that namespace's readers read and
+    /// is an owner device. The process is the node's producer: stopped with
+    /// it, its log shown when a step fails.
     pub fn start(
         cx: &mut Cx<'_>,
         node: &str,
         device: &str,
         hold_for: &[&str],
+        in_namespace: bool,
     ) -> StepResult<Holder> {
         let (sock, pib, store, log) = {
             let nd = cx.w.node(node);
@@ -374,6 +378,9 @@ impl Holder {
         for ns in hold_for {
             args.push("--hold-for".to_owned());
             args.push((*ns).to_owned());
+        }
+        if in_namespace {
+            args.push("--in-namespace".to_owned());
         }
         cx.note(&format!("$ ndn-repo {} &", args.join(" ")));
         let stderr = fs::OpenOptions::new()

@@ -13,34 +13,39 @@
 //!
 //! home and phone host their data layer with `ndn-data` (see
 //! [`super::data_host`]); repo and vault each run `ndn-repo hold
-//! --hold-for /ph`, a device of /ph that holds the namespace's data for
-//! custody, keeping what it holds for others as erasure stripes
+//! --hold-for /ph --in-namespace`, a device of /ph that holds the
+//! namespace's data for custody (holding for its own namespace, so the
+//! operator accepts that it reads what /ph's readers read and is an owner
+//! device), keeping what it holds for others as erasure stripes
 //! (`<store>/held/<i>`, 2 of 3 by default) beside its own log
 //! (`<store>/own`).
 //!
 //! Proves: the phone shares a log collection sealed to /ph and puts a
 //! 1.5 MB photo, which travels in pieces (home's watch sees it as large,
 //! by its size), and a caption. Asked to hold the collection (two copies,
-//! 30 days), the repo and the vault each sign a lease covering both, and
-//! the phone's audit of each (random pieces, fresh nonces) finds it kept;
-//! nothing is unkept. The phone releases the photo's pieces and, with
-//! every forwarder's cached copies erased, still reads the photo (length
-//! and SHA-256 equal the file's) from the holders. The repo loses one
-//! stripe (stopped, one stripe deleted, started): the next audit still
-//! finds its lease kept. Then the phone releases the pieces its read
-//! fetched back, every cache under /ph is erased, the vault goes offline
-//! (stopped, its stripes kept) and the repo loses everything it held
-//! (every stripe): no device in reach has the photo, so the phone's next
-//! `hold` reports the repo's lease broken (signed missing, or unanswered)
-//! and the vault's unanswered (no evidence, no verdict), no lease audited
-//! kept holds the photo, and the custody names it unkept. The vault comes
-//! back: asked again, the repo fetches the photo back from the vault, the
-//! only copy left, both leases are audited kept, nothing is unkept, and
-//! the phone reads the photo. The phone prunes the photo: the phone and
-//! home answer `get` of it with a final error naming the prune (home's
-//! watch reports it pruned), the caption still reads, and the phone's
-//! audit of both leases, which no longer count the photo, finds nothing
-//! broken.
+//! 30 days, holders the repo and the vault, named in the hold record), the
+//! repo and the vault each sign a lease covering both, and the phone's
+//! audit of each (random pieces, fresh nonces) finds it kept; nothing is
+//! unkept. The phone releases the photo's pieces — release asks each named
+//! holder for a fresh proof over every piece of the photo while the phone
+//! serves none of them, and drops them once both prove — and, with every
+//! forwarder's cached copies erased, still reads the photo (length and
+//! SHA-256 equal the file's) from the holders. The repo loses one stripe
+//! (stopped, one stripe deleted, started): the next audit still finds its
+//! lease kept. Then the phone releases the pieces its read fetched back
+//! (both holders again prove every piece), every cache under /ph is
+//! erased, the vault goes offline (stopped, its stripes kept) and the repo
+//! loses everything it held (every stripe): no device in reach has the
+//! photo, so the phone's next `hold` reports the repo's lease broken
+//! (signed missing, or unanswered) and the vault's unanswered (no
+//! evidence, no verdict), no lease audited kept holds the photo, and the
+//! custody names it unkept. The vault comes back: asked again, the repo
+//! fetches the photo back from the vault, the only copy left, both leases
+//! are audited kept, nothing is unkept, and the phone reads the photo. The
+//! phone prunes the photo: the phone and home answer `get` of it with a
+//! final error naming the prune (home's watch reports it pruned), the
+//! caption still reads, and the phone's audit of both leases, which no
+//! longer count the photo, finds nothing broken.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -80,13 +85,13 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `hold` of the photos at `host` (two copies, until `until`): the custody,
-/// or the error.
+/// `hold` of the photos at `host` (two copies, until `until`, held by the
+/// repo and the vault): the custody, or the error.
 fn hold(cx: &mut Cx<'_>, host: &mut Host, until: u64) -> StepResult<Result<Value, Value>> {
     Ok(host
         .call_within(
             cx,
-            &format!("hold {PHOTOS} copies={COPIES} until={until}"),
+            &format!("hold {PHOTOS} copies={COPIES} until={until} holders={REPO},{VAULT}"),
             CONVERGE,
         )?
         .map(|mut ok| ok["custody"].take()))
@@ -138,7 +143,8 @@ fn erase_cs(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<String> {
     Ok(out.stdout.trim().to_owned())
 }
 
-/// The phone's `release` of `v`: it must drop at least the photo's chunks.
+/// The phone's `release` of `v`: once both named holders prove every piece,
+/// it must drop at least the photo's chunks.
 fn released(cx: &mut Cx<'_>, phone: &mut Host, v: &Put, len: usize) -> StepResult<()> {
     let r = phone.ok(cx, &format!("release {}", v.name))?;
     let least = (len as u64).div_ceil(CHUNK);
@@ -152,8 +158,8 @@ fn released(cx: &mut Cx<'_>, phone: &mut Host, v: &Put, len: usize) -> StepResul
         ));
     }
     cx.evidence(&format!(
-        "phone released {} version(s), {} pieces, {} octets",
-        r["versions"], r["pieces"], r["bytes"]
+        "phone released {} version(s), {} pieces, {} octets; kept {}",
+        r["versions"], r["pieces"], r["bytes"], r["kept"]
     ));
     Ok(())
 }
@@ -161,7 +167,7 @@ fn released(cx: &mut Cx<'_>, phone: &mut Host, v: &Put, len: usize) -> StepResul
 /// The stopped `holder` started again on its own store: it must sign with
 /// the key it had.
 fn restarted(cx: &mut Cx<'_>, holder: &Holder) -> StepResult<Holder> {
-    let again = Holder::start(cx, &holder.node, &holder.device, &[NS])?;
+    let again = Holder::start(cx, &holder.node, &holder.device, &[NS], true)?;
     if again.writer != holder.writer {
         return Err(format!(
             "{} restarted as {}, not {}",
@@ -410,14 +416,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         .unwrap_or(0)
         + HOLD_DAYS * 24 * 3600 * 1000;
     let (mut repo, mut vault) = sc.step(
-        "start the holders (ndn-repo hold for /ph) on the repo and the vault; the phone asks \
-         for two copies for 30 days: a lease from each covering both versions, each audited \
-         kept, nothing unkept",
+        "start the holders (ndn-repo hold for /ph, in its namespace) on the repo and the vault; \
+         the phone asks them by name for two copies for 30 days: a lease from each covering \
+         both versions, each audited kept, nothing unkept",
         |cx| {
             cx.concept("holder (ndn-repo hold)");
             cx.concept("custody: hold, lease, audit");
-            let repo = Holder::start(cx, "repo", REPO, &[NS])?;
-            let vault = Holder::start(cx, "vault", VAULT, &[NS])?;
+            let repo = Holder::start(cx, "repo", REPO, &[NS], true)?;
+            let vault = Holder::start(cx, "vault", VAULT, &[NS], true)?;
             for (h, device) in [(&repo, REPO), (&vault, VAULT)] {
                 if !h.writer.starts_with(&format!("{device}/KEY/")) {
                     return Err(format!(
@@ -475,8 +481,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "the phone releases the photo's pieces; with every forwarder's cached copies erased it \
-         still reads the photo from the holders, length and SHA-256 the file's",
+        "the phone releases the photo's pieces once both named holders prove, to a fresh audit \
+         over every piece while the phone serves none, that they keep them; with every \
+         forwarder's cached copies erased it still reads the photo from the holders, length \
+         and SHA-256 the file's",
         |cx| {
             released(cx, &mut phone, &photo, len)?;
             for node in ["phone", "home", "repo", "vault"] {
@@ -519,11 +527,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     (repo, vault) = sc.step(
-        "the phone releases the pieces its read fetched back and every cache under /ph is \
-         erased; the vault goes offline (stopped, its stripes kept) and the repo loses what it \
-         held (stopped, every stripe deleted, started): the phone's hold reports the repo's \
-         lease broken by the audit and the vault's unanswered, no lease audited kept holds the \
-         photo, and the custody names it unkept",
+        "the phone releases the pieces its read fetched back (both holders again prove every \
+         piece) and every cache under /ph is erased; the vault goes offline (stopped, its \
+         stripes kept) and the repo loses what it held (stopped, every stripe deleted, \
+         started): the phone's hold reports the repo's lease broken by the audit and the \
+         vault's unanswered, no lease audited kept holds the photo, and the custody names it \
+         unkept",
         |cx| {
             released(cx, &mut phone, &photo, len)?;
             vault.stop(cx);
