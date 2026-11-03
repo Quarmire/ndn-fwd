@@ -17,10 +17,12 @@
 //! device's prefix) and a second one for State Vector Sync. A forwarder
 //! client's one reader splits its management replies off its data, so a
 //! prefix the layer registers while its receive loops run is answered to the
-//! registration, not to them. The forwarder must route the namespace's
-//! sync group `<ns>/32=sync` toward the other devices with the `multicast`
-//! strategy (this connection's registration of the group otherwise shadows
-//! any default route), and route the other devices' prefixes to them.
+//! registration, not to them. The namespace's sync group `<ns>/32=sync`
+//! needs nothing set up: a daemon holding the namespace's trust context
+//! runs it with the `multicast` strategy and routes it over each link to a
+//! device of the namespace (data-layer spec §12), beside this connection's
+//! registration of it; the other devices' prefixes are routed to them as
+//! those links route them.
 //!
 //! Verbs (one per line; values with spaces in double quotes, `\"` and `\\`
 //! escaped inside them):

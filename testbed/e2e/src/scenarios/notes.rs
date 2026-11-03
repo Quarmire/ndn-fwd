@@ -2,12 +2,15 @@
 //! meet again — the data layer (`ndn_data::Device`) on real daemons.
 //!
 //! Topology, on the harness's `lo`: laptop (10.200.0.1, the root device of
-//! /nt with its CA) ↔ phone (.2, a member enrolled by invite), one UDP link.
-//! Routes: what the link between them gives each, the laptop sends
-//! `/nt/member/phone` to the phone and the phone sends `/nt` (the laptop's
-//! device prefix, its CA) to the laptop. Nothing routes the namespace's sync
-//! group `/nt/32=sync` or sets its strategy: each daemon carries it to the
-//! other device over those routes by itself (data-layer spec §12).
+//! /nt as /nt/admin/laptop, with its CA) ↔ phone (.2, a member enrolled by
+//! invite). The phone enrolls over a UDP face that routes `/nt` (the CA,
+//! the namespace's certificates) to the laptop, and names the laptop as its
+//! QUIC peer (`[[peer]] device = "/nt/admin/laptop"`): once enrolled it
+//! links to it by itself. The link library routes each device's name to
+//! the other and the namespace's sync group `/nt/32=sync` over that link
+//! while it is up, and the trust-context library runs the group with the
+//! multicast strategy on each daemon, since each holds /nt: nothing in
+//! either config names the group or its strategy (data-layer spec §12).
 //!
 //! Each device runs `ndn-data` (ndn-tools) on its daemon's socket: the
 //! device's data layer with the key `ndn-fwd init`/`enroll` put in the PIB,
@@ -43,12 +46,16 @@ use serde_json::Value;
 use crate::run::Proc;
 use crate::scenarios::*;
 use crate::step::{Abort, Cx, Scenario, StepResult};
-use crate::world::{CaCfg, NodeCfg, addr};
+use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
 
 const NS: &str = "/nt";
 /// The note collection, in the person's namespace.
 const NOTES: &str = "/nt/notes/trip";
 const PHONE: &str = "/nt/member/phone";
+/// The laptop's device name: `ndn-fwd init --device laptop` on /nt.
+const LAPTOP: &str = "/nt/admin/laptop";
+/// The namespace's sync group (data-layer spec §12).
+const GROUP: &str = "/nt/32=sync";
 /// The nftables table that cuts laptop–phone.
 const CUT_TABLE: &str = "ndn_e2e_notes_cut";
 /// SVS's periodic interval for the hosts (default 30 s): how soon two
@@ -361,13 +368,81 @@ fn unanswered(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
     Ok(())
 }
 
+/// The faces `node`'s RIB routes exactly `prefix` to, with each route's
+/// origin (harness inspection: `ndn-ctl route rib-list`).
+fn rib(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<Vec<(u64, String)>> {
+    let want = name(prefix)?;
+    let sock = cx.w.node(node).sock().display().to_string();
+    let op = cx
+        .tool("ndn-ctl")
+        .args(["--socket", &sock, "route", "rib-list"]);
+    let out = cx.exec(op);
+    if !out.success() {
+        return Err(format!("route rib-list on {node}: {}", out.status_text()));
+    }
+    // `<prefix>  <face>  <origin>  <cost>  <flags>[  expiry=…]`
+    Ok(out
+        .stdout
+        .lines()
+        .filter_map(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            match w.as_slice() {
+                [p, face, origin, ..] if name(p).ok().as_ref() == Some(&want) => {
+                    Some((face.parse().ok()?, (*origin).to_owned()))
+                }
+                _ => None,
+            }
+        })
+        .collect())
+}
+
+/// The strategy `node` runs at exactly `prefix`, if one is set there
+/// (harness inspection: `ndn-ctl strategy list`).
+fn strategy_at(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<Option<String>> {
+    let want = name(prefix)?;
+    let sock = cx.w.node(node).sock().display().to_string();
+    let op = cx
+        .tool("ndn-ctl")
+        .args(["--socket", &sock, "strategy", "list"]);
+    let out = cx.exec(op);
+    if !out.success() {
+        return Err(format!("strategy list on {node}: {}", out.status_text()));
+    }
+    // `<prefix>  <strategy>`
+    Ok(out.stdout.lines().find_map(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        match w.as_slice() {
+            [p, s] if name(p).ok().as_ref() == Some(&want) => Some((*s).to_owned()),
+            _ => None,
+        }
+    }))
+}
+
+/// `node` routes `GROUP` over the face it routes `peer` (the other device's
+/// name) to, as the link library installs both for the link to it, and
+/// runs `GROUP` with the multicast strategy. The face's routes, as found.
+fn carries_group(cx: &mut Cx<'_>, node: &str, peer: &str) -> StepResult<Option<String>> {
+    let to_peer = rib(cx, node, peer)?;
+    let group = rib(cx, node, GROUP)?;
+    let linked = to_peer
+        .iter()
+        .find(|(face, origin)| group.contains(&(*face, origin.clone())));
+    let strategy = strategy_at(cx, node, GROUP)?;
+    Ok(match (linked, strategy) {
+        (Some((face, origin)), Some(s)) if s.contains("multicast") => Some(format!(
+            "{node}: {peer} and {GROUP} → face {face} ({origin}); {GROUP} runs {s}"
+        )),
+        _ => None,
+    })
+}
+
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     sc.world.add(
         "laptop",
         1,
         NodeCfg {
             links: vec![link("phone", 2)],
-            routes: vec![route(PHONE, "phone")],
+            quic_listen: true,
             ..Default::default()
         },
     );
@@ -377,12 +452,25 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         NodeCfg {
             links: vec![link("laptop", 1)],
             routes: vec![route(NS, "laptop")],
+            peers: vec![PeerCfg {
+                device: Some(LAPTOP.into()),
+                endpoint: Some(addr(1)),
+                ..Default::default()
+            }],
+            quic_dial_only: true,
             ..Default::default()
         },
     );
 
     let root = sc.step("init the laptop as the root device of /nt", |cx| {
-        init_root(cx, "laptop", NS, "laptop")
+        let root = init_root(cx, "laptop", NS, "laptop")?;
+        if root.identity != LAPTOP {
+            return Err(format!(
+                "the laptop is {}, not {LAPTOP} (the phone's peer entry)",
+                root.identity
+            ));
+        }
+        Ok(root)
     })?;
     sc.step("start the laptop's daemon with its CA", |cx| {
         cx.w.node_mut("laptop").cfg.identity = Some(root.identity.clone());
@@ -397,7 +485,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         mint(cx, "laptop", NS, &root.fp, 1, Some("1h"))
     })?;
     let phone_cert = sc.step(
-        "start the phone's daemon; the phone enrolls as /nt/member/phone over its link",
+        "start the phone's daemon; the phone enrolls as /nt/member/phone over its UDP face",
         |cx| {
             cx.start("phone")?;
             let c = enroll(cx, "phone", &invites[0], "phone", false, None)?;
@@ -405,6 +493,28 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 return Err(format!("unexpected certificate {c}"));
             }
             Ok(c)
+        },
+    )?;
+    sc.step(
+        "enrolled, the phone links to the laptop over QUIC: each daemon routes the other \
+         device and /nt/32=sync over the link and runs the group with multicast, none of it \
+         configured",
+        |cx| {
+            cx.concept("sync group carried by the trust-context and link libraries");
+            for (node, peer) in [("laptop", PHONE), ("phone", LAPTOP)] {
+                let mut found = None;
+                wait_for(
+                    cx,
+                    &format!("{node} carries {GROUP} over its link to {peer}"),
+                    SHORT,
+                    |cx| {
+                        found = carries_group(cx, node, peer)?;
+                        Ok(found.is_some())
+                    },
+                )?;
+                cx.evidence(&found.unwrap_or_default());
+            }
+            Ok(())
         },
     )?;
 
