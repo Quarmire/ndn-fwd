@@ -450,8 +450,8 @@ impl Holder {
     }
 
     /// Stop the holder (SIGTERM, then SIGKILL), leaving its daemon and its
-    /// store.
-    pub fn stop(self, cx: &mut Cx<'_>) {
+    /// store; [`Holder::start`] with its node and device starts it again.
+    pub fn stop(&self, cx: &mut Cx<'_>) {
         let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut cx.w.producers)
             .into_iter()
             .partition(|(n, p)| *n == self.node && p.label == HOLDER);

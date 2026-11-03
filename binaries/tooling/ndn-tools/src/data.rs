@@ -63,7 +63,9 @@
 //!   to keep the collection, audit every live lease and repair: the
 //!   custody, each live lease (holder key, name, what it holds, until when,
 //!   this device's last audit) and the leases this call found broken or
-//!   unanswered.
+//!   unanswered, and the versions asked for that no kept lease holds and
+//!   this device does not hold whole (`unkept`: lost unless a copy turns
+//!   up).
 //! - `prune <collection or version> upto=<writer key>:<seq>[,...]`: drop
 //!   this device's own versions up to that point.
 //! - `release <collection or version>`: drop this device's copies of the
@@ -682,6 +684,7 @@ fn custody(c: &Custody) -> Value {
         "until_ms": c.until.0,
         "leases": c.leases.iter().map(lease).collect::<Vec<_>>(),
         "broken": c.broken.iter().map(lease).collect::<Vec<_>>(),
+        "unkept": c.unkept.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
     })
 }
 
