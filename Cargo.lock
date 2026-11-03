@@ -3079,6 +3079,7 @@ dependencies = [
  "bytes",
  "futures",
  "futures-core",
+ "getrandom 0.2.17",
  "hkdf 0.13.0",
  "ndn-app",
  "ndn-foundation-types",
@@ -3144,6 +3145,7 @@ dependencies = [
  "ndn-trust-envelope",
  "ndn-tui",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
 ]
 
@@ -4000,6 +4002,7 @@ dependencies = [
  "ndn-transport",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tokio-util",
  "tracing",

@@ -3,12 +3,13 @@
 //! socket, with the key `ndn-fwd init`/`enroll` put in the PIB, verifying
 //! with the PIB's trust contexts, driven line by line over stdin and
 //! answering one JSON object per line — standing in for the host an app
-//! runs in, not for anything the person does. Beside it, the harness's
-//! inspection of what the daemons route and fetch for it.
+//! runs in, not for anything the person does; and `ndn-repo hold`, a
+//! device that holds a namespace's data for custody. Beside them, the
+//! harness's inspection of what the daemons route and fetch for them.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
@@ -193,11 +194,22 @@ impl Host {
 
     /// Send one verb line: its `ok` object, or its `error` object.
     pub fn call(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<Result<Value, Value>> {
+        self.call_within(cx, line, ANSWER)
+    }
+
+    /// [`call`](Self::call) for a verb that may take longer than one
+    /// answer (a `hold` waits for holders to fetch what they hold).
+    pub fn call_within(
+        &mut self,
+        cx: &mut Cx<'_>,
+        line: &str,
+        within: Duration,
+    ) -> StepResult<Result<Value, Value>> {
         cx.note(&format!("{}> {line}", self.node));
         writeln!(self.stdin, "{line}")
             .and_then(|()| self.stdin.flush())
             .map_err(|e| format!("{}: ndn-data stdin: {e}{}", self.node, self.tail()))?;
-        let answer = self.next(cx, line, ANSWER)?;
+        let answer = self.next(cx, line, within)?;
         let Value::Object(mut fields) = answer else {
             return Err(format!(
                 "{}> {line}: not a JSON object: {answer}",
@@ -309,6 +321,177 @@ impl Drop for Host {
         let _ = writeln!(self.stdin, "quit");
         let _ = self.stdin.flush();
     }
+}
+
+/// One device's holder: `ndn-repo hold` on its daemon's socket, holding
+/// for the namespaces it is given, its store a directory of the node (its
+/// own log under `own/`, what it holds for others as erasure stripes under
+/// `held/<i>/`). Its stdin stays open while it runs (end of input stops
+/// it).
+pub struct Holder {
+    pub node: String,
+    pub device: String,
+    pub writer: String,
+    pub store: PathBuf,
+}
+
+/// The holder's label among a node's producers.
+const HOLDER: &str = "ndn-repo";
+
+impl Holder {
+    /// Start `ndn-repo hold` for `device` on `node`'s daemon, holding for
+    /// `hold_for`; ready once it says so. The process is the node's
+    /// producer: stopped with it, its log shown when a step fails.
+    pub fn start(
+        cx: &mut Cx<'_>,
+        node: &str,
+        device: &str,
+        hold_for: &[&str],
+    ) -> StepResult<Holder> {
+        let (sock, pib, store, log) = {
+            let nd = cx.w.node(node);
+            (
+                nd.sock(),
+                nd.pib(),
+                nd.dir.join("repo"),
+                nd.dir.join("ndn-repo.log"),
+            )
+        };
+        let program = cx.w.bins.dir.join("ndn-repo");
+        let mut args = vec![
+            "hold".to_owned(),
+            "--device".to_owned(),
+            device.to_owned(),
+            "--pib".to_owned(),
+            pib.display().to_string(),
+            "--socket".to_owned(),
+            sock.display().to_string(),
+            "--store".to_owned(),
+            store.display().to_string(),
+            "--sync-interval-ms".to_owned(),
+            SYNC_INTERVAL_MS.to_string(),
+        ];
+        for ns in hold_for {
+            args.push("--hold-for".to_owned());
+            args.push((*ns).to_owned());
+        }
+        cx.note(&format!("$ ndn-repo {} &", args.join(" ")));
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .map_err(|e| format!("{}: {e}", log.display()))?;
+        // stdin stays a pipe, held open by the child handle until it stops.
+        let mut child = Command::new(&program)
+            .args(&args)
+            .env(
+                "RUST_LOG",
+                std::env::var("NDN_E2E_LOG").unwrap_or_else(|_| "info".into()),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .map_err(|e| format!("{}: {e}", program.display()))?;
+        let stdout = child.stdout.take().ok_or("ndn-repo: no stdout")?;
+        let (tx, lines) = channel();
+        thread::spawn(move || {
+            // Drain every line, so the holder never blocks on a full pipe.
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                let _ = tx.send(line);
+            }
+        });
+        cx.w.producers.push((
+            node.to_owned(),
+            Proc {
+                child,
+                label: HOLDER.into(),
+                log: log.clone(),
+            },
+        ));
+        let tail = || {
+            let text = fs::read_to_string(&log).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            let from = lines.len().saturating_sub(30);
+            format!(
+                "\n    ── tail of {node} ndn-repo log ──\n    | {}",
+                lines[from..].join("\n    | ")
+            )
+        };
+        let line = match lines.recv_timeout(Duration::from_secs(20)) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!("{node}: ndn-repo not ready within 20s{}", tail()));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(format!("{node}: ndn-repo exited{}", tail()));
+            }
+        };
+        cx.note(&format!("{node}< {line}"));
+        let ready: Value = serde_json::from_str(&line)
+            .map_err(|e| format!("{node}: ndn-repo's first line is no JSON ({e}): {line}"))?;
+        let ready = &ready["ready"];
+        if ready["device"] != device {
+            return Err(format!(
+                "{node}: ndn-repo did not start as {device}: {line}"
+            ));
+        }
+        let writer = ready["writer"]
+            .as_str()
+            .ok_or_else(|| format!("{node}: no writer in {line}"))?
+            .to_owned();
+        Ok(Holder {
+            node: node.to_owned(),
+            device: device.to_owned(),
+            writer,
+            store,
+        })
+    }
+
+    /// Stop the holder (SIGTERM, then SIGKILL), leaving its daemon and its
+    /// store.
+    pub fn stop(self, cx: &mut Cx<'_>) {
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut cx.w.producers)
+            .into_iter()
+            .partition(|(n, p)| *n == self.node && p.label == HOLDER);
+        cx.w.producers = rest;
+        drop(mine);
+        cx.note(&format!("{}: ndn-repo stopped", self.node));
+    }
+
+    /// The erasure stripes of what it holds for others, in order.
+    pub fn stripes(&self) -> StepResult<Vec<PathBuf>> {
+        let held = self.store.join("held");
+        let mut stripes = fs::read_dir(&held)
+            .map_err(|e| format!("{}: {e}", held.display()))?
+            .map(|e| e.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("{}: {e}", held.display()))?;
+        stripes.sort();
+        Ok(stripes)
+    }
+}
+
+/// The octets of the files under `path` (one file, or a directory's tree).
+pub fn octets(path: &Path) -> u64 {
+    match fs::metadata(path) {
+        Ok(m) if m.is_dir() => fs::read_dir(path)
+            .map(|d| d.flatten().map(|e| octets(&e.path())).sum())
+            .unwrap_or(0),
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    }
+}
+
+/// Delete `path`, a file or a directory's tree.
+pub fn delete(path: &Path) -> StepResult<()> {
+    let r = if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    r.map_err(|e| format!("delete {}: {e}", path.display()))
 }
 
 /// A version a host put.

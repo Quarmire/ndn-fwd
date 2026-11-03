@@ -50,15 +50,31 @@
 //!   epoch a removed reader cannot open.
 //! - `put <collection> <field>=<value>...`: a version of type
 //!   `/types/note` revision 1, kept forever; an empty value removes the field.
+//!   A value `@<path>` is the bytes of the file at `<path>` (`@@…` is a
+//!   value starting with `@`). A payload larger than a version carries
+//!   inline travels in pieces (log rule only).
 //! - `get <name>`: a collection's merged state (its newest version under
-//!   the log rule), or an exact version or state by its name.
+//!   the log rule), or an exact version or state by its name. A field value
+//!   longer than 256 octets is shown as its length and SHA-256, not its
+//!   bytes.
 //! - `watch <collection or folder>`: from now on, every change as its own
 //!   line.
+//! - `hold <collection> copies=<n> until=<ms since the epoch>`: ask holders
+//!   to keep the collection, audit every live lease and repair: the
+//!   custody, each live lease (holder key, name, what it holds, until when,
+//!   this device's last audit) and the leases this call found broken or
+//!   unanswered.
+//! - `prune <collection or version> upto=<writer key>:<seq>[,...]`: drop
+//!   this device's own versions up to that point.
+//! - `release <collection or version>`: drop this device's copies of the
+//!   pieces of large versions that a live lease it audited as kept covers
+//!   (the host's storage policy): how many versions, pieces and octets.
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
 //! `{"verb":…,"ok":{…}}` or `{"verb":…,"error":{"message","retry","next",
-//! "next_step"}}`; per watched change `{"watch":<collection>,"change":{…}}`.
+//! "next_step"}}` (with `"pruned_by"`, the prune record, when the name was
+//! pruned); per watched change `{"watch":<collection>,"change":{…}}`.
 //! Logs go to stderr.
 
 use std::sync::Arc;
@@ -69,12 +85,14 @@ use bytes::Bytes;
 use clap::Parser;
 use futures::StreamExt;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use ndn_app::{IpcConnection, Node, demux_cert_fetcher};
 use ndn_data::{
-    Age, Audience, Change, Config, Content, DataError, DataLayer, Device, Frontier, Got, Keep,
-    NextStep, Payload, PutOptions, Rule, Share, Transport, TypeId, Version, VersionId,
+    Age, Audience, Audit, Breach, Change, Config, Content, Custody, DataError, DataLayer, Device,
+    Frontier, Got, Hold, Keep, Lease, NextStep, Payload, Prune, PutOptions, Rule, Seq, Share,
+    Timestamp, Transport, TypeId, Version, VersionId, Writer,
 };
 use ndn_ipc::ForwarderClient;
 use ndn_packet::Name;
@@ -229,9 +247,12 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
             let mut content = Content::new();
             for f in fields {
                 let Some((field, value)) = f.split_once('=') else {
-                    return usage("usage: put <collection> <field>=<value>...");
+                    return usage(PUT_USAGE);
                 };
-                content = content.with(field, Bytes::copy_from_slice(value.as_bytes()));
+                match field_value(value).await {
+                    Ok(bytes) => content = content.with(field, bytes),
+                    Err(e) => return Ok(Verb::Usage(format!("{field}: {e}; {PUT_USAGE}"))),
+                }
             }
             let id = layer
                 .put(
@@ -254,7 +275,7 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
                 "name": version.to_string(),
             })))
         }
-        ("put", _) => usage("usage: put <collection> <field>=<value>..."),
+        ("put", _) => usage(PUT_USAGE),
         ("get", [n]) => {
             let n = match name(n) {
                 Ok(n) => n,
@@ -303,7 +324,50 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
             Ok(Verb::Done(json!({"collection": collection.to_string()})))
         }
         ("watch", _) => usage("usage: watch <collection>"),
-        _ => usage("verbs: share, put, get, watch, quit"),
+        ("hold", [collection, options @ ..]) => {
+            let collection = match name(collection) {
+                Ok(c) => c,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let want = match hold_options(options) {
+                Ok(h) => h,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {HOLD_USAGE}"))),
+            };
+            let c = layer.hold(&collection, want).await?;
+            Ok(Verb::Done(json!({"custody": custody(&c)})))
+        }
+        ("hold", _) => usage(HOLD_USAGE),
+        ("prune", [prefix, upto]) => {
+            let prefix = match name(prefix) {
+                Ok(p) => p,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let upto = match upto_frontier(upto) {
+                Ok(f) => f,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {PRUNE_USAGE}"))),
+            };
+            layer.prune(&prefix, &upto).await?;
+            Ok(Verb::Done(json!({
+                "prefix": prefix.to_string(),
+                "upto": frontier(&upto),
+            })))
+        }
+        ("prune", _) => usage(PRUNE_USAGE),
+        ("release", [n]) => {
+            let n = match name(n) {
+                Ok(n) => n,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let r = layer.release(&n).await?;
+            Ok(Verb::Done(json!({
+                "name": n.to_string(),
+                "versions": r.versions,
+                "pieces": r.pieces,
+                "bytes": r.bytes,
+            })))
+        }
+        ("release", _) => usage("usage: release <collection or version>"),
+        _ => usage("verbs: share, put, get, watch, hold, prune, release, quit"),
     }
 }
 
@@ -353,6 +417,77 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
         }
     }
     Ok(share)
+}
+
+const PUT_USAGE: &str = "usage: put <collection> <field>=<value>... (a value @<path> is the \
+                         file's bytes, @@... a value starting with @)";
+
+const HOLD_USAGE: &str = "usage: hold <collection> copies=<n> until=<ms since the epoch>";
+
+const PRUNE_USAGE: &str =
+    "usage: prune <collection or version> upto=<writer key>:<seq>[,<writer key>:<seq>...]";
+
+/// A `put` field's value: the text itself, the bytes of the file `@<path>`
+/// names, or (`@@…`) the text after its first `@`.
+async fn field_value(value: &str) -> Result<Bytes, String> {
+    match value.strip_prefix('@') {
+        Some(text) if text.starts_with('@') => Ok(Bytes::copy_from_slice(text.as_bytes())),
+        Some(path) => tokio::fs::read(path)
+            .await
+            .map(Bytes::from)
+            .map_err(|e| format!("read {path:?}: {e}")),
+        None => Ok(Bytes::copy_from_slice(value.as_bytes())),
+    }
+}
+
+/// A `hold` line's options: both `copies=` and `until=` are required.
+fn hold_options(options: &[String]) -> Result<Hold, String> {
+    let (mut copies, mut until) = (None, None);
+    for o in options {
+        match o.split_once('=') {
+            Some(("copies", n)) => {
+                copies = Some(n.parse::<u32>().map_err(|e| format!("copies {n:?}: {e}"))?);
+            }
+            Some(("until", t)) => {
+                until = Some(Timestamp(t.parse::<u64>().map_err(|e| {
+                    format!("until {t:?} is no date in ms since the epoch: {e}")
+                })?));
+            }
+            _ => return Err(format!("{o:?} is not copies= or until=")),
+        }
+    }
+    match (copies, until) {
+        (Some(copies), Some(until)) => Ok(Hold { copies, until }),
+        _ => Err("both copies= and until= are required".into()),
+    }
+}
+
+/// A `prune` line's `upto=<writer key>:<seq>[,...]` as a frontier. A key
+/// name may hold `:`, a seq never does: each item splits at its last `:`.
+fn upto_frontier(word: &str) -> Result<Frontier, String> {
+    let list = word
+        .strip_prefix("upto=")
+        .ok_or_else(|| format!("{word:?} is not upto=<writer key>:<seq>[,...]"))?;
+    let mut upto = Frontier::new();
+    for item in list.split(',').filter(|s| !s.is_empty()) {
+        let (key, seq) = item
+            .rsplit_once(':')
+            .ok_or_else(|| format!("{item:?} is not <writer key>:<seq>"))?;
+        let key = key
+            .parse::<Name>()
+            .map_err(|e| format!("{key:?} is no name: {e}"))?;
+        let seq = seq
+            .parse::<u64>()
+            .map_err(|e| format!("seq {seq:?}: {e}"))?;
+        upto.include(&VersionId {
+            writer: Writer::new(key),
+            seq: Seq(seq),
+        });
+    }
+    if upto.is_empty() {
+        return Err("upto= names no writer".into());
+    }
+    Ok(upto)
 }
 
 /// A line split into words: whitespace separates them, double quotes keep
@@ -408,12 +543,16 @@ fn usage_error(verb: &str, why: &str) -> Value {
 
 fn data_error(e: &DataError) -> Value {
     let next = e.next();
-    json!({
+    let mut v = json!({
         "message": e.to_string(),
         "retry": e.retry(),
         "next": next_token(next),
         "next_step": next_step(next),
-    })
+    });
+    if let DataError::Pruned { by, .. } = e {
+        v["pruned_by"] = prune(by);
+    }
+    v
 }
 
 fn next_token(n: NextStep) -> &'static str {
@@ -425,6 +564,7 @@ fn next_token(n: NextStep) -> &'static str {
         NextStep::EditInstead => "edit-instead",
         NextStep::FixLocal => "fix-local",
         NextStep::FixName => "fix-name",
+        NextStep::HoldFirst => "hold-first",
     }
 }
 
@@ -439,6 +579,10 @@ fn next_step(n: NextStep) -> &'static str {
         NextStep::EditInstead => "remove it with an edit to the collection: it is not yours",
         NextStep::FixLocal => "fix this device: its storage or its keys",
         NextStep::FixName => "ask again with a well-formed name: the message says how",
+        NextStep::HoldFirst => {
+            "ask holders to keep it (hold) and release it once their audit passes: nothing \
+             confirms it is kept anywhere else"
+        }
     }
 }
 
@@ -454,17 +598,29 @@ fn frontier(f: &Frontier) -> Value {
     )
 }
 
-/// Field values as text when they are UTF-8, else as `{"hex": …}`.
+/// Values longer than this are shown by length and digest, not bytes.
+const SHOWN_MAX: usize = 256;
+
+/// Field values as text when they are UTF-8, else as `{"hex": …}`; longer
+/// than [`SHOWN_MAX`] octets, as `{"len": …, "sha256": …}`.
 fn content(c: &Content) -> Value {
     let mut m = Map::new();
     for (field, value) in c.fields() {
-        let v = match std::str::from_utf8(value) {
-            Ok(s) => json!(s),
-            Err(_) => json!({"hex": value.iter().map(|b| format!("{b:02x}")).collect::<String>()}),
+        let v = if value.len() > SHOWN_MAX {
+            json!({"len": value.len(), "sha256": hex(&Sha256::digest(value))})
+        } else {
+            match std::str::from_utf8(value) {
+                Ok(s) => json!(s),
+                Err(_) => json!({"hex": hex(value)}),
+            }
         };
         m.insert(field.to_owned(), v);
     }
     Value::Object(m)
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn version(v: &Version) -> Value {
@@ -483,6 +639,7 @@ fn version(v: &Version) -> Value {
         "payload": match &v.payload {
             Payload::Entry(c) => json!({"entry": content(c)}),
             Payload::Block(cs) => json!({"block": cs.iter().map(content).collect::<Vec<_>>()}),
+            Payload::Large { size } => json!({"large": size}),
         },
     })
 }
@@ -501,9 +658,53 @@ fn change(c: &Change) -> Value {
             "cut_of": cut.of.to_string(),
             "cut_signer": cut.signer.key().to_string(),
         }}),
+        Change::Pruned { id: i, by } => json!({"pruned": {"id": id(i), "by": prune(by)}}),
         Change::Equivocation { first, second } => json!({"equivocation": {
             "first": version(first),
             "second": version(second),
         }}),
     }
+}
+
+fn prune(p: &Prune) -> Value {
+    json!({
+        "id": id(&p.id),
+        "name": p.name.to_string(),
+        "prefix": p.prefix.to_string(),
+        "upto": frontier(&p.upto),
+    })
+}
+
+fn custody(c: &Custody) -> Value {
+    json!({
+        "prefix": c.prefix.to_string(),
+        "copies": c.copies,
+        "until_ms": c.until.0,
+        "leases": c.leases.iter().map(lease).collect::<Vec<_>>(),
+        "broken": c.broken.iter().map(lease).collect::<Vec<_>>(),
+    })
+}
+
+fn lease(l: &Lease) -> Value {
+    json!({
+        "holder": l.holder.key().to_string(),
+        "name": l.name.to_string(),
+        "prefix": l.prefix.to_string(),
+        "holds": frontier(&l.holds),
+        "until_ms": l.until.0,
+        "audit": match &l.audit {
+            Audit::NotAudited => json!("not-audited"),
+            Audit::Kept { pieces } => json!({"kept": {"pieces": pieces}}),
+            Audit::Broken { piece, breach } => json!({"broken": {
+                "piece": piece.to_string(),
+                "breach": match breach {
+                    Breach::Missing => "missing",
+                    Breach::Wrong => "wrong",
+                },
+            }}),
+            Audit::Unanswered { asked, answered } => {
+                json!({"unanswered": {"asked": asked, "answered": answered}})
+            }
+        },
+    })
 }

@@ -1,0 +1,529 @@
+//! photos: a phone's large photo kept safely by a repo the person runs — the
+//! data layer's custody (`hold`, audits, `release`, `prune`) on real
+//! daemons.
+//!
+//! Topology, on the harness's `lo`: home (10.200.0.1, the root device of
+//! /ph as /ph/admin/home, with its CA, listening for QUIC links), phone
+//! (.2) and repo (.3), each a member enrolled by invite over a UDP face
+//! that routes `/ph` to home (the enrollment route notes uses, and no
+//! other), naming home as its QUIC peer: once enrolled each links to it by
+//! itself, and the link library routes each device's name and the sync
+//! group `/ph/32=sync` over its link (data-layer spec §12). No config
+//! routes a collection, a device or the group.
+//!
+//! home and phone host their data layer with `ndn-data` (see
+//! [`super::data_host`]); repo runs `ndn-repo hold --hold-for /ph`, a
+//! device of /ph that holds the namespace's data for custody, keeping what
+//! it holds for others as erasure stripes (`<store>/held/<i>`, 2 of 3 by
+//! default) beside its own log (`<store>/own`).
+//!
+//! Proves: the phone shares a log collection sealed to /ph and puts a
+//! 1.5 MB photo, which travels in pieces (home's watch sees it as large,
+//! by its size), and a caption. Asked to hold the collection (one copy, 30
+//! days), the repo signs a lease covering both, and the phone's audit of it
+//! (random pieces, fresh nonces) finds it kept. The phone releases the
+//! photo's pieces and, with every forwarder's cached copies erased, still
+//! reads the photo (length and SHA-256 equal the file's): the repo served
+//! it. The repo loses one stripe (stopped, one stripe deleted, started):
+//! the next audit still finds it kept. The repo loses everything it held
+//! (every stripe): the next `hold` reports its lease broken by the audit
+//! (signed missing, or unanswered) and repairs it. The phone prunes the
+//! photo: the phone and home answer `get` of it with a final error naming
+//! the prune (home's watch reports it pruned), the caption still reads, and
+//! the phone's audit of the repo's lease, which no longer counts the photo,
+//! finds nothing broken.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use super::data_host::{
+    CONVERGE, Holder, Host, Put, carries_group, delete, includes, name, octets,
+};
+use crate::scenarios::*;
+use crate::step::{Abort, Cx, Scenario, StepResult};
+use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
+
+const NS: &str = "/ph";
+const HOME: &str = "/ph/admin/home";
+const PHONE: &str = "/ph/member/phone";
+const REPO: &str = "/ph/member/repo";
+/// The photo collection: a log, so the photo may travel in pieces.
+const PHOTOS: &str = "/ph/32=data/photos";
+/// The namespace's sync group (data-layer spec §12).
+const GROUP: &str = "/ph/32=sync";
+/// The photo's octets: hundreds of pieces.
+const PHOTO_LEN: usize = 1_500_000;
+/// The data layer's piece size (spec §4.1).
+const CHUNK: u64 = 4096;
+/// How long the phone asks the repo to hold the photos.
+const HOLD_DAYS: u64 = 30;
+
+fn n(s: &str) -> String {
+    format!("{NS}{s}")
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `hold` of the photos at `host` (one copy, until `until`): the custody,
+/// or the error.
+fn hold(cx: &mut Cx<'_>, host: &mut Host, until: u64) -> StepResult<Result<Value, Value>> {
+    Ok(host
+        .call_within(
+            cx,
+            &format!("hold {PHOTOS} copies=1 until={until}"),
+            CONVERGE,
+        )?
+        .map(|mut ok| ok["custody"].take()))
+}
+
+/// The lease of `holder` (a key name) in `list` (`leases` or `broken`).
+fn lease_of<'a>(list: &'a Value, holder: &str) -> Option<&'a Value> {
+    list.as_array()?.iter().find(|l| l["holder"] == holder)
+}
+
+/// A lease as evidence: holder, name, what it holds, until, audit.
+fn shown(l: &Value) -> String {
+    format!(
+        "lease {} by {}: holds {}, until {} ms, audit {}",
+        l["name"].as_str().unwrap_or_default(),
+        l["holder"].as_str().unwrap_or_default(),
+        l["holds"],
+        l["until_ms"],
+        l["audit"]
+    )
+}
+
+/// Erase every copy `node`'s content store caches under `prefix`.
+fn erase_cs(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<String> {
+    let sock = cx.w.node(node).sock().display().to_string();
+    let op = cx
+        .tool("ndn-ctl")
+        .args(["--socket", &sock, "cs", "erase", prefix]);
+    let out = cx.ok(op, "cs erase")?;
+    Ok(out.stdout.trim().to_owned())
+}
+
+/// The photo as `host` reads it by the version's exact name: its length
+/// and SHA-256 must be the file's.
+fn reads_photo(
+    cx: &mut Cx<'_>,
+    host: &mut Host,
+    v: &Put,
+    len: usize,
+    sha256: &str,
+) -> StepResult<()> {
+    let got = host.version(cx, PHOTOS, v)?;
+    let photo = &got["payload"]["entry"]["photo"];
+    if photo["len"] != len || photo["sha256"] != sha256 {
+        return Err(format!(
+            "{} reads {} as {photo}, not {len} octets with SHA-256 {sha256}",
+            host.node, v.name
+        ));
+    }
+    cx.evidence(&format!(
+        "{} reads {}: {len} octets, SHA-256 {sha256} (the file's)",
+        host.node, v.name
+    ));
+    Ok(())
+}
+
+/// `get` of `v` at `host` answers a final error naming a prune that covers
+/// it: `v`'s writer, up to at least its seq.
+fn pruned_at(cx: &mut Cx<'_>, host: &mut Host, v: &Put) -> StepResult<()> {
+    let e = match host.call(cx, &format!("get {}", v.name))? {
+        Ok(ok) => return Err(format!("{} still reads {}: {ok}", host.node, v.name)),
+        Err(e) => e,
+    };
+    if e["retry"] != false || e["next"] != "none" || !includes(&e["pruned_by"]["upto"], v) {
+        return Err(format!(
+            "{}'s get of {} is not a final error naming its prune: {e}",
+            host.node, v.name
+        ));
+    }
+    cx.evidence(&format!(
+        "{} answers get {} with next {}: pruned by {}",
+        host.node, v.name, e["next"], e["pruned_by"]["name"]
+    ));
+    Ok(())
+}
+
+pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
+    sc.world.add(
+        "home",
+        1,
+        NodeCfg {
+            links: vec![link("phone", 2), link("repo", 3)],
+            quic_listen: true,
+            ..Default::default()
+        },
+    );
+    for (node, host) in [("phone", 2), ("repo", 3)] {
+        sc.world.add(
+            node,
+            host,
+            NodeCfg {
+                links: vec![link("home", 1)],
+                routes: vec![route(NS, "home")],
+                peers: vec![PeerCfg {
+                    device: Some(HOME.into()),
+                    endpoint: Some(addr(1)),
+                    ..Default::default()
+                }],
+                quic_dial_only: true,
+                ..Default::default()
+            },
+        );
+    }
+
+    let root = sc.step("init home as the root device of /ph", |cx| {
+        let root = init_root(cx, "home", NS, "home")?;
+        if root.identity != HOME {
+            return Err(format!(
+                "home is {}, not {HOME} (the members' peer entry)",
+                root.identity
+            ));
+        }
+        Ok(root)
+    })?;
+    sc.step("start home's daemon with its CA", |cx| {
+        cx.w.node_mut("home").cfg.identity = Some(root.identity.clone());
+        cx.w.node_mut("home").cfg.ca = Some(CaCfg {
+            prefix: NS.into(),
+            identity: n("/CA"),
+            member_days: None,
+        });
+        cx.start("home")
+    })?;
+    let invites = sc.step("make two member invites at home's CA", |cx| {
+        mint(cx, "home", NS, &root.fp, 2, Some("1h"))
+    })?;
+    sc.step(
+        "start the phone's and the repo's daemons; each enrolls as a member over its UDP face",
+        |cx| {
+            for (i, (node, device)) in [("phone", PHONE), ("repo", REPO)].into_iter().enumerate() {
+                cx.start(node)?;
+                let c = enroll(cx, node, &invites[i], node, false, None)?;
+                if !c.starts_with(&format!("{device}/KEY/")) {
+                    return Err(format!("{node}: unexpected certificate {c}"));
+                }
+                cx.evidence(&format!("{node} enrolled: {c}"));
+            }
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "enrolled, the phone and the repo link to home over QUIC: each link carries the other \
+         device and /ph/32=sync, none of it configured (the configs route only /ph, for \
+         enrollment)",
+        |cx| {
+            cx.concept("sync group carried by the trust-context and link libraries");
+            for (node, peer) in [
+                ("home", PHONE),
+                ("home", REPO),
+                ("phone", HOME),
+                ("repo", HOME),
+            ] {
+                let mut found = None;
+                wait_for(
+                    cx,
+                    &format!("{node} carries {GROUP} over its link to {peer}"),
+                    SHORT,
+                    |cx| {
+                        found = carries_group(cx, node, peer, GROUP)?;
+                        Ok(found.is_some())
+                    },
+                )?;
+                cx.evidence(&found.unwrap_or_default());
+            }
+            for node in ["home", "phone", "repo"] {
+                let config = cx.w.node(node).config();
+                let text = std::fs::read_to_string(&config)
+                    .map_err(|e| format!("{}: {e}", config.display()))?;
+                // Only `[[route]]` tables are routes (`[ca] prefix` is not).
+                let mut section = "";
+                let mut routes: Vec<&str> = Vec::new();
+                for l in text.lines().map(str::trim) {
+                    if l.starts_with('[') {
+                        section = l;
+                    } else if section == "[[route]]"
+                        && let Some(p) = l.strip_prefix("prefix = ")
+                    {
+                        routes.push(p);
+                    }
+                }
+                let enrollment = if node == "home" {
+                    vec![]
+                } else {
+                    vec!["\"/ph\""]
+                };
+                if routes != enrollment {
+                    return Err(format!("{node}'s config routes {routes:?}"));
+                }
+                cx.evidence(&format!("{node}'s config routes {routes:?}"));
+            }
+            Ok(())
+        },
+    )?;
+
+    let (mut home, mut phone) = sc.step(
+        "start the data layer on home and the phone (ndn-data on its daemon, signing with its \
+         own key); home watches the photos",
+        |cx| {
+            cx.concept("data layer host (ndn-data)");
+            let mut home = Host::start(cx, "home", HOME)?;
+            let phone = Host::start(cx, "phone", PHONE)?;
+            if home.writer == phone.writer {
+                return Err("both devices write with one key".into());
+            }
+            home.ok(cx, &format!("watch {PHOTOS}"))?;
+            cx.evidence(&format!("home writes as {}", home.writer));
+            cx.evidence(&format!("phone writes as {}", phone.writer));
+            Ok((home, phone))
+        },
+    )?;
+
+    let (photo, caption, len, sha256) = sc.step(
+        "the phone shares the photos (log rule, sealed to /ph) and puts a 1.5 MB photo and a \
+         caption: the photo travels in pieces (home's watch sees it by its size)",
+        |cx| {
+            let bytes = content(PHOTO_LEN, 0x0094_0705);
+            let sha256 = hex(&Sha256::digest(&bytes));
+            let file = cx.w.node("phone").dir.join("photo.jpg");
+            std::fs::write(&file, &bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+            phone.ok(cx, &format!("share {PHOTOS} rule=log readers=person:{NS}"))?;
+            let photo = phone.put(
+                cx,
+                PHOTOS,
+                &format!("photo=@{} title=beach", file.display()),
+            )?;
+            let caption = phone.put(cx, PHOTOS, "caption=\"the beach at noon\"")?;
+            reads_photo(cx, &mut phone, &photo, PHOTO_LEN, &sha256)?;
+            let seen = home.watched_until(cx, "the photo", CONVERGE, |w| {
+                name(w["change"]["version"]["name"].as_str().unwrap_or_default()).ok()
+                    == name(&photo.name).ok()
+            })?;
+            let size = &seen["change"]["version"]["payload"]["large"];
+            if size.as_u64().is_none_or(|s| s < PHOTO_LEN as u64) {
+                return Err(format!(
+                    "home's watch delivers {} as {}, not large",
+                    photo.name, seen["change"]["version"]["payload"]
+                ));
+            }
+            cx.evidence(&format!(
+                "home's watch: {} is large, {size} octets carried in pieces",
+                photo.name
+            ));
+            Ok((photo, caption, PHOTO_LEN, sha256))
+        },
+    )?;
+
+    let until = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+        + HOLD_DAYS * 24 * 3600 * 1000;
+    let mut repo = sc.step(
+        "start the repo's holder (ndn-repo hold for /ph); the phone asks for one copy for 30 \
+         days: a lease from the repo covering both versions, its audit kept",
+        |cx| {
+            cx.concept("holder (ndn-repo hold)");
+            cx.concept("custody: hold, lease, audit");
+            let repo = Holder::start(cx, "repo", REPO, &[NS])?;
+            if !repo.writer.starts_with(&format!("{REPO}/KEY/")) {
+                return Err(format!(
+                    "the repo holds as {}, not a key of {REPO}",
+                    repo.writer
+                ));
+            }
+            let mut last = Value::Null;
+            wait_for(cx, "a kept lease from the repo", CONVERGE, |cx| {
+                let custody = match hold(cx, &mut phone, until)? {
+                    Ok(c) => c,
+                    Err(e) if e["retry"] == true => return Ok(false),
+                    Err(e) => return Err(format!("phone> hold: {e}")),
+                };
+                let Some(lease) = lease_of(&custody["leases"], &repo.writer) else {
+                    return Ok(false);
+                };
+                if lease["audit"].get("broken").is_some() {
+                    return Err(format!("the repo's first lease is audited broken: {lease}"));
+                }
+                let done = lease["audit"].get("kept").is_some()
+                    && includes(&lease["holds"], &photo)
+                    && includes(&lease["holds"], &caption);
+                last = lease.clone();
+                Ok(done)
+            })?;
+            if last["until_ms"].as_u64().is_none_or(|u| u > until) {
+                return Err(format!(
+                    "the repo's lease outlives the hold asked for: {last}"
+                ));
+            }
+            cx.evidence(&shown(&last));
+            let stripes = repo.stripes()?;
+            if stripes.len() < 2 {
+                return Err(format!(
+                    "the repo holds in {} stripe(s), not erasure-coded across several",
+                    stripes.len()
+                ));
+            }
+            cx.evidence(&format!(
+                "the repo holds {} octets in {} stripes under {} for a {len}-octet photo",
+                octets(&repo.store.join("held")),
+                stripes.len(),
+                repo.store.join("held").display()
+            ));
+            Ok(repo)
+        },
+    )?;
+
+    sc.step(
+        "the phone releases the photo's pieces; with every forwarder's cached copies erased it \
+         still reads the photo, length and SHA-256 the file's: the repo served it",
+        |cx| {
+            let r = phone.ok(cx, &format!("release {}", photo.name))?;
+            let least = (len as u64).div_ceil(CHUNK);
+            if r["versions"].as_u64().is_none_or(|v| v < 1)
+                || r["pieces"].as_u64().is_none_or(|p| p < least)
+                || r["bytes"].as_u64().is_none_or(|b| b < len as u64)
+            {
+                return Err(format!(
+                    "the phone's release of {} dropped {r}, not the photo's {least}+ pieces",
+                    photo.name
+                ));
+            }
+            cx.evidence(&format!(
+                "phone released {} version(s), {} pieces, {} octets",
+                r["versions"], r["pieces"], r["bytes"]
+            ));
+            for node in ["phone", "home", "repo"] {
+                let out = erase_cs(cx, node, &photo.name)?;
+                cx.evidence(&format!("{node}: cs erase {}: {out}", photo.name));
+            }
+            reads_photo(cx, &mut phone, &photo, len, &sha256)
+        },
+    )?;
+
+    repo = sc.step(
+        "the repo loses a disk: stopped, one stripe deleted, started again; the phone's next \
+         hold audits its lease kept",
+        |cx| {
+            let device = repo.device.clone();
+            let writer = repo.writer.clone();
+            let stripes = repo.stripes()?;
+            let lost = stripes
+                .first()
+                .ok_or_else(|| format!("the repo holds no stripe under {}", repo.store.display()))?
+                .clone();
+            repo.stop(cx);
+            delete(&lost)?;
+            cx.evidence(&format!(
+                "deleted stripe {} of {}",
+                lost.display(),
+                stripes.len()
+            ));
+            let repo = Holder::start(cx, "repo", &device, &[NS])?;
+            if repo.writer != writer {
+                return Err(format!(
+                    "the repo restarted as {}, not {writer}",
+                    repo.writer
+                ));
+            }
+            let custody = hold(cx, &mut phone, until)?.map_err(|e| format!("phone> hold: {e}"))?;
+            if let Some(b) = lease_of(&custody["broken"], &repo.writer) {
+                return Err(format!("one lost stripe broke the repo's lease: {b}"));
+            }
+            let lease = lease_of(&custody["leases"], &repo.writer)
+                .ok_or_else(|| format!("no lease of the repo in {custody}"))?;
+            if lease["audit"].get("kept").is_none() || !includes(&lease["holds"], &photo) {
+                return Err(format!("after one lost stripe the repo's lease is {lease}"));
+            }
+            cx.evidence(&shown(lease));
+            Ok(repo)
+        },
+    )?;
+
+    repo = sc.step(
+        "the repo loses what it held: stopped, every stripe deleted, started again; the phone's \
+         next hold reports its lease broken by the audit, and repairs it",
+        |cx| {
+            let device = repo.device.clone();
+            let stripes = repo.stripes()?;
+            repo.stop(cx);
+            for s in &stripes {
+                delete(s)?;
+            }
+            cx.evidence(&format!("deleted all {} stripes", stripes.len()));
+            let repo = Holder::start(cx, "repo", &device, &[NS])?;
+            let custody = hold(cx, &mut phone, until)?.map_err(|e| format!("phone> hold: {e}"))?;
+            let broken = lease_of(&custody["broken"], &repo.writer)
+                .ok_or_else(|| format!("the audit did not catch the repo's loss: {custody}"))?;
+            let audit = &broken["audit"];
+            let caught =
+                audit["broken"]["breach"] == "missing" || audit.get("unanswered").is_some();
+            if !caught {
+                return Err(format!("the repo's lost lease is audited {audit}"));
+            }
+            cx.evidence(&format!("caught: {}", shown(broken)));
+            let mut last = Value::Null;
+            wait_for(cx, "the repo's lease kept again", CONVERGE, |cx| {
+                let custody =
+                    hold(cx, &mut phone, until)?.map_err(|e| format!("phone> hold: {e}"))?;
+                let Some(lease) = lease_of(&custody["leases"], &repo.writer) else {
+                    return Ok(false);
+                };
+                last = lease.clone();
+                Ok(lease["audit"].get("kept").is_some() && includes(&lease["holds"], &photo))
+            })?;
+            cx.evidence(&format!("repaired: {}", shown(&last)));
+            Ok(repo)
+        },
+    )?;
+
+    sc.step(
+        "the phone prunes the photo: the phone and home answer get of it with a final error \
+         naming the prune, the caption still reads, and the phone's audit of the repo's lease \
+         finds nothing broken",
+        |cx| {
+            cx.concept("prune");
+            let ok = phone.ok(
+                cx,
+                &format!("prune {} upto={}:{}", photo.name, photo.writer, photo.seq),
+            )?;
+            cx.evidence(&format!("phone pruned {}: upto {}", photo.name, ok["upto"]));
+            pruned_at(cx, &mut phone, &photo)?;
+            home.watched_until(cx, "the photo pruned", CONVERGE, |w| {
+                let p = &w["change"]["pruned"]["id"];
+                p["writer"] == photo.writer.as_str() && p["seq"] == photo.seq
+            })?;
+            cx.evidence(&format!("home's watch: {} pruned", photo.name));
+            pruned_at(cx, &mut home, &photo)?;
+            let got = home.version(cx, PHOTOS, &caption)?;
+            if got["payload"]["entry"]["caption"] != "the beach at noon" {
+                return Err(format!("home reads the caption as {got}"));
+            }
+            cx.evidence(&format!("home reads {}: {}", caption.name, got["payload"]));
+            let custody = hold(cx, &mut phone, until)?.map_err(|e| format!("phone> hold: {e}"))?;
+            if custody["broken"].as_array().is_none_or(|b| !b.is_empty()) {
+                return Err(format!("after the prune the audit finds {custody}"));
+            }
+            let lease = lease_of(&custody["leases"], &repo.writer)
+                .ok_or_else(|| format!("no lease of the repo in {custody}"))?;
+            if lease["audit"].get("kept").is_none() {
+                return Err(format!("after the prune the repo's lease is {lease}"));
+            }
+            cx.evidence(&shown(lease));
+            cx.evidence(&format!(
+                "the repo holds {} octets under {}",
+                octets(&repo.store.join("held")),
+                repo.store.join("held").display()
+            ));
+            Ok(())
+        },
+    )?;
+    Ok(())
+}

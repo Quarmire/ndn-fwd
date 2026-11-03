@@ -40,6 +40,9 @@ ndn-namespace = { workspace = true }
 # it: ciphertext beside its epoch, no fields.
 bytes    = { workspace = true }
 ndn-data = { workspace = true }
+# The `photos` scenario compares a photo read back with the file put, by
+# its SHA-256 (`ndn-data` shows large values by length and digest).
+sha2     = { workspace = true }
 
 [lints]
 workspace = true
