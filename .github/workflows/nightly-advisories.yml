@@ -33,10 +33,10 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 9717d7f7d72c864ebdf0eb7f4fec061396ed10bd, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: cf352fb54921edb2862eb537c96abe8281972d66, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: f417cabd7010841b650e3ad6e36f7e069affedfc, path: ndn-ext }
+        with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 226eec4cdf5be0cdbf408502bada87d7c386a9f7, path: ndn-ext }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-radio-drivers (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-radio-drivers", ref: 985cd9d70ce0664c6b622da29545c6aa2cd0448c, path: ndn-radio-drivers }
