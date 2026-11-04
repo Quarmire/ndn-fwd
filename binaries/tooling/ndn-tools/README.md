@@ -180,8 +180,11 @@ The remaining binaries back the `testbed/` harness; each takes
 - `ndn-data` — one device's data layer (`ndn_data::Device`) attached to a
   running `ndn-fwd` over its socket, signing with the device's key from
   the daemon's PIB and verifying with the PIB's trust contexts; reads
-  `share`/`put`/`get`/`watch` lines on stdin and answers one JSON object
-  per line (the `notes` e2e scenario's host). Collections are named
+  `share`/`put`/`get`/`range`/`watch`/`hold`/`prune`/`release` lines on
+  stdin and answers one JSON object per line (the host of the `notes`,
+  `shared`, `photos` and `sensor` e2e scenarios; `put --batch <ms>` puts
+  an entry into a signed block and answers once the block is signed,
+  while the next lines are read). Collections are named
   `<ns>/32=data/<path>` (e.g. `/nt/32=data/notes/trip`), `<ns>` the
   namespace of the trust context that governs the device. The verbs over
   forwarder management come with the data layer's slice 7.
