@@ -1,7 +1,8 @@
-//! stolen: a device's key is stolen; the owner ends it with a revocation
-//! cut, re-admits the honest note the cut left out, and nothing the thief
-//! wrote stays anywhere — the data layer (`ndn_data::Device`) and the root
-//! flow on real daemons (data-layer slice 5, "keys over time").
+//! stolen: a device's key is stolen; the owner reports the loss, ends the
+//! key with a revocation cut bounded by when the device was lost,
+//! re-admits the honest note the cut left out, and nothing the thief wrote
+//! stays anywhere — the data layer (`ndn_data::Device`) and the root flow
+//! on real daemons (data-layer slice 5, "keys over time").
 //!
 //! Topology, on the harness's `lo`: laptop (10.200.0.1, the root device of
 //! /st as /st/admin/laptop, with its CA, listening for QUIC links), tab (.2,
@@ -14,27 +15,40 @@
 //! (see [`super::data_host`]); the phone's keeps its entries in a store
 //! directory too (`--store`), as a phone keeps its data on its disk.
 //!
-//! The thief: the phone was out of its owner's hands for a while (a repair
-//! shop) and its storage was imaged — its PIB (the phone's key and
-//! certificate) and its data store, copied into the thief's daemon and
-//! host. The thief's path to the namespace is the one that copy gives it: a
-//! QUIC link dialled as the phone, with the phone's key and certificate,
-//! which every device of the namespace admits until the key is revoked.
-//! It reaches the tab (listening for links where the thief's network
-//! reaches it); the laptop is closed at home meanwhile, and the phone is on
-//! a flight. Its host runs a week behind (`--clock-offset-ms`), so what it
+//! The thief: the phone leaves its owner's hands (a repair shop; the time
+//! the owner later gives as when it was lost) and its storage is imaged —
+//! its PIB (the phone's key and certificate) and its data store, copied
+//! into the thief's daemon and host. The thief's path to the namespace is
+//! the one that copy gives it: QUIC links dialled as the phone, with the
+//! phone's key and certificate, which every device of the namespace admits
+//! until the key is revoked. It dials the tab and the laptop; the tab
+//! listens where the thief's network reaches it, the laptop only while it
+//! is open at a café (closed at home otherwise), and the phone is on a
+//! flight. Its host runs a week behind (`--clock-offset-ms`), so what it
 //! writes claims to predate the revocation; it continues the phone's log
-//! from the image (the seqs after the phone's last one), outside the cut.
+//! from the image (the seqs after the phone's last one).
 //!
 //! Proves: the phone's notes reach every device; apart, the phone writes a
 //! note nobody sees, and the thief's backdated notes reach the tab, which
-//! takes them (the key is not revoked yet). On the laptop, still apart, the
-//! owner takes the cut from what the laptop holds verified (`ndn-data` `cut
-//! <phone key> <file>`: runs of the phone's seqs that cover its notes and
-//! none of the thief's or the offline note) and revokes the phone with it
-//! (`ndn-fwd revoke /st/member/phone --cut <file>`; a cut of another key is
-//! refused and signs nothing). The thief writes once more after the
-//! revocation, dated before it; the tab, which has not heard of the
+//! takes them (the key is not revoked yet). Opened at the café, the laptop
+//! — the root device — takes them too, over the thief's link: after the
+//! time the phone was lost. The owner reports the loss there (`ndn-data`
+//! `suspect <phone key> <when it was lost>`): the laptop takes nothing new
+//! of the key from then on (a later thief note is refused there as
+//! suspected, while the tab takes it) and keeps what it held. The owner
+//! takes the cut from what the laptop first verified before the loss (`cut
+//! <phone key> <file>`, bounded by the suspected-since time): runs that
+//! cover the phone's notes and none of the thief's or the offline note,
+//! with the thief's notes the laptop took after the loss left out and
+//! listed by full name. A cut of a key neither suspected nor bounded is
+//! refused; so are revocations with a cut of another key, with a cut file
+//! made without a bound, without an answer to "When did you lose it?"
+//! (`--lost`), or with a loss time before the cut's bound — each signs
+//! nothing. Back home, the owner revokes the phone with its cut (`ndn-fwd
+//! revoke /st/member/phone --cut <file> --lost <when>`), which lists the
+//! left-out entries; the laptop, following its daemon's trust stream,
+//! withdraws the thief's notes it took. The thief writes once more after
+//! the revocation, dated before it; the tab, which has not heard of the
 //! revocation yet, takes that too. Once the laptop is back and the tab
 //! holds the new version, the tab withdraws every thief note (each reported
 //! to its watch as withdrawn by the cut of the phone's key; a `get` of each
@@ -48,12 +62,14 @@
 //! phone's host serves it; the laptop's and the tab's daemons validate it,
 //! signed by the revoked key, as in the cut now), and it appears at the
 //! laptop and the tab, while no honest device answers any thief note (not
-//! even at the offline note's name, where the thief wrote other bytes).
+//! even at the offline note's name, where the thief wrote other bytes) and
+//! the thief's notes the cut left out stay refused.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ndn_cert::CutFile;
 use serde_json::Value;
 
 use super::data_host::{
@@ -81,6 +97,7 @@ const IMPLICIT_SHA256: u64 = 0x01;
 const CUT_LAPTOP_TAB: &str = "ndn_e2e_stolen_laptop_tab";
 const CUT_LAPTOP_PHONE: &str = "ndn_e2e_stolen_laptop_phone";
 const CUT_TAB_PHONE: &str = "ndn_e2e_stolen_tab_phone";
+const CUT_LAPTOP_THIEF: &str = "ndn_e2e_stolen_laptop_thief";
 
 const LAPTOP_HOST: u8 = 1;
 const TAB_HOST: u8 = 2;
@@ -92,9 +109,10 @@ const FAST_LINKS: &str = "[links]\nkeep_alive_secs = 2\nidle_timeout_secs = 6\n"
 
 /// What the phone wrote offline, and what the thief writes.
 const OFFLINE_TEXT: &str = "written on the plane";
-const THIEF_TEXTS: [&str; 4] = [
+const THIEF_TEXTS: [&str; 5] = [
     "thief: wire the deposit",
     "thief: new bank details",
+    "thief: written after the loss was reported",
     "thief: written after the revocation",
     "thief: written once unlinked",
 ];
@@ -121,6 +139,12 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or_default()
+}
+
+/// `ms` since the epoch in RFC 3339 with milliseconds: how the e2e answers
+/// `ndn-fwd revoke --lost` ("When did you lose it?").
+fn rfc3339(ms: u64) -> String {
+    humantime::format_rfc3339_millis(UNIX_EPOCH + Duration::from_millis(ms)).to_string()
 }
 
 fn peer(device: &str, host: u8) -> PeerCfg {
@@ -198,6 +222,58 @@ fn cut_covers(cut: &Value, seq: u64) -> StepResult<bool> {
     Ok(covered)
 }
 
+/// `host` withdraws each of `notes` (written with `key`, outside its cut):
+/// its watch reports each withdrawn by the cut of `key`, its `get` of each
+/// is refused outside the cut (ask the owner), and it reports each refused
+/// by its full name with digest.
+fn withdraws(cx: &mut Cx<'_>, host: &mut Host, notes: &[&Put], key: &str) -> StepResult<()> {
+    for v in notes {
+        let w = host.watched_until(cx, &format!("{} withdrawn", v.name), CONVERGE, |w| {
+            let d = &w["change"]["withdrawn"];
+            d["id"]["writer"] == v.writer.as_str()
+                && d["id"]["seq"] == v.seq
+                && name(d["cut_of"].as_str().unwrap_or_default()).ok() == name(key).ok()
+        })?;
+        cx.evidence(&format!("{} watch: {}", host.node, w["change"]));
+        let mut last = Value::Null;
+        let node = host.node.clone();
+        wait_for(
+            cx,
+            &format!("{node} refuses {} outside the cut", v.name),
+            CONVERGE,
+            |cx| {
+                Ok(match text_at(cx, host, v)? {
+                    Err(e) => {
+                        let done = e["next"] == "ask-owner"
+                            && name(e["outside_cut"]["of"].as_str().unwrap_or_default()).ok()
+                                == name(key).ok();
+                        last = e;
+                        done
+                    }
+                    Ok(_) => false,
+                })
+            },
+        )?;
+        cx.evidence(&format!("{node} get {}: {}", v.name, last["outside_cut"]));
+    }
+    let refused = refused_names(cx, host, key)?;
+    for v in notes {
+        let mut listed = false;
+        for f in &refused {
+            listed |= is_full_name_of(f, v)?;
+        }
+        if !listed {
+            return Err(format!(
+                "{}'s refused names {refused:?} lack {} with its digest; expected every note \
+                 the cut withdrew",
+                host.node, v.name
+            ));
+        }
+    }
+    cx.evidence(&format!("{} refused: {refused:?}", host.node));
+    Ok(())
+}
+
 /// Copy `from` (a directory) to `to` as it is, modes kept: what imaging a
 /// device's storage copies.
 fn copy_tree(cx: &mut Cx<'_>, from: &Path, to: &Path) -> StepResult<()> {
@@ -264,13 +340,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         PHONE_HOST,
         member(vec![peer(LAPTOP, LAPTOP_HOST), peer(TAB, TAB_HOST)], false),
     );
-    // The thief's daemon: the phone's PIB once imaged, dialling the one
-    // device of the namespace its network reaches.
+    // The thief's daemon: the phone's PIB once imaged, dialling the devices
+    // of the namespace it may reach.
     sc.world.add(
         "thief",
         THIEF_HOST,
         NodeCfg {
-            peers: vec![peer(TAB, TAB_HOST)],
+            peers: vec![peer(TAB, TAB_HOST), peer(LAPTOP, LAPTOP_HOST)],
             quic_dial_only: true,
             refresh_secs: 1,
             extra_toml: FAST_LINKS.into(),
@@ -373,10 +449,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let phone_key = phone.writer.clone();
 
     let day1 = sc.step(
-        "the laptop shares the notes and writes text=day 1; the tab and the phone watch them",
+        "the laptop shares the notes and writes text=day 1; every device watches them",
         |cx| {
             laptop.ok(cx, &format!("share {NOTES}"))?;
             let day1 = laptop.put(cx, NOTES, "text=\"day 1\"")?;
+            laptop.ok(cx, &format!("watch {NOTES}"))?;
             tab.ok(cx, &format!("watch {NOTES}"))?;
             phone.ok(cx, &format!("watch {NOTES}"))?;
             Ok(day1)
@@ -416,21 +493,27 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         );
         return Ok(());
     }
-    let (laptop_tab, laptop_phone, tab_phone) = sc.step(
+    let (laptop_tab, laptop_phone, tab_phone, laptop_thief) = sc.step(
         "apart: the laptop is closed at home and the phone is on a flight (nftables drops UDP \
-         between each two of laptop, tab and phone)",
+         between each two of laptop, tab and phone, and between the laptop and the thief)",
         |cx| {
             let a = cut_udp(cx, CUT_LAPTOP_TAB, addr(LAPTOP_HOST), addr(TAB_HOST))?;
             let b = cut_udp(cx, CUT_LAPTOP_PHONE, addr(LAPTOP_HOST), addr(PHONE_HOST))?;
             let c = cut_udp(cx, CUT_TAB_PHONE, addr(TAB_HOST), addr(PHONE_HOST))?;
-            cx.evidence("laptop, tab and phone hear none of each other");
-            Ok((a, b, c))
+            let d = cut_udp(cx, CUT_LAPTOP_THIEF, addr(LAPTOP_HOST), addr(THIEF_HOST))?;
+            cx.evidence(
+                "laptop, tab and phone hear none of each other; the thief's network does not \
+                 reach the laptop",
+            );
+            Ok((a, b, c, d))
         },
     )?;
-    sc.step(
-        "the phone's storage is imaged: its PIB (key and certificate) and its data store, \
+    let lost_ms = sc.step(
+        "the phone leaves its owner's hands (the time the owner later gives as when it was \
+         lost); its storage is imaged: its PIB (key and certificate) and its data store, \
          copied into the thief's daemon and host",
         |cx| {
+            let lost_ms = now_ms();
             let (phone_pib, thief_pib, thief_dir) = {
                 let w = &cx.w;
                 (
@@ -448,9 +531,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 ));
             }
             cx.evidence(&format!(
-                "the thief's PIB holds the phone's key {phone_key}"
+                "lost at {lost_ms} ms ({}); the thief's PIB holds the phone's key {phone_key}",
+                rfc3339(lost_ms)
             ));
-            Ok(())
+            Ok(lost_ms)
         },
     )?;
     let n3 = sc.step(
@@ -468,8 +552,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let mut thief = sc.step(
-        "the thief starts the image: its daemon dials the tab as the phone, its host runs a \
-         week behind",
+        "the thief starts the image: its daemon dials the tab and the laptop as the phone (only \
+         the tab is reachable), its host runs a week behind",
         |cx| {
             cx.start("thief")?;
             let thief_store = cx.w.node("thief").dir.join("data-store");
@@ -549,10 +633,118 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
 
-    let cut_file = sc.world.node("laptop").dir.join("phone.cut");
     sc.step(
-        "on the laptop, the owner takes the cut of the phone's key from what the laptop holds \
-         verified: the phone's notes, none of the thief's, not the offline note",
+        "the laptop opens at a café the thief's network reaches: the thief's link, as the \
+         phone, reaches it, and the laptop takes the thief's two notes (the key is neither \
+         revoked nor suspected yet), after the time the phone was lost",
+        |cx| {
+            drop(laptop_thief);
+            let mut found = None;
+            wait_for(
+                cx,
+                &format!(
+                    "the laptop routes {PHONE} over a QUIC link with the thief's daemon ({})",
+                    addr(THIEF_HOST)
+                ),
+                CONVERGE,
+                |cx| {
+                    found = routes_over_link(cx, "laptop", PHONE, THIEF_HOST)?;
+                    Ok(found.is_some())
+                },
+            )?;
+            cx.evidence(&format!(
+                "the laptop admits the thief's link as {PHONE}: {}",
+                found.unwrap_or_default()
+            ));
+            for (v, text) in [(&t1, THIEF_TEXTS[0]), (&t2, THIEF_TEXTS[1])] {
+                wait_for(
+                    cx,
+                    &format!("the laptop reads {} as the thief wrote it", v.name),
+                    CONVERGE,
+                    |cx| Ok(text_at(cx, &mut laptop, v)?.is_ok_and(|t| t == text)),
+                )?;
+            }
+            cx.evidence(&format!(
+                "the laptop took {} and {}, after the loss at {lost_ms} ms",
+                t1.name, t2.name
+            ));
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "the owner reports the phone lost, on the laptop: it marks the phone's key suspected \
+         since the time it was lost",
+        |cx| {
+            cx.concept("suspected key (a device reported lost)");
+            let ok = laptop.ok(cx, &format!("suspect {phone_key} {lost_ms}"))?;
+            if ok["since_ms"] != lost_ms {
+                return Err(format!(
+                    "the laptop marks the phone's key suspected since {} ms, expected {lost_ms} \
+                     ms (when it was lost)",
+                    ok["since_ms"]
+                ));
+            }
+            cx.evidence(&format!(
+                "the laptop suspects {phone_key} since {lost_ms} ms"
+            ));
+            Ok(())
+        },
+    )?;
+    let ts = sc.step(
+        "after the report, the thief writes again: the tab takes it; the laptop takes nothing \
+         new of the suspected key (its get is refused, suspected) and keeps what it took before",
+        |cx| {
+            let ts = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[2]))?;
+            wait_for(
+                cx,
+                &format!("the tab reads {} as the thief wrote it", ts.name),
+                CONVERGE,
+                |cx| Ok(text_at(cx, &mut tab, &ts)?.is_ok_and(|t| t == THIEF_TEXTS[2])),
+            )?;
+            match text_at(cx, &mut laptop, &ts)? {
+                Err(e)
+                    if name(e["suspected"]["key"].as_str().unwrap_or_default()).ok()
+                        == name(&phone_key).ok() =>
+                {
+                    cx.evidence(&format!(
+                        "laptop get {}: refused, suspected {} (next {})",
+                        ts.name, e["suspected"], e["next"]
+                    ));
+                }
+                other => {
+                    return Err(format!(
+                        "the laptop answers get {} with {other:?}; expected a refusal naming the \
+                         suspected key {phone_key}",
+                        ts.name
+                    ));
+                }
+            }
+            let (at, _) = laptop
+                .state(cx, NOTES)?
+                .ok_or("the laptop holds no state of the notes")?;
+            if includes(&at, &ts) {
+                return Err(format!(
+                    "the laptop's state is at {at}, which includes the thief's {}; expected \
+                     nothing new of the suspected key",
+                    ts.name
+                ));
+            }
+            if !text_at(cx, &mut laptop, &t1)?.is_ok_and(|t| t == THIEF_TEXTS[0]) {
+                return Err(format!(
+                    "the laptop no longer reads {} as it took it; expected what it held before \
+                     the report to stay until the revocation decides",
+                    t1.name
+                ));
+            }
+            Ok(ts)
+        },
+    )?;
+
+    let cut_file = sc.world.node("laptop").dir.join("phone.cut");
+    let left_out = sc.step(
+        "on the laptop, the owner takes the cut of the phone's key, bounded by when it was lost \
+         (the time it is suspected since): the phone's notes; the thief's notes the laptop took \
+         after the loss left out and listed by full name; nothing the laptop never held",
         |cx| {
             cx.concept("revocation cut");
             let cut = laptop.ok(cx, &format!("cut {phone_key} {}", cut_file.display()))?;
@@ -562,67 +754,236 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     cut["key"]
                 ));
             }
+            if cut["held_before_ms"] != lost_ms {
+                return Err(format!(
+                    "the cut is bounded at {} ms, expected {lost_ms} ms (the time the phone's \
+                     key is suspected since)",
+                    cut["held_before_ms"]
+                ));
+            }
             for v in [&n1, &n2] {
                 if !cut_covers(&cut, v.seq)? {
                     return Err(format!(
-                        "the cut {cut} leaves out the phone's {}; expected it accepted",
+                        "the cut {cut} leaves out the phone's {}; expected it accepted (held \
+                         before the loss)",
                         v.name
                     ));
                 }
             }
-            for v in [&n3, &t1, &t2] {
+            for v in [&n3, &t1, &t2, &ts] {
                 if cut_covers(&cut, v.seq)? {
                     return Err(format!(
-                        "the cut {cut} accepts seq {} ({}), which the laptop never held; \
-                         expected it outside",
+                        "the cut {cut} accepts seq {} ({}), which the laptop never held or \
+                         first held after the loss; expected it outside",
                         v.seq, v.name
                     ));
                 }
             }
-            let len = std::fs::metadata(&cut_file).map(|m| m.len()).unwrap_or(0);
-            if len == 0 {
-                return Err(format!(
-                    "{} is empty or missing; expected the cut's TLV",
+            let left_out: Vec<String> = cut["left_out"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect();
+            for v in [&t1, &t2] {
+                let mut listed = false;
+                for f in &left_out {
+                    listed |= is_full_name_of(f, v)?;
+                }
+                if !listed {
+                    return Err(format!(
+                        "the cut's left-out list {left_out:?} lacks {} with its digest; expected \
+                         every thief note the laptop took after the loss",
+                        v.name
+                    ));
+                }
+            }
+            for v in [&n1, &n2] {
+                for f in &left_out {
+                    if is_full_name_of(f, v)? {
+                        return Err(format!(
+                            "the cut leaves out the phone's {} ({f}); expected it in the cut \
+                             (held before the loss)",
+                            v.name
+                        ));
+                    }
+                }
+            }
+            let wire = std::fs::read(&cut_file)
+                .map_err(|e| format!("{}: {e}; expected the cut file", cut_file.display()))?;
+            let file = CutFile::decode(&wire).map_err(|e| {
+                format!(
+                    "{} is no cut file ({e}); expected the cut with its bound",
                     cut_file.display()
+                )
+            })?;
+            let mut in_file: Vec<String> = file.left_out.iter().map(ToString::to_string).collect();
+            let mut answered = left_out.clone();
+            in_file.sort();
+            answered.sort();
+            if file.held_before != Some(lost_ms) || in_file != answered {
+                return Err(format!(
+                    "{} holds the bound {:?} and left out {in_file:?}; expected the bound \
+                     {lost_ms} ms and the names the answer lists, {answered:?}",
+                    cut_file.display(),
+                    file.held_before
                 ));
             }
             cx.evidence(&format!("cut: {}", cut["ranges"]));
+            cx.evidence(&format!("left out: {left_out:?}"));
+            Ok(left_out)
+        },
+    )?;
+    sc.step(
+        "a cut of a key that is neither suspected nor bounded (the tab's) is refused — say when \
+         the device was lost — and writes no file",
+        |cx| {
+            let file = cx.w.node("tab").dir.join("unbounded.cut");
+            match laptop.call(cx, &format!("cut {} {}", tab.writer, file.display()))? {
+                Ok(ok) => {
+                    return Err(format!(
+                        "the laptop wrote a cut with no bound: {ok}; expected a refusal (say \
+                         when the device was lost)"
+                    ));
+                }
+                Err(e) if e["next"] == "fix-request" => {
+                    cx.evidence(&format!("refused: {}", e["message"]));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "the laptop refused the unbounded cut with {e}; expected next \
+                         fix-request (say when the device was lost)"
+                    ));
+                }
+            }
+            if file.exists() {
+                return Err(format!(
+                    "{} was written; expected no file for a refused cut",
+                    file.display()
+                ));
+            }
             Ok(())
         },
     )?;
     let v0 = sc.world.held_version("laptop", NS).unwrap_or(0);
+    let lost = rfc3339(lost_ms);
     sc.step(
         "a revocation of the phone with a cut of another key (the tab's) is refused and signs \
          nothing",
         |cx| {
             let other = cx.w.node("tab").dir.join("tab.cut");
-            laptop.ok(cx, &format!("cut {} {}", tab.writer, other.display()))?;
+            laptop.ok(
+                cx,
+                &format!(
+                    "cut {} {} --held-before {lost_ms}",
+                    tab.writer,
+                    other.display()
+                ),
+            )?;
             let other = other.display().to_string();
-            let op = root_op(cx, &["revoke", PHONE, "--cut", other.as_str()]);
+            let op = root_op(cx, &["revoke", PHONE, "--cut", &other, "--lost", &lost]);
             cx.refused(op, "revoke the phone with the tab's cut")?;
             cx.expect_version("laptop", NS, v0)
         },
     )?;
-    let revoked_ms = sc.step(
-        "the owner revokes the phone with its cut: a new trust-context version",
+    sc.step(
+        "a revocation with a cut file made without a bound is refused and signs nothing: the \
+         bare RevocationCut (as cuts were written before they were bounded), and the cut file \
+         with its bound taken out",
+        |cx| {
+            let wire = std::fs::read(&cut_file)
+                .map_err(|e| format!("{}: {e}; expected the cut file", cut_file.display()))?;
+            let mut file = CutFile::decode(&wire)
+                .map_err(|e| format!("{} is no cut file: {e}", cut_file.display()))?;
+            let dir = cx.w.node("laptop").dir.clone();
+            let bare = dir.join("phone-bare.cut");
+            std::fs::write(&bare, file.cut.encode())
+                .map_err(|e| format!("{}: {e}", bare.display()))?;
+            file.held_before = None;
+            file.upto.clear();
+            let unbounded = dir.join("phone-unbounded.cut");
+            std::fs::write(&unbounded, file.encode())
+                .map_err(|e| format!("{}: {e}", unbounded.display()))?;
+            for (path, what) in [
+                (&bare, "the bare RevocationCut"),
+                (&unbounded, "the cut file without its bound"),
+            ] {
+                let path = path.display().to_string();
+                let op = root_op(cx, &["revoke", PHONE, "--cut", &path, "--lost", &lost]);
+                cx.refused(op, &format!("revoke the phone with {what}"))?;
+            }
+            cx.expect_version("laptop", NS, v0)
+        },
+    )?;
+    sc.step(
+        "the revocation asks when the phone was lost: without an answer (no --lost, and no \
+         terminal to ask on) it is refused, and with a loss time before the cut's bound it is \
+         refused; neither signs anything",
         |cx| {
             let file = cut_file.display().to_string();
-            let op = root_op(cx, &["revoke", PHONE, "--cut", file.as_str()]);
-            cx.ok(op, "revoke the phone with its cut")?;
+            let op = root_op(cx, &["revoke", PHONE, "--cut", &file]);
+            cx.refused(op, "revoke with a cut, not saying when the phone was lost")?;
+            let early = rfc3339(lost_ms.saturating_sub(60_000));
+            let op = root_op(cx, &["revoke", PHONE, "--cut", &file, "--lost", &early]);
+            cx.refused(
+                op,
+                "revoke with a cut bounded after the time given as when the phone was lost",
+            )?;
+            cx.expect_version("laptop", NS, v0)
+        },
+    )?;
+    let _laptop_thief = sc.step(
+        "the owner closes the laptop and goes home: the thief's network no longer reaches it",
+        |cx| {
+            let cut = cut_udp(cx, CUT_LAPTOP_THIEF, addr(LAPTOP_HOST), addr(THIEF_HOST))?;
+            cx.evidence("nftables drops UDP between the laptop and the thief again");
+            Ok(cut)
+        },
+    )?;
+    let revoked_ms = sc.step(
+        "the owner revokes the phone with its cut, saying when it was lost: a new trust-context \
+         version; the revocation lists the entries the cut left out",
+        |cx| {
+            let file = cut_file.display().to_string();
+            let op = root_op(cx, &["revoke", PHONE, "--cut", &file, "--lost", &lost]);
+            let out = cx.ok(op, "revoke the phone with its cut")?;
             cx.expect_version("laptop", NS, v0 + 1)?;
+            let listed: Vec<&str> = out
+                .stdout
+                .lines()
+                .filter_map(|l| {
+                    let (k, v) = l.split_once('=')?;
+                    (k.trim() == "left_out").then_some(v.trim())
+                })
+                .collect();
+            for n in &left_out {
+                if !listed.iter().any(|l| name(l).ok() == name(n).ok()) {
+                    return Err(format!(
+                        "the revocation lists {listed:?} as left out, lacking {n}; expected \
+                         every entry the cut left out (to re-admit one by one once checked)"
+                    ));
+                }
+            }
+            cx.evidence(&format!("the revocation lists left out: {listed:?}"));
             Ok(now_ms())
         },
+    )?;
+    sc.step(
+        "the laptop, following its daemon's trust stream, adopts the revocation and withdraws \
+         the thief's notes it took: each reported to its watch as withdrawn by the cut of the \
+         phone's key, refused outside the cut (ask the owner) and listed refused by full name",
+        |cx| withdraws(cx, &mut laptop, &[&t1, &t2], &phone_key),
     )?;
     let t3 = sc.step(
         "after the revocation, the thief writes a note dated before it; the tab, which has not \
          heard of the revocation, takes it",
         |cx| {
-            let t3 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[2]))?;
+            let t3 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[3]))?;
             wait_for(
                 cx,
                 &format!("the tab reads {} as the thief wrote it", t3.name),
                 CONVERGE,
-                |cx| Ok(text_at(cx, &mut tab, &t3)?.is_ok_and(|t| t == THIEF_TEXTS[2])),
+                |cx| Ok(text_at(cx, &mut tab, &t3)?.is_ok_and(|t| t == THIEF_TEXTS[3])),
             )?;
             let read = tab.version(cx, NOTES, &t3)?;
             let dated = read["dated_ms"].as_u64().unwrap_or(u64::MAX);
@@ -647,53 +1008,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     sc.step(
         "the tab withdraws every thief note, each reported to its watch as withdrawn by the \
          cut of the phone's key, and refuses each outside the cut (ask the owner)",
-        |cx| {
-            for v in [&t1, &t2, &t3] {
-                let w = tab.watched_until(cx, &format!("{} withdrawn", v.name), CONVERGE, |w| {
-                    let d = &w["change"]["withdrawn"];
-                    d["id"]["writer"] == v.writer.as_str()
-                        && d["id"]["seq"] == v.seq
-                        && name(d["cut_of"].as_str().unwrap_or_default()).ok()
-                            == name(&phone_key).ok()
-                })?;
-                cx.evidence(&format!("tab watch: {}", w["change"]));
-                let mut last = Value::Null;
-                wait_for(
-                    cx,
-                    &format!("the tab refuses {} outside the cut", v.name),
-                    CONVERGE,
-                    |cx| {
-                        Ok(match text_at(cx, &mut tab, v)? {
-                            Err(e) => {
-                                let done = e["next"] == "ask-owner"
-                                    && name(e["outside_cut"]["of"].as_str().unwrap_or_default())
-                                        .ok()
-                                        == name(&phone_key).ok();
-                                last = e;
-                                done
-                            }
-                            Ok(_) => false,
-                        })
-                    },
-                )?;
-                cx.evidence(&format!("tab get {}: {}", v.name, last["outside_cut"]));
-            }
-            let refused = refused_names(cx, &mut tab, &phone_key)?;
-            for v in [&t1, &t2, &t3] {
-                let mut listed = false;
-                for f in &refused {
-                    listed |= is_full_name_of(f, v)?;
-                }
-                if !listed {
-                    return Err(format!(
-                        "the tab's refused names {refused:?} lack {} with its digest",
-                        v.name
-                    ));
-                }
-            }
-            cx.evidence(&format!("tab refused: {refused:?}"));
-            Ok(())
-        },
+        |cx| withdraws(cx, &mut tab, &[&t1, &t2, &ts, &t3], &phone_key),
     )?;
     sc.step(
         "the phone's notes stay at the laptop and the tab; neither answers a thief note",
@@ -718,7 +1033,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 for v in [&n1, &n2] {
                     host.version(cx, NOTES, v)?;
                 }
-                for v in [&t1, &t2, &t3] {
+                for v in [&t1, &t2, &ts, &t3] {
                     let how = never_answers(cx, host, v)?;
                     cx.evidence(&format!("{} get {}: {how}", host.node, v.name));
                 }
@@ -741,7 +1056,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 |cx| Ok(routes_over_link(cx, "tab", PHONE, THIEF_HOST)?.is_none()),
             )?;
             cx.evidence(&format!("the tab routes {PHONE} to no link with the thief"));
-            let t4 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[3]))?;
+            let t4 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[4]))?;
             for host in [&mut laptop, &mut tab] {
                 let how = never_answers(cx, host, &t4)?;
                 cx.evidence(&format!("{} get {}: {how}", host.node, t4.name));
@@ -888,15 +1203,31 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     ));
                 }
                 cx.evidence(&format!("{}: at {}, value {}", host.node, last.0, last.1));
-                for v in [&t1, &t2, &t3, &t4] {
+                for v in [&t1, &t2, &ts, &t3, &t4] {
                     let how = never_answers(cx, host, v)?;
                     cx.evidence(&format!("{} get {}: {how}", host.node, v.name));
                 }
-                if refused_names(cx, host, &phone_key)?.contains(&n3_full) {
+                let refused = refused_names(cx, host, &phone_key)?;
+                if refused.contains(&n3_full) {
                     return Err(format!(
                         "{} still reports {n3_full} refused; expected it re-admitted",
                         host.node
                     ));
+                }
+                // A left-out thief note at the offline note's name (other
+                // bytes) gives way to the re-admitted honest version there;
+                // `never_answers` above shows the thief's bytes stay out.
+                for n in &left_out {
+                    if is_full_name_of(n, &n3)? {
+                        continue;
+                    }
+                    if !refused.iter().any(|r| name(r).ok() == name(n).ok()) {
+                        return Err(format!(
+                            "{} no longer reports {n} refused ({refused:?}); expected the \
+                             thief's notes the cut left out to stay refused (never re-admitted)",
+                            host.node
+                        ));
+                    }
                 }
             }
             let delivered = tab.watched_until(

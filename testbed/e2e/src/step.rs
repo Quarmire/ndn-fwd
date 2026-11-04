@@ -515,6 +515,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--bytes",
     "--reason",
     "--cut",
+    "--lost",
 ];
 
 /// Human inputs and concepts of one command, from its tool, subcommand,
@@ -726,6 +727,10 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
                 );
                 add(&mut concepts, "revocation cut".into());
             }
+            "--lost" => add(
+                &mut inputs,
+                format!("when the device was lost (\"When did you lose it?\": {v})"),
+            ),
             "--accept-narrowing" => add(
                 &mut inputs,
                 "--accept-narrowing (a schema that allows less)".into(),

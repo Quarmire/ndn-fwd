@@ -43,6 +43,9 @@ ndn-data = { workspace = true }
 # The `photos` scenario compares a photo read back with the file put, by
 # its SHA-256 (`ndn-data` shows large values by length and digest).
 sha2     = { workspace = true }
+# The `stolen` scenario answers `ndn-fwd revoke --lost` with the exact
+# loss time it marked the phone suspected since (RFC 3339, milliseconds).
+humantime = "2"
 
 [lints]
 workspace = true

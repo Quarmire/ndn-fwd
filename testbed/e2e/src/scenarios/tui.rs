@@ -464,6 +464,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 desk.execute(vec![Effect::Run(Command::Root(RootOp::Revoke {
                     namespace: name(NS),
                     name: name(&n("/member/phone")),
+                    cut: None,
                 }))]);
                 if !desk
                     .settle(wait, |app| matches!(app.modal, Some(Modal::Secret(_))))
