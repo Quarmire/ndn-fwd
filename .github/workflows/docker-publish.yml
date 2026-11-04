@@ -28,7 +28,7 @@ jobs:
         with: { path: ndn-fwd }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-rs (see workspace STATE.md)
-        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: cf352fb54921edb2862eb537c96abe8281972d66, path: ndn-rs }
+        with: { repository: "${{ github.repository_owner }}/ndn-rs", ref: 97be32295a24c3afb3bfed6e1a6440a321eb773f, path: ndn-rs }
       - uses: actions/checkout@v4
         # pinned sibling; bump deliberately when adopting newer ndn-ext (see workspace STATE.md)
         with: { repository: "${{ github.repository_owner }}/ndn-ext", ref: 226eec4cdf5be0cdbf408502bada87d7c386a9f7, path: ndn-ext }
