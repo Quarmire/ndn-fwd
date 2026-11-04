@@ -53,15 +53,19 @@
 //!   of the current certificate, no invite (see [`crate::renewal`]).
 //! - `revoke` (run on the root device) asks the running daemon to revoke a
 //!   device identity, key or certificate at its CA and in a new, root-signed
-//!   version of the namespace's trust context (see [`crate::revoke`]),
-//!   sending the root store's passphrase or PIN when it needs one.
+//!   version of the namespace's trust context (see [`crate::revoke`]), with
+//!   the revocation cut of one of its keys when `--cut` gives one, sending
+//!   the root store's passphrase or PIN when it needs one; `readmit` adds
+//!   exact packets to such a cut ([`crate::readmit`]).
 //! - `context refresh [<ns>]` asks the running daemon to check its held trust
 //!   contexts for a newer version now (see [`crate::context_refresh`]).
 //! - `root-key status|move` shows or moves where the root key lives
 //!   ([`crate::root_key`]).
 //! - `recovery-kit create|list|check|revoke` manages the recovery kits of
 //!   the namespace ([`crate::recovery_kit`]); `recover` makes a replacement
-//!   device the root device with one ([`crate::recover`]).
+//!   device the root device with one ([`crate::recover`]), and `recertify`
+//!   certifies again a key revoked with a cut whose certificate a
+//!   compromised recovery did not hold.
 
 use std::path::PathBuf;
 
@@ -92,6 +96,7 @@ pub async fn maybe_run() -> Option<Result<()>> {
         "adopt" => Some(run_adopt(&args[2..]).await),
         "enroll" => Some(run_enroll(&args[2..]).await),
         "revoke" => Some(crate::revoke::run(&args[2..]).await),
+        "readmit" => Some(crate::readmit::run(&args[2..]).await),
         "renew" => Some(run_renew(&args[2..]).await),
         "node-identity" => Some(crate::node_identity_cmd::run(&args[2..]).await),
         "context" => Some(run_context(&args[2..]).await),
@@ -99,6 +104,7 @@ pub async fn maybe_run() -> Option<Result<()>> {
         "root-key" => Some(crate::root_key::run(&args[2..]).await),
         "recovery-kit" => Some(crate::recovery_kit::run(&args[2..]).await),
         "recover" => Some(crate::recover::run(&args[2..]).await),
+        "recertify" => Some(crate::recover::run_recertify(&args[2..]).await),
         _ => None,
     }
 }
@@ -131,6 +137,7 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--kit-yubikey-slot",
     "--kit-touch-policy",
     "--keep-kit",
+    "--cut",
 ];
 
 /// The arguments one onboarding subcommand takes.
@@ -235,10 +242,29 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
                 "--config",
                 "--passphrase-file",
                 "--pin-file",
+                "--cut",
             ],
             repeatable: &[],
             switches: &[],
             positionals: 1,
+        },
+    ),
+    (
+        "readmit",
+        None,
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--passphrase-file",
+                "--pin-file",
+            ],
+            repeatable: &[],
+            switches: &[],
+            // The key, then any number of full names.
+            positionals: usize::MAX,
         },
     ),
     (
@@ -431,10 +457,22 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
                 "--yubikey-serial",
                 "--touch-policy",
                 "--keep-kit",
+                "--cut",
             ],
-            repeatable: &["--keep-kit"],
+            repeatable: &["--keep-kit", "--cut"],
             switches: &["--from-held", "--replace-slot"],
             positionals: 0,
+        },
+    ),
+    (
+        "recertify",
+        None,
+        ArgSpec {
+            values: &["--namespace", "--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            // Any number of certificate files.
+            positionals: usize::MAX,
         },
     ),
 ];

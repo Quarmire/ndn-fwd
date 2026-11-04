@@ -379,6 +379,7 @@ pub async fn run(
                         OldRoot::Destroyed
                     },
                     kept_kits: Vec::new(),
+                    cuts: Vec::new(),
                     from_held,
                     root: store_choice(store),
                 },
@@ -406,7 +407,7 @@ pub async fn run(
             }
         }
         RootOp::Revoke { namespace, name } => {
-            let planned = revoke::plan(pib, &name, Some(&namespace))?;
+            let planned = revoke::plan(pib, &name, Some(&namespace), None)?;
             let done = revoke::revoke(planned, &name, pib, &device, secrets).await?;
             RootDone::Revoked {
                 namespace: done.namespace.to_string(),

@@ -239,6 +239,7 @@ mod tests {
             root.as_ref(),
             &ns.init.context_data,
             std::slice::from_ref(&ns.device_key),
+            None,
         )
         .await
         .unwrap()

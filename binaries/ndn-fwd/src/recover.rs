@@ -42,6 +42,18 @@
 //!    the namespace's expected fingerprint again: the anchor link printed,
 //!    and invites minted from then on, carry it. Until then no link is
 //!    printed.
+//!
+//! **Revocation cuts.** `N+1` and `N+2` carry every cut the held version
+//! holds. With `--old-root compromised`, `--cut <file>` (repeatable) adds
+//! the cut of a key the recovery newly revokes (the old admin key, a kit not
+//! kept), beside its revocation. The old CA no longer chains then, so a key
+//! revoked with a cut could not renew and the packets its cut accepts would
+//! stop verifying: the new CA certifies again each such key whose
+//! certificate this PIB holds (same public key, a certificate of the new CA,
+//! recorded in its store once `N+1` is taken and served from its next
+//! start; the key stays revoked for everything else). A key of none held is
+//! listed; `ndn-fwd recertify <cert-file>` certifies it once its certificate
+//! is at hand ([`run_recertify`]).
 
 use anyhow::{Context, Result, bail};
 use ndn_cert::OldRoot;
@@ -50,11 +62,13 @@ use ndn_namespace::admin::NotTaken;
 use ndn_namespace::hex;
 use ndn_namespace::root::RootError;
 use ndn_namespace::root::recover::{self, AnchorKind, RecoverRequest, RevokedKind};
-use ndn_packet::Name;
+use ndn_packet::{Data, Name};
+use ndn_security::Certificate;
 
 use crate::context_adopt::namespace_words;
-use crate::onboard::{flag, pib_dir};
+use crate::onboard::{flag, flag_values, pib_dir, positionals};
 use crate::recovery_kit::kit_spec;
+use crate::revoke::{cut_text, read_cut};
 use crate::root_host::{Secrets, daemon, handed_text, namespace_arg, render};
 
 /// The answer the anti-fork check refused on, in the CLI's words: the
@@ -187,12 +201,16 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         Some(device) => device.to_string(),
         None => crate::onboard::default_device()?,
     };
-    let kept_kits = crate::onboard::flag_values(args, "--keep-kit")
+    let kept_kits = flag_values(args, "--keep-kit")
         .into_iter()
         .map(|key| {
             key.parse::<Name>()
                 .map_err(|e| anyhow::anyhow!("--keep-kit {key:?} is not an NDN name: {e}"))
         })
+        .collect::<Result<Vec<_>>>()?;
+    let cuts = flag_values(args, "--cut")
+        .into_iter()
+        .map(|path| read_cut(path, "recover"))
         .collect::<Result<Vec<_>>>()?;
     let root = crate::root_key::root_store_choice(args)?;
     let daemon = daemon(args)?;
@@ -204,6 +222,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             device,
             old_root,
             kept_kits,
+            cuts,
             from_held: args.iter().any(|a| a == "--from-held"),
             root,
         },
@@ -224,6 +243,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         pib_abs,
         anchors,
         revoked,
+        recertified_not_recorded,
         ..
     } = done;
     let v = &recovered.version;
@@ -304,6 +324,32 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             RevokedKind::OldRootDeviceKey => "a key of the old root device",
         };
         println!("revoked        = {key} ({what})");
+    }
+    // Every cut v{next} holds: the held ones, carried, and those given.
+    for cut in v.bump.context.revocation_cuts() {
+        println!("cut            = {}: {}", cut.key(), cut_text(cut));
+    }
+    for cert in &recovered.recertified.issued {
+        println!(
+            "recertified    = {} (revoked with a cut; certified again by the new CA)",
+            cert.name
+        );
+    }
+    for key in &recovered.recertified.unheld {
+        println!(
+            "not_recertified = {key} (revoked with a cut, no certificate of it here: the packets \
+             its cut accepts stop verifying until `ndn-fwd recertify <its certificate file> --pib \
+             {}`)",
+            pib_abs.display()
+        );
+    }
+    if let Some(e) = recertified_not_recorded {
+        println!(
+            "recertified    = NOT recorded in the CA's store ({:#}): run `ndn-fwd recertify --pib \
+             {}` to issue and record them again",
+            render(e),
+            pib_abs.display()
+        );
     }
     // An anchor link names the newest version's signer as the expected
     // fingerprint: the new root, once it signed v{settled}. Until then no
@@ -416,5 +462,62 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         "# stays a recovery anchor until `ndn-fwd recovery-kit revoke {}`.",
         v.recovery_key
     );
+    Ok(())
+}
+
+/// The certificate in the file `path` (a certificate Data, as `ndn-fwd`
+/// writes certificate files), for `recertify`'s refusal.
+fn read_certificate(path: &str) -> Result<Certificate> {
+    let wire = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("recertify refused: cannot read {path}: {e}"))?;
+    Data::decode(bytes::Bytes::from(wire))
+        .map_err(|e| e.to_string())
+        .and_then(|data| Certificate::decode(&data).map_err(|e| e.to_string()))
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "recertify refused: {path} is not a certificate ({e}): give the certificate Data \
+                 file of the revoked key (e.g. the device's own certificate file). Nothing was \
+                 certified"
+            )
+        })
+}
+
+/// `ndn-fwd recertify [<cert-file>]...`: on the root device, certify again,
+/// by the namespace CA, each key the held version revokes with a cut that
+/// the CA has not certified yet, from a certificate given (or kept in the
+/// PIB) — what a compromised recovery listed as `not_recertified`. Only
+/// certificates the operator holds are used, never ones fetched from the
+/// network: whoever held the old root could have forged those.
+pub(crate) async fn run_recertify(args: &[String]) -> Result<()> {
+    let certificates = positionals(args)
+        .into_iter()
+        .map(read_certificate)
+        .collect::<Result<Vec<_>>>()?;
+    let pib_dir = pib_dir(args)?;
+    let (namespace, done) =
+        recover::recertify(&pib_dir, namespace_arg(args)?.as_ref(), &certificates)
+            .await
+            .map_err(render)?;
+    println!("# ndn-fwd recertify");
+    println!("namespace      = {namespace}");
+    for cert in &done.issued {
+        println!(
+            "recertified    = {} (revoked with a cut; certified again by the CA)",
+            cert.name
+        );
+    }
+    for key in &done.unheld {
+        println!("not_recertified = {key} (no certificate of it given or kept here)");
+    }
+    if done.issued.is_empty() && done.unheld.is_empty() {
+        println!("# Every key revoked with a cut is certified by this CA already; nothing issued.");
+        return Ok(());
+    }
+    if !done.issued.is_empty() {
+        println!();
+        println!("# Restart this device's daemon: its CA serves these certificates from its next");
+        println!("# start, so the packets each key's cut accepts verify again. The keys stay");
+        println!("# revoked for everything else (never enrolled or renewed).");
+    }
     Ok(())
 }

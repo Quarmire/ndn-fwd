@@ -271,6 +271,26 @@ fn main() -> Result<()> {
             println!("anchors:      {}", ctx.anchors().len());
             println!("ca_endpoints: {}", ctx.ca_endpoints().len());
             println!("revocations:  {}", ctx.revocations().len());
+            // Each revocation cut: the packets its key signed that stay
+            // accepted (per prefix, the sequence-number runs) and how many
+            // exact packets were re-admitted.
+            for cut in ctx.revocation_cuts() {
+                let ranges: Vec<String> = cut
+                    .ranges()
+                    .iter()
+                    .map(|r| {
+                        let runs: Vec<String> =
+                            r.runs.iter().map(|(a, b)| format!("{a}..{b}")).collect();
+                        format!("{} seq {}", r.prefix, runs.join(","))
+                    })
+                    .collect();
+                println!(
+                    "cut:          {} [{}] exact={}",
+                    cut.key(),
+                    ranges.join("; "),
+                    cut.exact().len()
+                );
+            }
         }
     }
     Ok(())

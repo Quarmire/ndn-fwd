@@ -55,6 +55,9 @@ fn purpose_text(purpose: &SecretPurpose) -> String {
                 VersionChange::UpdateSchema { namespace } => {
                     format!("Updating the schema of {namespace}")
                 }
+                VersionChange::Readmit { key } => {
+                    format!("Re-admitting packets of the revoked key {key}")
+                }
             };
             format!("{change} signs a new trust context version")
         }

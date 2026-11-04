@@ -263,6 +263,9 @@ pub fn secret_prompt(request: &SecretRequest) -> String {
                 VersionChange::UpdateSchema { namespace } => {
                     format!("updating the trust rules of {namespace}")
                 }
+                VersionChange::Readmit { key } => {
+                    format!("re-admitting single packets of the revoked key {key}")
+                }
             };
             format!("to sign a new version {change}")
         }
@@ -1144,6 +1147,24 @@ fn root_phrase(w: &W<'_>) -> Option<String> {
         "nothing-to-sign" => format!(
             "{} has everything asked already: nothing to sign",
             w.version_or("version", "the current version")
+        ),
+        "cut-refused" => format!(
+            "the list of packets to keep for {} cannot be signed: it must come with the \
+             revocation of exactly that key{}",
+            w.named("key", "that key"),
+            w.error()
+        ),
+        "readmit-no-cut" => format!(
+            "{} has no list of packets to keep, so none can be accepted again: revoke it with \
+             one first{}",
+            w.named("key", "that key"),
+            w.error()
+        ),
+        "readmit-refused" => format!(
+            "{} is not a complete name of a packet {} published{}",
+            w.named("name", "that name"),
+            w.named("key", "that key"),
+            w.error()
         ),
         "not-a-kit" => format!(
             "{} is not a recovery kit{}",
@@ -2444,6 +2465,9 @@ mod tests {
             }),
             SecretPurpose::SignVersion(VersionChange::UpdateSchema {
                 namespace: name("/home/bob"),
+            }),
+            SecretPurpose::SignVersion(VersionChange::Readmit {
+                key: name("/home/bob/member/phone/KEY/k"),
             }),
             SecretPurpose::MoveRoot,
             SecretPurpose::SealRoot,

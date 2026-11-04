@@ -1,5 +1,5 @@
-//! `ndn-fwd revoke <device | key | certificate>` on the root device: the
-//! CLI over [`ndn_namespace::root::revoke`].
+//! `ndn-fwd revoke <device | key | certificate> [--cut <file>]` on the root
+//! device: the CLI over [`ndn_namespace::root::revoke`].
 //!
 //! **The revocation is a new version of the trust context.** The CLI works
 //! on the PIB of the daemon it hands the version to; the library checks,
@@ -23,15 +23,27 @@
 //! also ones issued later — once it holds that version, which other nodes
 //! fetch with their next refresh ([`crate::context_refresh`]).
 //!
+//! **A revocation cut** (`--cut <file>`: the RevocationCut TLV 0x0428 a
+//! device's data layer writes from what it holds verified of the key) is
+//! signed in the same version, beside the revocation of exactly its key:
+//! the packets it accepts (the key's log entries published before, as
+//! listed) stay accepted everywhere, every other packet the key signed is
+//! refused. Its key must be one the version revokes and the cut may list
+//! only that key's device log, else nothing is signed (`cut-refused`). A
+//! cut comes only with the key's revocation: single packets are re-admitted
+//! later by their full names ([`crate::readmit`]).
+//!
 //! **The CA follows the signed version**
 //! ([`ndn_cert::CaState::follow_context`]), never a separate request:
 //! whenever the daemon keeps a version of its namespace's context — handed
 //! over, refreshed, adopted by link ([`ndn_namespace::keep`]) — and when its
-//! CA starts ([`ndn_cert::CaState::follow_held`]), the CA stops serving
-//! every certificate it issued that the version revokes, records that in its
-//! store (`revoked/` in the CA's directory, [`ndn_cert::ca_dir`]), never
-//! certifies such a key again, and the device name the key held is free for
-//! a new key (one key per device name).
+//! CA starts ([`ndn_cert::CaState::follow_held`]), the CA records every
+//! certificate it issued that the version revokes as revoked in its store
+//! (`revoked/` in the CA's directory, [`ndn_cert::ca_dir`]), never certifies
+//! such a key again, and the device name the key held is free for a new key
+//! (one key per device name). It stops serving those certificates, except
+//! those of a key revoked with a cut: readers verify the packets the cut
+//! accepts with them.
 
 use std::path::Path;
 
@@ -39,8 +51,9 @@ use anyhow::{Context, Result};
 use ndn_cert::report::code;
 use ndn_namespace::root::{self, RootError};
 use ndn_packet::Name;
+use ndn_security::RevocationCut;
 
-use crate::onboard::{pib_dir, positionals};
+use crate::onboard::{flag, pib_dir, positionals};
 use crate::root_host::{
     Secrets, daemon, handed_text, namespace_arg, render, render_before_signing,
 };
@@ -87,7 +100,51 @@ fn plan_refused(e: RootError) -> anyhow::Error {
     render(e)
 }
 
-/// `ndn-fwd revoke <device | key | certificate>`.
+/// The revocation cut in the file `path` (the RevocationCut TLV 0x0428, as
+/// a device's data layer writes it), for `command`'s refusal.
+pub(crate) fn read_cut(path: &str, command: &str) -> Result<RevocationCut> {
+    let wire = std::fs::read(path).map_err(|e| {
+        anyhow::anyhow!(
+            "{command} refused: cannot read the cut file {path}: {e}. Nothing was signed"
+        )
+    })?;
+    RevocationCut::decode(&wire).map_err(|e| {
+        anyhow::anyhow!(
+            "{command} refused: {path} is not a revocation cut ({e}): give the file holding the \
+             RevocationCut TLV (0x0428) the key's device wrote from what it holds verified (the \
+             data layer's `cut <key> <file>`). Nothing was signed"
+        )
+    })
+}
+
+/// `cut` as the CLI shows it: per prefix its sequence-number runs, then
+/// how many exact packets it re-admits.
+pub(crate) fn cut_text(cut: &RevocationCut) -> String {
+    let mut parts: Vec<String> = cut
+        .ranges()
+        .iter()
+        .map(|range| {
+            let runs: Vec<String> = range
+                .runs
+                .iter()
+                .map(|(first, last)| match first == last {
+                    true => first.to_string(),
+                    false => format!("{first}..{last}"),
+                })
+                .collect();
+            format!("{} seq {}", range.prefix, runs.join(","))
+        })
+        .collect();
+    if !cut.exact().is_empty() {
+        parts.push(format!("{} exact packet(s)", cut.exact().len()));
+    }
+    match parts.is_empty() {
+        true => "accepts nothing".to_string(),
+        false => parts.join("; "),
+    }
+}
+
+/// `ndn-fwd revoke <device | key | certificate> [--cut <file>]`.
 pub(crate) async fn run(args: &[String]) -> Result<()> {
     let target = *positionals(args).first().context(
         "revoke requires a device identity (/<ns>/<role>/<device>), a key name \
@@ -96,15 +153,21 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     let name: Name = target
         .parse()
         .map_err(|e| anyhow::anyhow!("revoke refused: {target:?} is not an NDN name: {e}"))?;
+    let cut = flag(args, &["--cut"])
+        .map(|path| read_cut(path, "revoke"))
+        .transpose()?;
     let pib_dir = pib_dir(args)?;
-    let planned =
-        root::revoke::plan(&pib_dir, &name, namespace_arg(args)?.as_ref()).map_err(plan_refused)?;
+    let planned = root::revoke::plan(&pib_dir, &name, namespace_arg(args)?.as_ref(), cut)
+        .map_err(plan_refused)?;
     let held = planned.root.context.version();
     if planned.adding.is_empty() {
         println!("# ndn-fwd revoke");
         println!("namespace      = {}", planned.root.context.namespace());
         for key in &planned.keys {
             println!("revoked_key    = {key} (already)");
+            if let Some(cut) = planned.root.context.revocation_cut(key) {
+                println!("cut            = {key}: {} (already)", cut_text(cut));
+            }
         }
         println!("trust_context  = v{held} (already revokes every key named; nothing signed)");
         return Ok(());
@@ -119,6 +182,9 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     for key in &revoked.revoked {
         println!("revoked_key    = {key}");
     }
+    if let Some(cut) = &revoked.cut {
+        println!("cut            = {}: {}", cut.key(), cut_text(cut));
+    }
     println!(
         "trust_context  = v{held} -> v{version} (signed by the root {})",
         revoked.root_key
@@ -128,11 +194,31 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         handed_text(&revoked.handed_over, &daemon, version, &pib_dir)
     );
     println!();
-    println!("# The CA of {namespace} stops serving the certificates of these keys once its");
-    println!("# daemon holds v{version}, and the device name is free to enroll again with a");
-    println!("# new key. Every other node refuses the keys once it holds v{version}: at its next");
-    println!("# refresh ([security] context_refresh_secs, default 300 s), or at once with");
+    println!("# The CA of {namespace} never certifies these keys again once its daemon holds");
+    println!("# v{version}, and the device name is free to enroll again with a new key. Every");
+    println!("# other node refuses the keys once it holds v{version}: at its next refresh");
+    println!("# ([security] context_refresh_secs, default 300 s), or at once with");
     println!("# `ndn-fwd context refresh`.");
+    match &revoked.cut {
+        None => {
+            println!("# No cut: every packet these keys signed is refused, and the CA stops");
+            println!("# serving their certificates.");
+        }
+        Some(cut) => {
+            println!("# With the cut, the packets it lists stay accepted and the CA keeps serving");
+            println!(
+                "# the certificates of {} to verify them; everything",
+                cut.key()
+            );
+            println!(
+                "# else it signed is refused. A genuine packet outside the cut is re-admitted"
+            );
+            println!(
+                "# by its full name: ndn-fwd readmit {} <full-name>",
+                cut.key()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -189,14 +275,64 @@ mod tests {
     }
 
     /// Version 2 of the root device's context, revoking what `name`
-    /// designates, signed by the root as `ndn-fwd revoke` signs it.
-    async fn revocation(root_dev: &Path, name: &Name) -> ndn_cert::ContextBump {
-        let plan = plan(root_dev, name, None).unwrap();
+    /// designates (with `cut`, if any), signed by the root as `ndn-fwd
+    /// revoke` signs it.
+    async fn revocation_with(
+        root_dev: &Path,
+        name: &Name,
+        cut: Option<RevocationCut>,
+    ) -> ndn_cert::ContextBump {
+        let plan = plan(root_dev, name, None, cut).unwrap();
         let root = plan.root.store.signer(None).await.unwrap();
-        ndn_cert::bump_context_revoking(root.as_ref(), &plan.root.data, &plan.keys)
+        ndn_cert::bump_context_revoking(
+            root.as_ref(),
+            &plan.root.data,
+            &plan.keys,
+            plan.cut.as_ref(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    async fn revocation(root_dev: &Path, name: &Name) -> ndn_cert::ContextBump {
+        revocation_with(root_dev, name, None).await
+    }
+
+    /// A revocation with a cut handed to the daemon: the key is revoked
+    /// (the device name free for a new key), the cut is held as signed, the
+    /// CA keeps serving the key's certificate for the packets the cut
+    /// accepts, and a cut file the CLI reads is the cut signed.
+    #[tokio::test]
+    async fn a_revocation_with_a_cut_keeps_the_certificate_served() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-a"]).await;
+        let (identity, key, certificate) = enrolled(&node, "member-a").await;
+        let mut cut = RevocationCut::new(key.clone());
+        cut.add_run(&ndn_cert::device_log_of(&key).append("notes"), 1, 3);
+        let file = root_dev.path().join("phone.cut");
+        std::fs::write(&file, cut.encode()).unwrap();
+        let read = read_cut(file.to_str().unwrap(), "revoke").unwrap();
+        assert_eq!(read, cut);
+
+        let bump = revocation_with(root_dev.path(), &identity, Some(read)).await;
+        let daemon = admin(
+            node.admin.ns.engine().clone(),
+            root_dev.path(),
+            vec![Arc::clone(&node.ca)],
+        );
+        crate::context_refresh::apply_update(&daemon, bump.data.raw().clone())
             .await
-            .unwrap()
-            .unwrap()
+            .unwrap();
+        let held = daemon.ns.keyring().contexts().pop().unwrap();
+        assert!(held.is_revoked(&key));
+        assert_eq!(held.revocation_cut(&key), Some(&cut));
+        assert!(node.ca.is_revoked(&certificate));
+        assert!(
+            node.ca.get_served_cert(&certificate).is_some(),
+            "the CA keeps serving it"
+        );
+        node.shutdown.shutdown().await;
     }
 
     /// The checks before the root is unlocked: only on the root device, never
@@ -211,11 +347,11 @@ mod tests {
         let held = node.admin.ns.keyring().contexts().pop().unwrap();
         ndn_cert::persist_context(device.path(), &held, &node.context_data).unwrap();
         assert!(
-            plan(device.path(), &identity, None).is_err(),
+            plan(device.path(), &identity, None, None).is_err(),
             "not the root device"
         );
 
-        let planned = plan(root_dev.path(), &identity, None).unwrap();
+        let planned = plan(root_dev.path(), &identity, None, None).unwrap();
         assert_eq!(
             (planned.keys.clone(), planned.adding),
             (vec![key.clone()], vec![key])
@@ -228,7 +364,7 @@ mod tests {
             "/home/alice/member/phone/KEY/k",
         ] {
             assert!(
-                plan(root_dev.path(), &name.parse().unwrap(), None).is_err(),
+                plan(root_dev.path(), &name.parse().unwrap(), None, None).is_err(),
                 "{name}"
             );
         }
@@ -274,7 +410,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.version(), 2);
-        assert!(plan(root_dev.path(), &key, None).unwrap().adding.is_empty());
+        assert!(
+            plan(root_dev.path(), &key, None, None)
+                .unwrap()
+                .adding
+                .is_empty()
+        );
 
         let (again, other_key, _) = enrolled(&node, "member-b").await;
         assert_eq!(again, identity);
