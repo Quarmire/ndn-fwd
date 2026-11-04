@@ -26,7 +26,7 @@ use ndn_packet::Name;
 
 use crate::onboard::{pib_dir, positionals};
 use crate::root_host::{
-    Secrets, daemon, handed_text, namespace_arg, render, render_before_signing,
+    Secrets, daemon, handed_text, namespace_arg, print_keys_to_end, render, render_before_signing,
 };
 
 /// A refused re-admission into the cut of `key` (on the PIB at `pib_dir`,
@@ -96,6 +96,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             println!("readmitted     = {name} (already)");
         }
         println!("trust_context  = v{held} (its cut accepts every name given; nothing signed)");
+        print_keys_to_end(&pib_dir);
         return Ok(());
     }
     let daemon = daemon(args)?;
@@ -124,5 +125,6 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     );
     println!("# v{version}: at its next refresh, or at once with `ndn-fwd context refresh`. Any");
     println!("# other packet outside the key's cut stays refused.");
+    print_keys_to_end(&pib_dir);
     Ok(())
 }

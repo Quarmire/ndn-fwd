@@ -62,6 +62,7 @@ mod links;
 #[cfg(feature = "quic")]
 mod link_events;
 // `links/list`: the links' paths and direct-path states.
+mod end_keys;
 #[cfg(feature = "quic")]
 mod links_mgmt;
 mod monitors;
@@ -216,8 +217,8 @@ USAGE:
                                           when the code matches the one the
                                           new device shows
   ndn-fwd revoke <device-identity | key-name | cert-name> [--pib <dir>]
-                [--cut <file>] [--namespace <prefix>] [-c <config>]
-                [--passphrase-file <path> | --pin-file <path>]
+                [--cut <file> [--lost <when>]] [--namespace <prefix>]
+                [-c <config>] [--passphrase-file <path> | --pin-file <path>]
                                           on the root device: sign, here, a new
                                           version of the namespace's trust
                                           context that revokes the device's
@@ -227,16 +228,23 @@ USAGE:
                                           the device name is free for a new
                                           key. Other nodes refuse the key once
                                           they hold that version. --cut: the
-                                          revocation cut of one of those keys
-                                          (the RevocationCut file its device's
-                                          data layer writes, `cut <key>
-                                          <file>`), signed beside it: the
+                                          cut file of one of those keys (its
+                                          device's data layer writes it with
+                                          `cut <key> <file> --held-before
+                                          <when>`), signed beside it: the
                                           packets it lists stay accepted (and
                                           the key's certificates served),
                                           everything else the key signed is
                                           refused; without it every packet is
                                           refused and the CA stops serving the
-                                          certificates. A sealed-file or
+                                          certificates. With --cut it asks
+                                          \"When did you lose it?\" (--lost
+                                          <when> without a terminal: RFC 3339,
+                                          `2h ago` or `now`) and refuses a cut
+                                          file without a time bound or bounded
+                                          later than that; the entries the
+                                          bound left out are listed for
+                                          readmit. A sealed-file or
                                           yubikey-piv root asks for its
                                           passphrase / PIN here; it never
                                           leaves this command
@@ -250,6 +258,27 @@ USAGE:
                                           a key revoked with one, handed to the
                                           daemon as revoke does; names its cut
                                           accepts already sign nothing
+  ndn-fwd status [--pib <dir>] [-c <config>]
+                                          on the root device: list the keys
+                                          whose authority over Data ended and
+                                          that no version revokes yet — lapsed
+                                          keys of a role listed in
+                                          DataRequiresCut (guest) and keys
+                                          replaced by a newer key of the same
+                                          device — each with the data-host line
+                                          that writes its cut file
+  ndn-fwd end-keys [--cut <file>]... [--namespace <prefix>] [--yes]
+                [--pib <dir>] [-c <config>]
+                [--passphrase-file <path> | --pin-file <path>]
+                                          on the root device: one new version
+                                          revoking every ending key a cut file
+                                          is given for (bounded at or before
+                                          the key's end), each with its cut; a
+                                          key without a cut file is listed and
+                                          never revoked. --yes: no
+                                          confirmation, only for a root store
+                                          that unlocks without a secret (e.g.
+                                          run from a timer)
   ndn-fwd renew [-c <config>]             renew, now, the certificates the
                                           namespace CA issued to this node:
                                           same key, no invite (the daemon also
@@ -304,6 +333,16 @@ USAGE:
                                           link policy narrows or an advertised
                                           relay is dropped, unless
                                           --accept-narrowing
+  ndn-fwd schema data-requires-cut <role>[,<role>...]|none [--namespace <ns>]
+                [-c <config>] [--pib <dir>]
+                [--passphrase-file <path> | --pin-file <path>]
+                                          on the root device: a new version
+                                          listing exactly those device roles
+                                          in DataRequiresCut: Data a key of a
+                                          listed role signs is accepted only
+                                          while a certificate of the key is
+                                          valid, or once the key is revoked
+                                          with a cut (init lists guest)
   ndn-fwd root-key status [--namespace <prefix>] [--pib <dir>]
                                           where this root device keeps its
                                           namespace root keys (each trusted
@@ -357,7 +396,8 @@ USAGE:
                                           without that recovery anchor, revoking
                                           its key
   ndn-fwd recover --kit words|yubikey|<kit-file> --old-root destroyed|compromised
-                [--keep-kit <recovery-key-name>]... [--cut <file>]... [--namespace <ns>]
+                [--keep-kit <recovery-key-name>]... [--cut <file>]... [--lost <when>]
+                [--recertify-cuts yes|no] [--namespace <ns>]
                 [--device <name>] [--words-file <path>]
                 [--kit-passphrase-file <path>] [--kit-pin-file <path>]
                 [--kit-yubikey-slot <slot>] [--kit-yubikey-serial <n>]
@@ -382,29 +422,42 @@ USAGE:
                                           of the other recovery kits only those
                                           named with --keep-kit stay (the rest
                                           are revoked). --cut (compromised
-                                          only): the revocation cut of a key
-                                          it revokes (the old admin key, a kit
-                                          not kept), signed beside it. Every
-                                          cut held is carried, and each key
-                                          revoked with a cut whose certificate
-                                          this PIB holds is certified again by
-                                          the new CA (its cut's packets keep
-                                          verifying); the others are listed
-                                          for `ndn-fwd recertify`.
+                                          only): the cut file of a key it
+                                          revokes (the old admin key, a kit
+                                          not kept), signed beside it; it must
+                                          be bounded at or before the time the
+                                          old root device was lost (asked, or
+                                          --lost <when>). Every cut held is
+                                          carried except orphan cuts and cuts
+                                          outside their key's log (listed as
+                                          dropped_cut). Then the cuts are shown
+                                          and it asks whether the new CA
+                                          certifies those keys again
+                                          (--recertify-cuts yes|no without a
+                                          terminal; no answer is no): only a
+                                          certificate with the public key the
+                                          cut names; the others are listed for
+                                          `ndn-fwd recertify`.
                                           --from-held: when no other node
                                           answers for the namespace, recover
                                           from the version held (you vouch
                                           that no newer one exists)
-  ndn-fwd recertify [<cert-file>]... [--namespace <ns>] [--pib <dir>] [-c <config>]
-                                          on the root device: certify again,
-                                          by the namespace CA, each key revoked
-                                          with a cut it has not certified yet,
-                                          from a certificate of it given here
+  ndn-fwd recertify [<cert-file>]... [--yes] [--namespace <ns>] [--pib <dir>]
+                [-c <config>]
+                                          on the root device: show the cuts the
+                                          held version revokes keys with, ask
+                                          (--yes: confirmed beforehand), then
+                                          certify again, by the namespace CA,
+                                          each such key it has not certified
+                                          yet, from a certificate with the
+                                          public key its cut names given here
                                           (its Data file) or kept in this PIB,
                                           so the packets its cut accepts keep
                                           verifying after a compromised
-                                          recovery; the CA serves them from
-                                          its next start
+                                          recovery; a cut naming no public key
+                                          is never certified again
+                                          (no_key_digest). The CA serves them
+                                          from its next start
   (all take -c/--config to find [security].pib_path; default ~/.ndn/pib)
 
 OPTIONS:

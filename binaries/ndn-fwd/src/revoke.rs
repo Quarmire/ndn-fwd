@@ -23,15 +23,23 @@
 //! also ones issued later — once it holds that version, which other nodes
 //! fetch with their next refresh ([`crate::context_refresh`]).
 //!
-//! **A revocation cut** (`--cut <file>`: the RevocationCut TLV 0x0428 a
-//! device's data layer writes from what it holds verified of the key) is
+//! **A revocation cut** (`--cut <file>`: the cut file a device's data layer
+//! writes with its `cut` verb — the RevocationCut TLV 0x0428, the bound it
+//! used, the entries the bound left out and the cut manifest's packets) is
 //! signed in the same version, beside the revocation of exactly its key:
-//! the packets it accepts (the key's log entries published before, as
-//! listed) stay accepted everywhere, every other packet the key signed is
-//! refused. Its key must be one the version revokes and the cut may list
-//! only that key's device log, else nothing is signed (`cut-refused`). A
-//! cut comes only with the key's revocation: single packets are re-admitted
-//! later by their full names ([`crate::readmit`]).
+//! the packets it accepts (the key's log entries the data layer first
+//! verified before the loss, each by its exact bytes as the manifest lists
+//! them) stay accepted everywhere, every other packet the key signed is
+//! refused. The CLI asks **"When did you lose it?"** (`--lost <when>`
+//! without a terminal: RFC 3339, `2h ago`, or `now`) and refuses a cut
+//! file made without a time bound, or bounded later than that answer — it
+//! could accept what a thief wrote after the loss. Its key must be one the
+//! version revokes, the cut must list only that key's device log, name the
+//! key's public key and carry its whole manifest, else nothing is signed
+//! (`cut-refused`). The manifest's packets are stored beside the contexts
+//! and served with the version. The entries the bound left out are listed:
+//! each is refused with the rest, and a genuine one is re-admitted later by
+//! its full name ([`crate::readmit`]).
 //!
 //! **The CA follows the signed version**
 //! ([`ndn_cert::CaState::follow_context`]), never a separate request:
@@ -49,13 +57,16 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use ndn_cert::report::code;
+use ndn_cert::{CutFile, GivenCut};
+use ndn_namespace::root::revoke::{LOSS_QUESTION, format_when, parse_when};
 use ndn_namespace::root::{self, RootError};
 use ndn_packet::Name;
 use ndn_security::RevocationCut;
 
 use crate::onboard::{flag, pib_dir, positionals};
 use crate::root_host::{
-    Secrets, daemon, handed_text, namespace_arg, render, render_before_signing,
+    Secrets, daemon, handed_text, namespace_arg, now_ms, print_keys_to_end, render,
+    render_before_signing,
 };
 
 /// A refused revocation of `name` (on the PIB at `pib_dir`, the held
@@ -97,24 +108,129 @@ fn plan_refused(e: RootError) -> anyhow::Error {
             p("requested")
         );
     }
+    cut_refused(e, "revoke")
+}
+
+/// A `cut-refused` for a cut file's bound, in the CLI's words (times in RFC
+/// 3339, the line that writes the cut again); any other refusal as
+/// [`render`] says it.
+pub(crate) fn cut_refused(e: RootError, command: &str) -> anyhow::Error {
+    let p = |k| e.param(k).unwrap_or_default().to_string();
+    let ms = |k| {
+        p(k).parse::<u64>()
+            .map(format_when)
+            .unwrap_or_else(|_| p(k))
+    };
+    if e.is(code::CUT_REFUSED) {
+        match e.param("why") {
+            Some("after-loss") => {
+                return anyhow::anyhow!(
+                    "{command} refused: the cut file of {} keeps entries first verified until \
+                     {}, after {} (when it was lost): what a thief wrote after the loss could be \
+                     in it. Write the cut again in the ndn-data host: `cut {} <file> \
+                     --held-before {}`. Nothing was signed",
+                    p("key"),
+                    ms("held_before"),
+                    ms("lost"),
+                    p("key"),
+                    ms("lost")
+                );
+            }
+            Some("unbounded") => {
+                return anyhow::anyhow!(
+                    "{command} refused: the cut file of {} was written without a time bound, so \
+                     it may accept what a thief wrote after the loss. Write it again in the \
+                     ndn-data host: `cut {} <file> --held-before <when you lost it>`. Nothing \
+                     was signed",
+                    p("key"),
+                    p("key")
+                );
+            }
+            _ => {}
+        }
+    }
     render(e)
 }
 
-/// The revocation cut in the file `path` (the RevocationCut TLV 0x0428, as
-/// a device's data layer writes it), for `command`'s refusal.
-pub(crate) fn read_cut(path: &str, command: &str) -> Result<RevocationCut> {
+/// The cut file at `path` (as a device's data layer writes it with its
+/// `cut` verb), for `command`'s refusal.
+pub(crate) fn read_cut_file(path: &str, command: &str) -> Result<CutFile> {
     let wire = std::fs::read(path).map_err(|e| {
         anyhow::anyhow!(
             "{command} refused: cannot read the cut file {path}: {e}. Nothing was signed"
         )
     })?;
-    RevocationCut::decode(&wire).map_err(|e| {
+    CutFile::decode(&wire).map_err(|e| {
         anyhow::anyhow!(
-            "{command} refused: {path} is not a revocation cut ({e}): give the file holding the \
-             RevocationCut TLV (0x0428) the key's device wrote from what it holds verified (the \
-             data layer's `cut <key> <file>`). Nothing was signed"
+            "{command} refused: {path} is not a cut file ({e}): give the file the key's \
+             device's data layer wrote with `cut <key> <file> --held-before <when>`. Nothing \
+             was signed"
         )
     })
+}
+
+/// When the owner lost `what` (a key, or the old root device): `--lost
+/// <when>`, else asked on the terminal ([`LOSS_QUESTION`]). Without either,
+/// refused: a cut must be checked against it.
+pub(crate) fn loss_time(args: &[String], what: &str, command: &str) -> Result<u64> {
+    use std::io::IsTerminal as _;
+    let now = now_ms();
+    if let Some(when) = flag(args, &["--lost"]) {
+        return parse_when(when, now)
+            .map_err(|e| anyhow::anyhow!("{command} refused: --lost {e}. Nothing was signed"));
+    }
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        anyhow::bail!(
+            "{command} refused: a cut is checked against when {what} was lost, and there is no \
+             terminal to ask: give --lost <when> (RFC 3339 like 2026-11-04T10:00:00Z, a span \
+             like `2h ago`, or `now`). Nothing was signed"
+        );
+    }
+    loop {
+        eprintln!("The cut keeps only what {what} published before it was lost.");
+        eprint!("{LOSS_QUESTION} (e.g. 2026-11-04T10:00:00Z, 2h ago, now): ");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let mut answer = String::new();
+        if std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut answer)? == 0 {
+            anyhow::bail!(
+                "{command} refused: no answer to \"{LOSS_QUESTION}\". Nothing was signed"
+            );
+        }
+        match parse_when(&answer, now) {
+            Ok(at) => return Ok(at),
+            Err(e) => eprintln!("{e}"),
+        }
+    }
+}
+
+/// The cut file at `path` with the loss time it is checked against
+/// (`--lost`, else asked), for `command`.
+pub(crate) fn given_cut(args: &[String], path: &str, command: &str) -> Result<GivenCut> {
+    let file = read_cut_file(path, command)?;
+    let lost = loss_time(args, &file.cut.key().to_string(), command)?;
+    Ok(GivenCut { file, lost })
+}
+
+/// The lines saying how a cut file is bounded and what its bound left
+/// out, and how to re-admit a genuine entry left out.
+pub(crate) fn print_left_out(file: &CutFile) {
+    if let Some(held_before) = file.held_before {
+        println!(
+            "cut_bound      = first verified before {}",
+            format_when(held_before)
+        );
+    }
+    for (collection, seq) in &file.upto {
+        println!("cut_bound      = {collection} up to seq {seq}");
+    }
+    for name in &file.left_out {
+        println!("left_out       = {name}");
+    }
+    if !file.left_out.is_empty() {
+        println!("# The entries left out (verified at or after the loss) are refused with the");
+        println!("# rest. Re-admit one you know is genuine, one by one, by its full name:");
+        println!("#   ndn-fwd readmit {} <full-name>", file.cut.key());
+    }
 }
 
 /// `cut` as the CLI shows it: per prefix its sequence-number runs, then
@@ -144,7 +260,7 @@ pub(crate) fn cut_text(cut: &RevocationCut) -> String {
     }
 }
 
-/// `ndn-fwd revoke <device | key | certificate> [--cut <file>]`.
+/// `ndn-fwd revoke <device | key | certificate> [--cut <file> [--lost <when>]]`.
 pub(crate) async fn run(args: &[String]) -> Result<()> {
     let target = *positionals(args).first().context(
         "revoke requires a device identity (/<ns>/<role>/<device>), a key name \
@@ -154,7 +270,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("revoke refused: {target:?} is not an NDN name: {e}"))?;
     let cut = flag(args, &["--cut"])
-        .map(|path| read_cut(path, "revoke"))
+        .map(|path| given_cut(args, path, "revoke"))
         .transpose()?;
     let pib_dir = pib_dir(args)?;
     let planned = root::revoke::plan(&pib_dir, &name, namespace_arg(args)?.as_ref(), cut)
@@ -170,6 +286,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             }
         }
         println!("trust_context  = v{held} (already revokes every key named; nothing signed)");
+        print_keys_to_end(&pib_dir);
         return Ok(());
     }
     let daemon = daemon(args)?;
@@ -182,8 +299,13 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     for key in &revoked.revoked {
         println!("revoked_key    = {key}");
     }
-    if let Some(cut) = &revoked.cut {
-        println!("cut            = {}: {}", cut.key(), cut_text(cut));
+    if let Some(file) = &revoked.cut {
+        println!(
+            "cut            = {}: {}",
+            file.cut.key(),
+            cut_text(&file.cut)
+        );
+        print_left_out(file);
     }
     println!(
         "trust_context  = v{held} -> v{version} (signed by the root {})",
@@ -204,21 +326,16 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             println!("# No cut: every packet these keys signed is refused, and the CA stops");
             println!("# serving their certificates.");
         }
-        Some(cut) => {
-            println!("# With the cut, the packets it lists stay accepted and the CA keeps serving");
-            println!(
-                "# the certificates of {} to verify them; everything",
-                cut.key()
-            );
-            println!(
-                "# else it signed is refused. A genuine packet outside the cut is re-admitted"
-            );
-            println!(
-                "# by its full name: ndn-fwd readmit {} <full-name>",
-                cut.key()
-            );
+        Some(file) => {
+            let key = file.cut.key();
+            println!("# With the cut, the packets it lists (by their exact bytes, as its manifest");
+            println!("# lists them) stay accepted, and the CA keeps serving the certificates of");
+            println!("# {key} to verify them; everything else it signed is refused. A genuine");
+            println!("# packet outside the cut is re-admitted by its full name:");
+            println!("#   ndn-fwd readmit {key} <full-name>");
         }
     }
+    print_keys_to_end(&pib_dir);
     Ok(())
 }
 
@@ -280,23 +397,41 @@ mod tests {
     async fn revocation_with(
         root_dev: &Path,
         name: &Name,
-        cut: Option<RevocationCut>,
+        cut: Option<GivenCut>,
     ) -> ndn_cert::ContextBump {
         let plan = plan(root_dev, name, None, cut).unwrap();
         let root = plan.root.store.signer(None).await.unwrap();
-        ndn_cert::bump_context_revoking(
-            root.as_ref(),
-            &plan.root.data,
-            &plan.keys,
-            plan.cut.as_ref(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
+        let cuts: Vec<RevocationCut> = plan.cut.iter().map(|f| f.cut.clone()).collect();
+        ndn_cert::bump_context_revoking(root.as_ref(), &plan.root.data, &plan.keys, &cuts)
+            .await
+            .unwrap()
+            .unwrap()
     }
 
     async fn revocation(root_dev: &Path, name: &Name) -> ndn_cert::ContextBump {
         revocation_with(root_dev, name, None).await
+    }
+
+    /// The cut file of `key` accepting seqs 1..=3 of its `notes`, first
+    /// verified before `held_before` (ms), as the data layer writes it.
+    fn cut_file(key: &Name, held_before: Option<u64>) -> CutFile {
+        let notes = ndn_cert::device_log_of(key).append("notes");
+        let entries: Vec<(Name, u64, [u8; 32])> =
+            (1..=3).map(|s| (notes.clone(), s, [s as u8; 32])).collect();
+        let ns: Name = "/home/bob".parse().unwrap();
+        let built = ndn_security::cut_manifest::build(&ns, key, &entries).unwrap();
+        let mut cut = RevocationCut::new(key.clone());
+        cut.add_run(&notes, 1, 3);
+        cut.set_key_digest([5; 32]);
+        cut.set_manifest(built.root).unwrap();
+        let mut file = CutFile::new(cut);
+        file.held_before = held_before;
+        file.manifest = built.packets;
+        file
+    }
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
     }
 
     /// A revocation with a cut handed to the daemon: the key is revoked
@@ -308,14 +443,15 @@ mod tests {
         let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let node = node(root_dev.path(), device.path(), &["member-a"]).await;
         let (identity, key, certificate) = enrolled(&node, "member-a").await;
-        let mut cut = RevocationCut::new(key.clone());
-        cut.add_run(&ndn_cert::device_log_of(&key).append("notes"), 1, 3);
+        let written = cut_file(&key, Some(1_000));
         let file = root_dev.path().join("phone.cut");
-        std::fs::write(&file, cut.encode()).unwrap();
-        let read = read_cut(file.to_str().unwrap(), "revoke").unwrap();
-        assert_eq!(read, cut);
+        std::fs::write(&file, written.encode()).unwrap();
+        let path = file.to_str().unwrap();
+        let given = given_cut(&args(&["--lost", "2026-01-01T00:00:00Z"]), path, "revoke").unwrap();
+        assert_eq!(given.file, written);
+        let cut = written.cut.clone();
 
-        let bump = revocation_with(root_dev.path(), &identity, Some(read)).await;
+        let bump = revocation_with(root_dev.path(), &identity, Some(given)).await;
         let daemon = admin(
             node.admin.ns.engine().clone(),
             root_dev.path(),
@@ -331,6 +467,58 @@ mod tests {
         assert!(
             node.ca.get_served_cert(&certificate).is_some(),
             "the CA keeps serving it"
+        );
+        node.shutdown.shutdown().await;
+    }
+
+    /// S5-01: `revoke --cut` signs only a cut bounded by the root's own
+    /// observation at or before the loss: a cut file without a time bound
+    /// (a bare RevocationCut, or one bounded only by sequence numbers), or
+    /// bounded after the loss time given, is refused before anything is
+    /// asked or signed; so is a loss time the CLI cannot read.
+    #[tokio::test]
+    async fn a_cut_file_is_refused_unless_bounded_before_the_loss() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &["member-a"]).await;
+        let (identity, key, _) = enrolled(&node, "member-a").await;
+        let lost = "2026-01-01T00:00:00Z";
+        let lost_ms = parse_when(lost, now_ms()).unwrap();
+        let write = |name: &str, wire: bytes::Bytes| {
+            let path = root_dev.path().join(name);
+            std::fs::write(&path, wire).unwrap();
+            path.to_str().unwrap().to_owned()
+        };
+        let refused = |path: &str| {
+            let given = given_cut(&args(&["--lost", lost]), path, "revoke").unwrap();
+            let e = plan(root_dev.path(), &identity, None, Some(given))
+                .err()
+                .expect("refused");
+            assert!(e.is(code::CUT_REFUSED), "{path}: {e:?}");
+            e.param("why").unwrap_or_default().to_owned()
+        };
+
+        let bare = write("bare.cut", cut_file(&key, None).cut.encode());
+        assert_eq!(refused(&bare), "unbounded");
+        let mut by_seq = cut_file(&key, None);
+        by_seq
+            .upto
+            .insert(ndn_cert::device_log_of(&key).append("notes"), 3);
+        let by_seq = write("seq.cut", by_seq.encode());
+        assert_eq!(refused(&by_seq), "unbounded");
+        let late = write("late.cut", cut_file(&key, Some(lost_ms + 1)).encode());
+        assert_eq!(refused(&late), "after-loss");
+
+        let at_loss = write("ok.cut", cut_file(&key, Some(lost_ms)).encode());
+        let given = given_cut(&args(&["--lost", lost]), &at_loss, "revoke").unwrap();
+        assert!(plan(root_dev.path(), &identity, None, Some(given)).is_ok());
+        assert!(given_cut(&args(&["--lost", "next week"]), &at_loss, "revoke").is_err());
+        assert!(
+            given_cut(
+                &args(&["--lost", "2999-01-01T00:00:00Z"]),
+                &at_loss,
+                "revoke"
+            )
+            .is_err()
         );
         node.shutdown.shutdown().await;
     }

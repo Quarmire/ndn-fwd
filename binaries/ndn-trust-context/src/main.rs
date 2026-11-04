@@ -61,6 +61,11 @@ enum Cmd {
         /// Revoked key/cert name. Repeatable.
         #[arg(long = "revoke")]
         revocations: Vec<String>,
+        /// Device role whose Data is accepted only while a certificate of
+        /// its key is valid, or once the key is revoked with a cut
+        /// (DataRequiresCut; `ndn-fwd init` lists `guest`). Repeatable.
+        #[arg(long = "data-requires-cut")]
+        data_requires_cut: Vec<String>,
         /// PIB directory holding `--sign-key`.
         #[arg(long, requires = "sign_key")]
         pib: Option<PathBuf>,
@@ -110,6 +115,7 @@ fn main() -> Result<()> {
             schema_lvs,
             ca_endpoints,
             revocations,
+            data_requires_cut,
             pib,
             sign_key,
             passphrase_file,
@@ -141,6 +147,7 @@ fn main() -> Result<()> {
                     .iter()
                     .map(|s| parse_name(s))
                     .collect::<Result<_>>()?,
+                data_requires_cut,
             };
             let envelope = match (pib, sign_key) {
                 (Some(pib), Some(key)) => {
@@ -271,6 +278,13 @@ fn main() -> Result<()> {
             println!("anchors:      {}", ctx.anchors().len());
             println!("ca_endpoints: {}", ctx.ca_endpoints().len());
             println!("revocations:  {}", ctx.revocations().len());
+            println!(
+                "data_requires_cut: {}",
+                match ctx.data_requires_cut() {
+                    [] => "none".to_string(),
+                    roles => roles.join(","),
+                }
+            );
             // Each revocation cut: the packets its key signed that stay
             // accepted (per prefix, the sequence-number runs) and how many
             // exact packets were re-admitted.
@@ -285,10 +299,16 @@ fn main() -> Result<()> {
                     })
                     .collect();
                 println!(
-                    "cut:          {} [{}] exact={}",
+                    "cut:          {} [{}] exact={} key_digest={} manifest={}",
                     cut.key(),
                     ranges.join("; "),
-                    cut.exact().len()
+                    cut.exact().len(),
+                    match cut.key_digest() {
+                        Some(d) => d.iter().map(|b| format!("{b:02x}")).collect(),
+                        None => "none".to_string(),
+                    },
+                    cut.manifest()
+                        .map_or("none".to_string(), ToString::to_string)
                 );
             }
         }

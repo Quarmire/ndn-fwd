@@ -5,8 +5,9 @@
 //!
 //! A context binds a `namespace` to a set of trust anchors and a schema
 //! (LVS or the built-in hierarchical/accept-all defaults), plus optional CA
-//! endpoints and revocations. [`build_context`] assembles one from a
-//! [`ContextSpec`].
+//! endpoints, revocations and the device roles whose Data needs a cut once
+//! their certificates lapse (DataRequiresCut). [`build_context`] assembles
+//! one from a [`ContextSpec`].
 //!
 //! - [`build_signed_anchor_envelope`] signs the context into its NDN Data with
 //!   an anchor's key and pins that anchor's TOFU fingerprint — the form
@@ -50,6 +51,12 @@ pub struct ContextSpec {
     pub ca_endpoints: Vec<Name>,
     /// Names of revoked certificates or keys to reject.
     pub revocations: Vec<Name>,
+    /// Device roles listed in DataRequiresCut (0x0434): Data a key
+    /// `/<namespace>/<role>/<device>/KEY/<k>` of a listed role signs is
+    /// accepted only while a certificate of the key is valid by the
+    /// reader's clock, or once the key is revoked with a cut that accepts
+    /// it. `ndn-fwd init` lists `guest`.
+    pub data_requires_cut: Vec<String>,
 }
 
 impl Default for ContextSpec {
@@ -62,6 +69,7 @@ impl Default for ContextSpec {
             schema_lvs: None,
             ca_endpoints: Vec::new(),
             revocations: Vec::new(),
+            data_requires_cut: Vec::new(),
         }
     }
 }
@@ -80,6 +88,9 @@ pub fn build_context(spec: &ContextSpec) -> Result<SignedTrustContext> {
     }
     for rev in &spec.revocations {
         ctx = ctx.with_revocation(rev.clone());
+    }
+    for role in &spec.data_requires_cut {
+        ctx = ctx.with_data_requires_cut(role.clone());
     }
     if let Some(lvs) = &spec.schema_lvs {
         ctx = ctx
@@ -176,6 +187,7 @@ mod tests {
             schema_lvs: None,
             ca_endpoints: vec!["/home/bob/CA".parse().unwrap()],
             revocations: vec!["/home/bob/KEY/old".parse().unwrap()],
+            data_requires_cut: vec!["guest".into()],
         };
 
         // Author → envelope → parse → decode_content (what adopt_context does).
@@ -188,6 +200,7 @@ mod tests {
         assert!(adopted.enforces_hierarchy());
         assert!(adopted.is_revoked(&"/home/bob/KEY/old".parse().unwrap()));
         assert_eq!(adopted.ca_endpoints().len(), 1);
+        assert_eq!(adopted.data_requires_cut(), ["guest"]);
     }
 
     #[test]

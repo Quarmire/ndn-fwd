@@ -3135,6 +3135,7 @@ version = "0.1.0"
 dependencies = [
  "bip39",
  "bytes",
+ "humantime",
  "ndn-cert",
  "ndn-config",
  "ndn-data",
@@ -3575,6 +3576,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "humantime",
  "ndn-app",
  "ndn-cert",
  "ndn-engine",
@@ -3987,6 +3989,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures",
+ "humantime",
  "ndn-app",
  "ndn-cert",
  "ndn-config",

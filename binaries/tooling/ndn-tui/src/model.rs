@@ -88,12 +88,28 @@ pub struct RootFacts {
     /// The version the key storage holds, when it holds one.
     pub version: Option<u64>,
     pub anchors: Vec<Anchor>,
+    /// The keys whose authority over data ended that the held version
+    /// does not revoke yet.
+    pub ending: Vec<EndingFact>,
 }
 
 impl RootFacts {
     pub fn kits(&self) -> impl Iterator<Item = &Anchor> {
         self.anchors.iter().filter(|a| a.recovery_kit)
     }
+}
+
+/// A key of a prefix whose authority over data ended (an expired guest,
+/// a key replaced by a newer one of the same device) and that no version
+/// revokes yet: the main device ends it with a cut of what it published
+/// before then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndingFact {
+    pub key: String,
+    /// Why its authority ended, in the TUI's words.
+    pub why: String,
+    /// The data host line that writes its cut file.
+    pub cut_line: String,
 }
 
 /// A listing as last read: its value (kept when a later read fails) and
@@ -248,6 +264,9 @@ pub enum Warning {
     NoRecoveryKit { namespace: String },
     /// The root key of `namespace` is a plain, unprotected file.
     PlainRootKey { namespace: String, location: String },
+    /// Keys of `namespace` whose authority over data ended wait for the
+    /// main device to end them with their cuts.
+    KeysToEnd { namespace: String, count: usize },
 }
 
 /// What this device may do in a prefix.
@@ -525,6 +544,12 @@ impl Model {
                 out.push(Warning::PlainRootKey {
                     namespace: root.namespace.clone(),
                     location: root.location.clone(),
+                });
+            }
+            if !root.ending.is_empty() {
+                out.push(Warning::KeysToEnd {
+                    namespace: root.namespace.clone(),
+                    count: root.ending.len(),
                 });
             }
         }

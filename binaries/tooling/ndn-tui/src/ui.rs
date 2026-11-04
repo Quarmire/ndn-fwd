@@ -10,6 +10,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 
 use ndn_cert::report::{DataVerdict, MembershipRelation, RefreshState};
 use ndn_cert::{InviteState, KitFormat};
+use ndn_namespace::root::revoke::LOSS_QUESTION;
 
 use crate::app::{
     APPROVAL_ROLES, App, EXPIRIES, INVITE_ROLES, KIT_KINDS, KitAction, LinkKind, Modal,
@@ -225,6 +226,7 @@ fn hints_for(app: &App) -> String {
                 Section::Members if powers.root => keys.push("x remove device"),
                 Section::Invites => keys.push("w withdraw"),
                 Section::Kits => keys.push("x revoke kit"),
+                Section::Ending => keys.push("e end keys"),
                 _ => {}
             }
             if powers.invite {
@@ -329,6 +331,10 @@ fn warning_line(w: &Warning) -> Line<'static> {
         ),
         Warning::PlainRootKey { namespace, .. } => format!(
             "The main key of {namespace} is kept in a plain file that nothing protects. Open it and press m to move it."
+        ),
+        Warning::KeysToEnd { namespace, count } => format!(
+            "{namespace} has {count} key{} whose authority over data ended (expired or replaced) and that no version ends yet. Open it: Keys to end.",
+            if *count == 1 { "" } else { "s" }
         ),
     };
     Line::from(vec![
@@ -770,6 +776,38 @@ fn draw_prefix(f: &mut Frame, app: &App, ns: &str, area: Rect) {
                     focus,
                     at,
                     "No recovery kit. Press k to make one (24 words, a file, or a security key).",
+                );
+            }
+            Section::Ending => {
+                let rows: Vec<Line> = model
+                    .root_of(ns)
+                    .map(|r| {
+                        r.ending
+                            .iter()
+                            .map(|k| {
+                                let mut spans = vec![
+                                    Span::styled(k.key.clone(), bold()),
+                                    Span::raw(format!(" · {}", k.why)),
+                                ];
+                                if app.details {
+                                    spans.push(Span::styled(
+                                        format!(" · in the data host: {}", k.cut_line),
+                                        dim(),
+                                    ));
+                                }
+                                Line::from(spans)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                section_block(
+                    f,
+                    area,
+                    "Keys to end".into(),
+                    rows,
+                    focus,
+                    at,
+                    "No key's authority over data ended without being ended.",
                 );
             }
         }
@@ -1382,30 +1420,120 @@ fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
             ];
             dialog(f, "Waiting for approval", Text::from(text), width, 13);
         }
-        Modal::Remove { namespace, member } => {
+        Modal::Remove(form) => {
+            let member = &form.member;
+            let name = member
+                .device
+                .clone()
+                .unwrap_or_else(|| member.identity.clone());
+            let namespace = &form.namespace;
+            let cursor = |focus: bool| if focus { "▏" } else { "" };
+            let mut text = vec![
+                Line::from(format!("Remove {name} from {namespace}.")),
+                Line::from(format!(
+                    "It will no longer be able to publish or be trusted in {namespace}. It can be added again later with a new invite."
+                )),
+                Line::from(""),
+                Line::from(
+                    "To keep what it published before it was lost, give the cut file the data host wrote for its key (`cut <key> <file> --held-before <when you lost it>`).",
+                ),
+                Line::from(""),
+                field(
+                    LOSS_QUESTION,
+                    format!("{}{}", form.lost.text, cursor(form.field == 0)),
+                    form.field == 0,
+                ),
+                Line::from(Span::styled(
+                    "              e.g. 2026-11-04T10:00:00Z, 2h ago, now",
+                    dim(),
+                )),
+                field(
+                    "Cut file",
+                    format!("{}{}", form.cut.text, cursor(form.field == 1)),
+                    form.field == 1,
+                ),
+            ];
+            if let Some(problem) = &form.problem {
+                text.push(Line::from(Span::styled(
+                    problem.clone(),
+                    Style::new().fg(BAD),
+                )));
+            }
+            text.push(Line::from(
+                "The main key signs this change: you will be asked to unlock it here.",
+            ));
+            if app.details {
+                text.push(Line::from(Span::styled(member.identity.clone(), dim())));
+            }
+            text.push(Line::from(""));
+            text.push(Line::from(Span::styled(
+                "Tab next field · Enter remove (no cut file: asks before removing without one) · Esc cancel",
+                bold(),
+            )));
+            dialog(f, "Remove a device", Text::from(text), width, 20);
+        }
+        Modal::RemoveWithoutCut { namespace, member } => {
             let name = member
                 .device
                 .clone()
                 .unwrap_or_else(|| member.identity.clone());
             let text = vec![
-                Line::from(format!("Remove {name} from {namespace}?")),
+                Line::from(format!("Remove {name} from {namespace} WITHOUT a cut?")),
                 Line::from(""),
-                Line::from(format!(
-                    "It will no longer be able to publish or be trusted in {namespace}. It can be added again later with a new invite."
-                )),
-                Line::from("The main key signs this change: you will be asked to unlock it here."),
                 Line::from(Span::styled(
-                    if app.details {
-                        member.identity.clone()
-                    } else {
-                        String::new()
-                    },
-                    dim(),
+                    format!(
+                        "Everything {name} ever signed — also what it published honestly before it was lost — will be refused everywhere, for good: a cut can only come with the removal."
+                    ),
+                    Style::new().fg(BAD),
                 )),
+                Line::from(
+                    "To keep its earlier work, go back (n) and give the cut file the data host writes for its key.",
+                ),
                 Line::from(""),
-                Line::from(Span::styled("y remove · Esc cancel", bold())),
+                Line::from(Span::styled(
+                    "y remove without a cut · n back · Esc back",
+                    bold(),
+                )),
             ];
-            dialog(f, "Remove a device", Text::from(text), width, 10);
+            dialog(f, "Remove without a cut", Text::from(text), width, 11);
+        }
+        Modal::EndKeys(form) => {
+            let mut text = vec![
+                Line::from(format!(
+                    "Keys of {} whose authority over data ended:",
+                    form.namespace
+                )),
+                Line::from(
+                    "End each with the cut file the data host writes for it (the line below); a key without a file is not ended now.",
+                ),
+                Line::from(""),
+            ];
+            for (i, (key, file)) in form.keys.iter().zip(&form.files).enumerate() {
+                let focus = form.field == i;
+                text.push(Line::from(format!("{} — {}", key.key, key.why)));
+                text.push(Line::from(Span::styled(
+                    format!("  in the data host: {}", key.cut_line),
+                    dim(),
+                )));
+                text.push(field(
+                    "  Cut file",
+                    format!("{}{}", file.text, if focus { "▏" } else { "" }),
+                    focus,
+                ));
+            }
+            if let Some(problem) = &form.problem {
+                text.push(Line::from(Span::styled(
+                    problem.clone(),
+                    Style::new().fg(BAD),
+                )));
+            }
+            text.push(Line::from(""));
+            text.push(Line::from(Span::styled(
+                "Tab next key · Enter end them (one new version) · Esc cancel",
+                bold(),
+            )));
+            let height = u16::try_from(form.keys.len() * 4 + 9).unwrap_or(u16::MAX);
+            dialog(f, "End keys", Text::from(text), width, height);
         }
         Modal::Kit {
             namespace,

@@ -10,7 +10,7 @@
 //!
 //! Internally a code is worded as a *phrase*: lower-case start, no final
 //! period, so it can be quoted inside another (a refusal's cause, a link
-//! detail's causes); [`finish`] makes the shown sentence of it.
+//! detail's causes); `finish` makes the shown sentence of it.
 
 use ndn_cert::invites::TokenDenial;
 use ndn_cert::report::{
@@ -265,6 +265,12 @@ pub fn secret_prompt(request: &SecretRequest) -> String {
                 }
                 VersionChange::Readmit { key } => {
                     format!("re-admitting single packets of the revoked key {key}")
+                }
+                VersionChange::EndKeys { namespace } => {
+                    format!("ending the expired and replaced keys of {namespace}")
+                }
+                VersionChange::DataRequiresCut { namespace } => {
+                    format!("setting which roles of {namespace} need a cut for their data")
                 }
             };
             format!("to sign a new version {change}")
@@ -1148,12 +1154,32 @@ fn root_phrase(w: &W<'_>) -> Option<String> {
             "{} has everything asked already: nothing to sign",
             w.version_or("version", "the current version")
         ),
-        "cut-refused" => format!(
-            "the list of packets to keep for {} cannot be signed: it must come with the \
-             revocation of exactly that key{}",
-            w.named("key", "that key"),
-            w.error()
-        ),
+        "cut-refused" => match w.get("why") {
+            Some("unbounded") => format!(
+                "the cut file of {} says no time it was cut at, so it could keep what a thief \
+                 wrote after the loss: write it again in the data host, cut at the time you lost \
+                 the device (`cut <key> <file> --held-before <when>`)",
+                w.named("key", "that key")
+            ),
+            Some("after-loss") => format!(
+                "the cut file of {} keeps packets first seen after the time you lost the device: \
+                 write it again in the data host, cut at that time (`cut <key> <file> \
+                 --held-before <when>`)",
+                w.named("key", "that key")
+            ),
+            Some("manifest-incomplete") => format!(
+                "the cut file of {} does not carry the whole list of the packets it keeps{}: \
+                 write it again in the data host",
+                w.named("key", "that key"),
+                w.paren("reason")
+            ),
+            _ => format!(
+                "the list of packets to keep for {} cannot be signed: it must come with the \
+                 revocation of exactly that key{}",
+                w.named("key", "that key"),
+                w.error()
+            ),
+        },
         "readmit-no-cut" => format!(
             "{} has no list of packets to keep, so none can be accepted again: revoke it with \
              one first{}",
@@ -2468,6 +2494,12 @@ mod tests {
             }),
             SecretPurpose::SignVersion(VersionChange::Readmit {
                 key: name("/home/bob/member/phone/KEY/k"),
+            }),
+            SecretPurpose::SignVersion(VersionChange::EndKeys {
+                namespace: name("/home/bob"),
+            }),
+            SecretPurpose::SignVersion(VersionChange::DataRequiresCut {
+                namespace: name("/home/bob"),
             }),
             SecretPurpose::MoveRoot,
             SecretPurpose::SealRoot,

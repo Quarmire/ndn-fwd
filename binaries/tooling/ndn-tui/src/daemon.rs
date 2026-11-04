@@ -19,7 +19,7 @@ use ndn_mgmt_wire::{
 };
 use ndn_packet::Name;
 
-use crate::model::{Anchor, Listing, RootFacts, Update};
+use crate::model::{Anchor, EndingFact, Listing, RootFacts, Update};
 
 /// How long a command that needs the network (adopting, enrolling, deciding
 /// on an admin device, checking for a newer version) may take.
@@ -291,14 +291,19 @@ impl Daemon {
 pub const CACHED_PAGE: u64 = 200;
 
 /// The root keys this device's key storage at `pib` holds, with the
-/// recovery kits of each prefix (empty on a device that is no main device).
+/// recovery kits of each prefix (empty on a device that is no main device)
+/// and the keys whose authority over data ended that it should end.
 pub fn read_roots(pib: &Path) -> Result<Vec<RootFacts>, Failure> {
-    use ndn_namespace::root::{key, kit};
+    use ndn_namespace::root::{end_keys, key, kit};
     let statuses = key::open(pib)?.status(None)?;
     if statuses.is_empty() {
         return Ok(Vec::new());
     }
     let kits = kit::list(pib, None)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    let pending = end_keys::pending_all(pib, now)?;
     Ok(statuses
         .into_iter()
         .map(|status| {
@@ -306,6 +311,11 @@ pub fn read_roots(pib: &Path) -> Result<Vec<RootFacts>, Failure> {
                 .contexts
                 .iter()
                 .find(|c| c.namespace == status.namespace);
+            let ending = pending
+                .iter()
+                .find(|p| p.namespace == status.namespace)
+                .map(|p| p.ending.iter().map(ending_fact).collect())
+                .unwrap_or_default();
             RootFacts {
                 namespace: status.namespace.to_string(),
                 key: status.key.to_string(),
@@ -324,9 +334,34 @@ pub fn read_roots(pib: &Path) -> Result<Vec<RootFacts>, Failure> {
                             .collect()
                     })
                     .unwrap_or_default(),
+                ending,
             }
         })
         .collect())
+}
+
+/// A key to end, as the TUI shows it.
+fn ending_fact(key: &ndn_cert::EndingKey) -> EndingFact {
+    use ndn_namespace::root::revoke::format_when;
+    let why = match &key.why {
+        ndn_cert::Ending::Lapsed { not_after } => format!(
+            "expired {}: its data is refused until it is ended",
+            format_when(*not_after)
+        ),
+        ndn_cert::Ending::Replaced { by, enrolled } => format!(
+            "replaced by {by} at {}: its data stays accepted until it is ended",
+            format_when(*enrolled)
+        ),
+    };
+    EndingFact {
+        key: key.key.to_string(),
+        why,
+        cut_line: format!(
+            "cut {} <file> --held-before {}",
+            key.key,
+            format_when(key.held_before)
+        ),
+    }
 }
 
 /// Lower-case hex.

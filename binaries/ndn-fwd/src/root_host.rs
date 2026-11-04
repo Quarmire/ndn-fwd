@@ -12,6 +12,7 @@ use ndn_cert::report::code;
 use ndn_cert::{RootSecret, RootUnlockKind, read_root_secret, read_secret};
 use ndn_namespace::admin::HandedOver;
 use ndn_namespace::root::daemon::MgmtDevice;
+use ndn_namespace::root::revoke::format_when;
 use ndn_namespace::root::{
     RootError, SecretKind, SecretPurpose, SecretRequest, SecretSource, VersionChange,
 };
@@ -57,6 +58,12 @@ fn purpose_text(purpose: &SecretPurpose) -> String {
                 }
                 VersionChange::Readmit { key } => {
                     format!("Re-admitting packets of the revoked key {key}")
+                }
+                VersionChange::EndKeys { namespace } => {
+                    format!("Ending the lapsed and replaced keys of {namespace}")
+                }
+                VersionChange::DataRequiresCut { namespace } => {
+                    format!("Setting which roles of {namespace} need a cut for Data")
                 }
             };
             format!("{change} signs a new trust context version")
@@ -138,6 +145,64 @@ pub(crate) fn daemon(args: &[String]) -> anyhow::Result<MgmtDevice> {
                  namespace may be running there); asking again with the same version"
             );
         }))
+}
+
+/// Now, in ms since the Unix epoch, by this device's clock.
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// The keys whose authority over Data ended (lapsed guests, replaced keys)
+/// that the held versions of the roots in the PIB at `pib_dir` do not
+/// revoke yet, each with what to do: what every root command shows after
+/// its own outcome, and `ndn-fwd status`. Nothing when there are none; a
+/// PIB that cannot be read for it is said in one line.
+pub(crate) fn print_keys_to_end(pib_dir: &Path) {
+    let pending = match ndn_namespace::root::end_keys::pending_all(pib_dir, now_ms()) {
+        Ok(pending) => pending,
+        Err(e) => {
+            println!("# keys to end: not known ({})", render(e));
+            return;
+        }
+    };
+    let mut any = false;
+    for ns in &pending {
+        for key in &ns.ending {
+            if !any {
+                println!();
+                println!("# Keys whose authority over Data ended, not revoked yet:");
+                any = true;
+            }
+            println!("ending_key     = {}", ending_text(key));
+            println!(
+                "#   in the ndn-data host: cut {} <file> --held-before {}",
+                key.key,
+                format_when(key.held_before)
+            );
+        }
+    }
+    if any {
+        println!("# then end them in one version: ndn-fwd end-keys --cut <file>...");
+        println!("# (a lapsed key's Data is refused until then; a replaced key's is accepted).");
+    }
+}
+
+/// An ending key as the CLI shows it.
+pub(crate) fn ending_text(key: &ndn_cert::EndingKey) -> String {
+    match &key.why {
+        ndn_cert::Ending::Lapsed { not_after } => format!(
+            "{} (lapsed at {}: its role requires a cut for Data)",
+            key.key,
+            format_when(*not_after)
+        ),
+        ndn_cert::Ending::Replaced { by, enrolled } => format!(
+            "{} (replaced by {by} at {})",
+            key.key,
+            format_when(*enrolled)
+        ),
+    }
 }
 
 /// Where a version handed over went, as the CLI says it.

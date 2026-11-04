@@ -16,8 +16,8 @@ use ndn_trust_envelope::TrustEnvelope;
 use zeroize::Zeroizing;
 
 use crate::daemon::Failure;
-use crate::model::{Listing, Model, Update};
-use crate::root::{KitSpecArg, RootDone, RootOp, SchemaPreview, SecretAsk};
+use crate::model::{EndingFact, Listing, Model, Update};
+use crate::root::{KitSpecArg, RevokeCut, RootDone, RootOp, SchemaPreview, SecretAsk};
 use crate::words;
 
 /// A screen.
@@ -39,14 +39,17 @@ pub enum Section {
     Members,
     Invites,
     Kits,
+    /// Keys whose authority over data ended, to end with their cuts.
+    Ending,
 }
 
 impl Section {
-    const ORDER: [Section; 4] = [
+    const ORDER: [Section; 5] = [
         Section::Requests,
         Section::Members,
         Section::Invites,
         Section::Kits,
+        Section::Ending,
     ];
 }
 
@@ -424,6 +427,49 @@ pub enum KitAction {
     Check,
 }
 
+/// Removing a device: the cut file the data host wrote for its key and
+/// when the device was lost, so what it published before then stays
+/// accepted. Removing it without a cut is a separate, explicit choice.
+#[derive(Debug)]
+pub struct RemoveForm {
+    pub namespace: String,
+    pub member: IssuedEntry,
+    /// The answer to "When did you lose it?", as typed.
+    pub lost: Input,
+    /// The cut file the data host wrote for the device's key.
+    pub cut: Input,
+    /// 0 when it was lost, 1 the cut file.
+    pub field: usize,
+    /// Why the last Enter was not taken.
+    pub problem: Option<String>,
+}
+
+impl RemoveForm {
+    fn new(namespace: String, member: IssuedEntry) -> Self {
+        Self {
+            namespace,
+            member,
+            lost: Input::default(),
+            cut: Input::default(),
+            field: 0,
+            problem: None,
+        }
+    }
+}
+
+/// Ending the keys of a prefix whose authority over data ended, each with
+/// the cut file the data host wrote for it.
+#[derive(Debug)]
+pub struct EndKeysForm {
+    pub namespace: String,
+    pub keys: Vec<EndingFact>,
+    /// The cut file of each key, as typed; empty: not ended now.
+    pub files: Vec<Input>,
+    pub field: usize,
+    /// Why the last Enter was not taken.
+    pub problem: Option<String>,
+}
+
 /// An open dialog.
 #[derive(Debug)]
 pub enum Modal {
@@ -436,10 +482,14 @@ pub enum Modal {
         row: PendingApproval,
         reason: Input,
     },
-    Remove {
+    Remove(RemoveForm),
+    /// Removing a device without a cut, chosen explicitly: everything it
+    /// ever signed is refused.
+    RemoveWithoutCut {
         namespace: String,
         member: IssuedEntry,
     },
+    EndKeys(EndKeysForm),
     Kit {
         namespace: String,
         action: KitAction,
@@ -773,6 +823,22 @@ impl App {
                 "For devices to join {namespace} (invites, approvals), the daemon must run its certificate authority and sign as {identity}: that takes the settings shown in details (d), then a restart of the daemon."
             )
         };
+        // The entries a cut's time bound left out: refused with the rest; a
+        // genuine one is accepted again by its full name.
+        let left_out_lines = |key: Option<&str>, left_out: &[String]| -> Vec<String> {
+            if left_out.is_empty() {
+                return Vec::new();
+            }
+            let mut lines = vec![format!(
+                "Left out by the time the device was lost (first seen at or after it), so refused: {}.",
+                left_out.join(", ")
+            )];
+            lines.push(format!(
+                "Accept one you know is genuine again, one by one: `ndn-fwd readmit {} <full name>`.",
+                key.unwrap_or("<key>")
+            ));
+            lines
+        };
         match done {
             RootDone::Initialized {
                 namespace,
@@ -824,6 +890,8 @@ impl App {
                 root_handed,
                 short_link,
                 settings,
+                cut_keys,
+                dropped_cuts,
             } => {
                 let mut lines = vec![
                     format!("This device is now the main device of {namespace}, as {identity}."),
@@ -854,6 +922,17 @@ impl App {
                     )),
                 }
                 lines.push(authority(&namespace, &identity));
+                for dropped in &dropped_cuts {
+                    lines.push(format!(
+                        "Dropped a list of packets to keep that the old version held: {dropped}."
+                    ));
+                }
+                if !cut_keys.is_empty() {
+                    lines.push(format!(
+                        "Not certified again by the new certificate authority yet: {}, revoked with a list of packets to keep. Until they are, those packets stop being accepted where the old main device no longer counts. Check each list, then run `ndn-fwd recertify` on this device.",
+                        cut_keys.join(", ")
+                    ));
+                }
                 lines.push("Next: make a new recovery kit (open it and press k).".to_owned());
                 self.say(format!("Recovered {namespace}."));
                 self.modal = Some(Modal::Started(Started {
@@ -868,18 +947,55 @@ impl App {
                 namespace,
                 version,
                 revoked,
+                cut_key,
+                left_out,
                 handed: h,
             } => {
+                let mut lines = vec![format!(
+                    "Version {version} of {namespace} no longer trusts {} key{}.",
+                    revoked.len(),
+                    if revoked.len() == 1 { "" } else { "s" }
+                )];
+                match &cut_key {
+                    Some(key) => lines.push(format!(
+                        "What {key} published before it was lost stays accepted, by its exact bytes; everything else it signed is refused."
+                    )),
+                    None => lines.push(
+                        "Removed without a cut: everything these keys ever signed is refused."
+                            .to_owned(),
+                    ),
+                }
+                lines.extend(left_out_lines(cut_key.as_deref(), &left_out));
+                lines.push(handed(&h));
                 self.modal = Some(Modal::Message {
                     title: format!("Removed from {namespace}"),
-                    lines: vec![
-                        format!(
-                            "Version {version} of {namespace} no longer trusts {} key{}.",
-                            revoked.len(),
-                            if revoked.len() == 1 { "" } else { "s" }
-                        ),
-                        handed(&h),
-                    ],
+                    lines,
+                });
+            }
+            RootDone::KeysEnded {
+                namespace,
+                version,
+                ended,
+                left_out,
+                without_cut,
+                handed: h,
+            } => {
+                let mut lines = vec![format!(
+                    "Version {version} of {namespace} ends {}: what each published before its end stays accepted, by its exact bytes; everything else is refused.",
+                    ended.join(", ")
+                )];
+                lines.extend(left_out_lines(None, &left_out));
+                if !without_cut.is_empty() {
+                    lines.push(format!(
+                        "Not ended, as no cut file was given: {}. Write their cut files in the data host and end them too.",
+                        without_cut.join(", ")
+                    ));
+                }
+                lines.push(handed(&h));
+                self.say(format!("Ended {} key(s) of {namespace}.", ended.len()));
+                self.modal = Some(Modal::Message {
+                    title: format!("Keys ended in {namespace}"),
+                    lines,
                 });
             }
             RootDone::KitCreated {
@@ -1075,6 +1191,7 @@ impl App {
             Section::Members => self.model.members_in(ns).len(),
             Section::Invites => self.model.invites_in(ns).len(),
             Section::Kits => self.model.root_of(ns).map_or(0, |r| r.kits().count()),
+            Section::Ending => self.model.root_of(ns).map_or(0, |r| r.ending.len()),
         }
     }
 
@@ -1087,7 +1204,7 @@ impl App {
                 Section::Requests => powers.approve,
                 Section::Members => true,
                 Section::Invites => powers.invite,
-                Section::Kits => powers.root,
+                Section::Kits | Section::Ending => powers.root,
             })
             .collect()
     }
@@ -1269,10 +1386,10 @@ impl App {
                 if let Some(member) = self.model.members_in(ns).get(self.selected)
                     && !member.revoked
                 {
-                    self.modal = Some(Modal::Remove {
-                        namespace: ns.to_owned(),
-                        member: (*member).clone(),
-                    });
+                    self.modal = Some(Modal::Remove(RemoveForm::new(
+                        ns.to_owned(),
+                        (*member).clone(),
+                    )));
                 }
             }
             Key::Char('x') if self.section == Section::Kits && powers.root => {
@@ -1285,6 +1402,19 @@ impl App {
                         namespace: ns.to_owned(),
                         key: kit.key.clone(),
                     });
+                }
+            }
+            Key::Char('e') if powers.root => {
+                if let Some(root) = self.model.root_of(ns)
+                    && !root.ending.is_empty()
+                {
+                    self.modal = Some(Modal::EndKeys(EndKeysForm {
+                        namespace: ns.to_owned(),
+                        files: vec![Input::default(); root.ending.len()],
+                        keys: root.ending.clone(),
+                        field: 0,
+                        problem: None,
+                    }));
                 }
             }
             Key::Char('k') if powers.root => {
@@ -1519,7 +1649,71 @@ impl App {
                     (Some(Modal::Deny { row, reason }), none())
                 }
             },
-            Modal::Remove { namespace, member } => match key {
+            Modal::Remove(mut form) => match key {
+                Key::Esc => (None, none()),
+                Key::Tab | Key::Down | Key::BackTab | Key::Up => {
+                    form.field = 1 - form.field;
+                    (Some(Modal::Remove(form)), none())
+                }
+                Key::Enter => {
+                    let file = form.cut.text.trim().to_owned();
+                    let lost = form.lost.text.trim().to_owned();
+                    if file.is_empty() {
+                        // No cut file: removing without one is its own,
+                        // explicit choice, with what it costs stated.
+                        return (
+                            Some(Modal::RemoveWithoutCut {
+                                namespace: form.namespace,
+                                member: form.member,
+                            }),
+                            none(),
+                        );
+                    }
+                    if lost.is_empty() {
+                        form.problem = Some(
+                            "Say when you lost it first: the cut may keep only what the device \
+                             published before then."
+                                .to_owned(),
+                        );
+                        form.field = 0;
+                        return (Some(Modal::Remove(form)), none());
+                    }
+                    if let Err(e) = crate::root::lost_at(&lost) {
+                        form.problem = Some(e);
+                        form.field = 0;
+                        return (Some(Modal::Remove(form)), none());
+                    }
+                    let (Ok(ns), Ok(name)) = (
+                        form.namespace.parse::<Name>(),
+                        form.member.identity.parse::<Name>(),
+                    ) else {
+                        return (None, none());
+                    };
+                    self.modal = Some(Modal::Busy(format!("Removing {}…", form.member.identity)));
+                    (
+                        None,
+                        vec![Effect::Run(Command::Root(RootOp::Revoke {
+                            namespace: ns,
+                            name,
+                            cut: Some(RevokeCut {
+                                file: PathBuf::from(file),
+                                lost,
+                            }),
+                        }))],
+                    )
+                }
+                other => {
+                    let input = match form.field {
+                        0 => &mut form.lost,
+                        _ => &mut form.cut,
+                    };
+                    if input.edit(other) {
+                        form.problem = None;
+                    }
+                    (Some(Modal::Remove(form)), none())
+                }
+            },
+            Modal::RemoveWithoutCut { namespace, member } => match key {
                 Key::Char('y') => {
                     let (Ok(ns), Ok(name)) = (namespace.parse(), member.identity.parse()) else {
                         return (None, none());
@@ -1530,11 +1724,63 @@ impl App {
                         vec![Effect::Run(Command::Root(RootOp::Revoke {
                             namespace: ns,
                             name,
+                            cut: None,
                         }))],
                     )
                 }
-                Key::Esc | Key::Char('n') => (None, none()),
-                _ => (Some(Modal::Remove { namespace, member }), none()),
+                Key::Esc | Key::Char('n') => (
+                    Some(Modal::Remove(RemoveForm::new(namespace, member))),
+                    none(),
+                ),
+                _ => (Some(Modal::RemoveWithoutCut { namespace, member }), none()),
+            },
+            Modal::EndKeys(mut form) => match key {
+                Key::Esc => (None, none()),
+                Key::Tab | Key::Down => {
+                    form.field = (form.field + 1) % form.files.len().max(1);
+                    (Some(Modal::EndKeys(form)), none())
+                }
+                Key::BackTab | Key::Up => {
+                    let n = form.files.len().max(1);
+                    form.field = (form.field + n - 1) % n;
+                    (Some(Modal::EndKeys(form)), none())
+                }
+                Key::Enter => {
+                    let cuts: Vec<PathBuf> = form
+                        .files
+                        .iter()
+                        .map(|f| f.text.trim())
+                        .filter(|f| !f.is_empty())
+                        .map(PathBuf::from)
+                        .collect();
+                    if cuts.is_empty() {
+                        form.problem = Some(
+                            "Give the cut file of at least one key: a key is never ended without \
+                             its cut, which keeps what it published before its end."
+                                .to_owned(),
+                        );
+                        return (Some(Modal::EndKeys(form)), none());
+                    }
+                    let Ok(ns) = form.namespace.parse::<Name>() else {
+                        return (None, none());
+                    };
+                    self.modal = Some(Modal::Busy("Ending keys…".into()));
+                    (
+                        None,
+                        vec![Effect::Run(Command::Root(RootOp::EndKeys {
+                            namespace: ns,
+                            cuts,
+                        }))],
+                    )
+                }
+                other => {
+                    if let Some(input) = form.files.get_mut(form.field)
+                        && input.edit(other)
+                    {
+                        form.problem = None;
+                    }
+                    (Some(Modal::EndKeys(form)), none())
+                }
             },
             Modal::Kit {
                 namespace,

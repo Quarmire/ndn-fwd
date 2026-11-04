@@ -12,8 +12,9 @@ use ndn_cert::{
 use ndn_mgmt_wire::{
     ApprovalListing, LinkEntry, LinkListing, LinkPathEntry, LinkRelayEntry, PendingApproval,
 };
-use ndn_tui::app::{App, Key, Modal, Msg, Screen, Section};
-use ndn_tui::model::{Anchor, RootFacts, Update};
+use ndn_tui::app::{App, Command, Effect, Key, Modal, Msg, Screen, Section};
+use ndn_tui::model::{Anchor, EndingFact, RootFacts, Update};
+use ndn_tui::root::RootOp;
 use ndn_tui::{ui, words};
 
 const CODE: &str = "482 913";
@@ -124,6 +125,13 @@ fn app() -> App {
                 recovery_kit: false,
                 fingerprint: ROOT_FP.into(),
             }],
+            ending: vec![EndingFact {
+                key: "/home/bob/guest/ann/KEY/%02".into(),
+                why: "expired 2026-11-01T00:00:00.000Z".into(),
+                cut_line: "cut /home/bob/guest/ann/KEY/%02 <file> --held-before \
+                           2026-11-01T00:00:00.000Z"
+                    .into(),
+            }],
         }])),
         Update::Approvals(Ok(ApprovalListing {
             rows: vec![pending()],
@@ -215,8 +223,9 @@ fn home_lists_every_prefix_with_relation_trust_and_the_waiting_request() {
         screen.contains(CODE),
         "the request's code is cut:\n{screen}"
     );
-    // Both safety warnings: no recovery kit, plain-file main key.
-    assert_eq!(screen.matches('⚠').count(), 2, "warnings:\n{screen}");
+    // The safety warnings: no recovery kit, plain-file main key, a key whose
+    // authority over data ended waiting to be ended.
+    assert_eq!(screen.matches('⚠').count(), 3, "warnings:\n{screen}");
 }
 
 #[test]
@@ -251,6 +260,7 @@ fn a_prefix_shows_what_the_role_allows_and_no_more() {
         "Members",
         "Invites",
         "Recovery kits",
+        "Keys to end",
     ] {
         assert!(
             owner.contains(title),
@@ -268,7 +278,12 @@ fn a_prefix_shows_what_the_role_allows_and_no_more() {
 
     app.screen = Screen::Prefix("/news".into());
     let follower = render(&app, 120, 40);
-    for title in ["Waiting for approval", "Invites", "Recovery kits"] {
+    for title in [
+        "Waiting for approval",
+        "Invites",
+        "Recovery kits",
+        "Keys to end",
+    ] {
         assert!(
             !follower.contains(title),
             "a follower is offered {title}:\n{follower}"
@@ -284,6 +299,62 @@ fn a_prefix_shows_what_the_role_allows_and_no_more() {
             !follower.contains(key),
             "a follower is offered {key}:\n{follower}"
         );
+    }
+}
+
+/// Type `text` into the open dialog.
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        assert!(app.handle(Msg::Key(Key::Char(c))).is_empty());
+    }
+}
+
+#[test]
+fn removing_a_device_asks_when_it_was_lost_and_drops_the_cut_only_when_chosen() {
+    let mut app = app();
+    app.screen = Screen::Prefix("/home/bob".into());
+    app.section = Section::Members;
+    app.selected = 0;
+    assert!(app.handle(Msg::Key(Key::Char('x'))).is_empty());
+    let screen = render(&app, 120, 40);
+    assert!(
+        screen.contains("When did you lose it?") && screen.contains("Cut file"),
+        "the remove dialog offers no cut:\n{screen}"
+    );
+
+    // Enter without a cut file revokes nothing: removing without a cut is
+    // its own choice, which says what it costs.
+    assert!(app.handle(Msg::Key(Key::Enter)).is_empty());
+    assert!(
+        matches!(app.modal, Some(Modal::RemoveWithoutCut { .. })),
+        "{:?}",
+        app.modal
+    );
+    assert!(app.handle(Msg::Key(Key::Char('n'))).is_empty());
+    assert!(matches!(app.modal, Some(Modal::Remove(_))));
+
+    // A cut file without a loss time, or with one in the future, is not
+    // taken: the cut is checked against when the device was lost.
+    assert!(app.handle(Msg::Key(Key::Tab)).is_empty());
+    type_text(&mut app, "/tmp/phone.cut");
+    assert!(app.handle(Msg::Key(Key::Enter)).is_empty());
+    assert!(matches!(app.modal, Some(Modal::Remove(_))));
+    type_text(&mut app, "2999-01-01T00:00:00Z");
+    assert!(app.handle(Msg::Key(Key::Enter)).is_empty());
+    assert!(matches!(app.modal, Some(Modal::Remove(_))));
+
+    // A loss time and the cut file: revoked with that cut.
+    let Some(Modal::Remove(form)) = &mut app.modal else {
+        unreachable!()
+    };
+    form.lost.text.clear();
+    type_text(&mut app, "2h ago");
+    match app.handle(Msg::Key(Key::Enter)).as_slice() {
+        [Effect::Run(Command::Root(RootOp::Revoke { cut: Some(cut), .. }))] => {
+            assert_eq!(cut.file, std::path::PathBuf::from("/tmp/phone.cut"));
+            assert_eq!(cut.lost, "2h ago");
+        }
+        other => panic!("not revoked with the cut: {other:?}"),
     }
 }
 

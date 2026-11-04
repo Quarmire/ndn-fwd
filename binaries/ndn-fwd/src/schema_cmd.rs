@@ -1,8 +1,9 @@
-//! `ndn-fwd schema show|explain|update` — inspect the trust schema of the
-//! contexts the node adopted (`<pib>/contexts/`, verified on load exactly as
-//! the daemon loads them), and bring a namespace's schema up to date on its
-//! root device: the CLI over [`ndn_namespace::root::schema`]. Early-exit
-//! subcommand like `init`/`adopt`.
+//! `ndn-fwd schema show|explain|update|data-requires-cut` — inspect the
+//! trust schema of the contexts the node adopted (`<pib>/contexts/`,
+//! verified on load exactly as the daemon loads them), and bring a
+//! namespace's schema up to date on its root device: the CLI over
+//! [`ndn_namespace::root::schema`]. Early-exit subcommand like
+//! `init`/`adopt`.
 //!
 //! - `show [--namespace <ns>]` prints the context and each schema blob as
 //!   readable rules: an LVS binary decoded back to LVS source (rule names
@@ -26,6 +27,15 @@
 //!   listings under the version its daemon holds now, so it applies the new
 //!   rules as soon as its daemon adopts the update, with no restart; its
 //!   policy does not change, since the hint states the policy it enforces.
+//! - `data-requires-cut <role>[,<role>…]|none [--namespace <ns>]` (root
+//!   device only) signs version `N+1` listing exactly those device roles in
+//!   the context's DataRequiresCut
+//!   ([`ndn_cert::bump_context_data_requires_cut`]): Data a key of a listed
+//!   role signs is accepted only while a certificate of the key is valid by
+//!   the reader's clock, or once the key is revoked with a cut that accepts
+//!   it. `ndn-fwd init` lists `guest`; a role that renews (admin, member,
+//!   node) need not be listed. Every other field is carried over. A listed
+//!   role's lapsed keys are then ended by the root (`ndn-fwd end-keys`).
 //!
 //! **An explicit verb**, not something every root-signed version does: a
 //! revocation or a recovery kit (`ndn-fwd revoke`, `ndn-fwd recovery-kit`)
@@ -48,19 +58,23 @@ use ndn_packet::Name;
 
 use crate::onboard::{flag, pib_dir, positionals};
 use crate::root_host::{
-    Secrets, daemon, handed_text, listed, namespace_arg, render, render_before_signing,
+    Secrets, daemon, handed_text, listed, namespace_arg, print_keys_to_end, render,
+    render_before_signing,
 };
 
 const USAGE: &str = "usage: ndn-fwd schema show [-c <config>] [--pib <dir>] [--namespace <ns>]\n       \
      ndn-fwd schema explain <data-name> <key-name> [-c <config>] [--pib <dir>] \
      [--namespace <ns>]\n       \
-     ndn-fwd schema update [--namespace <ns>] [--accept-narrowing] [-c <config>] [--pib <dir>]";
+     ndn-fwd schema update [--namespace <ns>] [--accept-narrowing] [-c <config>] [--pib <dir>]\n       \
+     ndn-fwd schema data-requires-cut <role>[,<role>...]|none [--namespace <ns>] [-c <config>] \
+     [--pib <dir>]";
 
 pub(crate) async fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("show") => show(&args[1..]),
         Some("explain") => explain(&args[1..]),
         Some("update") => update(&args[1..]).await,
+        Some("data-requires-cut") => data_requires_cut(&args[1..]).await,
         _ => bail!("{USAGE}"),
     }
 }
@@ -317,6 +331,7 @@ async fn update(args: &[String]) -> Result<()> {
         println!("enrollment     = {}", policy.describe());
         println!("link_policy    = {}", change.link.describe());
         print_relays("relays", &change.relays);
+        print_keys_to_end(&pib_dir);
         return Ok(());
     }
     let daemon = daemon(args)?;
@@ -394,6 +409,107 @@ async fn update(args: &[String]) -> Result<()> {
     println!("# under v{version} as soon as its daemon holds it (no restart). Every other");
     println!("# node judges by v{version} once it holds it: at its next refresh ([security]");
     println!("# context_refresh_secs, default 300 s), or at once with `ndn-fwd context refresh`.");
+    print_keys_to_end(&pib_dir);
+    Ok(())
+}
+
+/// A refused DataRequiresCut change of `namespace` (held at `held`), as the
+/// CLI says it.
+fn data_requires_cut_refused(
+    e: RootError,
+    namespace: &Name,
+    held: u64,
+    pib_dir: &Path,
+) -> anyhow::Error {
+    if e.is(code::NOTHING_TO_SIGN) {
+        return anyhow::anyhow!(
+            "the held trust context of {namespace} lists these roles in DataRequiresCut already; \
+             nothing was signed"
+        );
+    }
+    if e.is(code::VERSION_NOT_TAKEN) {
+        return render(e).context(format!(
+            "nothing changed: the trust context of {namespace} stays v{held}"
+        ));
+    }
+    if e.is(code::HAND_OVER_UNKNOWN) {
+        let version = e.param("version").unwrap_or_default().to_string();
+        return render(e).context(format!(
+            "whether the daemon adopted v{version} (DataRequiresCut) is not known: once the \
+             daemon is idle, run `ndn-fwd schema data-requires-cut` again with the same roles \
+             and `--pib {}` — it reports nothing to change if the daemon took v{version}, and \
+             signs the version again if not",
+            pib_dir.display()
+        ));
+    }
+    render_before_signing(e)
+}
+
+/// The roles as the CLI lists them.
+fn roles_text(roles: &[String]) -> String {
+    match roles.is_empty() {
+        true => "none".to_string(),
+        false => roles.join(","),
+    }
+}
+
+/// `ndn-fwd schema data-requires-cut <role>[,<role>…]|none`.
+async fn data_requires_cut(args: &[String]) -> Result<()> {
+    let words = positionals(args);
+    let Some(text) = words.first() else {
+        bail!(
+            "schema data-requires-cut needs the roles: e.g. `guest`, `guest,member`, or `none`\n\
+             {USAGE}"
+        );
+    };
+    let roles = schema::parse_data_requires_cut(text).map_err(|e| {
+        let role = e.param("role").unwrap_or_default().to_string();
+        anyhow::anyhow!(
+            "schema data-requires-cut refused: {role:?} is no device role; name roles among \
+             admin, member, node and guest, separated by commas, or `none`. Nothing was signed"
+        )
+    })?;
+    let pib_dir = pib_dir(args)?;
+    let root = schema::root_of(&pib_dir, namespace_arg(args)?.as_ref()).map_err(render)?;
+    let planned = schema::plan_data_requires_cut(root, &roles);
+    let namespace = planned.root.context.namespace().clone();
+    let held = planned.root.context.version();
+    if planned.is_unchanged() {
+        println!("# ndn-fwd schema data-requires-cut");
+        println!("namespace      = {namespace}");
+        println!(
+            "data_requires_cut = {} (v{held} lists these already; nothing signed)",
+            roles_text(&planned.after)
+        );
+        print_keys_to_end(&pib_dir);
+        return Ok(());
+    }
+    let daemon = daemon(args)?;
+    let set = schema::set_data_requires_cut(planned, &pib_dir, &daemon, &Secrets { args })
+        .await
+        .map_err(|e| data_requires_cut_refused(e, &namespace, held, &pib_dir))?;
+    let version = set.version;
+    println!("# ndn-fwd schema data-requires-cut");
+    println!("namespace      = {namespace}");
+    println!(
+        "trust_context  = v{held} -> v{version} (signed by the root {})",
+        set.root_key
+    );
+    println!(
+        "data_requires_cut = {} -> {}",
+        roles_text(&set.before),
+        roles_text(&set.after)
+    );
+    println!(
+        "handed_over    = {}",
+        handed_text(&set.handed_over, &daemon, version, &pib_dir)
+    );
+    println!();
+    println!("# Once a node holds v{version}, Data a key of a listed role signs is accepted only");
+    println!("# while a certificate of the key is valid by the node's clock, or once the root");
+    println!("# revokes the key with a cut that accepts it (`ndn-fwd end-keys` ends a listed");
+    println!("# role's lapsed keys). Data of a role no longer listed is judged without clocks.");
+    print_keys_to_end(&pib_dir);
     Ok(())
 }
 

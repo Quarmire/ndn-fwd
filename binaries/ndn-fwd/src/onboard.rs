@@ -1,6 +1,6 @@
 //! `ndn-fwd init --namespace <ns>`, `ndn-fwd adopt <envelope>`, `ndn-fwd
-//! enroll <invite>`, `ndn-fwd renew`, `ndn-fwd revoke <name>` and `ndn-fwd
-//! context refresh` —
+//! enroll <invite>`, `ndn-fwd renew`, `ndn-fwd revoke <name>`, `ndn-fwd
+//! status`, `ndn-fwd end-keys` and `ndn-fwd context refresh` —
 //! the onboarding UX over the [`ndn_cert::namespace`] /
 //! [`ndn_cert::onboarding`] / [`ndn_cert::invite`] /
 //! [`ndn_cert::context_update`] primitives. A node does not "join" anything:
@@ -9,9 +9,11 @@
 //! forwarders are configured separately.
 //!
 //! These are early-exit subcommands: when `args[1]` is `init`, `adopt`,
-//! `enroll`, `renew`, `revoke`, `context` or `schema` ([`crate::schema_cmd`]), the
-//! daemon does not start. They act on the node's PIB directory (`--pib
-//! <dir>`, else `[security].pib_path` from `-c/--config`, else
+//! `enroll`, `renew`, `revoke`, `readmit`, `status`, `end-keys`, `context`,
+//! `schema` ([`crate::schema_cmd`]), `root-key`, `recovery-kit`, `recover` or
+//! `recertify`, the
+//! daemon does not start. They act on the node's PIB directory
+//! (`--pib <dir>`, else `[security].pib_path` from `-c/--config`, else
 //! `~/.ndn/pib`) or ask the running daemon:
 //!
 //! - `init` (run on the root device) mints the namespace root `<ns>/KEY/root`
@@ -54,18 +56,27 @@
 //! - `revoke` (run on the root device) asks the running daemon to revoke a
 //!   device identity, key or certificate at its CA and in a new, root-signed
 //!   version of the namespace's trust context (see [`crate::revoke`]), with
-//!   the revocation cut of one of its keys when `--cut` gives one, sending
-//!   the root store's passphrase or PIN when it needs one; `readmit` adds
-//!   exact packets to such a cut ([`crate::readmit`]).
+//!   the revocation cut of one of its keys when `--cut` gives a cut file —
+//!   after asking "When did you lose it?" (`--lost <when>` without a
+//!   terminal) and refusing a cut file unbounded or bounded after that —
+//!   sending the root store's passphrase or PIN when it needs one; `readmit`
+//!   adds exact packets to such a cut ([`crate::readmit`]).
+//! - `status` lists the keys whose authority over Data ended (lapsed keys of
+//!   a role in DataRequiresCut, replaced keys) that no version revokes yet,
+//!   and `end-keys --cut <file>... [--yes]` ends them with their cuts in one
+//!   version ([`crate::end_keys`]); every root command lists them too.
+//!   `schema data-requires-cut <roles>|none` sets which roles those are
+//!   ([`crate::schema_cmd`]).
 //! - `context refresh [<ns>]` asks the running daemon to check its held trust
 //!   contexts for a newer version now (see [`crate::context_refresh`]).
 //! - `root-key status|move` shows or moves where the root key lives
 //!   ([`crate::root_key`]).
 //! - `recovery-kit create|list|check|revoke` manages the recovery kits of
 //!   the namespace ([`crate::recovery_kit`]); `recover` makes a replacement
-//!   device the root device with one ([`crate::recover`]), and `recertify`
-//!   certifies again a key revoked with a cut whose certificate a
-//!   compromised recovery did not hold.
+//!   device the root device with one ([`crate::recover`]; `--cut` files are
+//!   bounded by `--lost` as for `revoke`), and `recertify` certifies again,
+//!   once the operator confirmed the cuts shown (`--yes`), a key revoked
+//!   with a cut whose certificate a compromised recovery did not hold.
 
 use std::path::PathBuf;
 
@@ -105,6 +116,8 @@ pub async fn maybe_run() -> Option<Result<()>> {
         "recovery-kit" => Some(crate::recovery_kit::run(&args[2..]).await),
         "recover" => Some(crate::recover::run(&args[2..]).await),
         "recertify" => Some(crate::recover::run_recertify(&args[2..]).await),
+        "status" => Some(crate::end_keys::run_status(&args[2..])),
+        "end-keys" => Some(crate::end_keys::run(&args[2..]).await),
         _ => None,
     }
 }
@@ -138,6 +151,8 @@ pub(crate) const VALUE_FLAGS: &[&str] = &[
     "--kit-touch-policy",
     "--keep-kit",
     "--cut",
+    "--lost",
+    "--recertify-cuts",
 ];
 
 /// The arguments one onboarding subcommand takes.
@@ -243,6 +258,7 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
                 "--passphrase-file",
                 "--pin-file",
                 "--cut",
+                "--lost",
             ],
             repeatable: &[],
             switches: &[],
@@ -332,6 +348,24 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
             repeatable: &[],
             switches: &["--accept-narrowing"],
             positionals: 1,
+        },
+    ),
+    (
+        "schema",
+        Some("data-requires-cut"),
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--passphrase-file",
+                "--pin-file",
+            ],
+            repeatable: &[],
+            switches: &[],
+            // The word, then the roles (`guest,member` or `none`).
+            positionals: 2,
         },
     ),
     (
@@ -458,6 +492,8 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
                 "--touch-policy",
                 "--keep-kit",
                 "--cut",
+                "--lost",
+                "--recertify-cuts",
             ],
             repeatable: &["--keep-kit", "--cut"],
             switches: &["--from-held", "--replace-slot"],
@@ -470,9 +506,37 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
         ArgSpec {
             values: &["--namespace", "--pib", "-c", "--config"],
             repeatable: &[],
-            switches: &[],
+            switches: &["--yes"],
             // Any number of certificate files.
             positionals: usize::MAX,
+        },
+    ),
+    (
+        "status",
+        None,
+        ArgSpec {
+            values: &["--pib", "-c", "--config"],
+            repeatable: &[],
+            switches: &[],
+            positionals: 0,
+        },
+    ),
+    (
+        "end-keys",
+        None,
+        ArgSpec {
+            values: &[
+                "--namespace",
+                "--pib",
+                "-c",
+                "--config",
+                "--passphrase-file",
+                "--pin-file",
+                "--cut",
+            ],
+            repeatable: &["--cut"],
+            switches: &["--yes"],
+            positionals: 0,
         },
     ),
 ];

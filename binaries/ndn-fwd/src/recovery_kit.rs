@@ -32,7 +32,9 @@ use ndn_namespace::root::kit::{self, KitLocation, KitRequest, KitSpec};
 use ndn_packet::Name;
 
 use crate::onboard::{flag, pib_dir, positionals};
-use crate::root_host::{Secrets, daemon, handed_text, listed, namespace_arg, render};
+use crate::root_host::{
+    Secrets, daemon, handed_text, listed, namespace_arg, print_keys_to_end, render,
+};
 
 /// A kit named on the command line: `words`, `yubikey` (the token and slot
 /// of `--kit-yubikey-*`), or a kit file.
@@ -228,6 +230,7 @@ async fn create(args: &[String]) -> Result<()> {
         },
         pib_dir.display()
     );
+    print_keys_to_end(&pib_dir);
     Ok(())
 }
 
@@ -363,5 +366,6 @@ async fn revoke(args: &[String]) -> Result<()> {
         "# v{}, a version the kit signs is refused there.",
         revoked.version
     );
+    print_keys_to_end(&pib_dir);
     Ok(())
 }

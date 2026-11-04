@@ -1,8 +1,9 @@
 //! Root operations, run in this process through `ndn_namespace::root`:
 //! starting a new trusted prefix and recovering one whose main device is
 //! lost, and on a trusted prefix this device is the main device of —
-//! removing a device, recovery kits, moving the root key, updating the
-//! schema.
+//! removing a device (with the cut file of its key and when it was lost, or
+//! explicitly without), ending the keys whose authority over data ended,
+//! recovery kits, moving the root key, updating the schema.
 //!
 //! The secrets they need are typed into the TUI ([`TuiSecrets`] asks the
 //! screen through a channel) and never leave this process: the running
@@ -12,15 +13,17 @@
 use std::path::{Path, PathBuf};
 
 use ndn_cert::report::{TrustRefusal, code};
-use ndn_cert::{KitFormat, OldRoot, PolicyInput, RootSecret, RootStoreKind, YubikeyKit};
+use ndn_cert::{
+    CutFile, GivenCut, KitFormat, OldRoot, PolicyInput, RootSecret, RootStoreKind, YubikeyKit,
+};
 use ndn_config::ForwarderConfig;
 use ndn_namespace::admin::{HandedOver, NotTaken};
 use ndn_namespace::root::daemon::MgmtDevice;
 use ndn_namespace::root::init::{InitRequest, RootStoreChoice, YubikeyRoot};
 use ndn_namespace::root::kit::{KitLocation, KitRequest, KitSpec};
-use ndn_namespace::root::recover::RecoverRequest;
+use ndn_namespace::root::recover::{Recertify, RecoverRequest};
 use ndn_namespace::root::{
-    RootError, SecretRequest, SecretSource, init, key, kit, recover, revoke, schema,
+    RootError, SecretRequest, SecretSource, end_keys, init, key, kit, recover, revoke, schema,
 };
 use ndn_packet::Name;
 use tokio::sync::{mpsc, oneshot};
@@ -122,8 +125,18 @@ pub enum RootOp {
         store: RootStoreKind,
     },
     /// Remove a device: revoke the keys `name` designates (a device
-    /// identity, a key or a certificate).
-    Revoke { namespace: Name, name: Name },
+    /// identity, a key or a certificate) — with the cut of one of its keys
+    /// (`cut`), so what it published before it was lost stays accepted, or
+    /// without one (everything it ever signed is refused), as the person
+    /// chose.
+    Revoke {
+        namespace: Name,
+        name: Name,
+        cut: Option<RevokeCut>,
+    },
+    /// End, in one version, the keys whose authority over data ended that
+    /// a cut file is given for (each the file the data host wrote for it).
+    EndKeys { namespace: Name, cuts: Vec<PathBuf> },
     /// Make a recovery kit: 24 words, a sealed file at `out`, or a key on a
     /// second security key.
     KitCreate {
@@ -144,6 +157,44 @@ pub enum RootOp {
         namespace: Name,
         accept_narrowing: bool,
     },
+}
+
+/// The cut a device is removed with: the file the data host wrote (`cut
+/// <key> <file> --held-before <when>`) and when the person says the device
+/// was lost, as typed (RFC 3339, `2h ago` or `now`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokeCut {
+    pub file: PathBuf,
+    pub lost: String,
+}
+
+/// The cut file at `path`, or why it cannot be used (`cut-refused`, `why`
+/// `unreadable`).
+fn read_cut_file(path: &Path) -> Result<CutFile, RootError> {
+    let unreadable = |error: String| {
+        RootError::new(
+            code::CUT_REFUSED,
+            "the cut file cannot be read; nothing was signed",
+        )
+        .with("why", "unreadable")
+        .with("path", path.display())
+        .with("error", error)
+    };
+    let wire = std::fs::read(path).map_err(|e| unreadable(e.to_string()))?;
+    CutFile::decode(&wire).map_err(|e| unreadable(e.to_string()))
+}
+
+/// Now, in ms since the Unix epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// When the person says the device was lost, as typed: an RFC 3339 time,
+/// `<span> ago` or `now`, never in the future (else why not, in words).
+pub fn lost_at(text: &str) -> Result<u64, String> {
+    revoke::parse_when(text, now_ms())
 }
 
 /// A kit to open, as the screen chose it.
@@ -231,11 +282,35 @@ pub enum RootDone {
         /// key's.
         short_link: Option<String>,
         settings: Vec<String>,
+        /// Keys the new version revokes with a cut: not certified again by
+        /// the new certificate authority here (`ndn-fwd recertify` does it,
+        /// once the person checked each cut).
+        cut_keys: Vec<String>,
+        /// Cuts of the version recovered from that the new one drops
+        /// (`<key>: <why>`): planted by whoever held the old main device, or
+        /// naming packets outside their key's log.
+        dropped_cuts: Vec<String>,
     },
     Revoked {
         namespace: String,
         version: u64,
         revoked: Vec<String>,
+        /// The key revoked with a cut, when one was given.
+        cut_key: Option<String>,
+        /// The full names of the entries the cut's time bound left out:
+        /// refused with the rest, each re-admittable by its full name.
+        left_out: Vec<String>,
+        handed: Handed,
+    },
+    /// Keys whose authority over data ended, revoked with their cuts.
+    KeysEnded {
+        namespace: String,
+        version: u64,
+        ended: Vec<String>,
+        /// The entries the cuts' time bounds left out.
+        left_out: Vec<String>,
+        /// Keys to end that no cut file was given for: not revoked.
+        without_cut: Vec<String>,
         handed: Handed,
     },
     KitCreated {
@@ -382,12 +457,26 @@ pub async fn run(
                     cuts: Vec::new(),
                     from_held,
                     root: store_choice(store),
+                    // Certifying the keys revoked with a cut again needs the
+                    // person to check each cut: `ndn-fwd recertify` shows
+                    // them and asks.
+                    recertify: Recertify::No,
                 },
                 &device,
                 secrets,
             )
             .await?;
             let r = &done.recovered;
+            let ctx = &r.version.bump.context;
+            let cut_keys = match compromised {
+                true => ctx
+                    .revocation_cuts()
+                    .iter()
+                    .filter(|c| ctx.revocations().contains(c.key()))
+                    .map(|c| c.key().to_string())
+                    .collect(),
+                false => Vec::new(),
+            };
             RootDone::Recovered {
                 namespace: done.namespace.to_string(),
                 previous: r.previous_version,
@@ -404,15 +493,70 @@ pub async fn run(
                 },
                 short_link: done.anchor_links().map(|(_, short)| short.to_uri()),
                 settings: settings(&done.namespace, &r.device_identity, &done.pib_abs),
+                cut_keys,
+                dropped_cuts: r
+                    .version
+                    .dropped_cuts
+                    .iter()
+                    .map(|d| format!("{}: {}", d.key, d.reason))
+                    .collect(),
             }
         }
-        RootOp::Revoke { namespace, name } => {
-            let planned = revoke::plan(pib, &name, Some(&namespace), None)?;
+        RootOp::Revoke {
+            namespace,
+            name,
+            cut,
+        } => {
+            let given = match cut {
+                None => None,
+                Some(RevokeCut { file, lost }) => Some(GivenCut {
+                    file: read_cut_file(&file)?,
+                    lost: lost_at(&lost).map_err(|error| {
+                        RootError::new(
+                            code::ROOT_BAD_REQUEST,
+                            "the time the device was lost is not readable; nothing was signed",
+                        )
+                        .with("error", error)
+                    })?,
+                }),
+            };
+            let planned = revoke::plan(pib, &name, Some(&namespace), given)?;
             let done = revoke::revoke(planned, &name, pib, &device, secrets).await?;
             RootDone::Revoked {
                 namespace: done.namespace.to_string(),
                 version: done.version,
                 revoked: done.revoked.iter().map(Name::to_string).collect(),
+                cut_key: done.cut.as_ref().map(|f| f.cut.key().to_string()),
+                left_out: done
+                    .cut
+                    .iter()
+                    .flat_map(|f| f.left_out.iter().map(Name::to_string))
+                    .collect(),
+                handed: Handed::from(&done.handed_over),
+            }
+        }
+        RootOp::EndKeys { namespace, cuts } => {
+            let files = cuts
+                .iter()
+                .map(|path| read_cut_file(path))
+                .collect::<Result<Vec<_>, _>>()?;
+            let planned = end_keys::plan(pib, Some(&namespace), files, now_ms())?;
+            let without_cut = planned
+                .without_cut
+                .iter()
+                .map(|k| k.key.to_string())
+                .collect();
+            let done = end_keys::end(planned, pib, &device, secrets).await?;
+            RootDone::KeysEnded {
+                namespace: done.namespace.to_string(),
+                version: done.version,
+                ended: done.ended.iter().map(|(k, _)| k.key.to_string()).collect(),
+                left_out: done
+                    .ended
+                    .iter()
+                    .flat_map(|(_, f)| f.left_out.iter().map(Name::to_string))
+                    .collect(),
+                without_cut,
                 handed: Handed::from(&done.handed_over),
             }
         }
