@@ -54,8 +54,8 @@ impl Host {
         Self::start_with(cx, node, device, &[])
     }
 
-    /// [`start`](Self::start) with further `ndn-data` options (`--store
-    /// <dir>`, `--clock-offset-ms <ms>`).
+    /// [`start`](Self::start) with further `ndn-data` options
+    /// (`--store <dir>`, `--clock-offset-ms <ms>`).
     pub fn start_with(
         cx: &mut Cx<'_>,
         node: &str,
