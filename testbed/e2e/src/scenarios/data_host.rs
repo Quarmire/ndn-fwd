@@ -192,6 +192,52 @@ impl Host {
         }
     }
 
+    /// Send one verb line without waiting for its answer: a batched `put`
+    /// answers once its block is signed, while the next lines are read.
+    /// [`answers`](Self::answers) collects what they came to.
+    pub fn send(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<()> {
+        cx.note(&format!("{}> {line}", self.node));
+        writeln!(self.stdin, "{line}")
+            .and_then(|()| self.stdin.flush())
+            .map_err(|e| format!("{}: ndn-data stdin: {e}{}", self.node, self.tail()))
+    }
+
+    /// The answers to `n` lines [`send`](Self::send) sent, in the order they
+    /// came, all within `within`: each its `ok` object, or its `error`.
+    pub fn answers(
+        &mut self,
+        cx: &mut Cx<'_>,
+        what: &str,
+        n: usize,
+        within: Duration,
+    ) -> StepResult<Vec<Result<Value, Value>>> {
+        let deadline = Instant::now() + within;
+        let mut got = Vec::with_capacity(n);
+        while got.len() < n {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let answer = self
+                .next(cx, what, left)
+                .map_err(|e| format!("{e} ({} of {n} answers came)", got.len()))?;
+            got.push(Self::outcome(what, answer).map_err(|e| format!("{}{e}", self.node))?);
+        }
+        Ok(got)
+    }
+
+    /// An answer line's `ok` object, or its `error` object.
+    fn outcome(line: &str, answer: Value) -> Result<Result<Value, Value>, String> {
+        let Value::Object(mut fields) = answer else {
+            return Err(format!("> {line}: not a JSON object: {answer}"));
+        };
+        match (fields.remove("ok"), fields.remove("error")) {
+            (Some(ok), _) => Ok(Ok(ok)),
+            (None, Some(err)) => Ok(Err(err)),
+            _ => Err(format!(
+                "> {line}: neither ok nor error: {}",
+                Value::Object(fields)
+            )),
+        }
+    }
+
     /// Send one verb line: its `ok` object, or its `error` object.
     pub fn call(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<Result<Value, Value>> {
         self.call_within(cx, line, ANSWER)
@@ -205,26 +251,9 @@ impl Host {
         line: &str,
         within: Duration,
     ) -> StepResult<Result<Value, Value>> {
-        cx.note(&format!("{}> {line}", self.node));
-        writeln!(self.stdin, "{line}")
-            .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("{}: ndn-data stdin: {e}{}", self.node, self.tail()))?;
+        self.send(cx, line)?;
         let answer = self.next(cx, line, within)?;
-        let Value::Object(mut fields) = answer else {
-            return Err(format!(
-                "{}> {line}: not a JSON object: {answer}",
-                self.node
-            ));
-        };
-        match (fields.remove("ok"), fields.remove("error")) {
-            (Some(ok), _) => Ok(Ok(ok)),
-            (None, Some(err)) => Ok(Err(err)),
-            _ => Err(format!(
-                "{}> {line}: neither ok nor error: {}",
-                self.node,
-                Value::Object(fields)
-            )),
-        }
+        Self::outcome(line, answer).map_err(|e| format!("{}{e}", self.node))
     }
 
     /// A verb that must succeed.
@@ -242,6 +271,19 @@ impl Host {
     /// key.
     pub fn put(&mut self, cx: &mut Cx<'_>, collection: &str, fields: &str) -> StepResult<Put> {
         let ok = self.ok(cx, &format!("put {collection} {fields}"))?;
+        let put = self.put_of(collection, &ok)?;
+        cx.evidence(&format!(
+            "{} put {fields}: {} (writer {})",
+            self.node, put.name, put.writer
+        ));
+        Ok(put)
+    }
+
+    /// The version a `put` into `collection` answered `ok` with (for a
+    /// batched put, the block carrying the entry): its name checked to be
+    /// `<device>/32=log/<collection>/seq=<n>` and its writer this device's
+    /// key.
+    pub fn put_of(&self, collection: &str, ok: &Value) -> StepResult<Put> {
         let put = Put {
             writer: ok["writer"].as_str().unwrap_or_default().to_owned(),
             seq: ok["seq"]
@@ -257,12 +299,11 @@ impl Host {
         }
         let expected = format!("{}/32=log{collection}/seq={}", self.device, put.seq);
         if name(&put.name)? != name(&expected)? {
-            return Err(format!("{} is named {}, not {expected}", fields, put.name));
+            return Err(format!(
+                "{} is named {}, not {expected}",
+                ok["fields"], put.name
+            ));
         }
-        cx.evidence(&format!(
-            "{} put {fields}: {} (writer {})",
-            self.node, put.name, put.writer
-        ));
         Ok(put)
     }
 
@@ -522,6 +563,15 @@ pub fn includes(at: &Value, v: &Put) -> bool {
 /// daemon, which validates it (a non-local face) against the trust context
 /// before delivering it.
 pub fn key_locator(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<String> {
+    let meta = delivered(cx, node, name)?;
+    meta.lines()
+        .find_map(|l| l.trim().strip_prefix("key:").map(|k| k.trim().to_owned()))
+        .ok_or_else(|| format!("ndn-peek -m of {name} shows no KeyLocator: {meta}"))
+}
+
+/// `name` fetched through `node`'s daemon gets Data: what `ndn-peek -m`
+/// prints of it.
+pub fn delivered(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<String> {
     let sock = cx.w.node(node).sock().display().to_string();
     let op = cx
         .tool("ndn-peek")
@@ -535,14 +585,11 @@ pub fn key_locator(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<String
             out.stderr.trim()
         ));
     }
-    out.stdout
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("key:").map(|k| k.trim().to_owned()))
-        .ok_or_else(|| format!("ndn-peek -m of {name} shows no KeyLocator: {}", out.stdout))
+    Ok(out.stdout)
 }
 
 /// `name` fetched through `node`'s daemon gets no Data (a short lifetime:
-/// nothing answers across a cut).
+/// nothing answers across a cut, or what no device serves any more).
 pub fn unanswered(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
     let sock = cx.w.node(node).sock().display().to_string();
     let op = cx
@@ -554,9 +601,21 @@ pub fn unanswered(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
         return Err(format!("ndn-peek of {name} at {node} hung"));
     }
     if out.success() {
-        return Err(format!("{name} was delivered at {node} across the cut"));
+        return Err(format!(
+            "{name} was delivered at {node}, where nothing should answer it"
+        ));
     }
     Ok(())
+}
+
+/// Erase every copy `node`'s content store caches under `prefix`.
+pub fn erase_cs(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<String> {
+    let sock = cx.w.node(node).sock().display().to_string();
+    let op = cx
+        .tool("ndn-ctl")
+        .args(["--socket", &sock, "cs", "erase", prefix]);
+    let out = cx.ok(op, "cs erase")?;
+    Ok(out.stdout.trim().to_owned())
 }
 
 /// The faces `node`'s RIB routes exactly `prefix` to, with each route's

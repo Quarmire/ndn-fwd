@@ -50,7 +50,7 @@ OPTIONS:
 SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
            recovery-compromised, negatives, approval, quic-links,
            direct-paths, phone-links, relays, on-demand, membership,
-           multi-prefix, tui, dv, notes, shared, photos
+           multi-prefix, tui, dv, notes, shared, photos, sensor
 ";
 
 #[derive(Clone, Debug, Default)]
@@ -175,7 +175,7 @@ fn binaries(args: &Args) -> Result<PathBuf, String> {
         if !ok {
             return Err("cargo build of the ndn-boltffi phone host failed".into());
         }
-        // The holder of `photos`: ndn-repo's daemon, from the ndn-repo
+        // The holder of `photos` and `sensor`: ndn-repo's daemon, from the ndn-repo
         // workspace (same shared target dir).
         println!("ndn-e2e: building the ndn-repo holder daemon (ndn-repo) …");
         let ok = Command::new("cargo")

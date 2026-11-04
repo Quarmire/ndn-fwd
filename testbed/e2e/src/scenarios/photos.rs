@@ -53,7 +53,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::data_host::{
-    CONVERGE, Holder, Host, Put, carries_group, delete, includes, name, octets,
+    CONVERGE, Holder, Host, Put, carries_group, delete, erase_cs, includes, name, octets,
 };
 use crate::scenarios::*;
 use crate::step::{Abort, Cx, Scenario, StepResult};
@@ -131,16 +131,6 @@ fn shown(l: &Value) -> String {
         l["until_ms"],
         l["audit"]
     )
-}
-
-/// Erase every copy `node`'s content store caches under `prefix`.
-fn erase_cs(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<String> {
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-ctl")
-        .args(["--socket", &sock, "cs", "erase", prefix]);
-    let out = cx.ok(op, "cs erase")?;
-    Ok(out.stdout.trim().to_owned())
 }
 
 /// The phone's `release` of `v`: once both named holders prove every piece,
