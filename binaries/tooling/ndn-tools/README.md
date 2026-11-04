@@ -99,7 +99,10 @@ ndn-ping /ndn/example --count 10 --interval-ms 100
 ```
 
 Sends probe Interests every `--interval-ms` and reports per-Interest
-round-trip time plus loss rate.
+round-trip time plus loss rate. Each ping asks with MustBeFresh, under a
+name no earlier run asked (`<prefix>/ping/<seq>`, the sequence starting
+from the clock), so only the server answers: a Content Store never
+reports a gone server as reachable.
 
 ### `ndn-traceroute` — hop distance
 
@@ -179,15 +182,23 @@ The remaining binaries back the `testbed/` harness; each takes
   ndn-cxx `ndnsec export`/`import`.
 - `ndn-data` — one device's data layer (`ndn_data::Device`) attached to a
   running `ndn-fwd` over its socket, signing with the device's key from
-  the daemon's PIB and verifying with the PIB's trust contexts (following
-  each newer version the daemon stores there); reads
-  `share`/`put`/`get`/`range`/`watch`/`hold`/`prune`/`release`/`cut`/`refused`
-  lines on stdin and answers one JSON object per line (the host of the
-  `notes`, `shared`, `photos`, `sensor` and `stolen` e2e scenarios; `put
-  --batch <ms>` puts an entry into a signed block and answers once the
-  block is signed, while the next lines are read; `cut <key> <file>`
-  writes the revocation cut `ndn-fwd revoke --cut` takes, `refused <key>`
-  lists the full names `ndn-fwd readmit` takes). `--store <dir>` keeps the
+  the daemon's PIB and verifying with the PIB's trust contexts (adopting
+  each newer version the daemon tells of on its trust stream,
+  `/localhost/nfd/security/notifications`, from the PIB it stored it in);
+  reads `share`/`put`/`get`/`range`/`watch`/`hold`/`prune`/`release`/
+  `suspect`/`unsuspect`/`cut`/`refused` lines on stdin and answers one
+  JSON object per line (the host of the `notes`, `shared`, `photos`,
+  `sensor` and `stolen` e2e scenarios; `put --batch <ms>` puts an entry
+  into a signed block and answers once the block is signed, while the next
+  lines are read; `suspect <key> [<when>]`, on reporting a device lost,
+  stops the device taking new entries of that key; `cut <key> <file>
+  [--held-before <when>] [--upto <collection>=<seq>]...` (`<when>`: ms
+  since the epoch or RFC 3339) writes the cut file
+  `ndn-fwd revoke --cut` takes — only the entries this device first
+  verified before the bound (default: the time the key was suspected
+  since; a cut with no bound is refused) — and lists by full name the
+  entries it left out; `refused <key>` lists the full names
+  `ndn-fwd readmit` takes). `--store <dir>` keeps the
   device's entries on disk too, so a host started again resumes its log;
   `--clock-offset-ms` shifts only the dates it writes. Collections are
   named `<ns>/32=data/<path>` (e.g. `/nt/32=data/notes/trip`), `<ns>` the

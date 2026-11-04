@@ -12,10 +12,12 @@
 //! (`SecurityManager::put_secret`), made on the first run; the validator is
 //! the trust contexts' keyring (their anchors and schemas) with a
 //! certificate fetcher over the device's own connection, so a peer's
-//! certificate chain is fetched and walked to the anchor on first use. The
-//! keyring follows the PIB: every second the host adopts each
-//! newer version the daemon stored there (a revocation it pulled or was
-//! pushed, one `ndn-fwd revoke` or `readmit` signed), and the data layer
+//! certificate chain is fetched and
+//! walked to the anchor on first use. The keyring follows the daemon: on
+//! each newer trust-context version the daemon tells of on its trust
+//! stream (`/localhost/nfd/security/notifications`: a revocation it pulled
+//! or was pushed, one `ndn-fwd revoke` or `readmit` signed), the host
+//! adopts the version the daemon stored in the PIB, and the data layer
 //! re-checks what it holds against it (a version a new revocation's cut
 //! does not accept is withdrawn; one it re-admits is fetched and
 //! delivered). Entries live in memory for the life of the process, and with
@@ -100,12 +102,31 @@
 //!   audit over every piece while this device serves none of them, that
 //!   they keep them (the host's storage policy): how many versions, pieces
 //!   and octets, and the versions kept here (`kept`: each name with why).
-//! - `cut <key> <file>`: the revocation cut of key `<key>` (`<id>/KEY/<k>`;
-//!   a certificate name stands for its key) as this device holds it: every
-//!   log entry of that key it holds verified and has not refused, as runs of
-//!   seqs per collection (and for its snapshots), written to `<file>` as the
-//!   RevocationCut TLV `ndn-fwd revoke <device> --cut <file>` takes. The
-//!   answer lists the ranges.
+//! - `suspect <key> [<when>]`: mark key `<key>` (`<id>/KEY/<k>`; a
+//!   certificate name stands for its key) suspected since `<when>` — ms
+//!   since the epoch or RFC 3339 in UTC (`2026-11-04T10:00:00.123Z`);
+//!   default: now, by the device's clock — what the owner does on
+//!   reporting a device lost. Kept across restarts. From now on this device
+//!   takes no new log entry of the key (a `get` of one is refused,
+//!   `suspected`; entries it already holds stay) until a revocation of the
+//!   key decides (adopting it ends the mark) or `unsuspect <key>` lifts the
+//!   mark (the answer says whether it was suspected).
+//! - `cut <key> <file> [--held-before <when>] [--upto <collection>=<seq>]...`
+//!   (`<when>` as for `suspect`): the revocation cut of `<key>` as this device
+//!   holds it, bounded by this device's own observation: every log entry of
+//!   that key it holds verified and has not refused, that it first verified
+//!   before `--held-before` (default: the time the key is suspected since)
+//!   and, for each `--upto` collection, whose seq is at most `<seq>`. A key
+//!   neither suspected nor given `--held-before` is refused: say when the
+//!   device was lost. Written to `<file>` as the cut file
+//!   `ndn-fwd revoke <device> --cut <file>` takes (`ndn_cert::CutFile`:
+//!   the RevocationCut TLV, the bound used, the entries left out and the
+//!   cut's manifest
+//!   packets). The answer lists the ranges, the bound and, by full name
+//!   with digest, the entries of the key this device holds that the bound
+//!   left out — written after the device was lost, or held since a time
+//!   not recorded; each is re-admitted one by one with `ndn-fwd readmit`
+//!   once checked.
 //! - `refused <key>`: the full names (each ending in the implicit SHA-256
 //!   digest of the refused packet) of every log entry of `<key>` this device
 //!   holds refused because the key is revoked and its cut does not accept
@@ -118,9 +139,14 @@
 //! "next_step"}}` (with `"pruned_by"`, the prune record, when the name was
 //! pruned, `"expired"`, the name and its keep, when it expired, and
 //! `"outside_cut"`, the revoked key and the cut's signer, when a revocation's
-//! cut refuses it); per watched change `{"watch":<collection>,"change":{…}}`.
+//! cut refuses it, `"suspected"`, the key and since when, when this device
+//! takes nothing new of a suspected key, and `"untrusted"`, why, when the
+//! chain of its signer is refused); per watched change
+//! `{"watch":<collection>,"change":{…}}` (a withdrawn version says `why`,
+//! with `cut_of` and `cut_signer` when a cut withdrew it).
 //! Logs go to stderr.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -136,24 +162,23 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::task::JoinSet;
 
 use ndn_app::{IpcConnection, Node, demux_cert_fetcher};
+use ndn_cert::CutFile;
+use ndn_cert::report::TrustEvent;
 use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
-    Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Config, Content, Custody, DataError,
-    DataLayer, Device, Entries, Frontier, Got, Hold, Keep, Lease, NextStep, Payload, Prune,
-    PutOptions, Refusal, Rule, Seq, Share, Timestamp, Transport, TypeId, Version, VersionId,
-    Writer,
+    Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
+    CutBound, DataError, DataLayer, Device, Entries, Frontier, Got, Hold, Keep, Lease, NextStep,
+    Payload, Prune, PutOptions, Refusal, Rule, Seq, Share, Timestamp, Transport, TypeId, Version,
+    VersionId, Writer,
 };
 use ndn_ipc::ForwarderClient;
+use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_packet::Name;
 use ndn_security::{CertCache, FilePib, Keyring, RevocationCut, SecurityManager, Validator};
 use ndn_sync::{DataStore, MemoryStore};
 
 /// Longest certificate chain the validator walks (device → CA → root).
 const MAX_CHAIN: usize = 5;
-
-/// How often the host adopts the newer trust-context versions the daemon
-/// stored in its PIB.
-const CONTEXT_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
 #[command(
@@ -245,6 +270,9 @@ async fn main() -> Result<()> {
         Some(dir) => Arc::new(DirStore::open(dir)?),
         None => Arc::new(MemoryStore::new()),
     };
+    // The device's clock: `suspect` without a time marks the key from now
+    // as the device dates what it verifies.
+    let clock = Arc::clone(&config.clock);
     let layer = Device::start(
         Transport { node, sync },
         device.clone(),
@@ -257,7 +285,11 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow!("{device}: {e} (next: {})", next_step(e.next())))?;
     // After the layer listens on the keyring: every newer version adopted
     // from here on re-checks what it holds.
-    tokio::spawn(follow_contexts(pib.root().to_path_buf(), keyring));
+    tokio::spawn(follow_contexts(
+        cli.face_socket.clone(),
+        pib.root().to_path_buf(),
+        keyring,
+    ));
     println!(
         "{}",
         json!({"ready": {"device": device.to_string(), "writer": layer.writer().key().to_string()}})
@@ -282,7 +314,7 @@ async fn main() -> Result<()> {
         if verb == "quit" {
             break;
         }
-        let answer = match run(&layer, verb, args).await {
+        let answer = match run(&layer, &clock, verb, args).await {
             Ok(Verb::Done(ok)) => json!({"verb": verb, "ok": ok}),
             Ok(Verb::Later(answer)) => {
                 let verb = verb.clone();
@@ -306,31 +338,129 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Adopt, every [`CONTEXT_POLL`], each trust-context version stored in the
-/// PIB at `pib_root` that is newer than the one `keyring` holds: the daemon
-/// stores the versions it adopts (pulled, pushed, or signed there by `ndn-fwd
-/// revoke`/`readmit`), and the data layer re-checks what it holds on each
-/// adoption. Re-adopting a held version changes nothing; an older one is
-/// refused by the keyring (no rollback).
-async fn follow_contexts(pib_root: PathBuf, keyring: Arc<Keyring>) {
-    let mut tick = tokio::time::interval(CONTEXT_POLL);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+/// How long one long-poll of the daemon's trust stream waits for an event.
+const TRUST_POLL: Duration = Duration::from_secs(30);
+/// How long before subscribing to the trust stream again after it failed
+/// (a reconnect backoff: while subscribed, the host only waits for events).
+const TRUST_RETRY: Duration = Duration::from_secs(3);
+
+/// Follow the trust-context versions the daemon at `face_socket` adopts —
+/// pulled, pushed, or signed there by `ndn-fwd revoke`/`readmit` — from its
+/// trust stream (`/localhost/nfd/security/notifications`): each
+/// `context-updated` event makes the host adopt the version the daemon
+/// stored in the PIB at `pib_root` into `keyring`, and the data layer
+/// re-checks what it holds on each adoption. A resync (the first notice,
+/// and whenever the host fell behind the stream or the daemon restarted)
+/// adopts every stored version newer than the held one, so a version told
+/// of meanwhile is not missed. Re-adopting a held version changes nothing;
+/// an older one is refused by the keyring (no rollback).
+async fn follow_contexts(face_socket: String, pib_root: PathBuf, keyring: Arc<Keyring>) {
     loop {
-        tick.tick().await;
-        match ndn_cert::load_persisted_contexts(&pib_root, &keyring) {
-            Ok(read) => {
-                for (path, result) in read {
-                    if let Err(e) = result {
-                        tracing::debug!(path = %path.display(), "stored trust context not adopted: {e}");
-                    }
+        let mut trust = match EventSubscription::<TrustEvent>::connect(&face_socket).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    socket = %face_socket,
+                    "the daemon's trust stream is not reachable: {e}; trust-context versions it \
+                     adopts are not followed until it is (subscribing again)"
+                );
+                tokio::time::sleep(TRUST_RETRY).await;
+                continue;
+            }
+        };
+        loop {
+            match trust.next(TRUST_POLL).await {
+                Ok(None) => {}
+                Ok(Some(Notice::Resync { .. })) => adopt_stored(&pib_root, &keyring),
+                Ok(Some(Notice::Event {
+                    event:
+                        TrustEvent::ContextUpdated {
+                            namespace, version, ..
+                        },
+                    ..
+                })) => adopt_told(&pib_root, &keyring, &namespace, version),
+                Ok(Some(Notice::Event { .. })) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        socket = %face_socket,
+                        "the daemon's trust stream failed: {e}; subscribing again (a resync \
+                         adopts what was stored meanwhile)"
+                    );
+                    tokio::time::sleep(TRUST_RETRY).await;
+                    break;
                 }
             }
-            Err(e) => tracing::warn!(
-                pib = %pib_root.display(),
-                "trust contexts not read: {e}; newer versions the daemon stores are not \
-                 followed until the PIB is readable again"
-            ),
         }
+    }
+}
+
+/// Adopt every trust context stored in the PIB at `pib_root` that is newer
+/// than the one `keyring` holds of its namespace.
+fn adopt_stored(pib_root: &Path, keyring: &Keyring) {
+    match ndn_cert::load_persisted_contexts(pib_root, keyring) {
+        Ok(read) => {
+            for (path, result) in read {
+                if let Err(e) = result {
+                    tracing::debug!(path = %path.display(), "stored trust context not adopted: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!(
+            pib = %pib_root.display(),
+            "trust contexts not read: {e}; newer versions the daemon stores are adopted at the \
+             next one it tells of once the PIB is readable again"
+        ),
+    }
+}
+
+/// Adopt version `version` of `namespace`, which the daemon told of: the
+/// daemon stores a version in the PIB at `pib_root` before it tells of it,
+/// so the stored file holds it (or a newer one). When it does not — the
+/// daemon could not store it — nothing is adopted now: the next version the
+/// daemon stores and tells of, or the next resync, brings the host up to
+/// date.
+fn adopt_told(pib_root: &Path, keyring: &Keyring, namespace: &str, version: u64) {
+    let ns: Name = match namespace.parse() {
+        Ok(ns) => ns,
+        Err(e) => {
+            tracing::warn!(
+                namespace,
+                "the daemon told of a namespace that is no name: {e}"
+            );
+            return;
+        }
+    };
+    if keyring.version_of(&ns).is_some_and(|held| held >= version) {
+        return;
+    }
+    match ndn_cert::read_stored_context(pib_root, &ns) {
+        Ok(Some((ctx, _data))) if ctx.version() >= version => {
+            let stored = ctx.version();
+            if !keyring.adopt(Arc::new(ctx)) {
+                tracing::debug!(
+                    %ns,
+                    stored,
+                    "stored trust context not adopted: the keyring holds this version or a \
+                     newer one"
+                );
+            }
+        }
+        Ok(stored) => tracing::warn!(
+            %ns,
+            version,
+            stored = ?stored.map(|(ctx, _)| ctx.version()),
+            pib = %pib_root.display(),
+            "the daemon told of this version but the PIB does not hold it (the daemon could \
+             not store it: see its log); not adopted now — the next version it stores, or the \
+             next resync, brings this host up to date"
+        ),
+        Err(e) => tracing::warn!(
+            %ns,
+            version,
+            pib = %pib_root.display(),
+            "the stored trust context is not readable: {e}; not adopted now — the next \
+             version the daemon stores, or the next resync, brings this host up to date"
+        ),
     }
 }
 
@@ -451,7 +581,12 @@ enum Verb {
     Usage(String),
 }
 
-async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataError> {
+async fn run(
+    layer: &Device,
+    clock: &Clock,
+    verb: &str,
+    args: &[String],
+) -> Result<Verb, DataError> {
     let usage = |s: &str| Ok(Verb::Usage(s.to_owned()));
     let name = |s: &str| {
         s.parse::<Name>()
@@ -607,22 +742,90 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
             })))
         }
         ("release", _) => usage("usage: release <collection or version>"),
-        ("cut", [key, file]) => {
+        ("suspect", [key, since @ ..]) if since.len() <= 1 => {
             let key = match name(key) {
                 Ok(k) => k,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            let cut = layer.revocation_cut(&key);
-            if let Err(e) = std::fs::write(file, cut.encode()) {
+            let since = match since.first() {
+                None => clock(),
+                Some(when) => match time(when) {
+                    Ok(t) => t,
+                    Err(e) => return Ok(Verb::Usage(format!("{e}; {SUSPECT_USAGE}"))),
+                },
+            };
+            layer.suspect(&key, since)?;
+            Ok(Verb::Done(
+                json!({"key": key.to_string(), "since_ms": since.0}),
+            ))
+        }
+        ("suspect", _) => usage(SUSPECT_USAGE),
+        ("unsuspect", [key]) => {
+            let key = match name(key) {
+                Ok(k) => k,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let was = layer.unsuspect(&key);
+            Ok(Verb::Done(
+                json!({"key": key.to_string(), "was_suspected": was}),
+            ))
+        }
+        ("unsuspect", _) => usage("usage: unsuspect <key>"),
+        ("cut", [key, file, options @ ..]) => {
+            let key = match name(key) {
+                Ok(k) => k,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let (given, upto) = match cut_options(options) {
+                Ok(o) => o,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {CUT_USAGE}"))),
+            };
+            let held_before = given.or_else(|| layer.suspected(&key));
+            if held_before.is_none() && !upto.is_empty() {
+                return Ok(Verb::Usage(format!(
+                    "{key} is not suspected and the line gives no --held-before: a cut bounded \
+                     only by --upto cannot be checked against when the device was lost, and \
+                     `ndn-fwd revoke --cut` refuses it; give --held-before <ms since the epoch> \
+                     (when the device was lost), or mark the key suspected from then first \
+                     (suspect {key} <ms since the epoch>)"
+                )));
+            }
+            // Neither bound: the layer refuses, saying to tell when the
+            // device was lost.
+            let bound = CutBound { held_before, upto };
+            let proposal = layer.revocation_cut(&key, &bound)?;
+            let mut cut_file = CutFile::new(proposal.cut);
+            cut_file.held_before = held_before.map(|t| t.0);
+            cut_file.upto = bound.upto;
+            cut_file.left_out = proposal.left_out;
+            cut_file.manifest = proposal.manifest;
+            if let Err(e) = std::fs::write(file, cut_file.encode()) {
                 return Ok(Verb::Usage(format!(
                     "write {file}: {e}; name a file this host may write"
                 )));
             }
-            let mut ok = revocation_cut(&cut);
+            let mut ok = revocation_cut(&cut_file.cut);
             ok["file"] = json!(file);
+            ok["held_before_ms"] = json!(cut_file.held_before);
+            ok["held_before_from"] = json!(if given.is_some() {
+                "given"
+            } else {
+                "suspected"
+            });
+            ok["upto"] = cut_file
+                .upto
+                .iter()
+                .map(|(c, seq)| json!({"collection": c.to_string(), "seq": seq}))
+                .collect();
+            ok["left_out"] = cut_file
+                .left_out
+                .iter()
+                .map(|n| json!(n.to_string()))
+                .collect();
+            ok["manifest_packets"] = json!(cut_file.manifest.len());
             Ok(Verb::Done(ok))
         }
-        ("cut", _) => usage("usage: cut <key> <file>"),
+        ("cut", _) => usage(CUT_USAGE),
         ("refused", [key]) => {
             let key = match name(key) {
                 Ok(k) => k,
@@ -635,9 +838,10 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
             })))
         }
         ("refused", _) => usage("usage: refused <key>"),
-        _ => {
-            usage("verbs: share, put, get, range, watch, hold, prune, release, cut, refused, quit")
-        }
+        _ => usage(
+            "verbs: share, put, get, range, watch, hold, prune, release, suspect, unsuspect, cut, \
+             refused, quit",
+        ),
     }
 }
 
@@ -705,6 +909,75 @@ const HOLD_USAGE: &str = "usage: hold <collection> copies=<n> until=<ms since th
 
 const PRUNE_USAGE: &str =
     "usage: prune <collection or version> upto=<writer key>:<seq>[,<writer key>:<seq>...]";
+
+const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key is suspected: \
+                             when the device was lost, as ms since the epoch or RFC 3339; \
+                             default now)";
+
+const CUT_USAGE: &str = "usage: cut <key> <file> [--held-before <when>] [--upto \
+                         <collection>=<seq>]... (<when> as ms since the epoch or RFC 3339; \
+                         --held-before defaults to the time the key was suspected since)";
+
+/// A time a line gives: ms since the epoch (`1793808000000`), or RFC 3339
+/// in UTC (`2026-11-04T10:00:00Z`, `2026-11-04T10:00:00.123Z`) as
+/// `ndn-fwd revoke --lost` takes it and its hints print it.
+fn time(when: &str) -> Result<Timestamp, String> {
+    if when.bytes().all(|b| b.is_ascii_digit()) {
+        return when
+            .parse::<u64>()
+            .map(Timestamp)
+            .map_err(|e| format!("{when:?} is no time in ms since the epoch: {e}"));
+    }
+    let at = humantime::parse_rfc3339_weak(when)
+        .map_err(|e| format!("{when:?} is neither ms since the epoch nor an RFC 3339 time: {e}"))?;
+    let ms = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| format!("{when:?} is before 1970"))?
+        .as_millis();
+    u64::try_from(ms)
+        .map(Timestamp)
+        .map_err(|_| format!("{when:?} is too far in the future"))
+}
+
+/// A `cut` line's options after the key and the file: `--held-before
+/// <when>` (at most once) and `--upto <collection>=<seq>` (once per
+/// collection). A collection name may hold `=`, a seq never does: each
+/// `--upto` splits at its last `=`.
+fn cut_options(words: &[String]) -> Result<(Option<Timestamp>, BTreeMap<Name, u64>), String> {
+    let (mut held_before, mut upto) = (None, BTreeMap::new());
+    let mut rest = words;
+    while let [option, value, more @ ..] = rest {
+        match option.as_str() {
+            "--held-before" if held_before.is_some() => {
+                return Err("--held-before is given twice".into());
+            }
+            "--held-before" => {
+                held_before = Some(time(value).map_err(|e| format!("--held-before: {e}"))?);
+            }
+            "--upto" => {
+                let (collection, seq) = value
+                    .rsplit_once('=')
+                    .ok_or_else(|| format!("--upto {value:?} is not <collection>=<seq>"))?;
+                let collection = collection
+                    .parse::<Name>()
+                    .map_err(|e| format!("--upto {collection:?} is no name: {e}"))?;
+                let seq = seq
+                    .parse::<u64>()
+                    .map_err(|e| format!("--upto {value:?}: seq {seq:?}: {e}"))?;
+                if upto.insert(collection, seq).is_some() {
+                    return Err(format!("--upto names the collection of {value:?} twice"));
+                }
+            }
+            _ => return Err(format!("{option:?} is not --held-before or --upto")),
+        }
+        rest = more;
+    }
+    match rest.first() {
+        None => Ok((held_before, upto)),
+        Some(o) if o == "--held-before" || o == "--upto" => Err(format!("{o:?} needs a value")),
+        Some(o) => Err(format!("{o:?} is not --held-before or --upto")),
+    }
+}
 
 /// A `put` line's `--batch <ms>` and `--keep <keep>` (before the fields)
 /// and its fields, at least one: the keep (default forever), the batch
@@ -914,21 +1187,33 @@ fn data_error(e: &DataError) -> Value {
     });
     match e {
         DataError::Pruned { by, .. } => v["pruned_by"] = prune(by),
-        DataError::Refused {
-            why: Refusal::OutsideCut(cut),
-            ..
-        } => {
-            v["outside_cut"] = json!({
-                "of": cut.of.to_string(),
-                "signer": cut.signer.key().to_string(),
-            });
-        }
+        DataError::Refused { why, .. } => refusal(&mut v, why),
         DataError::Expired { name, keep: k } => {
             v["expired"] = json!({"name": name.to_string(), "keep": keep(k)});
         }
         _ => {}
     }
     v
+}
+
+/// The fields of a refusal an error answer carries beside its message:
+/// `outside_cut` (the cut key or writer and the cut's signer), `suspected`
+/// (the key this device marked suspected, and since when), `untrusted`
+/// (why the durable rule refuses an issuer on its chain).
+fn refusal(v: &mut Value, why: &Refusal) {
+    match why {
+        Refusal::OutsideCut(cut) => {
+            v["outside_cut"] = json!({
+                "of": cut.of.to_string(),
+                "signer": cut.signer.key().to_string(),
+            });
+        }
+        Refusal::Suspected { key, since } => {
+            v["suspected"] = json!({"key": key.to_string(), "since_ms": since.0});
+        }
+        Refusal::Untrusted { why } => v["untrusted"] = json!(why),
+        _ => {}
+    }
 }
 
 fn next_token(n: NextStep) -> &'static str {
@@ -1051,7 +1336,9 @@ fn content(c: &Content) -> Value {
 }
 
 /// A revocation cut: its key, its runs of seqs per prefix, its exact
-/// (re-admitted) names.
+/// (re-admitted) names, the SHA-256 of the key's public key it binds
+/// (`key_digest`) and the full name of its manifest's root packet
+/// (`manifest`), each `null` when the cut has none.
 fn revocation_cut(c: &RevocationCut) -> Value {
     json!({
         "key": c.key().to_string(),
@@ -1060,6 +1347,8 @@ fn revocation_cut(c: &RevocationCut) -> Value {
             "runs": r.runs.iter().map(|(first, last)| json!([first, last])).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "exact": c.exact().iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "key_digest": c.key_digest().map(|d| hex(d.as_slice())),
+        "manifest": c.manifest().map(ToString::to_string),
     })
 }
 
@@ -1105,11 +1394,20 @@ fn change(c: &Change) -> Value {
             "frontier": frontier(&s.frontier),
             "children": s.children.len(),
         }}),
-        Change::Withdrawn { id: i, cut } => json!({"withdrawn": {
-            "id": id(i),
-            "cut_of": cut.of.to_string(),
-            "cut_signer": cut.signer.key().to_string(),
-        }}),
+        Change::Withdrawn { id: i, why } => {
+            let mut w = json!({"id": id(i), "why": why.to_string()});
+            match why {
+                // A cut: the key or writer cut and who signed the cut.
+                Refusal::OutsideCut(cut) => {
+                    w["cut_of"] = json!(cut.of.to_string());
+                    w["cut_signer"] = json!(cut.signer.key().to_string());
+                }
+                // An issuer refused by the durable rule: never re-admitted.
+                Refusal::Untrusted { .. } => w["untrusted"] = json!(true),
+                _ => {}
+            }
+            json!({ "withdrawn": w })
+        }
         Change::Pruned { id: i, by } => json!({"pruned": {"id": id(i), "by": prune(by)}}),
         Change::Expired { id: i, keep: k } => json!({"expired": {"id": id(i), "keep": keep(k)}}),
         Change::Equivocation { first, second } => json!({"equivocation": {

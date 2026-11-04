@@ -86,6 +86,9 @@ tracing        = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow         = { workspace = true }
 clap           = { version = "4", features = ["derive", "env"] }
+# ndn-data's `suspect` and `cut --held-before` take a time as ms since the
+# epoch or RFC 3339, as `ndn-fwd revoke --lost` and its hints write it.
+humantime      = "2"
 
 [lints]
 workspace = true
