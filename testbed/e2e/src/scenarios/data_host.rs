@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
@@ -19,6 +20,7 @@ use serde_json::Value;
 
 use crate::run::Proc;
 use crate::step::{Cx, StepResult};
+use crate::world::addr;
 
 /// SVS's periodic interval for the hosts (default 30 s): how soon two
 /// devices that were apart notice; performance only.
@@ -49,12 +51,23 @@ impl Host {
     /// so. The process is the node's producer: stopped with it, its log
     /// shown when a step fails.
     pub fn start(cx: &mut Cx<'_>, node: &str, device: &str) -> StepResult<Host> {
+        Self::start_with(cx, node, device, &[])
+    }
+
+    /// [`start`](Self::start) with further `ndn-data` options (`--store
+    /// <dir>`, `--clock-offset-ms <ms>`).
+    pub fn start_with(
+        cx: &mut Cx<'_>,
+        node: &str,
+        device: &str,
+        options: &[String],
+    ) -> StepResult<Host> {
         let (sock, pib, log) = {
             let nd = cx.w.node(node);
             (nd.sock(), nd.pib(), nd.dir.join("ndn-data.log"))
         };
         let program = cx.w.bins.dir.join("ndn-data");
-        let args = [
+        let mut args = vec![
             "--device".to_owned(),
             device.to_owned(),
             "--pib".to_owned(),
@@ -64,6 +77,7 @@ impl Host {
             "--sync-interval-ms".to_owned(),
             SYNC_INTERVAL_MS.to_string(),
         ];
+        args.extend_from_slice(options);
         cx.note(&format!("$ ndn-data {} &", args.join(" ")));
         let stderr = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
         let mut child = Command::new(&program)
@@ -616,6 +630,35 @@ pub fn erase_cs(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<String>
         .args(["--socket", &sock, "cs", "erase", prefix]);
     let out = cx.ok(op, "cs erase")?;
     Ok(out.stdout.trim().to_owned())
+}
+
+/// `node`'s QUIC link face to the daemon bound to `host`'s address
+/// (harness inspection: `ndn-ctl face list`).
+pub fn quic_face_to(cx: &mut Cx<'_>, node: &str, host: u8) -> StepResult<Option<u64>> {
+    let sock = cx.w.node(node).sock().display().to_string();
+    let op = cx
+        .tool("ndn-ctl")
+        .args(["--socket", &sock, "face", "list", "--scheme", "quic4"]);
+    let out = cx.exec(op);
+    if !out.success() {
+        return Err(format!("face list on {node}: {}", out.status_text()));
+    }
+    let mut face = None;
+    for line in out.stdout.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("faceid=") {
+            face = rest.split_whitespace().next().and_then(|f| f.parse().ok());
+        } else if let Some(remote) = t.strip_prefix("remote: quic4://")
+            && remote
+                .split(':')
+                .next()
+                .and_then(|ip| ip.parse::<Ipv4Addr>().ok())
+                == Some(addr(host))
+        {
+            return Ok(face);
+        }
+    }
+    Ok(None)
 }
 
 /// The faces `node`'s RIB routes exactly `prefix` to, with each route's

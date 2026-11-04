@@ -51,14 +51,12 @@
 //! outside the audience his get of the document is sealed; alice's next
 //! version is sealed in a new epoch, which bob cannot open.
 
-use std::net::Ipv4Addr;
-
 use bytes::Bytes;
 use ndn_data::wire::{Record, decode_record};
 use serde_json::Value;
 
 use super::data_host::{
-    CONVERGE, Host, Put, includes, key_locator, multicast_at, name, rib, unanswered,
+    CONVERGE, Host, Put, includes, key_locator, multicast_at, name, quic_face_to, rib, unanswered,
 };
 use super::direct_paths::link_list;
 use crate::scenarios::*;
@@ -88,34 +86,6 @@ const RELAY: u8 = 3;
 const FAST_LINKS: &str = "[links]\nkeep_alive_secs = 2\nidle_timeout_secs = 6\n";
 /// Whatever reaches the other person goes through the relay.
 const NO_DIRECT: &str = "[direct]\nmembership = false\n";
-
-/// `node`'s QUIC link face to the daemon bound to `host`'s address.
-fn quic_face_to(cx: &mut Cx<'_>, node: &str, host: u8) -> StepResult<Option<u64>> {
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-ctl")
-        .args(["--socket", &sock, "face", "list", "--scheme", "quic4"]);
-    let out = cx.exec(op);
-    if !out.success() {
-        return Err(format!("face list on {node}: {}", out.status_text()));
-    }
-    let mut face = None;
-    for line in out.stdout.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("faceid=") {
-            face = rest.split_whitespace().next().and_then(|f| f.parse().ok());
-        } else if let Some(remote) = t.strip_prefix("remote: quic4://")
-            && remote
-                .split(':')
-                .next()
-                .and_then(|ip| ip.parse::<Ipv4Addr>().ok())
-                == Some(addr(host))
-        {
-            return Ok(face);
-        }
-    }
-    Ok(None)
-}
 
 /// Alice or bob: its link face to the relay carries `other` (the other
 /// person's namespace), and it runs both groups with multicast.

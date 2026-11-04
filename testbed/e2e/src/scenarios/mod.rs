@@ -29,6 +29,7 @@ mod quic_links;
 mod relays;
 mod sensor;
 mod shared;
+mod stolen;
 mod tui;
 
 pub const ALL: &[&str] = &[
@@ -51,6 +52,7 @@ pub const ALL: &[&str] = &[
     "shared",
     "photos",
     "sensor",
+    "stolen",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -74,6 +76,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "shared" => shared::run(sc),
         "photos" => photos::run(sc),
         "sensor" => sensor::run(sc),
+        "stolen" => stolen::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

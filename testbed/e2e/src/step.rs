@@ -514,6 +514,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--timeout",
     "--bytes",
     "--reason",
+    "--cut",
 ];
 
 /// Human inputs and concepts of one command, from its tool, subcommand,
@@ -614,6 +615,23 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
             }
             targets_from = usize::MAX;
         }
+        ("ndn-fwd", Some("readmit")) => {
+            add(
+                &mut concepts,
+                "re-admission (exact versions of a revoked key)".into(),
+            );
+            add(&mut concepts, "trust context version".into());
+            if let Some(k) = sub.get(1) {
+                add(&mut inputs, format!("revoked key ({k})"));
+            }
+            if sub.len() > 2 {
+                add(
+                    &mut inputs,
+                    "full names of the versions to re-admit (each with its digest)".into(),
+                );
+            }
+            targets_from = usize::MAX;
+        }
         ("ndn-fwd", Some("renew")) => {
             add(&mut concepts, "certificate renewal".into());
         }
@@ -701,6 +719,13 @@ pub fn classify(op: &Op) -> (Vec<String>, Vec<String>) {
             "--role" if op.tool == "ndn-fwd" => add(&mut inputs, format!("requested role ({v})")),
             "--role" => add(&mut inputs, format!("invite role ({v})")),
             "--reason" => add(&mut inputs, "reason for the denial".into()),
+            "--cut" => {
+                add(
+                    &mut inputs,
+                    "revocation cut file (from the data layer)".into(),
+                );
+                add(&mut concepts, "revocation cut".into());
+            }
             "--accept-narrowing" => add(
                 &mut inputs,
                 "--accept-narrowing (a schema that allows less)".into(),
