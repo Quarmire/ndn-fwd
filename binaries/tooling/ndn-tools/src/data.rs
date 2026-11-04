@@ -912,6 +912,7 @@ fn lease(l: &Lease) -> Value {
                 "breach": match breach {
                     Breach::Missing => "missing",
                     Breach::Wrong => "wrong",
+                    Breach::Expired => "expired",
                 },
             }}),
             Audit::Unanswered { asked, answered } => {
