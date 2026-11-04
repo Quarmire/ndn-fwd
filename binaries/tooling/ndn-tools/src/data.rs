@@ -12,8 +12,21 @@
 //! (`SecurityManager::put_secret`), made on the first run; the validator is
 //! the trust contexts' keyring (their anchors and schemas) with a
 //! certificate fetcher over the device's own connection, so a peer's
-//! certificate chain is fetched and walked to the anchor on first use;
-//! entries live in memory for the life of the process.
+//! certificate chain is fetched and walked to the anchor on first use. The
+//! keyring follows the PIB: every second the host adopts each
+//! newer version the daemon stored there (a revocation it pulled or was
+//! pushed, one `ndn-fwd revoke` or `readmit` signed), and the data layer
+//! re-checks what it holds against it (a version a new revocation's cut
+//! does not accept is withdrawn; one it re-admits is fetched and
+//! delivered). Entries live in memory for the life of the process, and with
+//! `--store <dir>` also one file each under `<dir>`, so a host started again
+//! on the same directory resumes its log (and its key's sequence) where it
+//! stopped.
+//!
+//! `--clock-offset-ms <ms>` runs the device's wall clock that many
+//! milliseconds off the system's (negative: behind). It changes only the
+//! dates the device writes into its versions (`dated_ms`), never what any
+//! device accepts: validity of data does not depend on a clock.
 //!
 //! Two connections to the forwarder: a `Node` (fetching, and serving the
 //! device's prefix) and a second one for State Vector Sync. A forwarder
@@ -87,15 +100,28 @@
 //!   audit over every piece while this device serves none of them, that
 //!   they keep them (the host's storage policy): how many versions, pieces
 //!   and octets, and the versions kept here (`kept`: each name with why).
+//! - `cut <key> <file>`: the revocation cut of key `<key>` (`<id>/KEY/<k>`;
+//!   a certificate name stands for its key) as this device holds it: every
+//!   log entry of that key it holds verified and has not refused, as runs of
+//!   seqs per collection (and for its snapshots), written to `<file>` as the
+//!   RevocationCut TLV `ndn-fwd revoke <device> --cut <file>` takes. The
+//!   answer lists the ranges.
+//! - `refused <key>`: the full names (each ending in the implicit SHA-256
+//!   digest of the refused packet) of every log entry of `<key>` this device
+//!   holds refused because the key is revoked and its cut does not accept
+//!   them — refused on arrival or withdrawn later; what `ndn-fwd readmit
+//!   <key> <full name>...` takes to re-admit exactly those versions.
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
 //! `{"verb":…,"ok":{…}}` or `{"verb":…,"error":{"message","retry","next",
 //! "next_step"}}` (with `"pruned_by"`, the prune record, when the name was
-//! pruned, and `"expired"`, the name and its keep, when it expired); per
-//! watched change `{"watch":<collection>,"change":{…}}`.
+//! pruned, `"expired"`, the name and its keep, when it expired, and
+//! `"outside_cut"`, the revoked key and the cut's signer, when a revocation's
+//! cut refuses it); per watched change `{"watch":<collection>,"change":{…}}`.
 //! Logs go to stderr.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -114,15 +140,20 @@ use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Config, Content, Custody, DataError,
     DataLayer, Device, Entries, Frontier, Got, Hold, Keep, Lease, NextStep, Payload, Prune,
-    PutOptions, Rule, Seq, Share, Timestamp, Transport, TypeId, Version, VersionId, Writer,
+    PutOptions, Refusal, Rule, Seq, Share, Timestamp, Transport, TypeId, Version, VersionId,
+    Writer,
 };
 use ndn_ipc::ForwarderClient;
 use ndn_packet::Name;
-use ndn_security::{CertCache, FilePib, SecurityManager, Validator};
-use ndn_sync::MemoryStore;
+use ndn_security::{CertCache, FilePib, Keyring, RevocationCut, SecurityManager, Validator};
+use ndn_sync::{DataStore, MemoryStore};
 
 /// Longest certificate chain the validator walks (device → CA → root).
 const MAX_CHAIN: usize = 5;
+
+/// How often the host adopts the newer trust-context versions the daemon
+/// stored in its PIB.
+const CONTEXT_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
 #[command(
@@ -144,6 +175,17 @@ struct Cli {
     /// 30 s). Performance only: how soon devices that were apart notice.
     #[arg(long)]
     sync_interval_ms: Option<u64>,
+
+    /// Keep the device's entries under this directory too (one file each),
+    /// so a host started again on it resumes its log where it stopped
+    /// (default: in memory only, for the life of the process).
+    #[arg(long)]
+    store: Option<PathBuf>,
+
+    /// Run the device's wall clock this many milliseconds off the system's
+    /// (negative: behind). Only the dates it writes change.
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
+    clock_offset_ms: i64,
 
     #[arg(long, default_value_t = ndn_config::ManagementConfig::default().face_socket)]
     face_socket: String,
@@ -171,6 +213,7 @@ async fn main() -> Result<()> {
     ndn_cert::load_persisted_contexts(pib.root(), keys.keyring())
         .map_err(|e| anyhow!("PIB {}: {e}", cli.pib))?;
     let keys = Arc::new(keys);
+    let keyring = Arc::clone(keys.keyring());
 
     let node = Node::connect(&cli.face_socket)
         .await
@@ -193,16 +236,28 @@ async fn main() -> Result<()> {
     if let Some(ms) = cli.sync_interval_ms {
         config.svs.sync_interval = Duration::from_millis(ms);
     }
+    if cli.clock_offset_ms != 0 {
+        let system = Arc::clone(&config.clock);
+        let offset = cli.clock_offset_ms;
+        config.clock = Arc::new(move || Timestamp(system().0.saturating_add_signed(offset)));
+    }
+    let store: Arc<dyn DataStore> = match &cli.store {
+        Some(dir) => Arc::new(DirStore::open(dir)?),
+        None => Arc::new(MemoryStore::new()),
+    };
     let layer = Device::start(
         Transport { node, sync },
         device.clone(),
         keys,
         validator,
-        Arc::new(MemoryStore::new()),
+        store,
         config,
     )
     .await
     .map_err(|e| anyhow!("{device}: {e} (next: {})", next_step(e.next())))?;
+    // After the layer listens on the keyring: every newer version adopted
+    // from here on re-checks what it holds.
+    tokio::spawn(follow_contexts(pib.root().to_path_buf(), keyring));
     println!(
         "{}",
         json!({"ready": {"device": device.to_string(), "writer": layer.writer().key().to_string()}})
@@ -249,6 +304,142 @@ async fn main() -> Result<()> {
     while later.join_next().await.is_some() {}
     layer.shutdown();
     Ok(())
+}
+
+/// Adopt, every [`CONTEXT_POLL`], each trust-context version stored in the
+/// PIB at `pib_root` that is newer than the one `keyring` holds: the daemon
+/// stores the versions it adopts (pulled, pushed, or signed there by `ndn-fwd
+/// revoke`/`readmit`), and the data layer re-checks what it holds on each
+/// adoption. Re-adopting a held version changes nothing; an older one is
+/// refused by the keyring (no rollback).
+async fn follow_contexts(pib_root: PathBuf, keyring: Arc<Keyring>) {
+    let mut tick = tokio::time::interval(CONTEXT_POLL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        match ndn_cert::load_persisted_contexts(&pib_root, &keyring) {
+            Ok(read) => {
+                for (path, result) in read {
+                    if let Err(e) = result {
+                        tracing::debug!(path = %path.display(), "stored trust context not adopted: {e}");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(
+                pib = %pib_root.display(),
+                "trust contexts not read: {e}; newer versions the daemon stores are not \
+                 followed until the PIB is readable again"
+            ),
+        }
+    }
+}
+
+/// The host's store with `--store <dir>`: what the device keeps, in memory
+/// for reads, and each entry also a file of `<dir>` (named by the SHA-256 of
+/// its name; holding the name's TLV length as 4 octets big-endian, the
+/// name's TLV, then the stored wire), written atomically and owner-only, so
+/// a host started again on `<dir>` resumes what it held — its own log, and
+/// with it its key's sequence.
+struct DirStore {
+    memory: MemoryStore,
+    dir: PathBuf,
+}
+
+impl DirStore {
+    /// Open `dir` (made if missing) and read back every entry stored there.
+    fn open(dir: &Path) -> Result<Self> {
+        ndn_security::secure_fs::create_private_dir_all(dir)
+            .map_err(|e| anyhow!("--store {}: {e}", dir.display()))?;
+        let memory = MemoryStore::new();
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| anyhow!("--store {}: {e}", dir.display()))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|e| anyhow!("--store {}: {e}", dir.display()))?
+                .path();
+            // Skipped: a write's temporary file, cut short by a stop.
+            if path.extension().is_none_or(|x| x != STORE_EXT) {
+                continue;
+            }
+            let bytes = std::fs::read(&path).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+            let (name, wire) = Self::decode(Bytes::from(bytes)).ok_or_else(|| {
+                anyhow!(
+                    "{} is not an entry of this store; remove it, or start with another --store",
+                    path.display()
+                )
+            })?;
+            memory.insert(name, wire);
+        }
+        Ok(Self {
+            memory,
+            dir: dir.to_path_buf(),
+        })
+    }
+
+    fn decode(bytes: Bytes) -> Option<(Name, Bytes)> {
+        let len = u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+        let end = 4usize.checked_add(len).filter(|&end| end <= bytes.len())?;
+        let name = Name::decode_from_tlv(bytes.slice(4..end)).ok()?;
+        Some((name, bytes.slice(end..)))
+    }
+
+    fn path(&self, name_tlv: &[u8]) -> PathBuf {
+        self.dir
+            .join(format!("{}.{STORE_EXT}", hex(&Sha256::digest(name_tlv))))
+    }
+}
+
+/// The extension of a `--store` entry's file.
+const STORE_EXT: &str = "entry";
+
+impl DataStore for DirStore {
+    fn insert(&self, name: Name, wire: Bytes) {
+        let tlv = name.encode_to_tlv();
+        let mut file = Vec::with_capacity(4 + tlv.len() + wire.len());
+        file.extend_from_slice(&(tlv.len() as u32).to_be_bytes());
+        file.extend_from_slice(&tlv);
+        file.extend_from_slice(&wire);
+        let path = self.path(&tlv);
+        if let Err(e) = ndn_security::secure_fs::write_private(&path, &file) {
+            tracing::error!(
+                %name,
+                path = %path.display(),
+                "not written to the store: {e}; held in memory, but a host started again on \
+                 this --store loses it: free space or fix the directory's permissions"
+            );
+        }
+        self.memory.insert(name, wire);
+    }
+
+    fn get(&self, name: &Name) -> Option<Bytes> {
+        self.memory.get(name)
+    }
+
+    fn contains(&self, name: &Name) -> bool {
+        self.memory.contains(name)
+    }
+
+    fn find_under(&self, prefix: &Name) -> Option<Bytes> {
+        self.memory.find_under(prefix)
+    }
+
+    fn scan_under(&self, prefix: &Name, limit: usize) -> Vec<(Name, Bytes)> {
+        self.memory.scan_under(prefix, limit)
+    }
+
+    fn remove(&self, name: &Name) {
+        self.memory.remove(name);
+        let path = self.path(&name.encode_to_tlv());
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => tracing::error!(
+                %name,
+                path = %path.display(),
+                "not removed from the store: {e}; a host started again on this --store holds \
+                 it again: fix the directory's permissions"
+            ),
+            _ => {}
+        }
+    }
 }
 
 /// What one verb line came to.
@@ -416,7 +607,37 @@ async fn run(layer: &Device, verb: &str, args: &[String]) -> Result<Verb, DataEr
             })))
         }
         ("release", _) => usage("usage: release <collection or version>"),
-        _ => usage("verbs: share, put, get, range, watch, hold, prune, release, quit"),
+        ("cut", [key, file]) => {
+            let key = match name(key) {
+                Ok(k) => k,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let cut = layer.revocation_cut(&key);
+            if let Err(e) = std::fs::write(file, cut.encode()) {
+                return Ok(Verb::Usage(format!(
+                    "write {file}: {e}; name a file this host may write"
+                )));
+            }
+            let mut ok = revocation_cut(&cut);
+            ok["file"] = json!(file);
+            Ok(Verb::Done(ok))
+        }
+        ("cut", _) => usage("usage: cut <key> <file>"),
+        ("refused", [key]) => {
+            let key = match name(key) {
+                Ok(k) => k,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let names = layer.refused_by_revocation(&key);
+            Ok(Verb::Done(json!({
+                "key": key.to_string(),
+                "names": names.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            })))
+        }
+        ("refused", _) => usage("usage: refused <key>"),
+        _ => {
+            usage("verbs: share, put, get, range, watch, hold, prune, release, cut, refused, quit")
+        }
     }
 }
 
@@ -443,7 +664,6 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
         rule: merge(),
         writers: vec![ns.clone()],
         readers: vec![Audience::Person(ns.clone())],
-        readmit: Vec::new(),
     };
     for o in options {
         match o.split_once('=') {
@@ -694,6 +914,15 @@ fn data_error(e: &DataError) -> Value {
     });
     match e {
         DataError::Pruned { by, .. } => v["pruned_by"] = prune(by),
+        DataError::Refused {
+            why: Refusal::OutsideCut(cut),
+            ..
+        } => {
+            v["outside_cut"] = json!({
+                "of": cut.of.to_string(),
+                "signer": cut.signer.key().to_string(),
+            });
+        }
         DataError::Expired { name, keep: k } => {
             v["expired"] = json!({"name": name.to_string(), "keep": keep(k)});
         }
@@ -819,6 +1048,19 @@ fn content(c: &Content) -> Value {
         m.insert(field.to_owned(), v);
     }
     Value::Object(m)
+}
+
+/// A revocation cut: its key, its runs of seqs per prefix, its exact
+/// (re-admitted) names.
+fn revocation_cut(c: &RevocationCut) -> Value {
+    json!({
+        "key": c.key().to_string(),
+        "ranges": c.ranges().iter().map(|r| json!({
+            "prefix": r.prefix.to_string(),
+            "runs": r.runs.iter().map(|(first, last)| json!([first, last])).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "exact": c.exact().iter().map(ToString::to_string).collect::<Vec<_>>(),
+    })
 }
 
 fn hex(bytes: &[u8]) -> String {
