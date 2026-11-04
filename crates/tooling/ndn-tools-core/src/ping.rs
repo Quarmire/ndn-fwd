@@ -143,6 +143,7 @@ pub async fn run_client(params: PingClientParams, tx: mpsc::Sender<ToolEvent>) -
     let mut timeouts: u64 = 0;
     let mut nacks: u64 = 0;
     let mut seq: u64 = 0;
+    let first = first_probe_seq();
     let start = Instant::now();
 
     loop {
@@ -153,10 +154,11 @@ pub async fn run_client(params: PingClientParams, tx: mpsc::Sender<ToolEvent>) -
             break;
         }
 
-        let name = prefix.clone().append("ping").append(seq.to_string());
-        let wire = InterestBuilder::new(name.clone())
-            .lifetime(lifetime_dur)
-            .build();
+        let name = prefix
+            .clone()
+            .append("ping")
+            .append(first.wrapping_add(seq).to_string());
+        let wire = ping_interest(name.clone(), lifetime_dur);
 
         let t0 = Instant::now();
         match consumer.fetch_wire(wire, lifetime_dur).await {
@@ -251,6 +253,28 @@ pub async fn run_client(params: PingClientParams, tx: mpsc::Sender<ToolEvent>) -
     Ok(())
 }
 
+/// The ping Interest for `name`: MustBeFresh, so only the server answers it.
+/// The forwarder caches every Data, FreshnessPeriod 0 too, and answers an
+/// Interest without MustBeFresh from that copy — a ping of a name asked
+/// before would then report a gone server as reachable.
+fn ping_interest(name: Name, lifetime: Duration) -> bytes::Bytes {
+    InterestBuilder::new(name)
+        .must_be_fresh()
+        .lifetime(lifetime)
+        .build()
+}
+
+/// The sequence number a run's first probe name carries (the clock in
+/// nanoseconds), so a run asks names no earlier run asked: a server's
+/// `--freshness` keeps its answers fresh in caches for that long, and
+/// MustBeFresh alone would then let a cache answer a later run's probe of
+/// the same name. As ndnping, which starts at a random number.
+pub(crate) fn first_probe_seq() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64)
+}
+
 async fn compute_rtt_stats(
     rtt_results: &mut [u64],
     tx: &mpsc::Sender<ToolEvent>,
@@ -298,5 +322,23 @@ pub fn format_rtt(us: u64) -> String {
         format!("{:.2}ms", us as f64 / 1_000.0)
     } else {
         format!("{us}µs")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ping asks the server, never a Content Store (see `ping_interest`).
+    #[test]
+    fn a_ping_cannot_be_answered_from_a_cache() {
+        let name: Name = "/ndn/ping/7".parse().unwrap();
+        let wire = ping_interest(name.clone(), Duration::from_secs(4));
+        let interest = Interest::decode(wire).unwrap();
+        assert_eq!(*interest.name, name);
+        assert!(
+            interest.selectors().must_be_fresh,
+            "a ping without MustBeFresh"
+        );
     }
 }

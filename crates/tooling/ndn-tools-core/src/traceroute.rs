@@ -12,9 +12,9 @@
 //! identity would need forwarder cooperation (a hop-limit-exceeded responder that signs
 //! its node name) — a forwarder-side feature, not this tool.
 //!
-//! It probes a ping-style responder (`<prefix>/ping/<seq>`, fresh per probe so the
-//! Content Store never aliases an earlier hop's answer), so run an `ndn-ping` /
-//! `ndnpingserver` at the target.
+//! It probes a ping-style responder (`<prefix>/ping/<seq>`, a name no earlier probe or run
+//! asked, with MustBeFresh, so no Content Store answers with an earlier hop's or run's
+//! answer), so run an `ndn-ping` / `ndnpingserver` at the target.
 
 use std::time::{Duration, Instant};
 
@@ -87,7 +87,9 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
     }
 
     let trace_marker = NameComponent::keyword(Bytes::from_static(TRACEROUTE_KEYWORD));
-    let mut seq: u64 = 0;
+    // The first probe's sequence number: names no earlier run asked (see
+    // `ping::first_probe_seq`), with MustBeFresh below.
+    let mut seq: u64 = crate::ping::first_probe_seq();
     let mut reached_at: Option<u8> = None;
 
     for hop in 1..=params.max_hops {
@@ -104,7 +106,7 @@ pub async fn run_client(params: TracerouteParams, tx: mpsc::Sender<ToolEvent>) -
             if params.identify {
                 name = name.append_component(trace_marker.clone());
             }
-            seq += 1;
+            seq = seq.wrapping_add(1);
             let wire = InterestBuilder::new(name)
                 .hop_limit(hop)
                 .must_be_fresh()
