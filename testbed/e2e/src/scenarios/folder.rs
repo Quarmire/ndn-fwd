@@ -40,7 +40,8 @@
 //! the group's signed versions alone, not timing. Alice's store whole
 //! again, bob counts the whole group and the paste: on every element the
 //! same frontier and value as alice, nothing not counted, every member
-//! delivered to his watch only now.
+//! delivered to his watch of the folder only now, each named with its
+//! collection.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -111,6 +112,18 @@ fn counts_member(w: &Value, members: &[Put]) -> Option<String> {
         .iter()
         .find(|m| is(id, m))
         .map(|m| format!("{}: {change}", m.name))
+}
+
+/// The watched change names its collection: one under the folder, and for
+/// a version the version's own.
+fn tagged(w: &Value) -> bool {
+    let tag = w["collection"].as_str().unwrap_or_default();
+    let under = match (name(tag), name(FOLDER)) {
+        (Ok(t), Ok(f)) => t.has_prefix(&f) && t != f,
+        _ => false,
+    };
+    let version = &w["change"]["version"];
+    under && (!version.is_object() || version["collection"] == tag)
 }
 
 /// The files of the `--store` directory `store` holding entries under the
@@ -590,7 +603,16 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                         m.name
                     ));
                 }
-                cx.evidence(&format!("bob's watch: {}", w["change"]));
+                if !tagged(&w) {
+                    return Err(format!(
+                        "bob's folder watch did not name {}'s collection: {w}",
+                        m.name
+                    ));
+                }
+                cx.evidence(&format!(
+                    "bob's watch, of {}: {}",
+                    w["collection"], w["change"]
+                ));
             }
             Ok(())
         },

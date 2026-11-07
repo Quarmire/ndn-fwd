@@ -118,7 +118,9 @@
 //!   (excluded), in ms since the epoch.
 //! - `watch <collection or folder>`: from now on, every change as its own
 //!   line (a version that expired here, too; one not counted, with why,
-//!   and when it counts).
+//!   and when it counts), for a folder of every collection under it,
+//!   those created later included, each line naming the change's
+//!   collection.
 //! - `hold <collection> copies=<n> until=<ms since the epoch>
 //!   holders=<device>[,<device>...]`: ask the named holder devices (at
 //!   least `copies` of them, none this device) to keep the collection,
@@ -176,7 +178,8 @@
 //! chain of its signer is refused, `"rule_unknown"`, the collection and its
 //! rule, when this program does not know the rule, and `"group_member"`
 //! when a member of its group is refused); per watched change
-//! `{"watch":<collection>,"change":{…}}` (a withdrawn version says `why`,
+//! `{"watch":<collection or folder>,"collection":<the change's collection>,
+//! "change":{…}}` (a withdrawn version says `why`,
 //! with `cut_of` and `cut_signer` when a cut withdrew it; a version not
 //! counted is `{"not_counted":{"id","why"}}`, one that counts later
 //! `{"counted":{"id"}}`).
@@ -941,7 +944,11 @@ async fn run(
             tokio::spawn(async move {
                 while let Some(item) = changes.next().await {
                     let line = match item {
-                        Ok(c) => json!({"watch": watched, "change": change(&c)}),
+                        Ok(c) => json!({
+                            "watch": watched,
+                            "collection": c.collection().to_string(),
+                            "change": change(&c),
+                        }),
                         Err(e) => json!({"watch": watched, "error": data_error(&e)}),
                     };
                     println!("{line}");
@@ -949,7 +956,7 @@ async fn run(
             });
             Ok(Verb::Done(json!({"collection": collection.to_string()})))
         }
-        ("watch", _) => usage("usage: watch <collection>"),
+        ("watch", _) => usage("usage: watch <collection or folder>"),
         ("hold", [collection, options @ ..]) => {
             let collection = match name(collection) {
                 Ok(c) => c,
@@ -1990,7 +1997,7 @@ fn change(c: &Change) -> Value {
             "frontier": frontier(&s.frontier),
             "children": s.children.len(),
         }}),
-        Change::Withdrawn { id: i, why } => {
+        Change::Withdrawn { id: i, why, .. } => {
             let mut w = json!({"id": id(i), "why": why.to_string()});
             match why {
                 // A cut: the key or writer cut and who signed the cut.
@@ -2006,11 +2013,15 @@ fn change(c: &Change) -> Value {
             }
             json!({ "withdrawn": w })
         }
-        Change::Pruned { id: i, by } => json!({"pruned": {"id": id(i), "by": prune(by)}}),
-        Change::Expired { id: i, keep: k } => json!({"expired": {"id": id(i), "keep": keep(k)}}),
-        Change::NotCounted { id: i, why } => json!({"not_counted": {"id": id(i), "why": why}}),
-        Change::Counted { id: i } => json!({"counted": {"id": id(i)}}),
-        Change::Equivocation { first, second } => json!({"equivocation": {
+        Change::Pruned { id: i, by, .. } => json!({"pruned": {"id": id(i), "by": prune(by)}}),
+        Change::Expired { id: i, keep: k, .. } => {
+            json!({"expired": {"id": id(i), "keep": keep(k)}})
+        }
+        Change::NotCounted { id: i, why, .. } => {
+            json!({"not_counted": {"id": id(i), "why": why}})
+        }
+        Change::Counted { id: i, .. } => json!({"counted": {"id": id(i)}}),
+        Change::Equivocation { first, second, .. } => json!({"equivocation": {
             "first": version(first),
             "second": version(second),
         }}),
