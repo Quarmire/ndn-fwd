@@ -30,6 +30,14 @@
 //! dates the device writes into its versions (`dated_ms`), never what any
 //! device accepts: validity of data does not depend on a clock.
 //!
+//! `--merge-rule <function>` (repeatable) makes the device know a merge
+//! rule beside `/merge/yrs`, by its full name; this program ships one,
+//! `/ndn-tools/merge/element/v=1` (`element.rs`: an element of named text
+//! settings, each operation made over a basis it names by implicit digest,
+//! concurrent writes kept as ordered variants). A collection whose members
+//! record names a rule the device does not know is held unreadable: `get`
+//! and the puts answer `RuleUnknown` (next: update the program).
+//!
 //! Two connections to the forwarder: a `Node` (fetching, and serving the
 //! device's prefix) and a second one for State Vector Sync. A forwarder
 //! client's one reader splits its management replies off its data, so a
@@ -51,10 +59,12 @@
 //! Verbs (one per line; values with spaces in double quotes, `\"` and `\\`
 //! escaped inside them):
 //!
-//! - `share <collection> [rule=merge|log|one-key] [writers=<prefix>,<prefix>...]
-//!   [readers=<kind>:<name>,...]`: the members record of a collection of
-//!   this device's namespace, its first revision or the next. `rule=merge`
-//!   (the default) merges with `/merge/yrs`, `rule=log` keeps every member's
+//! - `share <collection> [rule=merge|merge:<function>|log|one-key]
+//!   [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...]`: the
+//!   members record of a collection of this device's namespace, its first
+//!   revision or the next. `rule=merge` (the default) merges with
+//!   `/merge/yrs`, `rule=merge:<function>` with the rule of that full name,
+//!   `rule=log` keeps every member's
 //!   versions (the newest is the latest), `rule=one-key` is written by
 //!   exactly one key, which `writers=` names (a key name `<D>/KEY/<id>`, or
 //!   this device's name for its own key), read through its signed head.
@@ -65,6 +75,10 @@
 //!   Sharing again without a writer or reader removes it: the owner cuts a
 //!   removed writer at what this device has seen of it, and seals later
 //!   versions in a new epoch a removed reader cannot open.
+//! - `share_folder <folder> [options as share]`: the members record of a
+//!   folder `<ns>/32=data/<path>`, which governs every collection under it
+//!   (each writes and reads by its own record narrowed by the folder's;
+//!   one without its own takes the folder's rule, writers and readers).
 //! - `put <collection> [--batch <ms>] [--keep forever|until=<ms since the
 //!   epoch>|last=<n>] <field>=<value>...`: a version of type `/types/note`
 //!   revision 1, kept forever unless `--keep` says otherwise; an empty value
@@ -76,17 +90,35 @@
 //!   tool reads the next line meanwhile; the answer comes once the block is
 //!   signed, naming the block, so answers to batched puts may come after
 //!   answers to later lines. Every put answer shows the fields it put.
+//! - `put_op <collection> [--keep <keep>] <operation>`: a version of a
+//!   merge collection carrying the operation the app built, of type
+//!   `/types/element`: `hex=<octets>` (any rule's operation as built), or an
+//!   element operation as words — `basis=<digest hex>`,
+//!   `set:<setting>=<text>`, `change:<setting>=<at>,<delete>,<insert>` (a
+//!   splice in characters of the text the basis wrote; a text `@<path>` is
+//!   the file's). Without `basis=`, a change's basis is the version that
+//!   wrote the changed setting's one variant in the state here (several
+//!   variants: name one). The collection's rule checks it before anything
+//!   is signed. The answer shows the operation.
+//! - `put_group [--keep <keep>] <collection> fields|op <words>... [;
+//!   <collection> fields|op <words>...]...`: several versions as one
+//!   group, all or none — one per collection, all of one folder — each
+//!   `fields` words as `put`'s or `op` words as `put_op`'s. A reader counts
+//!   none of them until it holds them all.
 //! - `get <name>`: a collection's merged state (its newest version under
 //!   the log and one-key rules), an exact version, state or entry
 //!   (`<version>/32=entry/seg=<i>`) by its name, or the entries a range name
 //!   (`<collection>/32=range/<range>`) selects. A field value longer than
-//!   256 octets is shown as its length and SHA-256, not its bytes.
+//!   256 octets is shown as its length and SHA-256, not its bytes. A state
+//!   lists the versions held here that are not in its value
+//!   (`not_counted`, each with why: the rule's, or its group incomplete).
 //! - `range <collection> seq=<low>..<high>|time=<from>..<to>`: `get` of the
 //!   range name of a one-key collection: the blocks from seq `low` to `high`
 //!   (both included), or the entries dated from `from` (included) to `to`
 //!   (excluded), in ms since the epoch.
 //! - `watch <collection or folder>`: from now on, every change as its own
-//!   line (a version that expired here, too).
+//!   line (a version that expired here, too; one not counted, with why,
+//!   and when it counts).
 //! - `hold <collection> copies=<n> until=<ms since the epoch>
 //!   holders=<device>[,<device>...]`: ask the named holder devices (at
 //!   least `copies` of them, none this device) to keep the collection,
@@ -140,11 +172,17 @@
 //! pruned, `"expired"`, the name and its keep, when it expired, and
 //! `"outside_cut"`, the revoked key and the cut's signer, when a revocation's
 //! cut refuses it, `"suspected"`, the key and since when, when this device
-//! takes nothing new of a suspected key, and `"untrusted"`, why, when the
-//! chain of its signer is refused); per watched change
+//! takes nothing new of a suspected key, `"untrusted"`, why, when the
+//! chain of its signer is refused, `"rule_unknown"`, the collection and its
+//! rule, when this program does not know the rule, and `"group_member"`
+//! when a member of its group is refused); per watched change
 //! `{"watch":<collection>,"change":{…}}` (a withdrawn version says `why`,
-//! with `cut_of` and `cut_signer` when a cut withdrew it).
+//! with `cut_of` and `cut_signer` when a cut withdrew it; a version not
+//! counted is `{"not_counted":{"id","why"}}`, one that counts later
+//! `{"counted":{"id"}}`).
 //! Logs go to stderr.
+
+mod element;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -167,9 +205,9 @@ use ndn_cert::report::TrustEvent;
 use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
-    CutBound, DataError, DataLayer, Device, Entries, Frontier, Got, Hold, Keep, Lease, NextStep,
-    Payload, Prune, PutOptions, Refusal, Rule, Seq, Share, Timestamp, Transport, TypeId, Version,
-    VersionId, Writer,
+    CutBound, DataError, DataLayer, Device, Entries, Frontier, Got, Hold, Keep, Lease, MergeRule,
+    NextStep, Payload, Prune, PutOptions, Refusal, Rule, Seq, Share, State, Timestamp, Transport,
+    TypeId, Version, VersionId, Writer, Yrs,
 };
 use ndn_ipc::ForwarderClient;
 use ndn_ipc::events::{EventSubscription, Notice};
@@ -177,8 +215,29 @@ use ndn_packet::Name;
 use ndn_security::{CertCache, FilePib, Keyring, RevocationCut, SecurityManager, Validator};
 use ndn_sync::{DataStore, MemoryStore};
 
+use crate::element::{ElementOp, ElementValue};
+
 /// Longest certificate chain the validator walks (device → CA → root).
 const MAX_CHAIN: usize = 5;
+
+/// The rule `--merge-rule <function>` names, among those this program
+/// ships.
+fn merge_rule(function: &str) -> Result<Arc<dyn MergeRule>> {
+    let name: Name = function
+        .parse()
+        .map_err(|e| anyhow!("--merge-rule {function:?} is no name: {e}"))?;
+    let rules: [Arc<dyn MergeRule>; 2] = [Arc::new(Yrs::new()), Arc::new(element::Element::new())];
+    rules
+        .into_iter()
+        .find(|r| *r.function() == name)
+        .ok_or_else(|| {
+            anyhow!(
+                "--merge-rule {name}: this program knows the merge rules /merge/yrs and {}; name \
+                 one of them, or run a program that knows {name}",
+                element::FUNCTION
+            )
+        })
+}
 
 #[derive(Parser)]
 #[command(
@@ -211,6 +270,13 @@ struct Cli {
     /// (negative: behind). Only the dates it writes change.
     #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     clock_offset_ms: i64,
+
+    /// Also know this merge rule, by its full name (repeatable): a
+    /// collection that merges with a rule the device does not know is held
+    /// unreadable (`RuleUnknown`). The rules this program ships beside
+    /// `/merge/yrs`: `/ndn-tools/merge/element/v=1` (see `put_op`).
+    #[arg(long = "merge-rule")]
+    merge_rules: Vec<String>,
 
     #[arg(long, default_value_t = ndn_config::ManagementConfig::default().face_socket)]
     face_socket: String,
@@ -266,6 +332,9 @@ async fn main() -> Result<()> {
         let offset = cli.clock_offset_ms;
         config.clock = Arc::new(move || Timestamp(system().0.saturating_add_signed(offset)));
     }
+    config.rules = cli.merge_rules.iter().try_fold(config.rules, |rules, r| {
+        Ok::<_, anyhow::Error>(rules.with(merge_rule(r)?))
+    })?;
     let store: Arc<dyn DataStore> = match &cli.store {
         Some(dir) => Arc::new(DirStore::open(dir)?),
         None => Arc::new(MemoryStore::new()),
@@ -606,6 +675,19 @@ async fn run(
             Ok(Verb::Done(json!({"collection": collection.to_string()})))
         }
         ("share", _) => usage(SHARE_USAGE),
+        ("share_folder", [folder, options @ ..]) => {
+            let folder = match name(folder) {
+                Ok(f) => f,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let share = match share_options(layer.namespace(), options) {
+                Ok(s) => s,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {SHARE_FOLDER_USAGE}"))),
+            };
+            layer.share_folder(&folder, share).await?;
+            Ok(Verb::Done(json!({"folder": folder.to_string()})))
+        }
+        ("share_folder", _) => usage(SHARE_FOLDER_USAGE),
         ("put", [collection, rest @ ..]) => {
             let collection = match name(collection) {
                 Ok(c) => c,
@@ -615,24 +697,11 @@ async fn run(
                 Ok(o) => o,
                 Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_USAGE}"))),
             };
-            let mut content = Content::new();
-            for f in fields {
-                let Some((field, value)) = f.split_once('=') else {
-                    return usage(PUT_USAGE);
-                };
-                match field_value(value).await {
-                    Ok(bytes) => content = content.with(field, bytes),
-                    Err(e) => return Ok(Verb::Usage(format!("{field}: {e}; {PUT_USAGE}"))),
-                }
-            }
-            let options = PutOptions {
-                type_id: TypeId {
-                    name: "/types/note".parse().expect("a valid name"),
-                    revision: 1,
-                },
-                keep,
-                batch,
+            let content = match fields_of(fields).await {
+                Ok(c) => c,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_USAGE}"))),
             };
+            let options = put_type(NOTE, keep, batch);
             let layer = layer.clone();
             let put = async move {
                 let shown = self::content(&content);
@@ -652,6 +721,100 @@ async fn run(
             }
         }
         ("put", _) => usage(PUT_USAGE),
+        ("put_op", [collection, rest @ ..]) => {
+            let collection = match name(collection) {
+                Ok(c) => c,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let (keep, words) = match keep_option(rest) {
+                Ok(o) => o,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_OP_USAGE}"))),
+            };
+            let op = match op_of(layer, &collection, words).await {
+                Ok(op) => op,
+                Err(Bad::Usage(e)) => return Ok(Verb::Usage(format!("{e}; {PUT_OP_USAGE}"))),
+                Err(Bad::Data(e)) => return Err(e),
+            };
+            let shown = op_shown(&op);
+            let id = layer
+                .put_op(&collection, op, put_type(ELEMENT, keep, None))
+                .await?;
+            let mut ok = put_answer(layer, &collection, &id);
+            ok["op"] = shown;
+            Ok(Verb::Done(ok))
+        }
+        ("put_op", _) => usage(PUT_OP_USAGE),
+        ("put_group", [_, ..]) => {
+            let (keep, words) = match keep_option(args) {
+                Ok(o) => o,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_GROUP_USAGE}"))),
+            };
+            let mut items = Vec::new();
+            let mut shown = Vec::new();
+            for item in words.split(|w| w == ";") {
+                let [collection, kind, edit @ ..] = item else {
+                    return Ok(Verb::Usage(format!(
+                        "item {:?} is not <collection> fields|op <words>...; {PUT_GROUP_USAGE}",
+                        item.join(" ")
+                    )));
+                };
+                let collection = match name(collection) {
+                    Ok(c) => c,
+                    Err(e) => return Ok(Verb::Usage(e)),
+                };
+                let (edit, show) = match kind.as_str() {
+                    "fields" => match fields_of(edit).await {
+                        Ok(c) => {
+                            let show = json!({"fields": content(&c)});
+                            (ndn_data::Edit::Fields(c), show)
+                        }
+                        Err(e) => {
+                            return Ok(Verb::Usage(format!(
+                                "{collection}: {e}; {PUT_GROUP_USAGE}"
+                            )));
+                        }
+                    },
+                    "op" => match op_of(layer, &collection, edit).await {
+                        Ok(op) => {
+                            let show = json!({"op": op_shown(&op)});
+                            (ndn_data::Edit::Op(op), show)
+                        }
+                        Err(Bad::Usage(e)) => {
+                            return Ok(Verb::Usage(format!(
+                                "{collection}: {e}; {PUT_GROUP_USAGE}"
+                            )));
+                        }
+                        Err(Bad::Data(e)) => return Err(e),
+                    },
+                    other => {
+                        return Ok(Verb::Usage(format!(
+                            "{collection}: {other:?} is neither fields nor op; {PUT_GROUP_USAGE}"
+                        )));
+                    }
+                };
+                shown.push((collection.clone(), show));
+                items.push((collection, edit));
+            }
+            let all_ops = items
+                .iter()
+                .all(|(_, e)| matches!(e, ndn_data::Edit::Op(_)));
+            let options = put_type(if all_ops { ELEMENT } else { NOTE }, keep, None);
+            let ids = layer.put_group(items, options).await?;
+            let versions = ids
+                .iter()
+                .zip(shown)
+                .map(|(id, (collection, show))| {
+                    let mut v = put_answer(layer, &collection, id);
+                    v["collection"] = json!(collection.to_string());
+                    if let (Value::Object(v), Value::Object(show)) = (&mut v, show) {
+                        v.extend(show);
+                    }
+                    v
+                })
+                .collect::<Vec<_>>();
+            Ok(Verb::Done(json!({"versions": versions})))
+        }
+        ("put_group", _) => usage(PUT_GROUP_USAGE),
         ("get", [n]) => {
             let n = match name(n) {
                 Ok(n) => n,
@@ -839,20 +1002,27 @@ async fn run(
         }
         ("refused", _) => usage("usage: refused <key>"),
         _ => usage(
-            "verbs: share, put, get, range, watch, hold, prune, release, suspect, unsuspect, cut, \
-             refused, quit",
+            "verbs: share, share_folder, put, put_op, put_group, get, range, watch, hold, prune, \
+             release, suspect, unsuspect, cut, refused, quit",
         ),
     }
 }
 
-const SHARE_USAGE: &str = "usage: share <collection> [rule=merge|log|one-key] \
+const SHARE_USAGE: &str = "usage: share <collection> [rule=merge|merge:<function>|log|one-key] \
                            [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...] (kind \
                            person, device or group; one-key: writers=<the one key or this \
                            device>)";
 
-/// A `share` line's options over the defaults: the merge rule `/merge/yrs`,
-/// writers the namespace `ns`, readers the person `ns`. `readers=` with
-/// nothing after it lists no readers (the collection is not sealed).
+const SHARE_FOLDER_USAGE: &str = "usage: share_folder <folder> \
+                                  [rule=merge|merge:<function>|log|one-key] \
+                                  [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...] \
+                                  (kind person, device or group; the folder is <ns>/32=data/<path>, \
+                                  and its record governs every collection under it)";
+
+/// A `share` (or `share_folder`) line's options over the defaults: the
+/// merge rule `/merge/yrs`, writers the namespace `ns`, readers the person
+/// `ns`. `rule=merge:<function>` merges with the rule of that full name.
+/// `readers=` with nothing after it lists no readers (not sealed).
 fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
     let merge = || Rule::Merge {
         function: "/merge/yrs".parse().expect("a valid name"),
@@ -874,9 +1044,18 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
             Some(("rule", "merge")) => share.rule = merge(),
             Some(("rule", "log")) => share.rule = Rule::Log,
             Some(("rule", "one-key")) => share.rule = Rule::OneKey,
-            Some(("rule", r)) => {
-                return Err(format!("rule {r:?} is neither merge, log nor one-key"));
-            }
+            Some(("rule", r)) => match r.strip_prefix("merge:") {
+                Some(function) => {
+                    share.rule = Rule::Merge {
+                        function: name(function)?,
+                    };
+                }
+                None => {
+                    return Err(format!(
+                        "rule {r:?} is neither merge, merge:<function>, log nor one-key"
+                    ));
+                }
+            },
             Some(("writers", v)) => share.writers = list(v).map(name).collect::<Result<_, _>>()?,
             Some(("readers", v)) => {
                 share.readers = list(v)
@@ -899,6 +1078,73 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
 const PUT_USAGE: &str = "usage: put <collection> [--batch <ms>] [--keep forever|until=<ms since \
                          the epoch>|last=<n>] <field>=<value>... (a value @<path> is the file's \
                          bytes, @@... a value starting with @)";
+
+const PUT_OP_USAGE: &str = "usage: put_op <collection> [--keep forever|until=<ms>|last=<n>] \
+                            hex=<operation> | [basis=<digest hex>] [set:<setting>=<text>]... \
+                            [change:<setting>=<at>,<delete>,<insert>]... (an element operation, \
+                            /ndn-tools/merge/element/v=1: a change splices, in characters, the \
+                            text its basis wrote, by default the version that wrote the \
+                            setting's one variant here; a text @<path> is the file's)";
+
+const PUT_GROUP_USAGE: &str = "usage: put_group [--keep forever|until=<ms>|last=<n>] <collection> \
+                               fields|op <words>... [; <collection> fields|op <words>...]... \
+                               (all or none, one collection each, all of one folder; fields \
+                               words as put's, op words as put_op's)";
+
+/// The type of versions `put` writes.
+const NOTE: &str = "/types/note";
+/// The type of versions `put_op` writes (and `put_group` of operations
+/// only).
+const ELEMENT: &str = "/types/element";
+
+fn put_type(type_name: &str, keep: Keep, batch: Option<Duration>) -> PutOptions {
+    PutOptions {
+        type_id: TypeId {
+            name: type_name.parse().expect("a valid name"),
+            revision: 1,
+        },
+        keep,
+        batch,
+    }
+}
+
+/// What a put answers about the version it wrote: writer, seq and name.
+fn put_answer(layer: &Device, collection: &Name, id: &VersionId) -> Value {
+    json!({
+        "writer": id.writer.key().to_string(),
+        "seq": id.seq.0,
+        "name": log_name(layer.name(), Some(collection), id.seq.0).to_string(),
+    })
+}
+
+/// An operation as an answer shows it: an element operation's basis and
+/// edits (texts as [`text_shown`]), else its length and SHA-256.
+fn op_shown(op: &[u8]) -> Value {
+    let Ok(op) = ElementOp::decode(op) else {
+        return json!({"len": op.len(), "sha256": hex(&Sha256::digest(op))});
+    };
+    json!({
+        "basis": op.basis.map(|d| hex(&d)),
+        "edits": op.edits.iter().map(|e| match e {
+            element::Edit::Set { setting, text } => {
+                json!({"set": setting, "text": text_shown(text)})
+            }
+            element::Edit::Change { setting, at, delete, insert } => json!({
+                "change": setting, "at": at, "delete": delete, "insert": text_shown(insert),
+            }),
+        }).collect::<Vec<_>>(),
+    })
+}
+
+/// A text up to [`SHOWN_MAX`] octets as itself, longer as its length and
+/// SHA-256.
+fn text_shown(text: &str) -> Value {
+    if text.len() > SHOWN_MAX {
+        json!({"len": text.len(), "sha256": hex(&Sha256::digest(text))})
+    } else {
+        json!(text)
+    }
+}
 
 const RANGE_USAGE: &str = "usage: range <collection> seq=<low>..<high>|time=<from>..<to> (seqs \
                            both included; dates in ms since the epoch, from included, to \
@@ -995,25 +1241,7 @@ fn put_options(words: &[String]) -> Result<(Keep, Option<Duration>, &[String]), 
                     .map_err(|e| format!("--batch {value:?} is no delay in ms: {e}"))?;
                 batch = Some(Duration::from_millis(ms));
             }
-            "--keep" => {
-                keep = match value.split_once('=') {
-                    None if value == "forever" => Keep::Forever,
-                    Some(("until", t)) => {
-                        Keep::Until(Timestamp(t.parse::<u64>().map_err(|e| {
-                            format!("--keep until={t:?} is no date in ms since the epoch: {e}")
-                        })?))
-                    }
-                    Some(("last", n)) => Keep::LastN(
-                        n.parse()
-                            .map_err(|e| format!("--keep last={n:?} is no count: {e}"))?,
-                    ),
-                    _ => {
-                        return Err(format!(
-                            "--keep {value:?} is not forever, until=<ms> or last=<n>"
-                        ));
-                    }
-                };
-            }
+            "--keep" => keep = keep_value(value)?,
             _ => return Err(format!("{option:?} is not --batch or --keep")),
         }
         rest = more;
@@ -1023,6 +1251,227 @@ fn put_options(words: &[String]) -> Result<(Keep, Option<Duration>, &[String]), 
         Some(o) if o.starts_with("--") => Err(format!("{o:?} needs a value")),
         Some(_) => Ok((keep, batch, rest)),
     }
+}
+
+/// A `--keep` value: `forever`, `until=<ms since the epoch>` or
+/// `last=<n>`.
+fn keep_value(value: &str) -> Result<Keep, String> {
+    match value.split_once('=') {
+        None if value == "forever" => Ok(Keep::Forever),
+        Some(("until", t)) => t
+            .parse::<u64>()
+            .map(|t| Keep::Until(Timestamp(t)))
+            .map_err(|e| format!("--keep until={t:?} is no date in ms since the epoch: {e}")),
+        Some(("last", n)) => n
+            .parse()
+            .map(Keep::LastN)
+            .map_err(|e| format!("--keep last={n:?} is no count: {e}")),
+        _ => Err(format!(
+            "--keep {value:?} is not forever, until=<ms> or last=<n>"
+        )),
+    }
+}
+
+/// A `put_op` or `put_group` line's `--keep <keep>` (before the rest), at
+/// most once, and the words after it, at least one.
+fn keep_option(words: &[String]) -> Result<(Keep, &[String]), String> {
+    let (keep, rest) = match words {
+        [option, value, rest @ ..] if option == "--keep" => (keep_value(value)?, rest),
+        [option, ..] if option == "--keep" => return Err("--keep needs a value".into()),
+        _ => (Keep::Forever, words),
+    };
+    match rest.first() {
+        None => Err("nothing to put".into()),
+        Some(o) if o.starts_with("--") => Err(format!("{o:?} is not --keep (given once)")),
+        Some(_) => Ok((keep, rest)),
+    }
+}
+
+/// A line that cannot be done: its words are wrong (answered as usage), or
+/// the layer refused what it needed first.
+enum Bad {
+    Usage(String),
+    Data(DataError),
+}
+
+impl From<String> for Bad {
+    fn from(why: String) -> Self {
+        Bad::Usage(why)
+    }
+}
+
+impl From<DataError> for Bad {
+    fn from(e: DataError) -> Self {
+        Bad::Data(e)
+    }
+}
+
+/// The fields of `<field>=<value>` words, at least one (values as
+/// [`field_value`] reads them).
+async fn fields_of(words: &[String]) -> Result<Content, String> {
+    if words.is_empty() {
+        return Err("no field to put".into());
+    }
+    let mut content = Content::new();
+    for f in words {
+        let (field, value) = f
+            .split_once('=')
+            .ok_or_else(|| format!("{f:?} is not <field>=<value>"))?;
+        content = content.with(
+            field,
+            field_value(value)
+                .await
+                .map_err(|e| format!("{field}: {e}"))?,
+        );
+    }
+    Ok(content)
+}
+
+/// The operation an `op` line gives for `collection`: `hex=<octets>` alone
+/// (any rule's operation, as built), or the words of an element operation
+/// (`/ndn-tools/merge/element/v=1`) — `basis=<digest hex>`,
+/// `set:<setting>=<text>`, `change:<setting>=<at>,<delete>,<insert>` (texts
+/// as field values: `@<path>` a file's text). A change without `basis=`
+/// takes as basis the version that wrote the changed setting's one variant
+/// in the collection's state here.
+async fn op_of(layer: &Device, collection: &Name, words: &[String]) -> Result<Bytes, Bad> {
+    if let [only] = words
+        && let Some(octets) = only.strip_prefix("hex=")
+    {
+        return Ok(Bytes::from(unhex(octets)?));
+    }
+    let mut basis = None;
+    let mut edits = Vec::new();
+    for w in words {
+        if let Some(d) = w.strip_prefix("basis=") {
+            basis = Some(digest_of(d)?);
+        } else if let Some(rest) = w.strip_prefix("set:") {
+            let (setting, value) = rest
+                .split_once('=')
+                .ok_or_else(|| format!("{w:?} is not set:<setting>=<text>"))?;
+            edits.push(element::Edit::Set {
+                setting: setting.to_owned(),
+                text: field_text(value)
+                    .await
+                    .map_err(|e| format!("{setting}: {e}"))?,
+            });
+        } else if let Some(rest) = w.strip_prefix("change:") {
+            let not_change = || format!("{w:?} is not change:<setting>=<at>,<delete>,<insert>");
+            let (setting, splice) = rest.split_once('=').ok_or_else(not_change)?;
+            let mut parts = splice.splitn(3, ',');
+            let (Some(at), Some(delete), Some(insert)) = (parts.next(), parts.next(), parts.next())
+            else {
+                return Err(not_change().into());
+            };
+            let count = |s: &str| {
+                s.parse::<u32>()
+                    .map_err(|e| format!("{w:?}: {s:?} is no count of characters: {e}"))
+            };
+            edits.push(element::Edit::Change {
+                setting: setting.to_owned(),
+                at: count(at)?,
+                delete: count(delete)?,
+                insert: field_text(insert)
+                    .await
+                    .map_err(|e| format!("{setting}: {e}"))?,
+            });
+        } else {
+            return Err(
+                format!("{w:?} is not hex=, basis=, set:<setting>= or change:<setting>=").into(),
+            );
+        }
+    }
+    if basis.is_none()
+        && edits
+            .iter()
+            .any(|e| matches!(e, element::Edit::Change { .. }))
+    {
+        let Got::State(state) = layer.get(collection).await?.got else {
+            return Err(
+                format!("{collection} has no merged state here; give basis=<digest>").into(),
+            );
+        };
+        basis = Some(change_basis(&state, &edits)?);
+    }
+    let op = ElementOp { basis, edits };
+    op.well_formed()?;
+    Ok(op.encode())
+}
+
+/// The basis of `edits`' changes in `state`: the digest of the version
+/// that wrote the one variant of every changed setting.
+fn change_basis(state: &State, edits: &[element::Edit]) -> Result<[u8; 32], String> {
+    let value = element_value(&state.value).ok_or_else(|| {
+        format!(
+            "{}'s value is not an element's ({}): give basis=<digest>, or hex=<operation>",
+            state.collection,
+            element::FUNCTION
+        )
+    })?;
+    let mut basis = None;
+    for e in edits {
+        let element::Edit::Change { setting, .. } = e else {
+            continue;
+        };
+        let variants = value.settings.get(setting).map_or(&[][..], Vec::as_slice);
+        let [one] = variants else {
+            return Err(if variants.is_empty() {
+                format!("{setting:?} has no text here to change: set it first")
+            } else {
+                format!(
+                    "{setting:?} has {} concurrent variants here: give basis=<digest> of the one \
+                     to change (get shows each variant's digest)",
+                    variants.len()
+                )
+            });
+        };
+        match basis {
+            None => basis = Some(one.digest),
+            Some(d) if d == one.digest => {}
+            Some(_) => {
+                return Err(
+                    "the changed settings were last written by different versions: \
+                            change them in separate operations, or give basis=<digest>"
+                        .into(),
+                );
+            }
+        }
+    }
+    basis.ok_or_else(|| "no edit changes a setting, so there is no basis to find".into())
+}
+
+/// A value decoded as an element's, when it is one.
+fn element_value(v: &ndn_data::Value) -> Option<ElementValue> {
+    v.bytes().and_then(|b| ElementValue::decode(b).ok())
+}
+
+/// A text value as [`field_value`] reads it, which must be UTF-8: element
+/// settings hold text.
+async fn field_text(value: &str) -> Result<String, String> {
+    String::from_utf8(field_value(value).await?.into())
+        .map_err(|e| format!("not UTF-8 text ({e}): element settings hold text"))
+}
+
+/// Octets written as hex.
+fn unhex(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err(format!("{s:?} is no hex: an odd number of digits"));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            s.get(i..i + 2)
+                .and_then(|d| u8::from_str_radix(d, 16).ok())
+                .ok_or_else(|| format!("{s:?} is no hex"))
+        })
+        .collect()
+}
+
+/// A digest (32 octets) written as hex.
+fn digest_of(s: &str) -> Result<[u8; 32], String> {
+    unhex(s)?
+        .try_into()
+        .map_err(|v: Vec<u8>| format!("{s:?} is {} octets, a digest 32", v.len()))
 }
 
 /// A `range` line's `seq=<low>..<high>` or `time=<from>..<to>`.
@@ -1191,6 +1640,10 @@ fn data_error(e: &DataError) -> Value {
         DataError::Expired { name, keep: k } => {
             v["expired"] = json!({"name": name.to_string(), "keep": keep(k)});
         }
+        DataError::RuleUnknown { collection, rule } => {
+            v["rule_unknown"] =
+                json!({"collection": collection.to_string(), "rule": rule.to_string()});
+        }
         _ => {}
     }
     v
@@ -1212,6 +1665,7 @@ fn refusal(v: &mut Value, why: &Refusal) {
             v["suspected"] = json!({"key": key.to_string(), "since_ms": since.0});
         }
         Refusal::Untrusted { why } => v["untrusted"] = json!(why),
+        Refusal::Group { member, .. } => v["group_member"] = json!(member.to_string()),
         _ => {}
     }
 }
@@ -1227,6 +1681,7 @@ fn next_token(n: NextStep) -> &'static str {
         NextStep::FixName => "fix-name",
         NextStep::HoldFirst => "hold-first",
         NextStep::FixRequest => "fix-request",
+        NextStep::UpdateProgram => "update-program",
     }
 }
 
@@ -1249,6 +1704,10 @@ fn next_step(n: NextStep) -> &'static str {
             "ask again as the message says: the request, as given, asks for something no \
              device does"
         }
+        NextStep::UpdateProgram => {
+            "run a program that knows the collection's merge rule: this one holds its versions \
+             but reads them under no other rule"
+        }
     }
 }
 
@@ -1263,12 +1722,7 @@ fn ids(ids: &[VersionId]) -> Value {
 /// A `get`'s answer: what it got and how old it may be.
 fn answer(a: Answer) -> Value {
     let mut ok = match a.got {
-        Got::State(s) => json!({"state": {
-            "name": s.name.to_string(),
-            "collection": s.collection.to_string(),
-            "at": frontier(&s.at),
-            "value": content(&s.value),
-        }}),
+        Got::State(s) => json!({"state": state(&s)}),
         Got::Version(v) => json!({"version": version(&v)}),
         Got::Snapshot(s) => json!({"snapshot": {
             "id": id(&s.id),
@@ -1284,6 +1738,53 @@ fn answer(a: Answer) -> Value {
         }
     };
     ok
+}
+
+/// A merged state: its name, collection, frontier, value, and the versions
+/// held here that are not in the value, each with why.
+fn state(s: &State) -> Value {
+    json!({
+        "name": s.name.to_string(),
+        "collection": s.collection.to_string(),
+        "at": frontier(&s.at),
+        "value": merged(&s.value),
+        "not_counted": s.not_counted.iter().map(|(i, why)| json!({"id": id(i), "why": why})).collect::<Vec<_>>(),
+    })
+}
+
+/// A merged value: fields (`/merge/yrs`) as [`content`]; an element's
+/// (`/ndn-tools/merge/element/v=1`, the one rule this program knows with
+/// its own encoding) as `{"element": {<setting>: [variant...]}}`, each
+/// variant its version (writer, seq), that version's digest (the basis a
+/// change names) and its text as [`text_shown`].
+fn merged(v: &ndn_data::Value) -> Value {
+    match v {
+        ndn_data::Value::Fields(c) => content(c),
+        ndn_data::Value::Rule(b) => match ElementValue::decode(b) {
+            Ok(e) => {
+                let settings: Map<String, Value> = e
+                    .settings
+                    .iter()
+                    .map(|(s, variants)| {
+                        let variants = variants
+                            .iter()
+                            .map(|v| {
+                                json!({
+                                    "writer": v.writer,
+                                    "seq": v.seq,
+                                    "digest": hex(&v.digest),
+                                    "text": text_shown(&v.text),
+                                })
+                            })
+                            .collect();
+                        (s.clone(), Value::Array(variants))
+                    })
+                    .collect();
+                json!({"element": settings})
+            }
+            Err(_) => json!({"rule": {"len": b.len(), "sha256": hex(&Sha256::digest(b))}}),
+        },
+    }
 }
 
 /// Entries of one writer's stream: each with its name, block, index, date
@@ -1365,6 +1866,7 @@ fn version(v: &Version) -> Value {
         "type": {"name": v.type_id.name.to_string(), "revision": v.type_id.revision},
         "keep": keep(&v.keep),
         "dated_ms": v.dated.0,
+        "group": v.group.map(|g| json!({"id": g.id, "count": g.count})),
         "payload": match &v.payload {
             Payload::Entry(c) => json!({"entry": content(c)}),
             Payload::Block(es) => json!({"block": es.iter().map(block_entry).collect::<Vec<_>>()}),
@@ -1404,12 +1906,16 @@ fn change(c: &Change) -> Value {
                 }
                 // An issuer refused by the durable rule: never re-admitted.
                 Refusal::Untrusted { .. } => w["untrusted"] = json!(true),
+                // A member of its group refused: none of the group counts.
+                Refusal::Group { member, .. } => w["group_member"] = json!(member.to_string()),
                 _ => {}
             }
             json!({ "withdrawn": w })
         }
         Change::Pruned { id: i, by } => json!({"pruned": {"id": id(i), "by": prune(by)}}),
         Change::Expired { id: i, keep: k } => json!({"expired": {"id": id(i), "keep": keep(k)}}),
+        Change::NotCounted { id: i, why } => json!({"not_counted": {"id": id(i), "why": why}}),
+        Change::Counted { id: i } => json!({"counted": {"id": id(i)}}),
         Change::Equivocation { first, second } => json!({"equivocation": {
             "first": version(first),
             "second": version(second),
