@@ -70,6 +70,8 @@ mod node_identity_cmd;
 mod onboard;
 mod own_certs;
 mod pib_vault;
+// The producer region: this device's names, for ForwardingHints.
+mod producer_region;
 // The named-radio medium face: `[[face]] kind="radio"` (one face over N radio
 // capabilities). Gated behind the `radio` feature.
 #[cfg(feature = "radio")]
@@ -1247,6 +1249,10 @@ async fn main() -> Result<()> {
         &trust_keyring,
         cancel.child_token(),
     );
+    // A ForwardingHint naming this device has reached it: forwarded by name.
+    if let Some(identity) = &active_identity {
+        producer_region::spawn(&engine, Arc::clone(identity), cancel.child_token());
+    }
     // QUIC links (`[[face]] kind = "quic"`, `[[peer]]`): admitted from the
     // held trust contexts and expected fingerprints, with this node's
     // certificates in their hello.
