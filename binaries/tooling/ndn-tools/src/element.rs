@@ -25,7 +25,9 @@
 //! that version's digest (the basis a later change names), ordered by
 //! version. Applying a write drops the variants inside its past, so the
 //! value depends only on which versions are applied, never on their order.
-//! Every applied version counts.
+//! Every applied version counts; the value leaves out the versions the
+//! layer holds back (a group waiting on another member), as though they
+//! were not applied.
 //!
 //! Wire (all integers big-endian; a text is a u32 length and UTF-8; the
 //! octets are consumed exactly). Operation: `basis` (u8 0, or u8 1 and 32
@@ -64,7 +66,7 @@ impl MergeRule for Element {
         &self.function
     }
 
-    fn start(&self, _local: &Writer) -> Box<dyn MergeState> {
+    fn start(&self, _collection: &Name, _local: &Writer) -> Box<dyn MergeState> {
         Box::new(ElementState::default())
     }
 }
@@ -262,6 +264,10 @@ struct ElementState {
     settings: BTreeMap<String, Vec<Held>>,
     /// The texts each applied version wrote: what a later change splices.
     written: HashMap<VersionId, BTreeMap<String, String>>,
+    /// Each applied version's digest, and the applied versions inside its
+    /// past that wrote a setting it writes: what the value without
+    /// held-back versions is computed from ([`MergeState::value`]).
+    over: HashMap<VersionId, ([u8; 32], BTreeSet<VersionId>)>,
 }
 
 impl ElementState {
@@ -345,25 +351,68 @@ impl MergeState for ElementState {
             });
             variants.sort_by(|a, b| a.id.cmp(&b.id));
         }
+        let over = self
+            .written
+            .iter()
+            .filter(|(w, t)| op.past.contains(w) && t.keys().any(|s| texts.contains_key(s)))
+            .map(|(w, _)| w.clone())
+            .collect();
+        self.over.insert(op.id.clone(), (*op.digest, over));
         self.written.insert(op.id.clone(), texts);
         Ok(Counting::Counted)
     }
 
-    fn value(&self) -> Value {
-        let settings = self
-            .settings
-            .iter()
-            .map(|(s, held)| {
-                let variants = held
+    fn value(&self, excluded: &BTreeSet<VersionId>) -> Value {
+        let variant = |id: &VersionId, digest: [u8; 32], text: &str| Variant {
+            writer: id.writer.key().to_string(),
+            seq: id.seq.0,
+            digest,
+            text: text.to_owned(),
+        };
+        if !excluded.iter().any(|id| self.written.contains_key(id)) {
+            let settings = self
+                .settings
+                .iter()
+                .map(|(s, held)| {
+                    let variants = held
+                        .iter()
+                        .map(|h| variant(&h.id, h.digest, &h.text))
+                        .collect();
+                    (s.clone(), variants)
+                })
+                .collect();
+            return Value::Rule(ElementValue { settings }.encode());
+        }
+        // Without the versions held back: per setting, the texts of the
+        // other versions that no other version writing it was made over.
+        let shown = |id: &VersionId| !excluded.contains(id);
+        // A version, its digest and the text it wrote.
+        type Shown<'a> = (&'a VersionId, [u8; 32], &'a str);
+        let mut settings: BTreeMap<String, Vec<Shown<'_>>> = BTreeMap::new();
+        for (id, texts) in self.written.iter().filter(|(id, _)| shown(id)) {
+            let (digest, _) = self.over[id];
+            for (s, text) in texts {
+                let replaced = self
+                    .written
                     .iter()
-                    .map(|h| Variant {
-                        writer: h.id.writer.key().to_string(),
-                        seq: h.id.seq.0,
-                        digest: h.digest,
-                        text: h.text.clone(),
-                    })
+                    .any(|(d, t)| shown(d) && t.contains_key(s) && self.over[d].1.contains(id));
+                if !replaced {
+                    settings
+                        .entry(s.clone())
+                        .or_default()
+                        .push((id, digest, text));
+                }
+            }
+        }
+        let settings = settings
+            .into_iter()
+            .map(|(s, mut held)| {
+                held.sort_by(|a, b| a.0.cmp(b.0));
+                let variants = held
+                    .into_iter()
+                    .map(|(id, digest, text)| variant(id, digest, text))
                     .collect();
-                (s.clone(), variants)
+                (s, variants)
             })
             .collect();
         Value::Rule(ElementValue { settings }.encode())
@@ -497,6 +546,14 @@ mod tests {
         s.apply(&op)
     }
 
+    /// A state of the rule for a collection of `/a`, run by `/a`.
+    fn start(rule: &Element) -> Box<dyn MergeState> {
+        rule.start(
+            &"/a/32=data/doc".parse().expect("a name"),
+            &Writer::new("/a/KEY/1".parse().expect("a name")),
+        )
+    }
+
     fn set(setting: &str, text: &str) -> Edit {
         Edit::Set {
             setting: setting.into(),
@@ -515,7 +572,7 @@ mod tests {
         let values: Vec<Value> = [[(&a, 1u8), (&b, 2u8)], [(&b, 2u8), (&a, 1u8)]]
             .iter()
             .map(|order| {
-                let mut s = rule.start(&Writer::new("/a/KEY/1".parse().expect("a name")));
+                let mut s = start(&rule);
                 for (id, d) in order {
                     let text = if *d == 1 { "from a" } else { "from b" };
                     apply(
@@ -530,14 +587,14 @@ mod tests {
                     )
                     .expect("applies");
                 }
-                s.value()
+                s.value(&BTreeSet::new())
             })
             .collect();
         assert_eq!(values[0], values[1]);
         let v = ElementValue::decode(values[0].bytes().expect("rule bytes")).expect("decodes");
         assert_eq!(v.settings["title"].len(), 2);
 
-        let mut s = rule.start(&Writer::new("/a/KEY/1".parse().expect("a name")));
+        let mut s = start(&rule);
         let past = PastOf(vec![(a.clone(), [1; 32]), (b.clone(), [2; 32])]);
         for (id, d) in [(&a, 1u8), (&b, 2u8)] {
             apply(
@@ -569,7 +626,8 @@ mod tests {
             },
         )
         .expect("applies");
-        let v = ElementValue::decode(s.value().bytes().expect("rule bytes")).expect("decodes");
+        let v = ElementValue::decode(s.value(&BTreeSet::new()).bytes().expect("rule bytes"))
+            .expect("decodes");
         assert_eq!(v.settings["title"].len(), 1);
         assert_eq!(v.settings["title"][0].text, "xyz");
     }
@@ -579,7 +637,7 @@ mod tests {
     #[test]
     fn refuses_what_its_writer_cannot_have_made() {
         let rule = Element::new();
-        let mut s = rule.start(&Writer::new("/a/KEY/1".parse().expect("a name")));
+        let mut s = start(&rule);
         let a = vid("/a/KEY/1", 1);
         let none = PastOf(Vec::new());
         apply(
@@ -608,6 +666,37 @@ mod tests {
         assert!(apply(&mut s, &b, [2; 32], &past, &change("body", 0)).is_err());
         assert!(apply(&mut s, &b, [2; 32], &past, &change("title", 3)).is_err());
         assert!(apply(&mut s, &b, [2; 32], &past, &change("title", 2)).is_ok());
+    }
+
+    /// A version held back is left out of the value as though it were not
+    /// applied: what it was made over shows again, beside what concurrent
+    /// versions wrote.
+    #[test]
+    fn a_held_back_version_is_left_out_alike() {
+        let rule = Element::new();
+        let mut s = start(&rule);
+        let (a, b, c) = (vid("/a/KEY/1", 1), vid("/b/KEY/1", 1), vid("/a/KEY/1", 2));
+        let none = PastOf(Vec::new());
+        let write = |text: &str| ElementOp {
+            basis: None,
+            edits: vec![set("title", text)],
+        };
+        apply(&mut s, &a, [1; 32], &none, &write("a")).expect("applies");
+        apply(&mut s, &b, [2; 32], &none, &write("b")).expect("applies");
+        let over_a = PastOf(vec![(a.clone(), [1; 32])]);
+        apply(&mut s, &c, [3; 32], &over_a, &write("c")).expect("applies");
+        let texts = |excluded: &[&VersionId]| {
+            let excluded: BTreeSet<VersionId> = excluded.iter().map(|id| (*id).clone()).collect();
+            let v = ElementValue::decode(s.value(&excluded).bytes().expect("rule bytes"))
+                .expect("decodes");
+            v.settings["title"]
+                .iter()
+                .map(|v| v.text.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(&[]), ["c", "b"]);
+        assert_eq!(texts(&[&c]), ["a", "b"]);
+        assert_eq!(texts(&[&b]), ["c"]);
     }
 
     #[test]
