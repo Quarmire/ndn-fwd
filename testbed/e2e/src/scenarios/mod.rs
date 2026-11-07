@@ -17,6 +17,7 @@ mod data_host;
 mod destroyed;
 mod direct_paths;
 mod dv;
+mod folder;
 mod lifecycle;
 mod membership;
 mod multi_prefix;
@@ -53,6 +54,7 @@ pub const ALL: &[&str] = &[
     "photos",
     "sensor",
     "stolen",
+    "folder",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -77,6 +79,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "photos" => photos::run(sc),
         "sensor" => sensor::run(sc),
         "stolen" => stolen::run(sc),
+        "folder" => folder::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

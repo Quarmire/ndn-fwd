@@ -34,6 +34,9 @@ pub fn name(s: &str) -> StepResult<ndn_packet::Name> {
     s.parse().map_err(|e| format!("{s:?} is no name: {e:?}"))
 }
 
+/// The host's label among a node's producers.
+const HOST: &str = "ndn-data";
+
 /// One device's `ndn-data` host: its stdin, its answers, the changes its
 /// watches delivered.
 pub struct Host {
@@ -79,7 +82,13 @@ impl Host {
         ];
         args.extend_from_slice(options);
         cx.note(&format!("$ ndn-data {} &", args.join(" ")));
-        let stderr = fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+        // Appended: a host started again on the node keeps the log of the
+        // run before it.
+        let stderr = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .map_err(|e| format!("{}: {e}", log.display()))?;
         let mut child = Command::new(&program)
             .args(&args)
             .env(
@@ -106,7 +115,7 @@ impl Host {
             node.to_owned(),
             Proc {
                 child,
-                label: "ndn-data".into(),
+                label: HOST.into(),
                 log: log.clone(),
             },
         ));
@@ -328,17 +337,52 @@ impl Host {
         cx: &mut Cx<'_>,
         collection: &str,
     ) -> StepResult<Option<(Value, Value)>> {
+        Ok(self
+            .merged(cx, collection)?
+            .map(|mut s| (s["at"].take(), s["value"].take())))
+    }
+
+    /// `collection`'s merged state here, whole (name, frontier, value, the
+    /// versions held but not counted); `None` while no path answered and
+    /// nothing is held yet (an error that says retry).
+    pub fn merged(&mut self, cx: &mut Cx<'_>, collection: &str) -> StepResult<Option<Value>> {
         match self.call(cx, &format!("get {collection}"))? {
-            Ok(ok) => Ok(Some((
-                ok["state"]["at"].clone(),
-                ok["state"]["value"].clone(),
-            ))),
+            Ok(mut ok) => Ok(Some(ok["state"].take())),
             Err(e) if e["retry"] == true => Ok(None),
             Err(e) => Err(format!(
                 "{}> get {collection}: {} (next: {})",
                 self.node, e["message"], e["next_step"]
             )),
         }
+    }
+
+    /// Stop the host (SIGTERM, then SIGKILL), leaving its daemon and its
+    /// `--store` directory; [`start_with`](Self::start_with) with the same
+    /// options starts it again where it stopped (this `Host` answers no
+    /// more).
+    pub fn stop(&mut self, cx: &mut Cx<'_>) {
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut cx.w.producers)
+            .into_iter()
+            .partition(|(n, p)| *n == self.node && p.label == HOST);
+        cx.w.producers = rest;
+        drop(mine);
+        cx.note(&format!("{}: ndn-data stopped", self.node));
+    }
+
+    /// Take in the watched changes the host printed until none came for
+    /// `quiet` (or for at most five times that while changes keep coming),
+    /// so [`watched`](Self::watched) holds what it delivered so far.
+    pub fn drain(&mut self, cx: &mut Cx<'_>, quiet: Duration) -> StepResult<()> {
+        let deadline = Instant::now() + quiet * 5;
+        while Instant::now() < deadline
+            && let Some(v) = self.line(cx, "drain", quiet)?
+        {
+            if v.get("watch").is_none() {
+                return Err(format!("{}: an answer to no verb: {v}", self.node));
+            }
+            self.watched.push(v);
+        }
+        Ok(())
     }
 
     /// Version `v` of `collection` as this device reads it by its exact

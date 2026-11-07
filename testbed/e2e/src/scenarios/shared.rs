@@ -66,44 +66,68 @@ use crate::world::{NodeCfg, QUIC_PORT, addr};
 const NS_A: &str = "/sa";
 const NS_B: &str = "/sb";
 const NS_R: &str = "/sr";
+/// Alice's, bob's and the relay's namespaces.
+const NAMESPACES: People = People {
+    a: NS_A,
+    b: NS_B,
+    relay: NS_R,
+};
 /// Alice's document and chat, in her namespace.
 const DOC: &str = "/sa/32=data/docs/plan";
 const CHAT: &str = "/sa/32=data/chat/ab";
-/// The namespaces' sync groups (data-layer spec §12).
-const GROUP_A: &str = "/sa/32=sync";
-const GROUP_B: &str = "/sb/32=sync";
 /// Bob writes and reads beside alice; then alice alone.
 const BOTH: &str = "writers=/sa,/sb readers=person:/sa,person:/sb";
 const ALICE_ONLY: &str = "writers=/sa readers=person:/sa";
 /// The nftables table that cuts bob–relay.
 const CUT_TABLE: &str = "ndn_e2e_shared_cut";
 
-const ALICE: u8 = 1;
-const BOB: u8 = 2;
-const RELAY: u8 = 3;
+/// The hosts of alice's, bob's and the relay's daemons.
+pub const ALICE: u8 = 1;
+pub const BOB: u8 = 2;
+pub const RELAY: u8 = 3;
 
 /// Link timing that notices a lost link within seconds.
 const FAST_LINKS: &str = "[links]\nkeep_alive_secs = 2\nidle_timeout_secs = 6\n";
 /// Whatever reaches the other person goes through the relay.
 const NO_DIRECT: &str = "[direct]\nmembership = false\n";
 
+/// The namespaces of two people (alice `a`, bob `b`) and of the community
+/// relay between them.
+#[derive(Clone, Copy)]
+pub struct People {
+    pub a: &'static str,
+    pub b: &'static str,
+    pub relay: &'static str,
+}
+
+/// A namespace's sync group (data-layer spec §12).
+fn group(ns: &str) -> String {
+    format!("{ns}/32=sync")
+}
+
 /// Alice or bob: its link face to the relay carries `other` (the other
 /// person's namespace), and it runs both groups with multicast.
-fn routes_over_relay(cx: &mut Cx<'_>, node: &str, other: &str) -> StepResult<Option<String>> {
+fn routes_over_relay(
+    cx: &mut Cx<'_>,
+    ns: People,
+    node: &str,
+    other: &str,
+) -> StepResult<Option<String>> {
     let Some(face) = quic_face_to(cx, node, RELAY)? else {
         return Ok(None);
     };
     let Some((_, origin)) = rib(cx, node, other)?.into_iter().find(|(f, _)| *f == face) else {
         return Ok(None);
     };
+    let (group_a, group_b) = (group(ns.a), group(ns.b));
     let (Some(a), Some(b)) = (
-        multicast_at(cx, node, GROUP_A)?,
-        multicast_at(cx, node, GROUP_B)?,
+        multicast_at(cx, node, &group_a)?,
+        multicast_at(cx, node, &group_b)?,
     ) else {
         return Ok(None);
     };
     Ok(Some(format!(
-        "{node}: {other} → face {face} (the relay link, {origin}); {GROUP_A} runs {a}, {GROUP_B} \
+        "{node}: {other} → face {face} (the relay link, {origin}); {group_a} runs {a}, {group_b} \
          runs {b}"
     )))
 }
@@ -112,35 +136,36 @@ fn routes_over_relay(cx: &mut Cx<'_>, node: &str, other: &str) -> StepResult<Opt
 /// (the issuer their hello showed) and the group of that person's
 /// namespace over the person's link, both groups run with multicast while
 /// their namespace is in transit (the relay holds neither). (Alice reaches
-/// bob through /sb's group, a member namespace of her collections, and bob
-/// alice through /sa's; each fetches the other's CA certificate through
+/// bob through bob's group, a member namespace of her collections, and bob
+/// alice through alice's; each fetches the other's CA certificate through
 /// the issuer route.)
-fn relay_routes(cx: &mut Cx<'_>, alice: &str, bob: &str) -> StepResult<Option<String>> {
+fn relay_routes(cx: &mut Cx<'_>, ns: People, alice: &str, bob: &str) -> StepResult<Option<String>> {
     let (Some(fa), Some(fb)) = (
         quic_face_to(cx, "relay", ALICE)?,
         quic_face_to(cx, "relay", BOB)?,
     ) else {
         return Ok(None);
     };
+    let (group_a, group_b) = (group(ns.a), group(ns.b));
     let on = |routes: &[(u64, String)], face: u64| routes.iter().any(|(f, _)| *f == face);
     let routed = on(&rib(cx, "relay", alice)?, fa)
-        && on(&rib(cx, "relay", GROUP_A)?, fa)
+        && on(&rib(cx, "relay", &group_a)?, fa)
         && on(&rib(cx, "relay", bob)?, fb)
-        && on(&rib(cx, "relay", GROUP_B)?, fb);
-    let (Some(ca_a), Some(ca_b)) = (issuer_route(cx, NS_A, fa)?, issuer_route(cx, NS_B, fb)?)
+        && on(&rib(cx, "relay", &group_b)?, fb);
+    let (Some(ca_a), Some(ca_b)) = (issuer_route(cx, ns.a, fa)?, issuer_route(cx, ns.b, fb)?)
     else {
         return Ok(None);
     };
     let (Some(a), Some(b)) = (
-        multicast_at(cx, "relay", GROUP_A)?,
-        multicast_at(cx, "relay", GROUP_B)?,
+        multicast_at(cx, "relay", &group_a)?,
+        multicast_at(cx, "relay", &group_b)?,
     ) else {
         return Ok(None);
     };
     Ok(routed.then(|| {
         format!(
-            "relay: {alice}, {ca_a} and {GROUP_A} → face {fa}; {bob}, {ca_b} and {GROUP_B} → face \
-             {fb}; {GROUP_A} runs {a}, {GROUP_B} runs {b}"
+            "relay: {alice}, {ca_a} and {group_a} → face {fa}; {bob}, {ca_b} and {group_b} → face \
+             {fb}; {group_a} runs {a}, {group_b} runs {b}"
         )
     }))
 }
@@ -172,7 +197,7 @@ fn issuer_route(cx: &mut Cx<'_>, ns: &str, face: u64) -> StepResult<Option<Strin
 /// `name` fetched through `node`'s daemon (which validates it against the
 /// trust context before delivering it, or forwards it unvalidated when its
 /// namespace is in transit there): its Content's octets.
-fn content_at(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<Vec<u8>> {
+pub fn content_at(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<Vec<u8>> {
     let sock = cx.w.node(node).sock().display().to_string();
     let op = cx
         .tool("ndn-peek")
@@ -301,7 +326,14 @@ fn adopt_offline(cx: &mut Cx<'_>, node: &str, ns: &str, link: &str) -> StepResul
     Ok(())
 }
 
-pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
+/// Two people, alice (namespace `ns.a`) and bob (`ns.b`), each the root
+/// device of their namespace, pointing at each other, their daemons linked
+/// through an open community relay (the root device of `ns.relay`) that
+/// their namespaces' trust contexts advertise — no config holding a route,
+/// a UDP link, a `[[peer]]` or a `[[relay]]` — and each routing the other
+/// namespace and both sync groups over the relay link. Alice's and bob's
+/// roots.
+pub fn people_through_relay(sc: &mut Scenario, ns: People) -> Result<(RootInfo, RootInfo), Abort> {
     let person = NodeCfg {
         quic_dial_only: true,
         ..Default::default()
@@ -318,11 +350,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     );
 
     let (relay_root, relay_key) = sc.step(
-        "the relay, the root device of /sr, starts as an open community relay: serve = open, no \
-         roots listed, no namespace of anyone else adopted",
+        &format!(
+            "the relay, the root device of {}, starts as an open community relay: serve = open, \
+             no roots listed, no namespace of anyone else adopted",
+            ns.relay
+        ),
         |cx| {
             cx.concept("open community relay");
-            let relay_root = init_root(cx, "relay", NS_R, "relay")?;
+            let relay_root = init_root(cx, "relay", ns.relay, "relay")?;
             let relay = cx.w.node_mut("relay");
             relay.cfg.identity = Some(relay_root.identity.clone());
             relay.cfg.extra_toml = format!(
@@ -341,8 +376,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let (alice_root, bob_root) = sc.step(
-        "alice creates /sa and bob /sb (init); each init config advertises the relay in the \
-         namespace's trust context ([[ca.relay]]: its device name, link key and endpoint)",
+        &format!(
+            "alice creates {} and bob {} (init); each init config advertises the relay in the \
+             namespace's trust context ([[ca.relay]]: its device name, link key and endpoint)",
+            ns.a, ns.b
+        ),
         |cx| {
             let advertised = format!(
                 "[[ca.relay]]\ndevice = \"{}\"\nkey = \"{relay_key}\"\nendpoint = \
@@ -351,7 +389,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 addr(RELAY)
             );
             let mut roots = Vec::new();
-            for (node, ns) in [("alice", NS_A), ("bob", NS_B)] {
+            for (node, ns) in [("alice", ns.a), ("bob", ns.b)] {
                 cx.w.node_mut(node).cfg.extra_toml =
                     format!("[ca]\nprefix = \"{ns}\"\n\n{advertised}");
                 let (root, out) = init_root_with(cx, node, ns, node, true)?;
@@ -374,8 +412,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "each person points at the other (adopts the other's inline anchor link) and starts",
         |cx| {
             for (node, root, other_ns, other) in [
-                ("alice", &alice_root, NS_B, &bob_root),
-                ("bob", &bob_root, NS_A, &alice_root),
+                ("alice", &alice_root, ns.b, &bob_root),
+                ("bob", &bob_root, ns.a, &alice_root),
             ] {
                 let n = cx.w.node_mut(node);
                 n.cfg.identity = Some(root.identity.clone());
@@ -387,11 +425,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     sc.step(
-        "each person's daemon links to the relay its namespace advertises, routes the other \
-         namespace over it and runs both groups with multicast; the relay, holding no context of \
-         /sa or /sb, routes each device, its issuer's key name and its namespace's group over its \
-         link and runs both groups with multicast; no config holds a route, a UDP link, a \
-         [[peer]] or a [[relay]]",
+        &format!(
+            "each person's daemon links to the relay its namespace advertises, routes the other \
+             namespace over it and runs both groups with multicast; the relay, holding no context \
+             of {} or {}, routes each device, its issuer's key name and its namespace's group \
+             over its link and runs both groups with multicast; no config holds a route, a UDP \
+             link, a [[peer]] or a [[relay]]",
+            ns.a, ns.b
+        ),
         |cx| {
             cx.concept("sync groups of two namespaces carried through a relay");
             for node in ["alice", "bob", "relay"] {
@@ -415,20 +456,21 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                      [[peer]], no [[relay]], no `roots`"
                 ));
             }
-            for ns in [NS_A, NS_B] {
-                if let Some(v) = cx.version("relay", ns) {
-                    return Err(format!("the relay holds {ns} v{v}"));
+            for person in [ns.a, ns.b] {
+                if let Some(v) = cx.version("relay", person) {
+                    return Err(format!("the relay holds {person} v{v}"));
                 }
             }
-            cx.expect_version("relay", NS_R, 1)?;
+            cx.expect_version("relay", ns.relay, 1)?;
             cx.evidence(&format!(
-                "relay holds {NS_R} only: no trust context of {NS_A} or {NS_B}"
+                "relay holds {} only: no trust context of {} or {}",
+                ns.relay, ns.a, ns.b
             ));
-            for (node, ns, other) in [("alice", NS_A, NS_B), ("bob", NS_B, NS_A)] {
+            for (node, own, other) in [("alice", ns.a, ns.b), ("bob", ns.b, ns.a)] {
                 let mut line = None;
                 wait_for(
                     cx,
-                    &format!("{node} links to the relay {ns} advertises"),
+                    &format!("{node} links to the relay {own} advertises"),
                     SHORT,
                     |cx| {
                         let list = link_list(cx, node)?;
@@ -439,7 +481,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                             .and_then(|l| l.relay.clone())
                             .filter(|r| {
                                 r.starts_with("linked")
-                                    && r.contains(&format!("source=namespace:{ns}"))
+                                    && r.contains(&format!("source=namespace:{own}"))
                             });
                         Ok(line.is_some())
                     },
@@ -455,7 +497,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     &format!("{node} routes {other} over its relay link"),
                     SHORT,
                     |cx| {
-                        found = routes_over_relay(cx, node, other)?;
+                        found = routes_over_relay(cx, ns, node, other)?;
                         Ok(found.is_some())
                     },
                 )?;
@@ -467,7 +509,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 "the relay routes each device, its issuer and its namespace's group over its link",
                 SHORT,
                 |cx| {
-                    found = relay_routes(cx, &alice_root.identity, &bob_root.identity)?;
+                    found = relay_routes(cx, ns, &alice_root.identity, &bob_root.identity)?;
                     Ok(found.is_some())
                 },
             )?;
@@ -475,6 +517,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             Ok(())
         },
     )?;
+    Ok((alice_root, bob_root))
+}
+
+pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
+    let (alice_root, bob_root) = people_through_relay(sc, NAMESPACES)?;
 
     let (mut alice, mut bob) = sc.step(
         "start the data layer on alice's and bob's devices (ndn-data, each signing with its \
