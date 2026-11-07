@@ -166,6 +166,24 @@
 //!   holds refused because the key is revoked and its cut does not accept
 //!   them — refused on arrival or withdrawn later; what `ndn-fwd readmit
 //!   <key> <full name>...` takes to re-admit exactly those versions.
+//! - `offer <folder> role=reader|writer until=<when> tries=<n>` (`<when>`
+//!   as for `suspect`): a one-use offer of a folder of this device's
+//!   namespace to someone who holds no trust context of it, expiring at
+//!   `<when>` by this device's clock, closed for good by the `<n>`-th wrong
+//!   try. The answer carries the code: `link` (`ndn-trust://intro/…`, one
+//!   QR; it names the relays this namespace advertises, so the joiner's
+//!   forwarder reaches this device through one of them before it trusts
+//!   anything of this namespace) and `words` (the offer's name and 24
+//!   words, without relays). When the joiner asks, this device adopts the
+//!   joiner's namespace through its daemon and adds it to the folder's
+//!   members with the role.
+//! - `join <code>`: join the folder a code offers (its link, or its words
+//!   in double quotes): the answer names the folder, the role and the
+//!   inviter's namespace, which this device's daemon now holds (adopted
+//!   through `security/context-adopt`, as `ndn-ctl adopt` asks, so it also
+//!   routes it over its relay links). An offer refused answers
+//!   `"introduction"`: the offer and why (`unknown`, `used`, `expired`,
+//!   `closed`, `wrong-proof` with `left`, `forged`, `conflict`).
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -209,15 +227,16 @@ use ndn_cert::report::TrustEvent;
 use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
-    CutBound, DataError, DataLayer, Device, Entries, Frontier, Got, Hold, Keep, Lease, MergeRule,
-    NextStep, Payload, Prune, PutOptions, Refusal, Rule, Seq, Share, State, Timestamp, Transport,
-    TypeId, Version, VersionId, Writer, Yrs,
+    CutBound, DataError, DataLayer, Device, Entries, Frontier, Got, Hold, IntroRefusal, Introducer,
+    Keep, Lease, MergeRule, NextStep, Offer, Payload, Prune, PutOptions, Refusal, Role, Rule, Seq,
+    Share, State, Timestamp, Transport, TypeId, Version, VersionId, Writer, Yrs,
 };
-use ndn_ipc::ForwarderClient;
 use ndn_ipc::events::{EventSubscription, Notice};
+use ndn_ipc::{ForwarderClient, MgmtClient};
 use ndn_packet::Name;
 use ndn_security::{CertCache, FilePib, Keyring, RevocationCut, SecurityManager, Validator};
 use ndn_sync::{DataStore, MemoryStore};
+use ndn_trust_envelope::TrustEnvelope;
 
 use crate::element::{ElementOp, ElementValue};
 
@@ -339,6 +358,15 @@ async fn main() -> Result<()> {
     config.rules = cli.merge_rules.iter().try_fold(config.rules, |rules, r| {
         Ok::<_, anyhow::Error>(rules.with(merge_rule(r)?))
     })?;
+    // Introductions (`offer`, `join`): the anchor this device shows is its
+    // namespace's context as the daemon stored it; another person's is
+    // adopted through the daemon, as `ndn-ctl adopt` does.
+    config.introducer = Some(Arc::new(DaemonIntroducer {
+        face_socket: cli.face_socket.clone(),
+        pib_root: pib.root().to_path_buf(),
+        namespace: keyring.context_for(&device).namespace().clone(),
+        keyring: Arc::clone(&keyring),
+    }));
     let store: Arc<dyn DataStore> = match &cli.store {
         Some(dir) => Arc::new(DirStore::open(dir)?),
         None => Arc::new(MemoryStore::new()),
@@ -534,6 +562,118 @@ fn adopt_told(pib_root: &Path, keyring: &Keyring, namespace: &str, version: u64)
             "the stored trust context is not readable: {e}; not adopted now — the next \
              version the daemon stores, or the next resync, brings this host up to date"
         ),
+    }
+}
+
+/// How long the daemon may take to adopt an anchor link (its context is
+/// inline: no fetch).
+const ADOPT_LIMIT: Duration = Duration::from_secs(10);
+
+/// The data layer's introductions on a daemon: this device's anchor is its
+/// namespace's trust context as the daemon stored it in the PIB; another
+/// person's anchor link is adopted by the daemon (`security/context-adopt`,
+/// as `ndn-ctl adopt` asks), which validates and stores it and routes the
+/// namespace over its relay links, and then by this host's keyring from
+/// the PIB, so the layer's validator trusts it before `adopt` answers.
+struct DaemonIntroducer {
+    face_socket: String,
+    pib_root: PathBuf,
+    /// This device's namespace (empty: none governs its name).
+    namespace: Name,
+    keyring: Arc<Keyring>,
+}
+
+impl DaemonIntroducer {
+    /// Whether the keyring holds `namespace` at `version` or newer, rooted
+    /// in the anchor of `fingerprint`.
+    fn holds(&self, namespace: &Name, fingerprint: &[u8; 32], version: u64) -> bool {
+        let ctx = self.keyring.context_for(namespace);
+        ctx.namespace() == namespace
+            && ctx.version() >= version
+            && ctx
+                .anchors()
+                .iter()
+                .any(|a| ndn_security::anchor_fingerprint(a.value()) == *fingerprint)
+    }
+
+    async fn adopt_link(&self, link: &TrustEnvelope) -> Result<(), String> {
+        let TrustEnvelope::Anchor {
+            namespace: Some(namespace),
+            fingerprint: Some(fingerprint),
+            version,
+            ..
+        } = link
+        else {
+            return Err("not an anchor link naming its namespace and fingerprint".into());
+        };
+        let ns: Name = namespace
+            .parse()
+            .map_err(|e| format!("the anchor link's namespace {namespace:?} is no name: {e}"))?;
+        let version = version.unwrap_or(0);
+        // Asked again (the same key asks again after a lost answer): held.
+        if self.holds(&ns, fingerprint, version) {
+            return Ok(());
+        }
+        let client = MgmtClient::connect(&self.face_socket).await.map_err(|e| {
+            format!(
+                "the daemon at {} is not reachable to adopt {ns}: {e}",
+                self.face_socket
+            )
+        })?;
+        let resp = client
+            .security_context_adopt(&link.to_uri(), ADOPT_LIMIT)
+            .await
+            .map_err(|e| format!("asking the daemon to adopt {ns}: {e}"))?;
+        if !resp.is_ok() {
+            return Err(match ndn_ipc::trust_refusal(&resp) {
+                Some(refusal) => format!("the daemon refused to adopt {ns}: {refusal}"),
+                None => format!(
+                    "the daemon refused to adopt {ns} ({}): {}",
+                    resp.status_code, resp.status_text
+                ),
+            });
+        }
+        let info: ndn_cert::report::AdoptedContextInfo = serde_json::from_str(&resp.status_text)
+            .map_err(|e| {
+                format!(
+                    "unreadable answer from the daemon ({e}): {}",
+                    resp.status_text
+                )
+            })?;
+        adopt_told(&self.pib_root, &self.keyring, &info.namespace, info.version);
+        if self.holds(&ns, fingerprint, version) {
+            Ok(())
+        } else {
+            Err(format!(
+                "the daemon adopted {ns} v{}, but the PIB at {} gives this host no such version to \
+                 adopt: check the PIB is the daemon's",
+                info.version,
+                self.pib_root.display()
+            ))
+        }
+    }
+}
+
+impl Introducer for DaemonIntroducer {
+    fn anchor(&self) -> Option<Bytes> {
+        if self.namespace.is_empty() {
+            return None;
+        }
+        match ndn_cert::read_stored_context(&self.pib_root, &self.namespace) {
+            Ok(Some((_, data))) => Some(data.raw().clone()),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    namespace = %self.namespace,
+                    "this device's trust context is not readable from the PIB: {e}"
+                );
+                None
+            }
+        }
+    }
+
+    fn adopt<'a>(&'a self, link: &'a TrustEnvelope) -> ndn_data::intro::Adopting<'a> {
+        Box::pin(self.adopt_link(link))
     }
 }
 
@@ -1101,9 +1241,40 @@ async fn run(
             })))
         }
         ("refused", _) => usage("usage: refused <key>"),
+        ("offer", [folder, options @ ..]) => {
+            let folder = match name(folder) {
+                Ok(f) => f,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let offer = match offer_options(options) {
+                Ok(o) => o,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {OFFER_USAGE}"))),
+            };
+            let (role, until, tries) = (offer.role, offer.until, offer.tries);
+            let code = layer.offer(&folder, offer).await?;
+            Ok(Verb::Done(json!({
+                "folder": folder.to_string(),
+                "role": role_word(role),
+                "until_ms": until.0,
+                "tries": tries,
+                "offer": code.offer.to_string(),
+                "link": code.link,
+                "words": code.words,
+            })))
+        }
+        ("offer", _) => usage(OFFER_USAGE),
+        ("join", [code]) => {
+            let joined = layer.join(code).await?;
+            Ok(Verb::Done(json!({
+                "folder": joined.folder.to_string(),
+                "role": role_word(joined.role),
+                "inviter": joined.inviter.to_string(),
+            })))
+        }
+        ("join", _) => usage(JOIN_USAGE),
         _ => usage(
             "verbs: share, share_folder, put, put_op, put_group, get, range, watch, hold, prune, \
-             release, suspect, unsuspect, cut, refused, quit",
+             release, suspect, unsuspect, cut, refused, offer, join, quit",
         ),
     }
 }
@@ -1263,6 +1434,62 @@ const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key i
 const CUT_USAGE: &str = "usage: cut <key> <file> [--held-before <when>] [--upto \
                          <collection>=<seq>]... (<when> as ms since the epoch or RFC 3339; \
                          --held-before defaults to the time the key was suspected since)";
+
+const OFFER_USAGE: &str = "usage: offer <folder> role=reader|writer until=<when> tries=<n> \
+                           (a folder of this device's namespace; <when>, the offer's expiry by \
+                           this device's clock, as ms since the epoch or RFC 3339; <n> ≥ 1, the \
+                           wrong tries that close it)";
+
+const JOIN_USAGE: &str = "usage: join <code> (the code an offer printed: its link \
+                          ndn-trust://intro/…, or its words in double quotes)";
+
+/// An `offer` line's options after the folder: `role=`, `until=` and
+/// `tries=`, each exactly once.
+fn offer_options(words: &[String]) -> Result<Offer, String> {
+    let (mut role, mut until, mut tries) = (None, None, None);
+    for word in words {
+        let (key, value) = word
+            .split_once('=')
+            .ok_or_else(|| format!("{word:?} is not <option>=<value>"))?;
+        let twice = || format!("{key}= is given twice");
+        match key {
+            "role" if role.is_some() => return Err(twice()),
+            "role" => {
+                role = Some(match value {
+                    "reader" => Role::Reader,
+                    "writer" => Role::Writer,
+                    other => return Err(format!("role={other:?} is neither reader nor writer")),
+                });
+            }
+            "until" if until.is_some() => return Err(twice()),
+            "until" => until = Some(time(value).map_err(|e| format!("until: {e}"))?),
+            "tries" if tries.is_some() => return Err(twice()),
+            "tries" => {
+                let n: u32 = value
+                    .parse()
+                    .map_err(|e| format!("tries={value:?} is no count: {e}"))?;
+                if n == 0 {
+                    return Err("tries=0 allows no try: give 1 or more".into());
+                }
+                tries = Some(n);
+            }
+            other => return Err(format!("{other:?} is no option of offer")),
+        }
+    }
+    Ok(Offer {
+        role: role.ok_or("role= is missing")?,
+        until: until.ok_or("until= is missing")?,
+        tries: tries.ok_or("tries= is missing")?,
+    })
+}
+
+/// A role as the lines name it.
+fn role_word(role: Role) -> &'static str {
+    match role {
+        Role::Reader => "reader",
+        Role::Writer => "writer",
+    }
+}
 
 /// A time a line gives: ms since the epoch (`1793808000000`), or RFC 3339
 /// in UTC (`2026-11-04T10:00:00Z`, `2026-11-04T10:00:00.123Z`) as
@@ -1744,9 +1971,29 @@ fn data_error(e: &DataError) -> Value {
             v["rule_unknown"] =
                 json!({"collection": collection.to_string(), "rule": rule.to_string()});
         }
+        DataError::Introduction { offer, why } => {
+            let mut i = json!({"offer": offer.to_string(), "why": intro_refusal(why)});
+            if let IntroRefusal::WrongProof { left } = why {
+                i["left"] = json!(left);
+            }
+            v["introduction"] = i;
+        }
         _ => {}
     }
     v
+}
+
+/// An introduction's refusal as the error answers name it.
+fn intro_refusal(why: &IntroRefusal) -> &'static str {
+    match why {
+        IntroRefusal::Unknown => "unknown",
+        IntroRefusal::Used => "used",
+        IntroRefusal::Expired => "expired",
+        IntroRefusal::Closed => "closed",
+        IntroRefusal::WrongProof { .. } => "wrong-proof",
+        IntroRefusal::Forged => "forged",
+        IntroRefusal::Conflict => "conflict",
+    }
 }
 
 /// The fields of a refusal an error answer carries beside its message:

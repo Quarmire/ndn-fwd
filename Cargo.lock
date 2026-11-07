@@ -2993,7 +2993,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
- "bip39",
  "bytes",
  "dashmap 6.2.1",
  "futures",
@@ -3081,12 +3080,14 @@ dependencies = [
  "futures-core",
  "getrandom 0.2.17",
  "hkdf 0.13.0",
+ "hmac 0.13.0",
  "ndn-app",
  "ndn-foundation-types",
  "ndn-packet",
  "ndn-security",
  "ndn-sync",
  "ndn-tlv",
+ "ndn-trust-envelope",
  "parking_lot",
  "sha2 0.11.0",
  "thiserror 2.0.18",
@@ -4003,6 +4004,7 @@ dependencies = [
  "ndn-sync",
  "ndn-tools-core",
  "ndn-transport",
+ "ndn-trust-envelope",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -4073,10 +4075,12 @@ name = "ndn-trust-envelope"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bip39",
  "bytes",
  "ndn-tlv",
  "qrcode",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
