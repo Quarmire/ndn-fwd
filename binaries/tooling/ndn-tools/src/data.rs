@@ -227,7 +227,8 @@ use ndn_cert::report::TrustEvent;
 use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
-    CutBound, DataError, DataLayer, Device, Entries, Frontier, Got, Hold, IntroRefusal, Introducer,
+    CutBound, DataError, DataLayer, Device, Entries, Equivocal, Frontier, Got, Hold, IntroRefusal,
+    Introducer,
     Keep, Lease, MergeRule, NextStep, Offer, Payload, Prune, PutOptions, Refusal, Role, Rule, Seq,
     Share, State, Timestamp, Transport, TypeId, Version, VersionId, Writer, Yrs,
 };
@@ -1081,8 +1082,10 @@ async fn run(
             };
             let mut changes = layer.watch(&collection, &Frontier::new()).await?;
             let watched = collection.to_string();
+            let (layer, target) = (layer.clone(), collection.clone());
             tokio::spawn(async move {
                 while let Some(item) = changes.next().await {
+                    let lagged = matches!(item, Ok(Change::Lagged { .. }));
                     let line = match item {
                         Ok(c) => json!({
                             "watch": watched,
@@ -1092,6 +1095,17 @@ async fn run(
                         Err(e) => json!({"watch": watched, "error": data_error(&e)}),
                     };
                     println!("{line}");
+                    // Fallen behind: read again. The listing is local, so
+                    // a whole folder resumes from the empty frontier.
+                    if lagged {
+                        match layer.watch(&target, &Frontier::new()).await {
+                            Ok(again) => changes = again,
+                            Err(e) => {
+                                println!("{}", json!({"watch": watched, "error": data_error(&e)}));
+                                return;
+                            }
+                        }
+                    }
                 }
             });
             Ok(Verb::Done(json!({"collection": collection.to_string()})))
@@ -2269,9 +2283,28 @@ fn change(c: &Change) -> Value {
         }
         Change::Counted { id: i, .. } => json!({"counted": {"id": id(i)}}),
         Change::Equivocation { first, second, .. } => json!({"equivocation": {
-            "first": version(first),
-            "second": version(second),
+            "first": equivocal(first),
+            "second": equivocal(second),
         }}),
+        Change::Lagged { .. } => json!({"lagged": {
+            "what_to_do": "changes were dropped while this watch was behind; it lists the collection again from the start"
+        }}),
+        Change::Untracked { writer, why, .. } => json!({"untracked": {
+            "writer": writer.key().to_string(),
+            "why": why,
+        }}),
+    }
+}
+
+/// One version of an equivocation: whole when it is of the collection told
+/// for, else by name and id only.
+fn equivocal(e: &Equivocal) -> Value {
+    match e {
+        Equivocal::Here(v) => version(v),
+        Equivocal::Elsewhere { name, id: i } => json!({
+            "id": id(i),
+            "name": name.to_string(),
+        }),
     }
 }
 
