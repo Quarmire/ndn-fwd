@@ -1,14 +1,18 @@
-//! The forwarder's producer region (NDNLPv2 ForwardingHint, NFD's
-//! NetworkRegionTable): this device's own names, the identities it signs
-//! as, kept current as they change.
+//! The forwarder's own names (NDNLPv2 ForwardingHint; ndn-engine's
+//! `NetworkRegionTable`): this device's names, the identities it signs as,
+//! kept current as they change.
 //!
-//! An Interest whose ForwardingHint names this device has reached it: the
-//! forwarder strips the hint and forwards the Interest by its name. A relay
-//! is thus reachable by its name from a device that routes nothing of the
-//! namespace asked for: the device's relay link routes the relay's name,
-//! and the relay forwards the hinted Interest by name over the link of the
-//! device its name routes (ndn-rs `docs/specs/ndn-link.md` §15.5 "Reaching
-//! a device not followed yet"). Nothing here knows the names asked for.
+//! An Interest whose ForwardingHint names this device, or a name under it,
+//! has reached it: the forwarder strips the hint and forwards the Interest
+//! by its name. A relay is thus reachable by its name from a device that
+//! routes nothing of the namespace asked for: the device's relay link
+//! routes the relay's name, and the relay forwards the hinted Interest by
+//! name over the link of the device its name routes (ndn-rs
+//! `docs/specs/ndn-link.md` §15.5 "Reaching a device not followed yet"). A
+//! hint naming an ancestor of one of these names (the device's namespace,
+//! toward its CA) has not reached this device and is forwarded toward the
+//! delegation, so they are own names, not NFD regions. Nothing here knows
+//! the names asked for.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -19,8 +23,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::active_identity::ActiveIdentity;
 
-/// Make the engine's producer region `identity`'s names now, and again on
-/// each change of its identities, until `cancel`.
+/// Make the engine's own names `identity`'s names now, and again on each
+/// change of its identities, until `cancel`.
 pub(crate) fn spawn(
     engine: &ForwarderEngine,
     identity: Arc<ActiveIdentity>,
@@ -41,8 +45,8 @@ pub(crate) fn spawn(
     });
 }
 
-/// Set `region` to the names `identity` signs as, given `held`, the ones
-/// set before (updated).
+/// Set `region`'s own names to the names `identity` signs as, given `held`,
+/// the ones set before (updated).
 fn follow(
     region: &ndn_engine::stages::strategy::NetworkRegionTable,
     identity: &ActiveIdentity,
@@ -55,15 +59,15 @@ fn follow(
         .filter(|name| !name.is_empty())
         .collect();
     for gone in held.difference(&now) {
-        region.remove_region(gone);
+        region.remove_own_name(gone);
     }
     for new in now.difference(held) {
-        region.add_region(new.clone());
+        region.add_own_name(new.clone());
     }
     if *held != now {
         tracing::info!(
-            region = ?now.iter().map(Name::to_string).collect::<Vec<_>>(),
-            "producer region (a ForwardingHint naming one of these is forwarded by name here)"
+            own_names = ?now.iter().map(Name::to_string).collect::<Vec<_>>(),
+            "own names (a ForwardingHint naming one of these, or a name under one, is forwarded by name here)"
         );
     }
     *held = now;

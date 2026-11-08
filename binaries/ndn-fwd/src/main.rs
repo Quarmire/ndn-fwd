@@ -70,7 +70,7 @@ mod node_identity_cmd;
 mod onboard;
 mod own_certs;
 mod pib_vault;
-// The producer region: this device's names, for ForwardingHints.
+// The forwarder's own names: this device's names, for ForwardingHints.
 mod producer_region;
 // The named-radio medium face: `[[face]] kind="radio"` (one face over N radio
 // capabilities). Gated behind the `radio` feature.
@@ -1249,7 +1249,8 @@ async fn main() -> Result<()> {
         &trust_keyring,
         cancel.child_token(),
     );
-    // A ForwardingHint naming this device has reached it: forwarded by name.
+    // A ForwardingHint naming this device (or a name under it) has reached
+    // it: forwarded by name. One naming its namespace has not.
     if let Some(identity) = &active_identity {
         producer_region::spawn(&engine, Arc::clone(identity), cancel.child_token());
     }
