@@ -29,6 +29,7 @@ mod phone_links;
 mod photos;
 mod quic_links;
 mod relays;
+mod self_certifying;
 mod sensor;
 mod shared;
 mod stolen;
@@ -57,6 +58,7 @@ pub const ALL: &[&str] = &[
     "stolen",
     "folder",
     "invite",
+    "self-certifying",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -83,6 +85,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "stolen" => stolen::run(sc),
         "folder" => folder::run(sc),
         "invite" => invite::run(sc),
+        "self-certifying" => self_certifying::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }
