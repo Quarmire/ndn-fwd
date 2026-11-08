@@ -541,6 +541,7 @@ mod tests {
             parents: &parents,
             past,
             bytes: &bytes,
+            dated: ndn_data::Timestamp(0),
         };
         s.check(&op)?;
         s.apply(&op)
