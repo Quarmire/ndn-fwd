@@ -88,6 +88,7 @@ mod security_init;
 #[cfg(feature = "smtp")]
 mod smtp_email;
 mod tracing_init;
+mod transit_marks;
 mod transport_listeners;
 
 pub(crate) use face_setup::{FaceSetupState, run_face_setup};

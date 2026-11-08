@@ -3,7 +3,9 @@
 //! `security/context-refresh` (`ndn-fwd context refresh`),
 //! `security/context-update` (`ndn-fwd revoke`, `ndn-fwd recovery-kit`,
 //! `ndn-fwd recover`: a version signed on this device), `security/renew`
-//! (`ndn-fwd renew`), `security/memberships` (`ndn-ctl status`: the trusted
+//! (`ndn-fwd renew`), `security/transit` (a local app carrying a person's
+//! namespace it adopted for one scope of its own: [`TransitMarks`]),
+//! `security/memberships` (`ndn-ctl status`: the trusted
 //! prefixes and how the daemon takes part in each, with their changes at
 //! `/localhost/nfd/security/notifications`) and the identities
 //! `security/identity-status` reports (the node identity, why, and every
@@ -31,6 +33,7 @@ use ndn_security::Keyring;
 
 use crate::active_identity::ActiveIdentity;
 use crate::pib_vault::PibVault;
+use crate::transit_marks::TransitMarks;
 
 pub(crate) struct TrustAdmin {
     pub(crate) ns: Arc<Participant>,
@@ -39,6 +42,9 @@ pub(crate) struct TrustAdmin {
     /// The daemon's identities (node signer, signing identities); `None`
     /// when the node runs unsigned.
     pub(crate) signing: Option<Arc<ActiveIdentity>>,
+    /// The namespaces local apps asked to carry in transit; never the
+    /// keyring.
+    pub(crate) transit: TransitMarks,
 }
 
 /// What the daemon builds its [`TrustAdmin`] from.
@@ -209,6 +215,7 @@ impl TrustAdmin {
             context_sync,
         } = parts;
         Self {
+            transit: TransitMarks::new(engine.clone()),
             ns: Arc::new(Participant::new(ParticipantParts {
                 engine,
                 keyring,
@@ -270,6 +277,14 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
 
     async fn renew(&self) -> Result<Vec<ndn_mgmt::RenewalInfo>, ndn_mgmt::TrustRefusal> {
         crate::renewal::renew_now(self).await
+    }
+
+    fn transit(
+        &self,
+        namespace: ndn_packet::Name,
+        carry: bool,
+    ) -> Result<ndn_mgmt::TransitInfo, ndn_mgmt::TrustRefusal> {
+        self.transit.mark(namespace, carry)
     }
 
     fn signing_identity(&self) -> Option<ndn_mgmt::SigningIdentityInfo> {

@@ -201,7 +201,13 @@
 //!   `"introduction"`: the offer and why (`unknown`, `used`, `expired`,
 //!   `closed`, `wrong-proof` with `left`, `forged`, `conflict`, or
 //!   `inviter-conflict` when the inviter's namespace overlaps one this
-//!   device trusts).
+//!   device trusts). The other writers a folder's records list, whose
+//!   self-certifying namespaces this device's daemon does not hold, are
+//!   adopted by name for the layer alone (data-layer spec §6.3): the host
+//!   asks the daemon to carry each in transit (`security/transit`, so this
+//!   host runs as the daemon's user, root, or a member of one of its
+//!   trust-admin groups) and fetches its trust-context versions over its
+//!   own connection; the daemon needs a route to each such namespace.
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -239,7 +245,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::task::JoinSet;
 
-use ndn_app::{IpcConnection, Node, demux_cert_fetcher};
+use ndn_app::{Connection, Consumer, IpcConnection, Node, demux_cert_fetcher};
 use ndn_cert::CutFile;
 use ndn_cert::report::TrustEvent;
 use ndn_data::wire::{Range, log_name, range_name};
@@ -253,7 +259,9 @@ use ndn_data::{
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
 use ndn_packet::Name;
-use ndn_security::{CertCache, FilePib, Keyring, RevocationCut, SecurityManager, Validator};
+use ndn_security::{
+    CertCache, FilePib, Keyring, RevocationCut, ScopedContext, SecurityManager, Validator,
+};
 use ndn_sync::{DataStore, MemoryStore};
 use ndn_trust_envelope::TrustEnvelope;
 
@@ -379,12 +387,16 @@ async fn main() -> Result<()> {
     })?;
     // Introductions (`offer`, `join`): the anchor this device shows is its
     // namespace's context as the daemon stored it; another person's is
-    // adopted through the daemon, as `ndn-ctl adopt` does.
+    // adopted through the daemon, as `ndn-ctl adopt` does. A writer's
+    // namespace adopted for a folder alone is fetched over this host's own
+    // connection, which the daemon carries in transit meanwhile.
+    let connection: Arc<dyn Connection> = node.demux();
     config.introducer = Some(Arc::new(DaemonIntroducer {
         face_socket: cli.face_socket.clone(),
         pib_root: pib.root().to_path_buf(),
         namespace: keyring.context_for(&device).namespace().clone(),
         keyring: Arc::clone(&keyring),
+        connection,
     }));
     let store: Arc<dyn DataStore> = match &cli.store {
         Some(dir) => Arc::new(DirStore::open(dir)?),
@@ -602,12 +614,25 @@ const ADOPT_LIMIT: Duration = Duration::from_secs(60);
 /// fetched one (a different one refused as a fork), never offline — and
 /// then by this host's keyring from the PIB, so the layer's validator
 /// trusts it before `adopt` answers.
+///
+/// A writer's self-certifying namespace that a folder's records list, which
+/// the daemon does not hold, is adopted for the layer alone
+/// (`adopt_scoped`, data-layer spec §6.3): the daemon is asked to carry it
+/// in transit first (`security/transit`, one mark), since it refuses that
+/// namespace's Data as one not held — the adoption's own fetches of its
+/// trust-context versions included — then the versions are fetched over
+/// this host's own connection and checked here (`ndn_cert::adopt_scoped`),
+/// into no keyring; the mark is taken back if that fails, and when the
+/// layer releases the namespace (`release_scoped`).
 struct DaemonIntroducer {
     face_socket: String,
     pib_root: PathBuf,
     /// This device's namespace (empty: none governs its name).
     namespace: Name,
     keyring: Arc<Keyring>,
+    /// This host's own connection to the daemon, which a namespace adopted
+    /// for a folder is fetched over.
+    connection: Arc<dyn Connection>,
 }
 
 impl DaemonIntroducer {
@@ -679,6 +704,72 @@ impl DaemonIntroducer {
             ))
         }
     }
+
+    /// Adopt `namespace` for the layer alone, refreshed from `held` when the
+    /// layer holds a version already (its mark stays as it is then).
+    async fn adopt_for_folders(
+        &self,
+        namespace: &Name,
+        held: Option<&ScopedContext>,
+    ) -> Result<ScopedContext, String> {
+        if held.is_none() {
+            mark_transit(&self.face_socket, namespace, true).await?;
+        }
+        let mut exchange = HostExchange(Consumer::new(Arc::clone(&self.connection)));
+        match ndn_cert::adopt_scoped(None, &mut exchange, namespace, held).await {
+            Ok(scoped) => Ok(scoped),
+            Err(e) => {
+                if held.is_none()
+                    && let Err(why) = mark_transit(&self.face_socket, namespace, false).await
+                {
+                    tracing::warn!(%namespace, "{why}");
+                }
+                Err(format!(
+                    "adopting {namespace} by name for the folders that list it as a writer \
+                     failed: {e}; its versions there wait, and it is asked again (reach its \
+                     devices, through a route to {namespace} on this device's daemon, for it to \
+                     succeed)"
+                ))
+            }
+        }
+    }
+}
+
+/// Ask the daemon at `face_socket` to carry `namespace` in transit (`carry`:
+/// one mark more) or to take one mark back.
+async fn mark_transit(face_socket: &str, namespace: &Name, carry: bool) -> Result<(), String> {
+    let what = if carry { "carry" } else { "stop carrying" };
+    let client = MgmtClient::connect(face_socket).await.map_err(|e| {
+        format!(
+            "the daemon at {face_socket} is not reachable to {what} {namespace} in transit: {e}; \
+             check it runs"
+        )
+    })?;
+    client
+        .security_transit(namespace, carry)
+        .await
+        .map(|_| ())
+        .map_err(|e| match ndn_ipc::trust_refusal_in(&e) {
+            Some(refusal) => format!(
+                "the daemon refused to {what} {namespace} in transit: {refusal} (it carries the \
+                 namespace's Data to this device only for a local operator: run this host as \
+                 the daemon's user, root, or a member of its trust-admin groups)"
+            ),
+            None => format!("asking the daemon to {what} {namespace} in transit: {e}"),
+        })
+}
+
+/// Fetches over this host's own connection to the daemon, for an adoption
+/// by name: each Interest asked once (the layer asks the adoption again).
+struct HostExchange(Consumer);
+
+impl ndn_cert::CaExchange for HostExchange {
+    async fn express(&mut self, interest: Bytes) -> Result<ndn_packet::Data, ndn_cert::CertError> {
+        self.0
+            .fetch_wire(interest, ndn_app::DEFAULT_TIMEOUT)
+            .await
+            .map_err(|e| ndn_cert::CertError::Transport(e.to_string()))
+    }
 }
 
 impl Introducer for DaemonIntroducer {
@@ -701,6 +792,34 @@ impl Introducer for DaemonIntroducer {
 
     fn adopt<'a>(&'a self, link: &'a TrustEnvelope) -> ndn_data::intro::Adopting<'a> {
         Box::pin(self.adopt_link(link))
+    }
+
+    fn adopt_scoped<'a>(
+        &'a self,
+        namespace: &'a Name,
+        held: Option<&'a ScopedContext>,
+    ) -> ndn_data::intro::Scoping<'a> {
+        Box::pin(self.adopt_for_folders(namespace, held))
+    }
+
+    fn release_scoped(&self, namespace: &Name) {
+        let (face_socket, namespace) = (self.face_socket.clone(), namespace.clone());
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                %namespace,
+                "released with no runtime to tell the daemon on: its mark stays until the daemon \
+                 restarts"
+            );
+            return;
+        };
+        runtime.spawn(async move {
+            if let Err(why) = mark_transit(&face_socket, &namespace, false).await {
+                tracing::warn!(
+                    %namespace,
+                    "{why}; the daemon keeps carrying it in transit until it restarts"
+                );
+            }
+        });
     }
 }
 

@@ -9,8 +9,8 @@
 //! bob's namespace); carol (.4, the root device of carol's) ↔ spare. Each
 //! daemon routes the other namespaces it reaches over its UDP links: spare
 //! routes alice's namespace to alice, bob's to bob and carol's to carol; bob
-//! and carol route alice's to spare. The routes name namespaces only `init`
-//! printed: nothing is known of them before.
+//! routes alice's and carol's to spare, carol alice's and bob's. The routes
+//! name namespaces only `init` printed: nothing is known of them before.
 //!
 //! The gestures:
 //! 1. `ndn-fwd init --self-certifying` on alice, bob and carol: each
@@ -30,9 +30,13 @@
 //!    code's link alone (see [`super::data_host`] and [`super::invite`]);
 //! 5. alice, recovered, shares another folder with herself and offers it;
 //!    carol's device — a stranger, holding nothing of alice's namespace —
-//!    joins with that code's link alone. (Another folder: bob's versions in
-//!    the first are parents of alice's there, and carol trusts nothing of
-//!    bob's namespace, so she cannot verify them.)
+//!    joins with that code's link alone;
+//! 6. three people, one folder: alice shares a third folder and offers it
+//!    twice, bob and carol each join with a code of their own, and each of
+//!    the three writes into it. Bob's and carol's daemons never adopt each
+//!    other's namespace: each one's data host adopts the other for the
+//!    folder alone (data-layer spec §6.3), its daemon carrying that
+//!    namespace's Data to it in transit (`security/transit`).
 //!
 //! Proves: the namespaces are `/user/<0xA1 component>`; the name-only link
 //! carries no fingerprint and no context; spare and bob hold alice's v2
@@ -44,7 +48,9 @@
 //! and each reads what the other writes in the folder. Carol, given alice's
 //! recovered v5 in the answer, reaches it from alice's genesis (by name,
 //! through her daemon) and is admitted; carol and alice read each other's
-//! writes in the second folder.
+//! writes in the second folder. In the third, all three read everything all
+//! three wrote, while bob's daemon holds nothing of carol's namespace and
+//! carol's nothing of bob's.
 
 use std::time::Duration;
 
@@ -194,8 +200,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     sc.step(
         "the daemons start, routing the namespaces init named: spare routes alice's to alice, \
-         bob's to bob and carol's to carol; bob and carol route alice's to spare; carol holds \
-         nothing of alice's namespace",
+         bob's to bob and carol's to carol; bob routes alice's and carol's to spare, carol \
+         alice's and bob's; carol holds nothing of alice's namespace",
         |cx| {
             cx.w.node_mut("alice").cfg.identity = Some(alice.root.identity.clone());
             cx.w.node_mut("spare").cfg.routes = vec![
@@ -205,10 +211,16 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             ];
             let b = cx.w.node_mut("bob");
             b.cfg.identity = Some(bob.root.identity.clone());
-            b.cfg.routes = vec![route(alice.ns.clone(), "spare")];
+            b.cfg.routes = vec![
+                route(alice.ns.clone(), "spare"),
+                route(carol.ns.clone(), "spare"),
+            ];
             let c = cx.w.node_mut("carol");
             c.cfg.identity = Some(carol.root.identity.clone());
-            c.cfg.routes = vec![route(alice.ns.clone(), "spare")];
+            c.cfg.routes = vec![
+                route(alice.ns.clone(), "spare"),
+                route(bob.ns.clone(), "spare"),
+            ];
             for node in ["alice", "spare", "bob", "carol"] {
                 cx.start(node)?;
             }
@@ -344,15 +356,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         |cx| {
             cx.concept("an introduction between two people named by their keys");
             let joined = joins(cx, &mut bob_host, &code, "bob")?;
-            if name(joined["folder"].as_str().unwrap_or_default())? != name(&folder)?
-                || joined["role"] != "writer"
-                || name(joined["inviter"].as_str().unwrap_or_default())? != name(&alice.ns)?
-            {
-                return Err(format!(
-                    "bob joined {joined}, not {folder} as writer of {}",
-                    alice.ns
-                ));
-            }
+            joined_as_writer(&joined, &folder, &alice.ns, "bob")?;
             cx.evidence(&format!("bob joined: {joined}"));
             cx.expect_version("spare", &bob.ns, 2)?;
             cx.expect_version("bob", &alice.ns, 5)?;
@@ -432,15 +436,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         |cx| {
             cx.concept("a stranger joins a recovered self-certifying namespace");
             let joined = joins(cx, &mut carol_host, &code, "carol")?;
-            if name(joined["folder"].as_str().unwrap_or_default())? != name(&plans)?
-                || joined["role"] != "writer"
-                || name(joined["inviter"].as_str().unwrap_or_default())? != name(&alice.ns)?
-            {
-                return Err(format!(
-                    "carol joined {joined}, not {plans} as writer of {}",
-                    alice.ns
-                ));
-            }
+            joined_as_writer(&joined, &plans, &alice.ns, "carol")?;
             cx.evidence(&format!("carol joined: {joined}"));
             cx.expect_version("carol", &alice.ns, 5)?;
             cx.expect_version("spare", &carol.ns, 2)?;
@@ -492,7 +488,111 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         );
         Ok(())
     })?;
+
+    let reunion = format!("{}/32=data/reunion", alice.ns);
+    let board = format!("{reunion}/board");
+    let (for_bob, for_carol) = sc.step(
+        "three people, one folder: alice shares a third folder with herself alone and offers it \
+         twice — writer, one code for bob and one for carol",
+        |cx| {
+            cx.concept("three people, one folder");
+            alice_host.ok(
+                cx,
+                &format!(
+                    "share_folder {reunion} rule=merge writers={ns} readers=person:{ns}",
+                    ns = alice.ns
+                ),
+            )?;
+            let for_bob = offer_writer(cx, &mut alice_host, &reunion)?;
+            let for_carol = offer_writer(cx, &mut alice_host, &reunion)?;
+            Ok((for_bob, for_carol))
+        },
+    )?;
+
+    sc.step(
+        "bob and carol each join with their own code, admitted as writers; neither one's daemon \
+         holds the other's namespace",
+        |cx| {
+            let joined = joins(cx, &mut bob_host, &for_bob, "bob")?;
+            joined_as_writer(&joined, &reunion, &alice.ns, "bob")?;
+            cx.evidence(&format!("bob joined: {joined}"));
+            let joined = joins(cx, &mut carol_host, &for_carol, "carol")?;
+            joined_as_writer(&joined, &reunion, &alice.ns, "carol")?;
+            cx.evidence(&format!("carol joined: {joined}"));
+            holds_nothing_of(cx, "bob", &carol.ns)?;
+            holds_nothing_of(cx, "carol", &bob.ns)
+        },
+    )?;
+
+    sc.step(
+        "alice, bob and carol each write into the folder's board, and all three read everything: \
+         bob's data host adopts carol's namespace for the folder alone, carol's adopts bob's, \
+         each daemon carrying the other's Data to its host in transit",
+        |cx| {
+            cx.concept("a writer's namespace adopted for one folder (security/transit)");
+            let puts = [
+                alice_host.put(cx, &board, "alice=\"bring the map\"")?,
+                bob_host.put(cx, &board, "bob=\"bring the tent\"")?,
+                carol_host.put(cx, &board, "carol=\"bring the stove\"")?,
+            ];
+            for (who, host) in [
+                ("alice", &mut alice_host),
+                ("bob", &mut bob_host),
+                ("carol", &mut carol_host),
+            ] {
+                wait_for(
+                    cx,
+                    &format!("{who} holds the three writes"),
+                    CONVERGE * 2,
+                    |cx| {
+                        Ok(host.state(cx, &board)?.is_some_and(|(at, v)| {
+                            puts.iter().all(|put| includes(&at, put))
+                                && v["alice"] == "bring the map"
+                                && v["bob"] == "bring the tent"
+                                && v["carol"] == "bring the stove"
+                        }))
+                    },
+                )?;
+                cx.evidence(&format!(
+                    "{who}'s board state includes alice's, bob's and carol's versions"
+                ));
+            }
+            holds_nothing_of(cx, "bob", &carol.ns)?;
+            holds_nothing_of(cx, "carol", &bob.ns)?;
+            cx.evidence(&format!(
+                "bob's daemon still holds nothing of {} and carol's nothing of {}: each was \
+                 adopted for the folder alone",
+                carol.ns, bob.ns
+            ));
+            Ok(())
+        },
+    )?;
     Ok(())
+}
+
+/// The answer of a join admitted `who` as writer of `folder`, offered by
+/// `inviter`.
+fn joined_as_writer(joined: &Value, folder: &str, inviter: &str, who: &str) -> StepResult<()> {
+    if name(joined["folder"].as_str().unwrap_or_default())? != name(folder)?
+        || joined["role"] != "writer"
+        || name(joined["inviter"].as_str().unwrap_or_default())? != name(inviter)?
+    {
+        return Err(format!(
+            "{who} joined {joined}, not {folder} as writer of {inviter}"
+        ));
+    }
+    Ok(())
+}
+
+/// `node`'s daemon holds no version of `ns`: whatever its data host
+/// adopted of it, it adopted for a folder alone.
+fn holds_nothing_of(cx: &mut Cx<'_>, node: &str, ns: &str) -> StepResult<()> {
+    match cx.version(node, ns) {
+        Some(v) => Err(format!(
+            "{node}'s daemon holds {ns} v{v}: adopted for the node, not for a folder alone"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// `host` offers `folder`: writer, for an hour, three wrong tries. The code's
