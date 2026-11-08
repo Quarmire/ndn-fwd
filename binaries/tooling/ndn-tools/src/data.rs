@@ -573,16 +573,23 @@ fn adopt_told(pib_root: &Path, keyring: &Keyring, namespace: &str, version: u64)
     }
 }
 
-/// How long the daemon may take to adopt an anchor link (its context is
-/// inline: no fetch).
-const ADOPT_LIMIT: Duration = Duration::from_secs(10);
+/// How long the daemon may take to adopt an anchor link: an inline context
+/// of another kind of namespace needs no fetch, but a self-certifying
+/// namespace not held is adopted by name — version 1, the newest's name and
+/// the newest, then a walk of at most `ndn_cert::MAX_CATCH_UP_TIME` (40 s)
+/// when versions lie in between; the link's inline context is never taken
+/// alone.
+const ADOPT_LIMIT: Duration = Duration::from_secs(60);
 
 /// The data layer's introductions on a daemon: this device's anchor is its
 /// namespace's trust context as the daemon stored it in the PIB; another
 /// person's anchor link is adopted by the daemon (`security/context-adopt`,
 /// as `ndn-ctl adopt` asks), which validates and stores it and routes the
-/// namespace over its relay links, and then by this host's keyring from
-/// the PIB, so the layer's validator trusts it before `adopt` answers.
+/// namespace over its relay links — a self-certifying namespace not held by
+/// name over the network, the link's version 1 only compared with the
+/// fetched one (a different one refused as a fork), never offline — and
+/// then by this host's keyring from the PIB, so the layer's validator
+/// trusts it before `adopt` answers.
 struct DaemonIntroducer {
     face_socket: String,
     pib_root: PathBuf,

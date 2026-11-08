@@ -267,6 +267,7 @@ pub(crate) mod tests {
             data: ndn_packet::Data::decode(node.context_data.raw().clone()).unwrap(),
             fetched: false,
             earlier: Vec::new(),
+            offline_genesis: false,
         };
         // Another command adopted a newer version meanwhile.
         node.admin

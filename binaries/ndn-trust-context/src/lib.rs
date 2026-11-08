@@ -313,8 +313,8 @@ mod tests {
         let signed = build_signed_anchor_envelope(&spec, &signer).await.unwrap();
         let scanned = TrustEnvelope::from_uri(&signed.to_uri()).unwrap();
         let keyring = Keyring::new();
-        let (ctx, _) = ndn_cert::adopt_anchor_envelope(&keyring, &scanned).unwrap();
-        assert_eq!(ctx.version(), 2);
+        let adopted = ndn_cert::adopt_anchor_envelope(&keyring, &scanned).unwrap();
+        assert_eq!(adopted.context.version(), 2);
 
         let legacy = build_anchor_envelope(&spec).unwrap();
         assert!(matches!(
