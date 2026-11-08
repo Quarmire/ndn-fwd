@@ -235,9 +235,8 @@ use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
     CutBound, DataError, DataLayer, Device, Entries, Equivocal, Frontier, Got, Hold, IntroRefusal,
-    Introducer,
-    Keep, Lease, MergeRule, NextStep, Offer, Payload, Prune, PutOptions, Refusal, Role, Rule, Seq,
-    Share, State, Timestamp, Transport, TypeId, Version, VersionId, Writer, Yrs,
+    Introducer, Keep, Lease, MergeRule, NextStep, Offer, Payload, Prune, PutOptions, Refusal, Role,
+    Rule, Seq, Share, State, Timestamp, Transport, TypeId, Version, VersionId, Writer, Yrs,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
