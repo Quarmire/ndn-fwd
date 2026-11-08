@@ -210,24 +210,78 @@ pub const KIT_KINDS: [KitFormat; 3] = [KitFormat::Words, KitFormat::File, KitFor
 /// A new trusted prefix being set up ("start a new trusted prefix").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPrefixForm {
-    /// The prefix, e.g. `/home`.
+    /// The prefix is named after its own new main key (`/user/<hash>`)
+    /// rather than typed: its name alone then lets others follow it.
+    pub own_key: bool,
+    /// The prefix, e.g. `/home` (not asked when named after its own key).
     pub prefix: Input,
     /// This device's name in it.
     pub device: Input,
     /// Where the main key is kept ([`NEW_ROOT_STORES`]).
     pub store: usize,
-    /// 0 prefix, 1 device, 2 store.
+    /// 0 naming, 1 prefix, 2 device, 3 store.
     pub field: usize,
     /// Why the form cannot go on yet.
     pub problem: Option<String>,
 }
 
 impl NewPrefixForm {
-    const FIELDS: usize = 3;
+    const FIELDS: usize = 4;
+
+    /// A new form, on its prefix field.
+    pub fn new(device: String) -> Self {
+        Self {
+            own_key: false,
+            prefix: Input::default(),
+            device: Input { text: device },
+            store: 0,
+            field: 1,
+            problem: None,
+        }
+    }
 
     /// The prefix typed, when it is one.
     pub fn prefix(&self) -> Result<Name, String> {
         prefix_of(&self.prefix.text)
+    }
+
+    /// The operation the form asks for, or why it cannot go on yet.
+    pub fn op(&self) -> Result<RootOp, String> {
+        let store = NEW_ROOT_STORES[self.store];
+        let namespace = if self.own_key {
+            if store == RootStoreKind::YubikeyPiv {
+                return Err(format!(
+                    "A prefix named after its own key is made with a kind of key (Ed25519) {} cannot hold: keep its main key in {} or {}. A recovery can move it onto a security key later; the name stays.",
+                    words::root_store(RootStoreKind::YubikeyPiv.as_str()),
+                    words::root_store(RootStoreKind::SealedFile.as_str()),
+                    words::root_store(RootStoreKind::OsKeyring.as_str()),
+                ));
+            }
+            None
+        } else {
+            let namespace = self.prefix()?;
+            if namespace
+                .components()
+                .iter()
+                .any(|c| c.typ == ndn_packet::tlv_type::SELF_CERTIFYING)
+            {
+                return Err(format!(
+                    "{namespace} holds a key's hash (a component of type {}): only a prefix named after its own main key has one, made from that new key, as /user/<hash>. Choose \"named after its own key\" above, or type a prefix without it.",
+                    ndn_packet::tlv_type::SELF_CERTIFYING
+                ));
+            }
+            Some(namespace)
+        };
+        Ok(RootOp::Init {
+            namespace,
+            device: device_of(&self.device.text)?,
+            store,
+        })
+    }
+
+    /// Whether `field` is skipped: the prefix, when named after its key.
+    fn skips(&self, field: usize) -> bool {
+        field == 1 && self.own_key
     }
 }
 
@@ -847,11 +901,12 @@ impl App {
                 store,
                 fingerprint,
                 short_link,
+                name_link,
                 settings,
                 followed,
                 ..
             } => {
-                let lines = vec![
+                let mut lines = vec![
                     format!(
                         "{namespace} is a new trusted prefix (version {version}), and this device is its main device as {identity}."
                     ),
@@ -868,11 +923,17 @@ impl App {
                     authority(&namespace, &identity),
                     "Next: make a recovery kit (open it and press k), so losing this device does not lose the prefix.".to_owned(),
                 ];
+                if name_link.is_some() {
+                    lines.insert(
+                        1,
+                        "It is named after its main key: the link below carries its name alone, and a device following it checks that the first version of its trust rules is signed by the key the name is made from. A recovery replaces the main key and keeps the name.".to_owned(),
+                    );
+                }
                 self.say(format!("Started {namespace}."));
                 self.modal = Some(Modal::Started(Started {
                     title: format!("{namespace} started"),
                     lines,
-                    link: Some(short_link),
+                    link: Some(name_link.unwrap_or(short_link)),
                     fingerprint,
                     settings,
                 }));
@@ -1254,13 +1315,7 @@ impl App {
                     }
                 }
                 Key::Char('n') => {
-                    self.modal = Some(Modal::NewPrefix(NewPrefixForm {
-                        prefix: Input::default(),
-                        device: Input { text: hostname() },
-                        store: 0,
-                        field: 0,
-                        problem: None,
-                    }));
+                    self.modal = Some(Modal::NewPrefix(NewPrefixForm::new(hostname())));
                 }
                 Key::Char('r') => {
                     // The prefix this device follows, when it follows one only.
@@ -2015,43 +2070,45 @@ impl App {
             }
             Modal::NewPrefix(mut form) => match key {
                 Key::Esc => (None, none()),
-                Key::Tab | Key::Down => {
-                    form.field = (form.field + 1) % NewPrefixForm::FIELDS;
+                Key::Tab | Key::Down | Key::BackTab | Key::Up => {
+                    let n = NewPrefixForm::FIELDS;
+                    let forward = matches!(key, Key::Tab | Key::Down);
+                    loop {
+                        form.field = if forward {
+                            (form.field + 1) % n
+                        } else {
+                            (form.field + n - 1) % n
+                        };
+                        if !form.skips(form.field) {
+                            break;
+                        }
+                    }
                     (Some(Modal::NewPrefix(form)), none())
                 }
-                Key::BackTab | Key::Up => {
-                    form.field = (form.field + NewPrefixForm::FIELDS - 1) % NewPrefixForm::FIELDS;
+                Key::Char('<') | Key::Char('>') if form.field == 0 => {
+                    form.own_key = !form.own_key;
                     (Some(Modal::NewPrefix(form)), none())
                 }
-                Key::Char('<') | Key::Char('>') if form.field == 2 => {
+                Key::Char('<') | Key::Char('>') if form.field == 3 => {
                     form.store = step(form.store, NEW_ROOT_STORES.len(), key);
                     (Some(Modal::NewPrefix(form)), none())
                 }
-                Key::Enter => {
-                    let op = form.prefix().and_then(|namespace| {
-                        Ok(RootOp::Init {
-                            namespace,
-                            device: device_of(&form.device.text)?,
-                            store: NEW_ROOT_STORES[form.store],
-                        })
-                    });
-                    match op {
-                        Ok(op) => {
-                            form.problem = None;
-                            self.covered = Some(Box::new(Modal::NewPrefix(form)));
-                            self.modal = Some(Modal::Busy("Starting the trusted prefix…".into()));
-                            (None, vec![Effect::Run(Command::Root(op))])
-                        }
-                        Err(problem) => {
-                            form.problem = Some(problem);
-                            (Some(Modal::NewPrefix(form)), none())
-                        }
+                Key::Enter => match form.op() {
+                    Ok(op) => {
+                        form.problem = None;
+                        self.covered = Some(Box::new(Modal::NewPrefix(form)));
+                        self.modal = Some(Modal::Busy("Starting the trusted prefix…".into()));
+                        (None, vec![Effect::Run(Command::Root(op))])
                     }
-                }
+                    Err(problem) => {
+                        form.problem = Some(problem);
+                        (Some(Modal::NewPrefix(form)), none())
+                    }
+                },
                 other => {
                     match form.field {
-                        0 => form.prefix.edit(other),
-                        1 => form.device.edit(other),
+                        1 => form.prefix.edit(other),
+                        2 => form.device.edit(other),
                         _ => false,
                     };
                     (Some(Modal::NewPrefix(form)), none())

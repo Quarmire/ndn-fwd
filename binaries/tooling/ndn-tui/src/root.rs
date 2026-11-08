@@ -104,8 +104,11 @@ impl From<&HandedOver> for Handed {
 pub enum RootOp {
     /// Start a new trusted prefix on this device, which becomes its main
     /// device as `<namespace>/admin/<device>`; its main key in `store`.
+    /// `namespace` `None`: the prefix is named after its new main key,
+    /// `/user/<SHA-256 of that key>` (self-certifying), so its name alone
+    /// lets other devices follow it.
     Init {
-        namespace: Name,
+        namespace: Option<Name>,
         device: String,
         store: RootStoreKind,
     },
@@ -252,6 +255,9 @@ pub enum RootDone {
         link: String,
         /// The short anchor link (fetched by name): what others scan.
         short_link: String,
+        /// A prefix named after its main key: the anchor link carrying its
+        /// name alone (no fingerprint), which others scan instead.
+        name_link: Option<String>,
         /// The daemon's configuration lines for its certificate authority.
         settings: Vec<String>,
         /// Whether the running daemon follows it now (set once it was
@@ -409,11 +415,19 @@ pub async fn run(
             device: name,
             store,
         } => {
+            let request = match namespace {
+                Some(namespace) => init::InitNamespace::Named(namespace),
+                None => init::InitNamespace::self_certifying(None)?,
+            };
+            let namespace = match &request {
+                init::InitNamespace::Named(namespace) => namespace.clone(),
+                init::InitNamespace::SelfCertifying { key, .. } => key.namespace(),
+            };
             let made = init::init(
                 InitRequest {
                     pib_dir: pib.to_path_buf(),
                     stated: stated_policy(config, &namespace)?,
-                    namespace: init::InitNamespace::Named(namespace.clone()),
+                    namespace: request,
                     device: name,
                     force: false,
                     root: store_choice(store),
@@ -422,6 +436,18 @@ pub async fn run(
             )
             .await?;
             let out = &made.persisted;
+            // The name alone: a following device fetches version 1 and
+            // checks it against the name.
+            let name_link = made.self_certifying.then(|| {
+                ndn_trust_envelope::TrustEnvelope::Anchor {
+                    namespace: Some(namespace.to_string()),
+                    fingerprint: None,
+                    version: None,
+                    context_data: None,
+                    context_content: None,
+                }
+                .to_uri()
+            });
             RootDone::Initialized {
                 namespace: namespace.to_string(),
                 version: out.init.context.version(),
@@ -430,6 +456,7 @@ pub async fn run(
                 fingerprint: hex(&made.anchor_fingerprint),
                 link: out.init.envelope.to_uri(),
                 short_link: made.fingerprint_link.to_uri(),
+                name_link,
                 settings: settings(&namespace, &out.device_identity, &made.pib_abs),
                 followed: None,
             }

@@ -421,3 +421,100 @@ fn fingerprints_and_the_event_log_show_only_in_details() {
         "no event log in details:\n{details}"
     );
 }
+
+/// The open new-prefix form.
+fn new_prefix_form(app: &mut App) -> &mut ndn_tui::app::NewPrefixForm {
+    match &mut app.modal {
+        Some(Modal::NewPrefix(form)) => form,
+        other => panic!("no new-prefix form: {other:?}"),
+    }
+}
+
+#[test]
+fn a_new_prefix_named_after_its_own_key_is_started_without_a_typed_name() {
+    let mut app = app();
+    assert!(app.handle(Msg::Key(Key::Char('n'))).is_empty());
+    new_prefix_form(&mut app).device.text = "desk".into();
+    // A typed prefix carrying a key's hash is refused in the form: no new
+    // key hashes to a name typed before it.
+    type_text(&mut app, &format!("/user/161={}", "%AB".repeat(32)));
+    assert!(app.handle(Msg::Key(Key::Enter)).is_empty());
+    assert!(new_prefix_form(&mut app).problem.is_some());
+
+    // Named after its own key: the typed prefix is not asked (Tab skips it).
+    assert!(app.handle(Msg::Key(Key::BackTab)).is_empty());
+    assert!(app.handle(Msg::Key(Key::Char('>'))).is_empty());
+    assert!(app.handle(Msg::Key(Key::Tab)).is_empty());
+    assert_eq!(new_prefix_form(&mut app).field, 2);
+    let screen = render(&app, 120, 30);
+    assert!(screen.contains("/user/<hash"), "{screen}");
+
+    // Its key cannot be kept on a security key: refused in the form.
+    assert!(app.handle(Msg::Key(Key::Tab)).is_empty());
+    let form = new_prefix_form(&mut app);
+    form.store = ndn_tui::app::NEW_ROOT_STORES
+        .iter()
+        .position(|s| *s == ndn_cert::RootStoreKind::YubikeyPiv)
+        .unwrap();
+    form.problem = None;
+    assert!(app.handle(Msg::Key(Key::Enter)).is_empty());
+    assert!(new_prefix_form(&mut app).problem.is_some());
+
+    assert!(app.handle(Msg::Key(Key::Char('<'))).is_empty());
+    match app.handle(Msg::Key(Key::Enter)).as_slice() {
+        [Effect::Run(Command::Root(RootOp::Init { namespace, .. }))] => {
+            assert_eq!(namespace, &None)
+        }
+        other => panic!("not started named after its key: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_prefix_named_after_its_own_key_is_shared_by_its_name_alone() {
+    let pib = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("ndn-tui-self-certifying-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&pib);
+    // No secret is asked for a plain-file main key.
+    let (asks, _) = tokio::sync::mpsc::channel(1);
+    let done = ndn_tui::root::run(
+        RootOp::Init {
+            namespace: None,
+            device: "desk".into(),
+            store: ndn_cert::RootStoreKind::File,
+        },
+        &pib,
+        "/nonexistent/mgmt.sock",
+        None,
+        &ndn_tui::root::TuiSecrets::new(asks),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&pib);
+    let done = done.unwrap_or_else(|f| panic!("not started: {}", f.words()));
+    let ndn_tui::root::RootDone::Initialized {
+        namespace,
+        name_link: Some(name_link),
+        ..
+    } = &done
+    else {
+        panic!("no name-only link: {done:?}");
+    };
+    assert!(namespace.starts_with("/user/161="), "{namespace}");
+    match ndn_trust_envelope::TrustEnvelope::from_uri(name_link) {
+        Ok(ndn_trust_envelope::TrustEnvelope::Anchor {
+            namespace: Some(named),
+            fingerprint: None,
+            context_data: None,
+            ..
+        }) => assert_eq!(&named, namespace),
+        other => panic!("not a name-only anchor link: {other:?}"),
+    }
+
+    // The started dialog offers that link to scan.
+    let name_link = name_link.clone();
+    let mut app = app();
+    app.handle(Msg::Done(Box::new(ndn_tui::app::Outcome::Root(Ok(done)))));
+    match &app.modal {
+        Some(Modal::Started(started)) => assert_eq!(started.link.as_ref(), Some(&name_link)),
+        other => panic!("not started: {other:?}"),
+    }
+}

@@ -1758,32 +1758,62 @@ fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
                     "This device becomes the main device of the new trusted prefix: it keeps the main key, which decides which devices belong.",
                 ),
                 Line::from(""),
-                field("Prefix", format!("{}▏", form.prefix.text), form.field == 0),
-                Line::from(Span::styled(
-                    "  a name that starts with /, e.g. /home",
-                    dim(),
-                )),
                 field(
-                    "Device name",
-                    format!("{}▏", form.device.text),
-                    form.field == 1,
-                ),
-                field(
-                    "Main key in",
-                    format!(
-                        "‹ {} ›",
-                        words::root_store(NEW_ROOT_STORES[form.store].as_str())
-                    ),
-                    form.field == 2,
+                    "Named",
+                    if form.own_key {
+                        "‹ after its own main key ›".to_owned()
+                    } else {
+                        "‹ by the prefix typed below ›".to_owned()
+                    },
+                    form.field == 0,
                 ),
             ];
-            if let (Ok(ns), device) = (form.prefix(), form.device.text.trim())
-                && !device.is_empty()
-            {
+            if form.own_key {
+                text.push(field(
+                    "Prefix",
+                    "/user/<hash of its new main key>".to_owned(),
+                    false,
+                ));
                 text.push(Line::from(Span::styled(
-                    format!("This device will be {ns}/admin/{device}."),
+                    "  made with the key and shown once started; its name alone lets others follow it",
                     dim(),
                 )));
+            } else {
+                text.push(field(
+                    "Prefix",
+                    format!("{}▏", form.prefix.text),
+                    form.field == 1,
+                ));
+                text.push(Line::from(Span::styled(
+                    "  a name that starts with /, e.g. /home",
+                    dim(),
+                )));
+            }
+            text.push(field(
+                "Device name",
+                format!("{}▏", form.device.text),
+                form.field == 2,
+            ));
+            text.push(field(
+                "Main key in",
+                format!(
+                    "‹ {} ›",
+                    words::root_store(NEW_ROOT_STORES[form.store].as_str())
+                ),
+                form.field == 3,
+            ));
+            let device = form.device.text.trim();
+            if !device.is_empty() {
+                let ns = match form.own_key {
+                    true => Some("/user/<hash>".to_owned()),
+                    false => form.prefix().ok().map(|ns| ns.to_string()),
+                };
+                if let Some(ns) = ns {
+                    text.push(Line::from(Span::styled(
+                        format!("This device will be {ns}/admin/{device}."),
+                        dim(),
+                    )));
+                }
             }
             if let Some(problem) = &form.problem {
                 text.push(Line::from(Span::styled(
@@ -1793,10 +1823,10 @@ fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
             }
             text.push(Line::from(""));
             text.push(Line::from(Span::styled(
-                "Tab field · on Main key: < > change · Enter start · Esc cancel",
+                "Tab field · on Named, Main key: < > change · Enter start · Esc cancel",
                 bold(),
             )));
-            dialog(f, "Start a new trusted prefix", Text::from(text), width, 14);
+            dialog(f, "Start a new trusted prefix", Text::from(text), width, 16);
         }
         Modal::Recover(form) => {
             let kit = match KIT_KINDS[form.kit] {
