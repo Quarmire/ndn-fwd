@@ -169,21 +169,28 @@
 //! - `offer <folder> role=reader|writer until=<when> tries=<n>` (`<when>`
 //!   as for `suspect`): a one-use offer of a folder of this device's
 //!   namespace to someone who holds no trust context of it, expiring at
-//!   `<when>` by this device's clock, closed for good by the `<n>`-th wrong
-//!   try. The answer carries the code: `link` (`ndn-trust://intro/…`, one
+//!   `<when>` by this device's clock, closed for good to an asker by its
+//!   `<n>`-th wrong try (and to everyone at the device's overall cap). The
+//!   answer carries the code: `link` (`ndn-trust://intro/…`, one
 //!   QR; it names the relays this namespace advertises, so the joiner's
 //!   forwarder reaches this device through one of them before it trusts
 //!   anything of this namespace) and `words` (the offer's name and 24
 //!   words, without relays). When the joiner asks, this device adopts the
 //!   joiner's namespace through its daemon and adds it to the folder's
 //!   members with the role.
+//! - `close_offer <offer>`: close an offer this device made (its name, as
+//!   `offer` printed it), for good, durably: every ask of it is refused as
+//!   closed from then on, its user's too. Removing an introduced member
+//!   from the folder closes the offers it used already.
 //! - `join <code>`: join the folder a code offers (its link, or its words
 //!   in double quotes): the answer names the folder, the role and the
 //!   inviter's namespace, which this device's daemon now holds (adopted
 //!   through `security/context-adopt`, as `ndn-ctl adopt` asks, so it also
 //!   routes it over its relay links). An offer refused answers
 //!   `"introduction"`: the offer and why (`unknown`, `used`, `expired`,
-//!   `closed`, `wrong-proof` with `left`, `forged`, `conflict`).
+//!   `closed`, `wrong-proof` with `left`, `forged`, `conflict`, or
+//!   `inviter-conflict` when the inviter's namespace overlaps one this
+//!   device trusts).
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -1278,6 +1285,18 @@ async fn run(
             })))
         }
         ("offer", _) => usage(OFFER_USAGE),
+        ("close_offer", [offer]) => {
+            let offer = match name(offer) {
+                Ok(o) => o,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {CLOSE_OFFER_USAGE}"))),
+            };
+            layer.close_offer(&offer).await?;
+            Ok(Verb::Done(json!({
+                "offer": offer.to_string(),
+                "closed": true,
+            })))
+        }
+        ("close_offer", _) => usage(CLOSE_OFFER_USAGE),
         ("join", [code]) => {
             let joined = layer.join(code).await?;
             Ok(Verb::Done(json!({
@@ -1289,7 +1308,7 @@ async fn run(
         ("join", _) => usage(JOIN_USAGE),
         _ => usage(
             "verbs: share, share_folder, put, put_op, put_group, get, range, watch, hold, prune, \
-             release, suspect, unsuspect, cut, refused, offer, join, quit",
+             release, suspect, unsuspect, cut, refused, offer, close_offer, join, quit",
         ),
     }
 }
@@ -1457,6 +1476,9 @@ const OFFER_USAGE: &str = "usage: offer <folder> role=reader|writer until=<when>
 
 const JOIN_USAGE: &str = "usage: join <code> (the code an offer printed: its link \
                           ndn-trust://intro/…, or its words in double quotes)";
+
+const CLOSE_OFFER_USAGE: &str = "usage: close_offer <offer> (the offer's name an offer printed, \
+                                 made by this device: closed for good)";
 
 /// An `offer` line's options after the folder: `role=`, `until=` and
 /// `tries=`, each exactly once.
@@ -2008,6 +2030,7 @@ fn intro_refusal(why: &IntroRefusal) -> &'static str {
         IntroRefusal::WrongProof { .. } => "wrong-proof",
         IntroRefusal::Forged => "forged",
         IntroRefusal::Conflict => "conflict",
+        IntroRefusal::InviterConflict { .. } => "inviter-conflict",
     }
 }
 
