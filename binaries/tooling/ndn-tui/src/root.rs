@@ -413,7 +413,7 @@ pub async fn run(
                 InitRequest {
                     pib_dir: pib.to_path_buf(),
                     stated: stated_policy(config, &namespace)?,
-                    namespace: namespace.clone(),
+                    namespace: init::InitNamespace::Named(namespace.clone()),
                     device: name,
                     force: false,
                     root: store_choice(store),

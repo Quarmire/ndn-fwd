@@ -190,7 +190,7 @@ const ARG_SPECS: &[(&str, Option<&str>, ArgSpec)] = &[
                 "--touch-policy",
             ],
             repeatable: &[],
-            switches: &["--force", "--replace-slot"],
+            switches: &["--force", "--replace-slot", "--self-certifying"],
             positionals: 0,
         },
     ),
@@ -669,10 +669,24 @@ pub(crate) fn default_device() -> Result<String> {
 }
 
 async fn run_init(args: &[String]) -> Result<()> {
-    let namespace: Name = flag(args, &["--namespace"])
-        .context("init requires --namespace <ndn-name>, e.g. /home/bob")?
-        .parse()
-        .context("invalid --namespace NDN name")?;
+    use ndn_namespace::root::init::InitNamespace;
+    let given: Option<Name> = flag(args, &["--namespace"])
+        .map(|n| n.parse().context("invalid --namespace NDN name"))
+        .transpose()?;
+    // `--self-certifying`: a `/user/<hash>` namespace named from its new
+    // root key; a name given must be that one.
+    let request_namespace = if args.iter().any(|a| a == "--self-certifying") {
+        InitNamespace::self_certifying(given).map_err(crate::root_host::render)?
+    } else {
+        InitNamespace::Named(given.context(
+            "init requires --namespace <ndn-name>, e.g. /home/bob, or --self-certifying for a \
+             /user/<hash> namespace named from its new root key",
+        )?)
+    };
+    let namespace = match &request_namespace {
+        InitNamespace::Named(namespace) => namespace.clone(),
+        InitNamespace::SelfCertifying { key, .. } => key.namespace(),
+    };
     let device = match flag(args, &["--device"]) {
         Some(device) => device.to_string(),
         None => default_device()?,
@@ -705,7 +719,7 @@ async fn run_init(args: &[String]) -> Result<()> {
     let made = ndn_namespace::root::init::init(
         ndn_namespace::root::init::InitRequest {
             pib_dir: pib_dir.clone(),
-            namespace: namespace.clone(),
+            namespace: request_namespace,
             device,
             force,
             stated,
@@ -760,8 +774,22 @@ async fn run_init(args: &[String]) -> Result<()> {
         "anchor_url     = {}",
         root_dev.envelope.to_https_url("ndn.local")
     );
-    // The same link without the context: a short QR; the context is fetched by name.
     println!("anchor_uri_fp  = {}", made.fingerprint_link.to_uri());
+    if made.self_certifying {
+        // The name alone: an adopting device fetches version 1 and checks
+        // it against the name.
+        println!(
+            "anchor_uri_name= {}",
+            ndn_trust_envelope::TrustEnvelope::Anchor {
+                namespace: Some(namespace.to_string()),
+                fingerprint: None,
+                version: None,
+                context_data: None,
+                context_content: None,
+            }
+            .to_uri()
+        );
+    }
     println!();
     if root_dev.envelope.to_uri().len() <= ndn_trust_envelope::qr::MAX_TEXT_LEN {
         println!("# Scan anchor_uri as a QR, or share anchor_url. anchor_uri_fp is the short");

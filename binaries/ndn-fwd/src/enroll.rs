@@ -266,6 +266,7 @@ pub(crate) mod tests {
             context: Arc::clone(&held),
             data: ndn_packet::Data::decode(node.context_data.raw().clone()).unwrap(),
             fetched: false,
+            earlier: Vec::new(),
         };
         // Another command adopted a newer version meanwhile.
         node.admin
