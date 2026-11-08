@@ -79,6 +79,14 @@
 //!   folder `<ns>/32=data/<path>`, which governs every collection under it
 //!   (each writes and reads by its own record narrowed by the folder's;
 //!   one without its own takes the folder's rule, writers and readers).
+//!   Or a change of the folder's record in force: `add_writers=`,
+//!   `remove_writers=` (prefixes), `add_readers=`, `remove_readers=`
+//!   (`<kind>:<name>`), applied when the device signs, so a member added
+//!   meanwhile (an introduction's admission) stays; a change that changes
+//!   nothing signs nothing.
+//! - `members <folder or collection>`: the members record in force over
+//!   it — rule, writers, readers — whoever signed it; a watch shows each
+//!   change of it as `members`.
 //! - `put <collection> [--batch <ms>] [--keep forever|until=<ms since the
 //!   epoch>|last=<n>] <field>=<value>...`: a version of type `/types/note`
 //!   revision 1, kept forever unless `--keep` says otherwise; an empty value
@@ -112,6 +120,9 @@
 //!   256 octets is shown as its length and SHA-256, not its bytes. A state
 //!   lists the versions held here that are not in its value
 //!   (`not_counted`, each with why: the rule's, or its group incomplete).
+//!   Every version shown carries its packet's implicit digest (`digest`,
+//!   hex) and, of a merge version whose operation is open here, the
+//!   operation's octets (`op`, hex).
 //! - `range <collection> seq=<low>..<high>|time=<from>..<to>`: `get` of the
 //!   range name of a one-key collection: the blocks from seq `low` to `high`
 //!   (both included), or the entries dated from `from` (included) to `to`
@@ -236,7 +247,8 @@ use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
     CutBound, DataError, DataLayer, Device, Entries, Equivocal, Frontier, Got, Hold, IntroRefusal,
     Introducer, Keep, Lease, MergeRule, NextStep, Offer, Payload, Prune, PutOptions, Refusal, Role,
-    Rule, Seq, Share, State, Timestamp, Transport, TypeId, Version, VersionId, Writer, Yrs,
+    Rule, Seq, Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId, Version,
+    VersionId, Writer, Yrs,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -931,14 +943,25 @@ async fn run(
                 Ok(f) => f,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            let share = match share_options(layer.namespace(), options) {
+            let sharing = match folder_sharing(layer.namespace(), options) {
                 Ok(s) => s,
                 Err(e) => return Ok(Verb::Usage(format!("{e}; {SHARE_FOLDER_USAGE}"))),
             };
-            layer.share_folder(&folder, share).await?;
+            layer.share_folder(&folder, sharing).await?;
             Ok(Verb::Done(json!({"folder": folder.to_string()})))
         }
         ("share_folder", _) => usage(SHARE_FOLDER_USAGE),
+        ("members", [n]) => {
+            let n = match name(n) {
+                Ok(n) => n,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let share = layer.members(&n).await?;
+            Ok(Verb::Done(
+                json!({"name": n.to_string(), "members": members(&share)}),
+            ))
+        }
+        ("members", _) => usage("usage: members <folder or collection>"),
         ("put", [collection, rest @ ..]) => {
             let collection = match name(collection) {
                 Ok(c) => c,
@@ -1313,8 +1336,8 @@ async fn run(
         }
         ("join", _) => usage(JOIN_USAGE),
         _ => usage(
-            "verbs: share, share_folder, put, put_op, put_group, get, range, watch, hold, prune, \
-             release, suspect, unsuspect, cut, refused, offer, close_offer, join, quit",
+            "verbs: share, share_folder, members, put, put_op, put_group, get, range, watch, \
+             hold, prune, release, suspect, unsuspect, cut, refused, offer, close_offer, join, quit",
         ),
     }
 }
@@ -1327,8 +1350,13 @@ const SHARE_USAGE: &str = "usage: share <collection> [rule=merge|merge:<function
 const SHARE_FOLDER_USAGE: &str = "usage: share_folder <folder> \
                                   [rule=merge|merge:<function>|log|one-key] \
                                   [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...] \
-                                  (kind person, device or group; the folder is <ns>/32=data/<path>, \
-                                  and its record governs every collection under it)";
+                                  | [add_writers=<prefix>,...] [remove_writers=<prefix>,...] \
+                                  [add_readers=<kind>:<name>,...] \
+                                  [remove_readers=<kind>:<name>,...] (kind person, device or \
+                                  group; the folder is <ns>/32=data/<path>, and its record \
+                                  governs every collection under it; add_/remove_ change the \
+                                  record in force when it is signed, keeping whom it does not \
+                                  name)";
 
 /// A `share` (or `share_folder`) line's options over the defaults: the
 /// merge rule `/merge/yrs`, writers the namespace `ns`, readers the person
@@ -1369,21 +1397,76 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
             },
             Some(("writers", v)) => share.writers = list(v).map(name).collect::<Result<_, _>>()?,
             Some(("readers", v)) => {
-                share.readers = list(v)
-                    .map(|r| match r.split_once(':') {
-                        Some(("person", n)) => name(n).map(Audience::Person),
-                        Some(("device", n)) => name(n).map(Audience::Device),
-                        Some(("group", n)) => name(n).map(Audience::Group),
-                        _ => Err(format!(
-                            "reader {r:?} is not <kind>:<name> with kind person, device or group"
-                        )),
-                    })
-                    .collect::<Result<_, _>>()?;
+                share.readers = list(v).map(reader).collect::<Result<_, _>>()?;
             }
             _ => return Err(format!("{o:?} is not rule=, writers= or readers=")),
         }
     }
     Ok(share)
+}
+
+/// A reader `<kind>:<name>`, kind person, device or group.
+fn reader(r: &str) -> Result<Audience, String> {
+    let name = |s: &str| {
+        s.parse::<Name>()
+            .map_err(|e| format!("{s:?} is no name: {e}"))
+    };
+    match r.split_once(':') {
+        Some(("person", n)) => name(n).map(Audience::Person),
+        Some(("device", n)) => name(n).map(Audience::Device),
+        Some(("group", n)) => name(n).map(Audience::Group),
+        _ => Err(format!(
+            "reader {r:?} is not <kind>:<name> with kind person, device or group"
+        )),
+    }
+}
+
+/// A `share_folder` line's options: a change of the record in force
+/// (`add_writers=`, `remove_writers=`, `add_readers=`, `remove_readers=`),
+/// or else the whole record ([`share_options`]); never both.
+fn folder_sharing(ns: &Name, options: &[String]) -> Result<Sharing, String> {
+    const CHANGE: [&str; 4] = [
+        "add_writers",
+        "remove_writers",
+        "add_readers",
+        "remove_readers",
+    ];
+    let changes = |o: &String| o.split_once('=').is_some_and(|(k, _)| CHANGE.contains(&k));
+    if !options.iter().any(changes) {
+        return share_options(ns, options).map(Sharing::Whole);
+    }
+    let names = |v: &str| {
+        v.split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.parse::<Name>()
+                    .map_err(|e| format!("{s:?} is no name: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let readers = |v: &str| {
+        v.split(',')
+            .filter(|s| !s.is_empty())
+            .map(reader)
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let mut change = ShareChange::default();
+    for o in options {
+        match o.split_once('=') {
+            Some(("add_writers", v)) => change.add_writers.extend(names(v)?),
+            Some(("remove_writers", v)) => change.remove_writers.extend(names(v)?),
+            Some(("add_readers", v)) => change.add_readers.extend(readers(v)?),
+            Some(("remove_readers", v)) => change.remove_readers.extend(readers(v)?),
+            _ => {
+                return Err(format!(
+                    "{o:?} is no change: a change takes add_writers=, remove_writers=, \
+                     add_readers= and remove_readers= only (share the whole record with rule=, \
+                     writers= and readers= alone)"
+                ));
+            }
+        }
+    }
+    Ok(Sharing::Change(change))
 }
 
 const PUT_USAGE: &str = "usage: put <collection> [--batch <ms>] [--keep forever|until=<ms since \
@@ -2259,11 +2342,32 @@ fn version(v: &Version) -> Value {
         "keep": keep(&v.keep),
         "dated_ms": v.dated.0,
         "group": v.group.map(|g| json!({"id": g.id, "count": g.count})),
+        "digest": hex(&v.digest),
+        "op": v.op.as_deref().map(hex),
         "payload": match &v.payload {
             Payload::Entry(c) => json!({"entry": content(c)}),
             Payload::Block(es) => json!({"block": es.iter().map(block_entry).collect::<Vec<_>>()}),
             Payload::Large { size } => json!({"large": size}),
         },
+    })
+}
+
+/// A members record in force, as `members` answers and `Change::Members`
+/// tells it: the rule, writer prefixes and readers (`<kind>:<name>`, as
+/// `share_folder` takes them).
+fn members(s: &Share) -> Value {
+    json!({
+        "rule": match &s.rule {
+            Rule::Merge { function } => format!("merge:{function}"),
+            Rule::Log => "log".into(),
+            Rule::OneKey => "one-key".into(),
+        },
+        "writers": s.writers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "readers": s.readers.iter().map(|r| match r {
+            Audience::Person(n) => format!("person:{n}"),
+            Audience::Device(n) => format!("device:{n}"),
+            Audience::Group(n) => format!("group:{n}"),
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -2323,6 +2427,7 @@ fn change(c: &Change) -> Value {
             "writer": writer.key().to_string(),
             "why": why,
         }}),
+        Change::Members { share, .. } => json!({"members": members(share)}),
     }
 }
 
