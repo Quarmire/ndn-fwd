@@ -268,10 +268,14 @@ pub(crate) mod tests {
             fetched: false,
         };
         // Another command adopted a newer version meanwhile.
-        node.admin.ns.keyring().adopt(Arc::new(
-            ndn_security::SignedTrustContext::hierarchical(ns.clone())
-                .with_version(held.version() + 1),
-        ));
+        node.admin
+            .ns
+            .keyring()
+            .adopt_update(Arc::new(
+                ndn_security::SignedTrustContext::hierarchical(ns.clone())
+                    .with_version(held.version() + 1),
+            ))
+            .unwrap();
         let refused = ndn_namespace::keep::keep_adopted(&node.admin.ns, &older, &node.fingerprint);
         assert!(
             refused
@@ -279,6 +283,49 @@ pub(crate) mod tests {
                 .is(ndn_namespace::code::CONTEXT_SUPERSEDED)
         );
         assert!(!ndn_cert::context_file_path(device.path(), &ns).exists());
+        node.shutdown.shutdown().await;
+    }
+
+    /// The daemon's `security/context-adopt` never replaces the anchors of a
+    /// namespace the node holds: another root of `/home/bob`, named by an
+    /// anchor link carrying its own fingerprint and its version 1000 inline,
+    /// is refused, and the node's keyring and store keep what it held.
+    #[tokio::test]
+    async fn another_root_of_a_held_namespace_is_never_adopted() {
+        let (root_dev, device) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let node = node(root_dev.path(), device.path(), &[]).await;
+        let ns: Name = "/home/bob".parse().unwrap();
+        let held = node.admin.ns.keyring().contexts().pop().unwrap();
+        let mallory = SecurityManager::new();
+        let other = ndn_cert::init_namespace(&mallory, &ns).unwrap();
+        let v1000 =
+            ndn_security::SignedTrustContext::decode_content(&other.context.encode_content(), 1000)
+                .unwrap()
+                .sign_into_data(mallory.get_signer_sync(&other.anchor_key).unwrap().as_ref())
+                .unwrap();
+        let link = TrustEnvelope::Anchor {
+            namespace: Some(ns.to_string()),
+            fingerprint: Some(ndn_cert::anchor_fingerprint(&other.anchor)),
+            version: Some(1000),
+            context_data: Some(v1000.raw().clone()),
+            context_content: None,
+        }
+        .to_uri();
+
+        let res = ndn_mgmt::TrustAdminMgmtBackend::adopt(&node.admin, link).await;
+        assert!(
+            Arc::ptr_eq(&node.admin.ns.keyring().contexts().pop().unwrap(), &held),
+            "another root's /home/bob replaced the held one: {res:?}"
+        );
+        let stored = ndn_cert::read_stored_context(device.path(), &ns).unwrap();
+        assert!(
+            stored.is_none_or(|(ctx, _)| ctx.version() == held.version()),
+            "another root's /home/bob was stored"
+        );
+        assert!(
+            res.unwrap_err().is(ndn_namespace::code::CONTEXT_REFUSED),
+            "refused as a context this node does not take"
+        );
         node.shutdown.shutdown().await;
     }
 
@@ -461,11 +508,15 @@ pub(crate) mod tests {
         .into_iter()
         .enumerate()
         {
-            node.admin.ns.keyring().adopt(Arc::new(
-                ndn_security::SignedTrustContext::hierarchical(ns.clone())
-                    .with_version(version + 1 + bump as u64)
-                    .with_revocation(revoked.clone()),
-            ));
+            node.admin
+                .ns
+                .keyring()
+                .adopt_update(Arc::new(
+                    ndn_security::SignedTrustContext::hierarchical(ns.clone())
+                        .with_version(version + 1 + bump as u64)
+                        .with_revocation(revoked.clone()),
+                ))
+                .unwrap();
             let held = certified_in(&node.admin.ns, node.admin.vault.as_ref(), &ns);
             assert_eq!(held[0].key.to_string(), info.key);
             assert_eq!(

@@ -497,7 +497,8 @@ async fn follow_contexts(face_socket: String, pib_root: PathBuf, keyring: Arc<Ke
 }
 
 /// Adopt every trust context stored in the PIB at `pib_root` that is newer
-/// than the one `keyring` holds of its namespace.
+/// than the one `keyring` holds of its namespace — a held namespace only by
+/// the continuity rule ([`ndn_cert::adopt_stored_context`]).
 fn adopt_stored(pib_root: &Path, keyring: &Keyring) {
     match ndn_cert::load_persisted_contexts(pib_root, keyring) {
         Ok(read) => {
@@ -536,14 +537,14 @@ fn adopt_told(pib_root: &Path, keyring: &Keyring, namespace: &str, version: u64)
         return;
     }
     match ndn_cert::read_stored_context(pib_root, &ns) {
-        Ok(Some((ctx, _data))) if ctx.version() >= version => {
+        Ok(Some((ctx, data))) if ctx.version() >= version => {
             let stored = ctx.version();
-            if !keyring.adopt(Arc::new(ctx)) {
-                tracing::debug!(
+            if let Err(e) = ndn_cert::adopt_stored_context(pib_root, keyring, ctx, &data) {
+                tracing::warn!(
                     %ns,
                     stored,
-                    "stored trust context not adopted: the keyring holds this version or a \
-                     newer one"
+                    held = ?keyring.version_of(&ns),
+                    "stored trust context not adopted: {e}; this host keeps the version it holds"
                 );
             }
         }
