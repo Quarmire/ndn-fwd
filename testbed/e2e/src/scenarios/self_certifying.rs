@@ -14,15 +14,16 @@
 //!
 //! The gestures:
 //! 1. `ndn-fwd init --self-certifying` on alice, bob and carol: each
-//!    namespace is named from its new root key, and init prints its
+//!    namespace is named from its new root key, init signs its genesis (v1,
+//!    the root alone) and v2 (the CA, schema and policies), and prints its
 //!    name-only anchor link (`anchor_uri_name`), a namespace and nothing else;
 //! 2. spare and bob adopt alice's namespace from that link: each daemon
 //!    fetches version 1 by name and checks it is signed by the key the name
-//!    hashes — no fingerprint is given anywhere;
-//! 3. alice makes a file recovery kit (v2), which spare and bob follow;
+//!    hashes — no fingerprint is given anywhere — then reaches v2 from it;
+//! 3. alice makes a file recovery kit (v3), which spare and bob follow;
 //!    alice's root device is then held by someone else: spare recovers with
-//!    the kit (`--old-root compromised`: v3 by the kit, v4 by spare's new
-//!    root) and becomes the root device; bob follows to v4 by refresh, under
+//!    the kit (`--old-root compromised`: v4 by the kit, v5 by spare's new
+//!    root) and becomes the root device; bob follows to v5 by refresh, under
 //!    the same name;
 //! 4. alice's device (spare, `ndn-data`, signing as its new identity) shares
 //!    a folder with herself and offers it; bob's device joins with the
@@ -34,14 +35,14 @@
 //!    bob's namespace, so she cannot verify them.)
 //!
 //! Proves: the namespaces are `/user/<0xA1 component>`; the name-only link
-//! carries no fingerprint and no context; spare and bob hold alice's v1
-//! adopted by name; after the recovery bob holds v4 of the very same name;
+//! carries no fingerprint and no context; spare and bob hold alice's v2
+//! adopted by name; after the recovery bob holds v5 of the very same name;
 //! the introduction is admitted on both sides — alice's daemon and her data
-//! host adopt bob's namespace from his genesis (his credentials carry v1,
+//! host adopt bob's namespace from his genesis (his credentials carry v2,
 //! and alice's host vouches for it from what her daemon stored), bob's host
 //! finds alice's recovered context already held under the same anchor —
 //! and each reads what the other writes in the folder. Carol, given alice's
-//! recovered v4 in the answer, reaches it from alice's genesis (by name,
+//! recovered v5 in the answer, reaches it from alice's genesis (by name,
 //! through her daemon) and is admitted; carol and alice read each other's
 //! writes in the second folder.
 
@@ -70,7 +71,8 @@ struct Named {
 
 /// `ndn-fwd init --self-certifying` with a sealed-file root on `node`'s
 /// PIB: the namespace is named from the new root key, a `/user/<0xA1>`
-/// name, and the name-only link carries nothing else.
+/// name, init signs its genesis (v1) and v2, and the name-only link
+/// carries nothing else.
 fn init_named(cx: &mut Cx<'_>, node: &str, device: &str) -> StepResult<Named> {
     let pib = cx.w.node(node).pib();
     let op = cx
@@ -86,7 +88,10 @@ fn init_named(cx: &mut Cx<'_>, node: &str, device: &str) -> StepResult<Named> {
             "{node}: init --self-certifying named {ns}, not /user/<0xA1: 32 bytes>"
         ));
     }
-    cx.expect_version(node, &ns, 1)?;
+    if first(out.kv("genesis")).is_none() {
+        return Err(format!("{node}: init printed no genesis (version 1)"));
+    }
+    cx.expect_version(node, &ns, 2)?;
     let by_name = first(out.kv("anchor_uri_name")).ok_or("init printed no anchor_uri_name")?;
     match TrustEnvelope::from_uri(&by_name) {
         Ok(TrustEnvelope::Anchor {
@@ -216,14 +221,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     sc.step(
         "spare and bob adopt alice's namespace from its name alone: each daemon fetches version \
-         1 and checks it is signed by the key the name hashes",
+         1, checks it is signed by the key the name hashes, and reaches v2 from it",
         |cx| {
             cx.concept("adoption by name alone (no fingerprint)");
             cx.input(format!("anchor_uri_name: {}", alice.by_name));
             for node in ["spare", "bob"] {
                 adopt_by_name(cx, node, &alice.by_name)?;
-                cx.expect_version(node, &alice.ns, 1)?;
-                cx.evidence(&format!("{node} holds {} v1, adopted by name", alice.ns));
+                cx.expect_version(node, &alice.ns, 2)?;
+                cx.evidence(&format!("{node} holds {} v2, adopted by name", alice.ns));
             }
             Ok(())
         },
@@ -231,7 +236,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     let kit = sc.world.dir.join("self-certifying.kit");
     sc.step(
-        "alice makes a file recovery kit (v2); spare and bob follow it by refresh",
+        "alice makes a file recovery kit (v3); spare and bob follow it by refresh",
         |cx| {
             let op = cx
                 .tool("ndn-fwd")
@@ -242,9 +247,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 .env("NDN_ROOT_PASSPHRASE", ROOT_PASS)
                 .env("NDN_KIT_PASSPHRASE", KIT_PASS);
             cx.ok(op, "recovery-kit create file")?;
-            cx.expect_version("alice", &alice.ns, 2)?;
-            cx.wait_version("spare", &alice.ns, 2, SHORT)?;
-            cx.wait_version("bob", &alice.ns, 2, SHORT).map(|_| ())
+            cx.expect_version("alice", &alice.ns, 3)?;
+            cx.wait_version("spare", &alice.ns, 3, SHORT)?;
+            cx.wait_version("bob", &alice.ns, 3, SHORT).map(|_| ())
         },
     )?;
 
@@ -266,7 +271,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 .env("NDN_ROOT_PASSPHRASE", NEW_ROOT_PASS)
                 .timeout(Duration::from_secs(180));
             let out = cx.ok(op, "recover")?;
-            cx.expect_version("spare", &alice.ns, 4)?;
+            cx.expect_version("spare", &alice.ns, 5)?;
             if cx
                 .w
                 .node_mut("alice")
@@ -285,12 +290,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "bob follows alice's namespace to v4 by refresh: the same name, now rooted in spare's \
+        "bob follows alice's namespace to v5 by refresh: the same name, now rooted in spare's \
          new key",
         |cx| {
-            cx.wait_version("bob", &alice.ns, 4, SHORT)?;
+            cx.wait_version("bob", &alice.ns, 5, SHORT)?;
             cx.evidence(&format!(
-                "bob holds {} v4: the name init printed, kept through the recovery",
+                "bob holds {} v5: the name init printed, kept through the recovery",
                 alice.ns
             ));
             Ok(())
@@ -349,10 +354,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 ));
             }
             cx.evidence(&format!("bob joined: {joined}"));
-            cx.expect_version("spare", &bob.ns, 1)?;
-            cx.expect_version("bob", &alice.ns, 4)?;
+            cx.expect_version("spare", &bob.ns, 2)?;
+            cx.expect_version("bob", &alice.ns, 5)?;
             cx.evidence(&format!(
-                "spare holds {} v1 (bob's genesis); bob still holds {} v4",
+                "spare holds {} v2 (from bob's genesis); bob still holds {} v5",
                 bob.ns, alice.ns
             ));
             Ok(())
@@ -406,7 +411,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let plans = format!("{}/32=data/plans", alice.ns);
     let agenda = format!("{plans}/agenda");
     let (code, first_plan) = sc.step(
-        "alice, recovered (v4, rooted on spare), shares another folder with herself alone, \
+        "alice, recovered (v5, rooted on spare), shares another folder with herself alone, \
          writes its agenda and offers it: writer",
         |cx| {
             alice_host.ok(
@@ -423,7 +428,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     sc.step(
         "carol's device, a stranger to alice's namespace, joins with the code's link alone: \
-         carol's daemon reaches alice's v4 from her genesis, and spare's holds carol's v1",
+         carol's daemon reaches alice's v5 from her genesis, and spare's holds carol's v2",
         |cx| {
             cx.concept("a stranger joins a recovered self-certifying namespace");
             let joined = joins(cx, &mut carol_host, &code, "carol")?;
@@ -437,11 +442,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 ));
             }
             cx.evidence(&format!("carol joined: {joined}"));
-            cx.expect_version("carol", &alice.ns, 4)?;
-            cx.expect_version("spare", &carol.ns, 1)?;
+            cx.expect_version("carol", &alice.ns, 5)?;
+            cx.expect_version("spare", &carol.ns, 2)?;
             cx.evidence(&format!(
-                "carol holds {} v4 (from its genesis, under the name init printed); spare holds \
-                 {} v1 (carol's genesis)",
+                "carol holds {} v5 (from its genesis, under the name init printed); spare holds \
+                 {} v2 (from carol's genesis)",
                 alice.ns, carol.ns
             ));
             Ok(())

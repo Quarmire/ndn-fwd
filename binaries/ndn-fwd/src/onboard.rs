@@ -760,6 +760,15 @@ async fn run_init(args: &[String]) -> Result<()> {
         out.context_path.display(),
         root_dev.context.version()
     );
+    if let Some(genesis) = &root_dev.genesis {
+        // Version 1 of a self-certifying namespace: the root alone, the
+        // same bytes whenever its key makes it; the context follows from it.
+        println!(
+            "genesis        = {} (v{}, the root alone)",
+            ndn_cert::context_version_path(&pib_dir, &namespace, 1).display(),
+            genesis.context().version()
+        );
+    }
     println!("schema         = generated namespace schema (see `ndn-fwd schema show`)");
     println!("enrollment     = {}", approval.describe());
     println!("link_policy    = {}", link.describe());
@@ -883,9 +892,12 @@ fn toml_basic_string(s: &str) -> String {
     out
 }
 
-/// How long the CLI waits for the daemon to adopt (it may fetch the context
-/// over the network: two Interests of at most ~4.5 s each).
-const DAEMON_ADOPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long the CLI waits for the daemon to adopt: a fingerprint-only link
+/// is two Interests of at most ~4.5 s each; a self-certifying namespace not
+/// held — whatever the link carries — is adopted by name: version 1, the
+/// newest's name and the newest, then a walk of at most
+/// `ndn_cert::MAX_CATCH_UP_TIME` (40 s) when versions lie in between.
+const DAEMON_ADOPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The daemon's management socket: `[management] face_socket` from
 /// `-c/--config`, else the default.
@@ -956,6 +968,9 @@ async fn adopt_via_daemon(client: &ndn_ipc::MgmtClient, uri: &str, socket: &str)
     println!("stored               = {}", info.stored);
     println!("published            = {}", info.published);
     println!();
+    if info.offline_genesis {
+        println!("# {}", ndn_cert::LinkAdoption::OFFLINE_GENESIS_NOTE);
+    }
     println!("# Signed by the anchor with the expected fingerprint. The daemon trusts it");
     println!("# now and loads it again at every start; producing still needs enrollment.");
     Ok(())
@@ -970,8 +985,9 @@ fn adopt_offline(
     let envelope =
         TrustEnvelope::from_uri(uri).map_err(|e| anyhow::anyhow!("parse trust link: {e}"))?;
     let pib_dir = pib_dir(args)?;
-    let (ctx, path) = adopt_envelope_into_store(&pib_dir, &envelope)
+    let (adopted, path) = adopt_envelope_into_store(&pib_dir, &envelope)
         .map_err(|e| anyhow::anyhow!("adopt refused: {e}"))?;
+    let ctx = &adopted.context;
     let expected_fingerprint = match &envelope {
         TrustEnvelope::Anchor {
             fingerprint: Some(fp),
@@ -990,6 +1006,9 @@ fn adopt_offline(
     println!("relays               = {} advertised", ctx.relays().len());
     println!("stored               = {}", path.display());
     println!();
+    if adopted.offline_genesis {
+        println!("# {}", ndn_cert::LinkAdoption::OFFLINE_GENESIS_NOTE);
+    }
     println!("# Signed by the anchor with the expected fingerprint. The daemon loads this");
     println!("# context at its next start (same pib_path); producing still needs enrollment.");
     Ok(())
