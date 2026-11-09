@@ -485,6 +485,11 @@ fn trust_phrase(w: &W<'_>) -> Option<String> {
         "context-not-held" => format!(
             "this device does not follow {ns}: follow it on the Trusted prefixes screen first"
         ),
+        "transit-not-personal" => format!(
+            "only a person's own name (/user/ and a key's hash) can be carried for a scoped \
+             adoption, and {ns} is not one: follow it on the Trusted prefixes screen, or let a \
+             link carry it"
+        ),
         "link-invalid" => format!(
             "the link cannot be read{}: check it and paste it again",
             w.paren("error")
