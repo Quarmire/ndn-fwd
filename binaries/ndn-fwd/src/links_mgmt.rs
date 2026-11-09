@@ -328,6 +328,9 @@ mod tests {
         fn remove_face(&self, _: FaceId) {}
         fn add_routes(&self, _: FaceId, _: &[Route]) {}
         fn remove_routes(&self, _: FaceId, _: &[Name]) {}
+        fn routes_to(&self, _: FaceId) -> bool {
+            false
+        }
         fn transit(&self, _: &Name, _: bool) {}
     }
 

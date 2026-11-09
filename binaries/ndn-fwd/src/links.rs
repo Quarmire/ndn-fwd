@@ -387,11 +387,13 @@ pub(crate) fn spawn(
         "this device's link key (other devices name it in [[peer]] key = \"…\")"
     );
     let peers = peer_specs(config)?;
-    let transport = LinkTransportConfig::bounded(
+    let mut transport = LinkTransportConfig::bounded(
         Duration::from_secs(config.links.keep_alive_secs),
         Duration::from_secs(config.links.idle_timeout_secs),
     )
     .map_err(|e| anyhow::anyhow!("[links]: {e}"))?;
+    transport.limits.max_links = config.links.max_links;
+    transport.quiet_close = Duration::from_secs(config.links.quiet_close_secs);
     let advertised = match &socket {
         Some((_, _, advertise)) => advertise
             .iter()
