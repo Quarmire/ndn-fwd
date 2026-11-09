@@ -27,7 +27,7 @@ use ndn_surface::signal::{
     RunId, Signal, SignalError, SignalOptions, SignalRun, SignalStats, Signals,
 };
 
-use crate::{Verb, hex, next_step, next_token};
+use crate::{Verb, data_error, hex, next_step, next_token};
 
 pub const SUBSCRIBE_USAGE: &str = "usage: signal-subscribe <folder or collection> (every signal \
                                    of the scope from now on, one line each)";
@@ -442,8 +442,12 @@ fn stats(s: &SignalStats) -> Value {
 }
 
 /// A signal refusal as an error answer: why, whether to ask again, and
-/// what to do next (`retry_after_ms` when over the sender's rate).
+/// what to do next (`retry_after_ms` when over the sender's rate); one the
+/// data layer gave answers as `data_error` does.
 pub fn error(e: &SignalError) -> Value {
+    if let SignalError::Data(d) = e {
+        return data_error(d);
+    }
     let next = e.next();
     let mut v = json!({
         "message": e.to_string(),
