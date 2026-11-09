@@ -490,6 +490,12 @@ fn trust_phrase(w: &W<'_>) -> Option<String> {
              adoption, and {ns} is not one: follow it on the Trusted prefixes screen, or let a \
              link carry it"
         ),
+        "transit-not-permitted" => format!(
+            "{} may not have this device carry another person's name for an app: only {}{} may",
+            user(w),
+            operators(w),
+            w.wrap("transit_groups", ", or a member of ", "")
+        ),
         "link-invalid" => format!(
             "the link cannot be read{}: check it and paste it again",
             w.paren("error")

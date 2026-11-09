@@ -281,10 +281,11 @@ impl ndn_mgmt::TrustAdminMgmtBackend for TrustAdmin {
 
     fn transit(
         &self,
+        face: Option<ndn_transport::FaceId>,
         namespace: ndn_packet::Name,
         carry: bool,
     ) -> Result<ndn_mgmt::TransitInfo, ndn_mgmt::TrustRefusal> {
-        self.transit.mark(namespace, carry)
+        self.transit.mark(face, namespace, carry)
     }
 
     fn signing_identity(&self) -> Option<ndn_mgmt::SigningIdentityInfo> {
