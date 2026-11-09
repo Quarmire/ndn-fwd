@@ -46,7 +46,9 @@ pub const CAPTURE_USAGE: &str = "usage: signal-capture <group> (a sync group `<n
                                  each)";
 
 /// The highest rate a stream may ask for: the sender's limit is 120
-/// packets per second per run.
+/// packets per second per run. The process's push budget (80 push
+/// Interests/s by default, one per packet per group of the scope) paces a
+/// stream into several groups further: it waits as told (`rate_limited`).
 const STREAM_HZ_MAX: f64 = 120.0;
 
 /// One device's signals, as this host drives them.
@@ -247,8 +249,9 @@ fn stream_options(scope: &str, count: &str, hz: &str) -> Result<(Name, u64, f64)
 }
 
 /// `count` signals for `address` at `hz` on `run`, each payload
-/// `n=<i> sent_us=<µs>`. A send over the sender's rate waits what it is
-/// told and is sent again; any other refusal ends the stream.
+/// `n=<i> sent_us=<µs>`. A send over the run's rate or the push budget
+/// waits what it is told and is sent again; any other refusal ends the
+/// stream.
 async fn stream(
     scope: &Name,
     run: &RunLock<SignalRun>,
