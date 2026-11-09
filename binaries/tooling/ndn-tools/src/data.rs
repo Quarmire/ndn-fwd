@@ -211,6 +211,33 @@
 //!   holds for its whole run, which owns the marks (the daemon releases
 //!   them when the host ends), and fetches its trust-context versions over
 //!   its own connection; the daemon needs a route to each such namespace.
+//! - `signal-subscribe <folder or collection>`: from now on, every signal
+//!   of the scope (live data that is never a version and never stored:
+//!   `ndn_surface::signal`) from every member as its own line — the newest
+//!   per (sender, address), never a backlog. Refused NotMember (ask the
+//!   owner) or NotReady (no record or, sealed, no epoch key held yet: ask
+//!   again). The device's signals start on the first signal verb, over a
+//!   connection to the daemon of their own, which registers this device's
+//!   namespace group `<ns>/32=sync` there (`rib/register`).
+//! - `signal-open <folder or collection>`: a run over the scope (a fresh
+//!   run key, its header signed by this device's key); `signal-send` and
+//!   `signal-stream` open one when none is open. `signal-close <scope>`
+//!   ends it.
+//! - `signal-send <scope> <address> <payload>`: one signal on the scope's
+//!   run (address at most 64 octets, payload at most 768): its sequence.
+//! - `signal-stream <scope> <address> <count> <hz>`: `count` signals at
+//!   `hz` per second (at most 120) on the scope's run, each payload
+//!   `n=<i> sent_us=<µs since the epoch>`, answered once all are sent
+//!   (while the next lines are read): the run, the first and last sequence,
+//!   how long it took.
+//! - `signal-stats`: the counters of this device's signals since they
+//!   started — sent packets and octets, delivered, and what was dropped,
+//!   by why.
+//! - `signal-capture <group>`: register `group` (`<ns>/32=sync`) on the
+//!   daemon over a connection of its own and print every signal Interest
+//!   it is given — what a relay's operator sees of the signals its daemon
+//!   forwards. Needs no device: started without `--device` (and `--pib`),
+//!   the tool answers this verb and `quit` only.
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -227,10 +254,20 @@
 //! "change":{…}}` (a withdrawn version says `why`,
 //! with `cut_of` and `cut_signer` when a cut withdrew it; a version not
 //! counted is `{"not_counted":{"id","why"}}`, one that counts later
-//! `{"counted":{"id"}}`).
+//! `{"counted":{"id"}}`); per received signal `{"signal":{"scope",
+//! "sender","run","seq","address","payload","expires_ms","local"}}`
+//! (address and payload as text, or `{"hex"}` when not UTF-8; with
+//! `"latency_us"`, by this host's clock, when the payload carries
+//! `sent_us=<µs>`, as a stream's does); per captured signal Interest
+//! `{"capture":<group>,"interest":{"name","octets","params_hex",
+//! "digest_ok","decodes_as"}}` (`SignalSealed` with its `key_id`, or
+//! `SignalBody` with the scope and run it shows, or `undecodable` with
+//! why); a signal refusal's error carries `retry_after_ms` when over the
+//! sender's rate. `--no-signal-ring` opens no local ring per run.
 //! Logs go to stderr.
 
 mod element;
+mod signal;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -265,6 +302,7 @@ use ndn_packet::Name;
 use ndn_security::{
     CertCache, FilePib, Keyring, RevocationCut, ScopedContext, SecurityManager, Validator,
 };
+use ndn_surface::signal::SignalOptions;
 use ndn_sync::{DataStore, MemoryStore};
 use ndn_trust_envelope::TrustEnvelope;
 
@@ -300,13 +338,15 @@ fn merge_rule(function: &str) -> Result<Arc<dyn MergeRule>> {
 struct Cli {
     /// The device: its key must be `<device>/KEY/<id>` in the PIB, with a
     /// currently valid certificate (e.g. `/alice/member/phone`, as `ndn-fwd
-    /// enroll` certified it).
+    /// enroll` certified it). Without it the tool hosts no device and
+    /// answers `signal-capture` and `quit` only (a relay's capture).
     #[arg(long)]
-    device: String,
+    device: Option<String>,
 
-    /// The daemon's PIB directory: the device's key and the trust contexts.
+    /// The daemon's PIB directory: the device's key and the trust contexts
+    /// (needed with `--device`).
     #[arg(long)]
-    pib: String,
+    pib: Option<String>,
 
     /// State Vector Sync's periodic interval in milliseconds (default: SVS's
     /// 30 s). Performance only: how soon devices that were apart notice.
@@ -331,6 +371,12 @@ struct Cli {
     #[arg(long = "merge-rule")]
     merge_rules: Vec<String>,
 
+    /// Open no local ring per signal run: this device's signals reach
+    /// subscribers on this host through the forwarder only, as they reach
+    /// other hosts.
+    #[arg(long)]
+    no_signal_ring: bool,
+
     #[arg(long, default_value_t = ndn_config::ManagementConfig::default().face_socket)]
     face_socket: String,
 }
@@ -342,20 +388,22 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
-    let device: Name = cli
-        .device
+    let Some(device) = &cli.device else {
+        return capture_host(&cli.face_socket).await;
+    };
+    let device: Name = device
         .parse()
-        .map_err(|e| anyhow!("--device {:?}: {e}", cli.device))?;
+        .map_err(|e| anyhow!("--device {device:?}: {e}"))?;
+    let pib_dir = cli.pib.as_deref().ok_or_else(|| {
+        anyhow!("--device {device} needs --pib: the daemon's PIB directory holding its key")
+    })?;
 
-    let pib = FilePib::open(&cli.pib).map_err(|e| anyhow!("open PIB {}: {e}", cli.pib))?;
+    let pib = FilePib::open(pib_dir).map_err(|e| anyhow!("open PIB {pib_dir}: {e}"))?;
     let keys = SecurityManager::from_pib(&pib, &device).map_err(|e| {
-        anyhow!(
-            "PIB {}: {e}; enroll this device as {device} first (`ndn-fwd enroll`)",
-            cli.pib
-        )
+        anyhow!("PIB {pib_dir}: {e}; enroll this device as {device} first (`ndn-fwd enroll`)")
     })?;
     ndn_cert::load_persisted_contexts(pib.root(), keys.keyring())
-        .map_err(|e| anyhow!("PIB {}: {e}", cli.pib))?;
+        .map_err(|e| anyhow!("PIB {pib_dir}: {e}"))?;
     let keys = Arc::new(keys);
     let keyring = Arc::clone(keys.keyring());
 
@@ -437,9 +485,17 @@ async fn main() -> Result<()> {
         "{}",
         json!({"ready": {"device": device.to_string(), "writer": layer.writer().key().to_string()}})
     );
+    let signals = signal::SignalHost::new(
+        layer.clone(),
+        cli.face_socket.clone(),
+        SignalOptions {
+            local_ring: !cli.no_signal_ring,
+            ..SignalOptions::default()
+        },
+    );
 
-    // Batched puts in flight: each prints its answer once its block is
-    // signed, while the next lines are read.
+    // Batched puts and signal streams in flight: each prints its answer
+    // once done, while the next lines are read.
     let mut later = JoinSet::new();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read stdin")? {
@@ -457,27 +513,79 @@ async fn main() -> Result<()> {
         if verb == "quit" {
             break;
         }
-        let answer = match run(&layer, &clock, verb, args).await {
-            Ok(Verb::Done(ok)) => json!({"verb": verb, "ok": ok}),
-            Ok(Verb::Later(answer)) => {
-                let verb = verb.clone();
-                later.spawn(async move {
-                    let line = match answer.await {
-                        Ok(ok) => json!({"verb": verb, "ok": ok}),
-                        Err(e) => json!({"verb": verb, "error": data_error(&e)}),
-                    };
-                    println!("{line}");
-                });
+        let outcome = if verb.starts_with("signal-") {
+            signals.run(verb, args).await.map_err(|e| signal::error(&e))
+        } else {
+            run(&layer, &clock, verb, args)
+                .await
+                .map_err(|e| data_error(&e))
+        };
+        if let Some(line) = answer_line(verb, outcome, &mut later) {
+            println!("{line}");
+        }
+    }
+    // Every batched put and stream still waiting answers before the layer
+    // stops.
+    while later.join_next().await.is_some() {}
+    signals.shutdown();
+    layer.shutdown();
+    Ok(())
+}
+
+/// The answer line of a verb's outcome (its error already an error
+/// object); `None` for a verb answered later, whose line `later` prints
+/// once it is done.
+fn answer_line(verb: &str, outcome: Result<Verb, Value>, later: &mut JoinSet<()>) -> Option<Value> {
+    match outcome {
+        Ok(Verb::Done(ok)) => Some(json!({"verb": verb, "ok": ok})),
+        Ok(Verb::Later(answer)) => {
+            let verb = verb.to_owned();
+            later.spawn(async move {
+                let line = match answer.await {
+                    Ok(ok) => json!({"verb": verb, "ok": ok}),
+                    Err(e) => json!({"verb": verb, "error": e}),
+                };
+                println!("{line}");
+            });
+            None
+        }
+        Ok(Verb::Usage(why)) => Some(usage_error(verb, &why)),
+        Err(e) => Some(json!({"verb": verb, "error": e})),
+    }
+}
+
+/// Without `--device`: no data layer and no key, only `signal-capture`
+/// (what a relay's operator sees of the signals its daemon forwards) and
+/// `quit`.
+async fn capture_host(face_socket: &str) -> Result<()> {
+    println!("{}", json!({"ready": {"device": null}}));
+    let mut later = JoinSet::new();
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    while let Some(line) = lines.next_line().await.context("read stdin")? {
+        let words = match split(&line) {
+            Ok(w) => w,
+            Err(e) => {
+                println!("{}", usage_error("", &e));
                 continue;
             }
-            Ok(Verb::Usage(why)) => usage_error(verb, &why),
-            Err(e) => json!({"verb": verb, "error": data_error(&e)}),
         };
-        println!("{answer}");
+        let Some((verb, args)) = words.split_first() else {
+            continue;
+        };
+        let outcome = match verb.as_str() {
+            "quit" => break,
+            "signal-capture" => signal::capture(face_socket, args)
+                .await
+                .map_err(|e| signal::error(&e)),
+            _ => Ok(Verb::Usage(format!(
+                "this ndn-data hosts no device (started without --device): it answers \
+                 signal-capture and quit; start it with --device and --pib for {verb}"
+            ))),
+        };
+        if let Some(line) = answer_line(verb, outcome, &mut later) {
+            println!("{line}");
+        }
     }
-    // Every batched put still waiting answers before the layer stops.
-    while later.join_next().await.is_some() {}
-    layer.shutdown();
     Ok(())
 }
 
@@ -1072,8 +1180,9 @@ impl DataStore for DirStore {
 /// What one verb line came to.
 enum Verb {
     Done(Value),
-    /// Answered later, while the next lines are read (a batched put).
-    Later(BoxFuture<'static, Result<Value, DataError>>),
+    /// Answered later, while the next lines are read (a batched put, a
+    /// signal stream): its `ok` object, or its error object.
+    Later(BoxFuture<'static, Result<Value, Value>>),
     /// The line is not a verb this tool knows, or its arguments are wrong.
     Usage(String),
 }
@@ -1154,7 +1263,9 @@ async fn run(
                 }))
             };
             if batch.is_some() {
-                Ok(Verb::Later(Box::pin(put)))
+                Ok(Verb::Later(Box::pin(async move {
+                    put.await.map_err(|e: DataError| data_error(&e))
+                })))
             } else {
                 put.await.map(Verb::Done)
             }
@@ -1502,7 +1613,9 @@ async fn run(
         ("join", _) => usage(JOIN_USAGE),
         _ => usage(
             "verbs: share, share_folder, members, put, put_op, put_group, get, range, watch, \
-             hold, prune, release, suspect, unsuspect, cut, refused, offer, close_offer, join, quit",
+             hold, prune, release, suspect, unsuspect, cut, refused, offer, close_offer, join, \
+             signal-subscribe, signal-open, signal-send, signal-stream, signal-close, \
+             signal-stats, signal-capture, quit",
         ),
     }
 }

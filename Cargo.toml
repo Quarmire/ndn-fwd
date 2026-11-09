@@ -77,6 +77,7 @@ ndn-face             = { path = "../ndn-rs/crates/faces/ndn-face" }
 ndn-face-serial      = { path = "../ndn-ext/crates/faces/ndn-face-serial" }
 ndn-face-websocket   = { path = "../ndn-ext/crates/faces/ndn-face-websocket" }
 ndn-face-shm         = { path = "../ndn-ext/crates/faces/ndn-face-shm" }
+ndn-surface          = { path = "../ndn-ext/crates/surface/ndn-surface", features = ["signals"] }
 ndn-face-bluetooth   = { path = "../ndn-ext/crates/faces/ndn-face-bluetooth" }
 ndn-face-afxdp       = { path = "../ndn-ext/crates/faces/ndn-face-afxdp" }
 ndn-face-webtransport = { path = "../ndn-ext/crates/faces/ndn-face-webtransport" }
