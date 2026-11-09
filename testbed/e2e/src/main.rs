@@ -51,7 +51,7 @@ SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
            recovery-compromised, negatives, approval, quic-links,
            direct-paths, phone-links, relays, on-demand, membership,
            multi-prefix, tui, dv, notes, shared, photos, sensor, stolen,
-           folder, invite, self-certifying
+           folder, invite, self-certifying, signals
 ";
 
 #[derive(Clone, Debug, Default)]

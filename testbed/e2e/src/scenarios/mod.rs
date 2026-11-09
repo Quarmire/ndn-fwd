@@ -32,6 +32,7 @@ mod relays;
 mod self_certifying;
 mod sensor;
 mod shared;
+mod signals;
 mod stolen;
 mod tui;
 
@@ -59,6 +60,7 @@ pub const ALL: &[&str] = &[
     "folder",
     "invite",
     "self-certifying",
+    "signals",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -86,6 +88,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "folder" => folder::run(sc),
         "invite" => invite::run(sc),
         "self-certifying" => self_certifying::run(sc),
+        "signals" => signals::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

@@ -36,16 +36,22 @@ pub fn name(s: &str) -> StepResult<ndn_packet::Name> {
 
 /// The host's label among a node's producers.
 const HOST: &str = "ndn-data";
+/// A capture's label among a node's producers (`ndn-data` with no device).
+const CAPTURE: &str = "ndn-data-capture";
 
 /// One device's `ndn-data` host: its stdin, its answers, the changes its
-/// watches delivered.
+/// watches delivered, the signals its subscriptions delivered and, for a
+/// capture, the signal Interests it was given.
 pub struct Host {
     pub node: String,
     pub device: String,
     pub writer: String,
+    label: &'static str,
     stdin: ChildStdin,
     lines: Receiver<String>,
     pub watched: Vec<Value>,
+    pub signals: Vec<Value>,
+    pub captured: Vec<Value>,
     log: PathBuf,
 }
 
@@ -65,25 +71,63 @@ impl Host {
         device: &str,
         options: &[String],
     ) -> StepResult<Host> {
-        let (sock, pib, log) = {
-            let nd = cx.w.node(node);
-            (nd.sock(), nd.pib(), nd.dir.join("ndn-data.log"))
-        };
-        let program = cx.w.bins.dir.join("ndn-data");
+        let pib = cx.w.node(node).pib();
         let mut args = vec![
             "--device".to_owned(),
             device.to_owned(),
             "--pib".to_owned(),
             pib.display().to_string(),
-            "--face-socket".to_owned(),
-            sock.display().to_string(),
             "--sync-interval-ms".to_owned(),
             SYNC_INTERVAL_MS.to_string(),
         ];
         args.extend_from_slice(options);
+        let mut host = Self::spawn(cx, node, HOST, args)?;
+        host.device = device.to_owned();
+        let ready = host.next(cx, "start", Duration::from_secs(20))?;
+        let ready = &ready["ready"];
+        if ready["device"] != device {
+            return Err(format!(
+                "{node}: ndn-data did not start as {device}: {ready}"
+            ));
+        }
+        host.writer = ready["writer"]
+            .as_str()
+            .ok_or_else(|| format!("{node}: no writer in {ready}"))?
+            .to_owned();
+        Ok(host)
+    }
+
+    /// `ndn-data` with no device on `node`'s daemon — what an operator runs
+    /// to see the signals the daemon forwards (`signal-capture <group>`);
+    /// ready once it says so. The node's producer, as a host is.
+    pub fn capture(cx: &mut Cx<'_>, node: &str) -> StepResult<Host> {
+        let mut host = Self::spawn(cx, node, CAPTURE, Vec::new())?;
+        let ready = host.next(cx, "start", Duration::from_secs(20))?;
+        if !ready["ready"]["device"].is_null() {
+            return Err(format!(
+                "{node}: ndn-data without --device did not start bare: {ready}"
+            ));
+        }
+        Ok(host)
+    }
+
+    /// Spawn `ndn-data` with `args` on `node`'s daemon socket, its stderr
+    /// appended to `<label>.log` in the node's directory (a host started
+    /// again on the node keeps the log of the run before it).
+    fn spawn(
+        cx: &mut Cx<'_>,
+        node: &str,
+        label: &'static str,
+        mut args: Vec<String>,
+    ) -> StepResult<Host> {
+        let (sock, log) = {
+            let nd = cx.w.node(node);
+            (nd.sock(), nd.dir.join(format!("{label}.log")))
+        };
+        let program = cx.w.bins.dir.join("ndn-data");
+        args.push("--face-socket".to_owned());
+        args.push(sock.display().to_string());
         cx.note(&format!("$ ndn-data {} &", args.join(" ")));
-        // Appended: a host started again on the node keeps the log of the
-        // run before it.
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -115,31 +159,38 @@ impl Host {
             node.to_owned(),
             Proc {
                 child,
-                label: HOST.into(),
+                label: label.into(),
                 log: log.clone(),
             },
         ));
-        let mut host = Host {
+        Ok(Host {
             node: node.to_owned(),
-            device: device.to_owned(),
+            device: String::new(),
             writer: String::new(),
+            label,
             stdin,
             lines,
             watched: Vec::new(),
+            signals: Vec::new(),
+            captured: Vec::new(),
             log,
-        };
-        let ready = host.next(cx, "start", Duration::from_secs(20))?;
-        let ready = &ready["ready"];
-        if ready["device"] != device {
-            return Err(format!(
-                "{node}: ndn-data did not start as {device}: {ready}"
-            ));
+        })
+    }
+
+    /// A line the host printed on its own — a watched change, a received
+    /// signal, a captured Interest — kept with its kind; `Some` with the
+    /// line when it is an answer to a verb.
+    fn keep(&mut self, v: Value) -> Option<Value> {
+        if v.get("watch").is_some() {
+            self.watched.push(v);
+        } else if v.get("signal").is_some() {
+            self.signals.push(v);
+        } else if v.get("capture").is_some() {
+            self.captured.push(v);
+        } else {
+            return Some(v);
         }
-        host.writer = ready["writer"]
-            .as_str()
-            .ok_or_else(|| format!("{node}: no writer in {ready}"))?
-            .to_owned();
-        Ok(host)
+        None
     }
 
     /// The next line within `within`, as JSON; `None` when none came.
@@ -174,9 +225,7 @@ impl Host {
                     self.tail()
                 ));
             };
-            if v.get("watch").is_some() {
-                self.watched.push(v);
-            } else {
+            if let Some(v) = self.keep(v) {
                 return Ok(v);
             }
         }
@@ -207,12 +256,43 @@ impl Host {
                     self.tail()
                 ));
             }
-            match self.line(cx, what, left)? {
-                Some(v) if v.get("watch").is_some() => self.watched.push(v),
-                Some(v) => return Err(format!("{}: an answer to no verb: {v}", self.node)),
-                None => {}
+            if let Some(v) = self.line(cx, what, left)?
+                && let Some(v) = self.keep(v)
+            {
+                return Err(format!("{}: an answer to no verb: {v}", self.node));
             }
         }
+    }
+
+    /// Take in what the host prints on its own (watched changes, signals,
+    /// captured Interests) until `done` holds of it, within `within`; how
+    /// long it took.
+    pub fn until(
+        &mut self,
+        cx: &mut Cx<'_>,
+        what: &str,
+        within: Duration,
+        done: impl Fn(&Host) -> bool,
+    ) -> StepResult<Duration> {
+        let started = Instant::now();
+        let deadline = started + within;
+        while !done(self) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(format!(
+                    "{}: {what}: not within {}s{}",
+                    self.node,
+                    within.as_secs(),
+                    self.tail()
+                ));
+            }
+            if let Some(v) = self.line(cx, what, left)?
+                && let Some(v) = self.keep(v)
+            {
+                return Err(format!("{}: an answer to no verb: {v}", self.node));
+            }
+        }
+        Ok(started.elapsed())
     }
 
     /// Send one verb line without waiting for its answer: a batched `put`
@@ -363,24 +443,25 @@ impl Host {
     pub fn stop(&mut self, cx: &mut Cx<'_>) {
         let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut cx.w.producers)
             .into_iter()
-            .partition(|(n, p)| *n == self.node && p.label == HOST);
+            .partition(|(n, p)| *n == self.node && p.label == self.label);
         cx.w.producers = rest;
         drop(mine);
-        cx.note(&format!("{}: ndn-data stopped", self.node));
+        cx.note(&format!("{}: {} stopped", self.node, self.label));
     }
 
-    /// Take in the watched changes the host printed until none came for
-    /// `quiet` (or for at most five times that while changes keep coming),
-    /// so [`watched`](Self::watched) holds what it delivered so far.
+    /// Take in what the host printed on its own (watched changes, signals,
+    /// captured Interests) until none came for `quiet` (or for at most five
+    /// times that while lines keep coming), so [`watched`](Self::watched),
+    /// [`signals`](Self::signals) and [`captured`](Self::captured) hold
+    /// what it delivered so far.
     pub fn drain(&mut self, cx: &mut Cx<'_>, quiet: Duration) -> StepResult<()> {
         let deadline = Instant::now() + quiet * 5;
         while Instant::now() < deadline
             && let Some(v) = self.line(cx, "drain", quiet)?
         {
-            if v.get("watch").is_none() {
+            if let Some(v) = self.keep(v) {
                 return Err(format!("{}: an answer to no verb: {v}", self.node));
             }
-            self.watched.push(v);
         }
         Ok(())
     }
@@ -408,8 +489,9 @@ impl Host {
         let lines: Vec<&str> = text.lines().collect();
         let from = lines.len().saturating_sub(30);
         format!(
-            "\n    ── tail of {} ndn-data log ──\n    | {}",
+            "\n    ── tail of {} {} log ──\n    | {}",
             self.node,
+            self.label,
             lines[from..].join("\n    | ")
         )
     }
@@ -577,6 +659,33 @@ impl Holder {
         stripes.sort();
         Ok(stripes)
     }
+}
+
+/// The entries of the `--store` directory `store`, each by its name with
+/// its file (each file: the name's TLV length, 4 octets big-endian, the
+/// name's TLV, the stored wire).
+pub fn stored(store: &Path) -> StepResult<Vec<(ndn_packet::Name, PathBuf)>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(store).map_err(|e| format!("{}: {e}", store.display()))? {
+        let path = entry
+            .map_err(|e| format!("{}: {e}", store.display()))?
+            .path();
+        if path.extension().is_none_or(|x| x != "entry") {
+            continue;
+        }
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let len = bytes
+            .get(..4)
+            .map(|l| u32::from_be_bytes([l[0], l[1], l[2], l[3]]) as usize)
+            .ok_or_else(|| format!("{} is no store entry", path.display()))?;
+        let tlv = bytes
+            .get(4..4 + len)
+            .ok_or_else(|| format!("{} is no store entry", path.display()))?;
+        let name = ndn_packet::Name::decode_from_tlv(bytes::Bytes::copy_from_slice(tlv))
+            .map_err(|e| format!("{}: {e:?}", path.display()))?;
+        found.push((name, path));
+    }
+    Ok(found)
 }
 
 /// The octets of the files under `path` (one file, or a directory's tree).

@@ -50,7 +50,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::data_host::{CONVERGE, Host, Put, delivered, erase_cs, includes, name, unanswered};
+use super::data_host::{
+    CONVERGE, Host, Put, delivered, erase_cs, includes, name, stored, unanswered,
+};
 use super::shared::{BOB, People, RELAY, content_at, people_through_relay};
 use crate::scenarios::*;
 use crate::step::{Abort, Scenario, StepResult};
@@ -127,33 +129,14 @@ fn tagged(w: &Value) -> bool {
 }
 
 /// The files of the `--store` directory `store` holding entries under the
-/// name `prefix` (each file: the name's TLV length, 4 octets big-endian,
-/// the name's TLV, the stored wire).
+/// name `prefix`.
 fn entries_under(store: &Path, prefix: &str) -> StepResult<Vec<PathBuf>> {
     let prefix = name(prefix)?;
-    let mut found = Vec::new();
-    for entry in fs::read_dir(store).map_err(|e| format!("{}: {e}", store.display()))? {
-        let path = entry
-            .map_err(|e| format!("{}: {e}", store.display()))?
-            .path();
-        if path.extension().is_none_or(|x| x != "entry") {
-            continue;
-        }
-        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let len = bytes
-            .get(..4)
-            .map(|l| u32::from_be_bytes([l[0], l[1], l[2], l[3]]) as usize)
-            .ok_or_else(|| format!("{} is no store entry", path.display()))?;
-        let tlv = bytes
-            .get(4..4 + len)
-            .ok_or_else(|| format!("{} is no store entry", path.display()))?;
-        let stored = ndn_packet::Name::decode_from_tlv(bytes::Bytes::copy_from_slice(tlv))
-            .map_err(|e| format!("{}: {e:?}", path.display()))?;
-        if stored.has_prefix(&prefix) {
-            found.push(path);
-        }
-    }
-    Ok(found)
+    Ok(stored(store)?
+        .into_iter()
+        .filter(|(stored, _)| stored.has_prefix(&prefix))
+        .map(|(_, path)| path)
+        .collect())
 }
 
 /// Move every file of `files` into `to`.
