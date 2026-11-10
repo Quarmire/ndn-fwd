@@ -3539,7 +3539,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "getrandom 0.2.17",
- "libc",
  "ndn-app",
  "ndn-cert",
  "ndn-discovery-core",
