@@ -59,8 +59,9 @@ The outer process starts `unshare --map-auto --map-root-user --net --pid
 user, network, mount and PID namespace (`--mount-proc` gives it its own
 `/proc`, so `/proc/<pid>/ns/net` names a namespace of a process it
 started). Inside, `lo` carries 10.200.0.1-10/24. Those are not
-loopback addresses (faces to 127.0.0.1 are local and skip validation), so
-every link between daemons is a non-local UDP face and every Data is
+loopback addresses, so every face is non-local in scope as on a network (faces to
+127.0.0.1 are local in scope but are validated too: a face is trusted for how
+it was opened, never for its address); every link between daemons is a UDP face and every Data is
 validated. Daemons and producers are stopped after each scenario; when the
 inner process exits for any reason (including a panic or a kill), the kernel
 kills every process left in the PID namespace. Ctrl-C kills `unshare`, which
