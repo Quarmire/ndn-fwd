@@ -87,10 +87,14 @@ nftables table in the harness's namespace dropping UDP between their public
 addresses. The rulesets and every command run, with its output, are in
 `<run dir>/direct-paths/nat/` (`--keep`).
 
-Inside the user namespace the daemons run as uid 0 (your uid, mapped). The
-"another local user" steps run the CLI as uid 1 through `setpriv --reuid=1
---regid=1 --clear-groups`; the daemon's peer-credential check sees a uid
-that is neither its own, root, nor in `trust_admin_groups`.
+Inside the user namespace the daemons run as uid 0 (your uid, mapped), so
+the faces the daemons and tools open to each other over the Unix socket are
+program faces (the daemon's user). The "another local user" steps run the CLI
+as uid 1 through `setpriv --reuid=1 --regid=1 --clear-groups`; the daemon's
+peer-credential check sees a uid that is neither its own, root, nor in
+`trust_admin_groups` (operators) or `program_groups` (program peers), so
+those steps' commands are signature-checked and the faces they open are
+validated, not trusted.
 
 Each step prints PASS/FAIL with its duration, followed by its `evidence:`
 lines where it records what it observed (addresses, counters, path states;

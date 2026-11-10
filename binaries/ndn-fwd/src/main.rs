@@ -580,14 +580,16 @@ fn load_adopted_contexts(cfg: &ForwarderConfig, mgr: &ndn_security::SecurityMana
 
 /// Say at startup, in one line, how Data from validated faces (every face
 /// but a program face: TCP, UDP, WebTransport, QUIC and the like, loopback
-/// included) is validated: the mapping is `boot::configure_data_path`'s.
+/// included, and the Unix socket of any user who is not the daemon's, root or
+/// in `[security] program_groups`) is validated: the mapping is
+/// `boot::configure_data_path`'s.
 fn log_data_validation(sec: &ndn_config::SecurityConfig, ephemeral: bool) {
     if !sec.validator_enabled || sec.profile == "disabled" {
         if sec.profile.is_empty() {
             // `SecurityConfig::default()`: the config has no [security] table.
             tracing::warn!(
                 target: "security",
-                "no [security] table: Data from network faces (loopback ones included) is forwarded and cached \
+                "no [security] table: Data from network faces (loopback ones included) and from other users' sockets is forwarded and cached \
                  WITHOUT validation (profile \"disabled\"). Add a [security] table to \
                  validate: profile = \"default\" (chain to this node's trust anchors) or \
                  \"accept-signed\" (signature only)."
@@ -595,14 +597,14 @@ fn log_data_validation(sec: &ndn_config::SecurityConfig, ephemeral: bool) {
         } else {
             tracing::warn!(
                 target: "security",
-                "[security] disables validation: Data from network faces (loopback ones included) is forwarded and \
+                "[security] disables validation: Data from network faces (loopback ones included) and from other users' sockets is forwarded and \
                  cached WITHOUT validation."
             );
         }
     } else if sec.profile == "accept-signed" {
         tracing::info!(
             target: "security",
-            "[security] profile = \"accept-signed\": Data from network faces (loopback ones included) must carry a \
+            "[security] profile = \"accept-signed\": Data from network faces (loopback ones included) and from other users' sockets must carry a \
              signature that verifies against its signer's certificate; no trust anchor is \
              required."
         );
@@ -611,13 +613,13 @@ fn log_data_validation(sec: &ndn_config::SecurityConfig, ephemeral: bool) {
             target: "security",
             "[security] profile = \"default\" with an ephemeral identity: the only trust \
              anchors are this node's own key and adopted trust contexts, so key-signed Data \
-             from network faces (loopback ones included) that chains to neither is REFUSED (untrusted-root). Configure \
+             from network faces (loopback ones included) and from other users' sockets that chains to neither is REFUSED (untrusted-root). Configure \
              an identity whose PIB holds trust anchors, or `ndn-fwd adopt <anchor link>`."
         );
     } else {
         tracing::info!(
             target: "security",
-            "[security] profile = \"default\": Data from network faces (loopback ones included) must chain to a trust \
+            "[security] profile = \"default\": Data from network faces (loopback ones included) and from other users' sockets must chain to a trust \
              anchor of this node (its PIB's anchors, trust_anchor, adopted trust contexts)."
         );
     }
@@ -763,6 +765,16 @@ async fn main() -> Result<()> {
         );
     }
     log_data_validation(&fwd_config.security, security_is_ephemeral);
+    if !fwd_config.security.program_groups.is_empty() {
+        tracing::warn!(
+            target: "security",
+            groups = ?fwd_config.security.program_groups,
+            "[security] program_groups: members of these groups skip Data validation on their \
+             sockets to the face socket — whatever their programs send is believed and may be \
+             cached and served to everyone. Keep the list to groups you trust as you trust \
+             the daemon's own user."
+        );
+    }
 
     // Parse [coding] and [rate-limit] from the same raw TOML.
     #[cfg(feature = "fec")]
@@ -1572,8 +1584,15 @@ async fn main() -> Result<()> {
 
     let listener_engine = engine.clone();
     let listener_cancel = cancel.clone();
+    let program_groups = fwd_config.security.program_groups.clone();
     let ndn_listener_task = tokio::spawn(async move {
-        mgmt_ndn::run_face_listener(&face_socket, listener_engine, listener_cancel).await;
+        mgmt_ndn::run_face_listener(
+            &face_socket,
+            ndn_face::local::ProgramPeers::new(&program_groups),
+            listener_engine,
+            listener_cancel,
+        )
+        .await;
     });
 
     wait_for_shutdown_signal().await?;

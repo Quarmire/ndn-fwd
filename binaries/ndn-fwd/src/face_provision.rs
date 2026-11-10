@@ -107,6 +107,31 @@ fn parse_ble_query(query: &str, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Add `face`, a face provisioned *for* the requester of `req`, with no more
+/// trust than the requester has: a shared-memory face is a program face by
+/// its transport, but a validated requester (a TCP or other-user socket
+/// client) must not be able to ask for one and so have its Data believed. An
+/// internally generated command has no requester face and adds the face as it
+/// is.
+#[cfg(feature = "spsc-shm")]
+fn add_for_requester<F: ndn_transport::Transport + 'static>(
+    req: &ProvisionRequest<'_>,
+    face: F,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    match req.source_face {
+        Some(from) => {
+            req.engine.add_face_inheriting(
+                face,
+                cancel,
+                ndn_transport::FacePersistency::OnDemand,
+                from,
+            );
+        }
+        None => req.engine.add_face(face, cancel),
+    }
+}
+
 /// `shm://<name>` — a zero-copy shared-memory ring face (the app<->engine IPC
 /// seam). SHM moved to the `ndn-face-shm` extension crate, so the forwarder
 /// dials it through a provisioner rather than ndn-mgmt constructing it.
@@ -176,7 +201,7 @@ impl FaceProvisioner for ShmProvisioner {
                 let _ = std::fs::remove_file(&cleanup_path);
             });
 
-            req.engine.add_face(face, cancel);
+            add_for_requester(&req, face, cancel);
             return Ok(ProvisionedFace {
                 face_id,
                 remote_uri: format!("shm://{shm_name}"),
@@ -192,7 +217,7 @@ impl FaceProvisioner for ShmProvisioner {
         };
         match face_result {
             Ok(face) => {
-                req.engine.add_face(face, cancel);
+                add_for_requester(&req, face, cancel);
                 Ok(ProvisionedFace {
                     face_id,
                     remote_uri: format!("shm://{shm_name}"),
@@ -295,5 +320,89 @@ impl FaceProvisioner for WebTransportProvisioner {
                 "WebTransport face creation failed: {e}"
             ))),
         }
+    }
+}
+
+#[cfg(all(test, feature = "spsc-shm"))]
+mod tests {
+    use super::*;
+    use ndn_engine::{EngineBuilder, EngineConfig};
+    use ndn_face::local::InProcFace;
+    use ndn_transport::{FaceId, FaceTrust};
+
+    const PROGRAM_REQUESTER: u64 = 1;
+    const TCP_REQUESTER: u64 = 2;
+
+    /// Provision a capability `shm://` face for the command arriving on
+    /// `source`, and return the trust of the face the forwarder created.
+    async fn trust_of_shm_face_for(
+        engine: &ndn_engine::ForwarderEngine,
+        source: Option<FaceId>,
+    ) -> FaceTrust {
+        let token = ndn_face_shm::mint_token().expect("mint token");
+        let params = ndn_mgmt_wire::ControlParameters {
+            shm_control_token: Some(bytes::Bytes::copy_from_slice(&token)),
+            ..Default::default()
+        };
+        let provisioned = ShmProvisioner
+            .provision(ProvisionRequest {
+                uri: "shm://trust-test",
+                params: &params,
+                source_face: source,
+                engine,
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the shm face is provisioned"));
+        let trust = engine
+            .faces()
+            .get(provisioned.face_id)
+            .expect("the provisioned face is in the face table")
+            .trust();
+        engine.remove_face(provisioned.face_id);
+        let _ = std::fs::remove_file(ndn_face_shm::control_socket_path(&token));
+        trust
+    }
+
+    /// A shared-memory face is a program face by its transport, but one the
+    /// forwarder opens for a validated requester (a loopback TCP client) must
+    /// not be: that client would otherwise launder forged Data through it.
+    /// A face for a program requester, or for an internal command, stays a
+    /// program face.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shm_face_has_no_more_trust_than_its_requester() {
+        let (program_face, _program_handle) = InProcFace::new(FaceId(PROGRAM_REQUESTER), 16);
+        let (engine, shutdown) = EngineBuilder::new(EngineConfig::default())
+            .face(program_face)
+            .build()
+            .await
+            .expect("engine build");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+        let (stream, _) = accepted.unwrap();
+        let _tcp_peer = client.unwrap();
+        engine.add_face(
+            ndn_face::tcp_face_from_stream(FaceId(TCP_REQUESTER), stream),
+            tokio_util::sync::CancellationToken::new(),
+        );
+
+        assert_eq!(
+            trust_of_shm_face_for(&engine, Some(FaceId(TCP_REQUESTER))).await,
+            FaceTrust::Validated,
+            "a shm face opened for a loopback TCP client is a program face"
+        );
+        assert_eq!(
+            trust_of_shm_face_for(&engine, Some(FaceId(PROGRAM_REQUESTER))).await,
+            FaceTrust::Program,
+            "a shm face opened for a program requester lost its trust"
+        );
+        assert_eq!(
+            trust_of_shm_face_for(&engine, None).await,
+            FaceTrust::Program,
+            "a shm face opened by an internal command lost its trust"
+        );
+        shutdown.shutdown().await;
     }
 }
