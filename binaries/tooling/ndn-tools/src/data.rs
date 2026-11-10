@@ -119,7 +119,9 @@
 //!   (`<collection>/32=range/<range>`) selects. A field value longer than
 //!   256 octets is shown as its length and SHA-256, not its bytes. A state
 //!   lists the versions held here that are not in its value
-//!   (`not_counted`, each with why: the rule's, or its group incomplete).
+//!   (`not_counted`, each `{"id","why","kind"}`: `kind` is `"waits"` for the
+//!   layer's own wait, such as a group incomplete, which ends by the version
+//!   counting, and `"excluded"` for a rule's own exclusion).
 //!   Every version shown carries its packet's implicit digest (`digest`,
 //!   hex) and, of a merge version whose operation is open here, the
 //!   operation's octets (`op`, hex).
@@ -253,7 +255,7 @@
 //! `{"watch":<collection or folder>,"collection":<the change's collection>,
 //! "change":{…}}` (a withdrawn version says `why`,
 //! with `cut_of` and `cut_signer` when a cut withdrew it; a version not
-//! counted is `{"not_counted":{"id","why"}}`, one that counts later
+//! counted is `{"not_counted":{"id","why","kind"}}` (`kind` as in `get`), one that counts later
 //! `{"counted":{"id"}}`); per received signal `{"signal":{"scope",
 //! "sender","run","seq","address","payload","expires_ms","local"}}`
 //! (address and payload as text, or `{"hex"}` when not UTF-8; with
@@ -261,7 +263,9 @@
 //! `sent_us=<µs>`, as a stream's does); per captured signal Interest
 //! `{"capture":<group>,"interest":{"name","octets","params_hex",
 //! "digest_ok","decodes_as"}}` (`SignalSealed` with its `key_id`, or
-//! `SignalBody` with the scope and run it shows, or `undecodable` with
+//! `SignalBody` with the `scope_digest` (16 octets, hex, of the scope's name:
+//! the name itself rides only in a run header) and run it shows, or
+//! `undecodable` with
 //! why); a signal refusal's error carries `retry_after_ms` when over the
 //! sender's rate. `--no-signal-ring` opens no local ring per run.
 //! Logs go to stderr.
@@ -292,9 +296,9 @@ use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
     CutBound, DataError, DataLayer, Device, Entries, Equivocal, Frontier, Got, Hold, IntroRefusal,
-    Introducer, Keep, Lease, MergeRule, NextStep, Offer, Payload, Prune, PutOptions, Refusal, Role,
-    Rule, Seq, Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId, Version,
-    VersionId, Writer, Yrs,
+    Introducer, Keep, Lease, MergeRule, NextStep, NotCounted, Offer, Payload, Prune, PutOptions,
+    Refusal, Role, Rule, Seq, Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId,
+    Version, VersionId, Writer, Yrs,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -2467,6 +2471,15 @@ fn id(id: &VersionId) -> Value {
     json!({"writer": id.writer.key().to_string(), "seq": id.seq.0})
 }
 
+/// A version's reason not to be counted, with its kind.
+fn not_counted(i: &VersionId, why: &NotCounted) -> Value {
+    let kind = match why {
+        NotCounted::Waits(_) => "waits",
+        NotCounted::Excluded(_) => "excluded",
+    };
+    json!({"id": id(i), "why": why.to_string(), "kind": kind})
+}
+
 fn ids(ids: &[VersionId]) -> Value {
     Value::Array(ids.iter().map(id).collect())
 }
@@ -2500,7 +2513,7 @@ fn state(s: &State) -> Value {
         "collection": s.collection.to_string(),
         "at": frontier(&s.at),
         "value": merged(&s.value),
-        "not_counted": s.not_counted.iter().map(|(i, why)| json!({"id": id(i), "why": why})).collect::<Vec<_>>(),
+        "not_counted": s.not_counted.iter().map(|(i, why)| not_counted(i, why)).collect::<Vec<_>>(),
     })
 }
 
@@ -2691,7 +2704,7 @@ fn change(c: &Change) -> Value {
             json!({"expired": {"id": id(i), "keep": keep(k)}})
         }
         Change::NotCounted { id: i, why, .. } => {
-            json!({"not_counted": {"id": id(i), "why": why}})
+            json!({"not_counted": not_counted(i, why)})
         }
         Change::Counted { id: i, .. } => json!({"counted": {"id": id(i)}}),
         Change::Remerged { bases, .. } => json!({"remerged": {
