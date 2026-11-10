@@ -182,7 +182,7 @@
 //! - `offer <folder> role=reader|writer until=<when> tries=<n>` (`<when>`
 //!   as for `suspect`): a one-use offer of a folder of this device's
 //!   namespace to someone who holds no trust context of it, expiring at
-//!   `<when>` by this device's clock, closed for good to an asker by its
+//!   `<when>` by this device's clock, closed to an asker by its
 //!   `<n>`-th wrong try (and to everyone at the device's overall cap). The
 //!   answer carries the code: `link` (`ndn-trust://intro/…`, one
 //!   QR; it names the relays this namespace advertises, so the joiner's
@@ -192,9 +192,10 @@
 //!   joiner's namespace through its daemon and adds it to the folder's
 //!   members with the role.
 //! - `close_offer <offer>`: close an offer this device made (its name, as
-//!   `offer` printed it), for good, durably: every ask of it is refused as
-//!   closed from then on, its user's too. Removing an introduced member
-//!   from the folder closes the offers it used already.
+//!   `offer` printed it), durably: the offer admits no one new from then on
+//!   (every other key's ask is refused as closed) and still answers the key
+//!   it admitted until the offer expires. Removing an introduced member
+//!   from the folder closes the offers it used the same way.
 //! - `join <code>`: join the folder a code offers (its link, or its words
 //!   in double quotes): the answer names the folder, the role and the
 //!   inviter's namespace, which this device's daemon now holds (adopted
@@ -1849,7 +1850,8 @@ const JOIN_USAGE: &str = "usage: join <code> (the code an offer printed: its lin
                           ndn-trust://intro/…, or its words in double quotes)";
 
 const CLOSE_OFFER_USAGE: &str = "usage: close_offer <offer> (the offer's name an offer printed, \
-                                 made by this device: closed for good)";
+                                 made by this device: it admits no one new, and still answers \
+                                 the one it admitted until it expires)";
 
 /// An `offer` line's options after the folder: `role=`, `until=` and
 /// `tries=`, each exactly once.

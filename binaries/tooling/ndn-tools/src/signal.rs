@@ -365,7 +365,7 @@ fn captured(interest: &Interest) -> Value {
         }
         Ok(Packet::Body(b)) => {
             v["decodes_as"] = json!("SignalBody");
-            v["scope"] = json!(b.scope.to_string());
+            v["scope_digest"] = json!(b.digest.to_string());
             v["run"] = json!(run_id(b.run));
             v["header"] = json!(b.header.is_some());
             v["signals"] = json!(b.signals.len());
