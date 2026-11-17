@@ -2440,6 +2440,7 @@ fn next_token(n: NextStep) -> &'static str {
         NextStep::HoldFirst => "hold-first",
         NextStep::FixRequest => "fix-request",
         NextStep::UpdateProgram => "update-program",
+        NextStep::SetPolicy => "set-policy",
     }
 }
 
@@ -2466,7 +2467,53 @@ fn next_step(n: NextStep) -> &'static str {
             "run a program that knows the collection's merge rule: this one holds its versions \
              but reads them under no other rule"
         }
+        NextStep::SetPolicy => {
+            "change the answer policy, or ask whoever sets it: name the signer as a provider of \
+             the function, or trust it for pure answers"
+        }
     }
+}
+
+/// A named answer (`get` of a question or an exact answer name): what it
+/// binds, how many reads it names, its result's size and digest, and how this
+/// device came by it. The result's octets belong to the evaluator's program.
+fn answered(a: &ndn_data::Answered) -> Value {
+    let how = match &a.how {
+        ndn_data::Provenance::Recomputed {
+            confirmed_by,
+            disagreed_with,
+        } => json!({
+            "recomputed": {
+                "confirmed_by": confirmed_by.iter().map(|w| w.key().to_string()).collect::<Vec<_>>(),
+                "disagreed_with": disagreed_with.iter().map(|w| w.key().to_string()).collect::<Vec<_>>(),
+            }
+        }),
+        ndn_data::Provenance::Trusted {
+            signer,
+            unverified_reads,
+        } => json!({"trusted": {
+            "signer": signer.key().to_string(),
+            "unverified_reads": unverified_reads,
+        }}),
+        ndn_data::Provenance::Provider {
+            signer,
+            unverified_reads,
+        } => json!({"provider": {
+            "signer": signer.key().to_string(),
+            "unverified_reads": unverified_reads,
+        }}),
+    };
+    json!({
+        "name": a.name.to_string(),
+        "id": hex(a.id.as_bytes()),
+        "kind": match a.kind {
+            ndn_data::AnswerKind::Pure => "pure",
+            ndn_data::AnswerKind::Provider => "provider",
+        },
+        "reads": a.reads.reads().len(),
+        "result": {"len": a.result.len(), "sha256": hex(&Sha256::digest(&a.result))},
+        "how": how,
+    })
 }
 
 fn id(id: &VersionId) -> Value {
@@ -2497,6 +2544,7 @@ fn answer(a: Answer) -> Value {
             "pins": s.pins.iter().map(ToString::to_string).collect::<Vec<_>>(),
         }}),
         Got::Entries(e) => json!({"entries": entries(&e)}),
+        Got::Answer(a) => json!({"answer": answered(&a)}),
     };
     ok["age"] = match a.age {
         Age::Exact => json!("exact"),
