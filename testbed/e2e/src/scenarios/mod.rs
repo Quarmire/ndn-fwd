@@ -11,12 +11,14 @@ use crate::run::Op;
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{addr, now_unix, parse_utc};
 
+mod answers;
 mod approval;
 mod compromised;
 mod data_host;
 mod destroyed;
 mod direct_paths;
 mod dv;
+mod events;
 mod folder;
 mod invite;
 mod lifecycle;
@@ -34,6 +36,7 @@ mod sensor;
 mod shared;
 mod signals;
 mod stolen;
+mod trio;
 mod tui;
 
 pub const ALL: &[&str] = &[
@@ -61,6 +64,8 @@ pub const ALL: &[&str] = &[
     "invite",
     "self-certifying",
     "signals",
+    "events",
+    "answers",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -89,6 +94,8 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "invite" => invite::run(sc),
         "self-certifying" => self_certifying::run(sc),
         "signals" => signals::run(sc),
+        "events" => events::run(sc),
+        "answers" => answers::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }
