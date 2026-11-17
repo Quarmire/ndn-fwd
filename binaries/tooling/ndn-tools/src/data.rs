@@ -3012,6 +3012,7 @@ fn answer_refusal(why: &AnswerRefusal) -> &'static str {
         AnswerRefusal::Equivocal => "equivocal",
         AnswerRefusal::TooLarge { .. } => "too-large",
         AnswerRefusal::OverBudget { .. } => "over-budget",
+        AnswerRefusal::TooManyStates { .. } => "too-many-states",
         AnswerRefusal::Busy => "busy",
         AnswerRefusal::AlreadySigned => "already-signed",
     }
