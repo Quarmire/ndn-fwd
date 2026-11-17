@@ -38,6 +38,19 @@
 //! record names a rule the device does not know is held unreadable: `get`
 //! and the puts answer `RuleUnknown` (next: update the program).
 //!
+//! `--evaluator <function>` (repeatable) makes the device know a pure
+//! evaluator of answers, by its full name; this program ships one,
+//! `/ndn-tools/eval/words/v=1` (`words.rs`: the number of words of the notes
+//! of a definition and of the newest version of each collection it names). A
+//! device that knows no evaluator cannot compute an answer, and takes one
+//! only from a signer its policy trusts (`CannotCheck`, next: update the
+//! program, when none is). `--answer-signers none|own|own-and-members|
+//! <device>[,<device>...]` sets whom the device trusts for pure answers it
+//! does not recompute (default: own-and-members, the library's); `--provider
+//! <function> <device>` (repeatable) names a device the device takes the
+//! answers of a provider function from (default: none, so such an answer is
+//! refused with `NotProvider`, next: change the policy).
+//!
 //! Two connections to the forwarder: a `Node` (fetching, and serving the
 //! device's prefix) and a second one for State Vector Sync. A forwarder
 //! client's one reader splits its management replies off its data, so a
@@ -241,6 +254,46 @@
 //!   it is given — what a relay's operator sees of the signals its daemon
 //!   forwards. Needs no device: started without `--device` (and `--pib`),
 //!   the tool answers this verb and `quit` only.
+//! - `events [<cursor>]`: the device-wide events this device has not had
+//!   acknowledged (data-layer spec §21: equivocation, a withdrawal, a cut, a
+//!   revocation, answer evidence), those with a cursor above `<cursor>`
+//!   (default: all), whether or not anything watches. Each carries its `id`
+//!   (32 hex digits, stable across restarts), `cursor`, `kind`, `subject`,
+//!   the `evidence` names it was derived from (`detail` has their digests
+//!   and the rest), `meaning` (what this device did already), `next` and
+//!   `next_step` (the class of step), `what_to_do` and `why` (in words) and
+//!   `count` (occurrences coalesced into it). `cursor`, in the answer, is
+//!   the highest one shown. At least once: an event stays until
+//!   acknowledged, a restart included.
+//! - `ack <id>...`: acknowledge events handled (their ids as `events` shows
+//!   them): the answer comes once no restart redelivers them. An id already
+//!   acknowledged is accepted again; an id this device never had refuses the
+//!   whole line, saying to take ids from `events`.
+//! - `answer-put [by=<evaluator>] <definition> [<input>...]`: compute the
+//!   answer to the question over `<definition>` (a log or one-key
+//!   collection: its newest version this device holds is the definition) and
+//!   sign, store and serve it as `<this device>/32=answer/<id>`; the
+//!   evaluator is `by=` or `/ndn-tools/eval/words/v=1`. With inputs
+//!   (collections), the question states its reads — the definition and the
+//!   newest version of each input — and is the same question whether this
+//!   device knows the evaluator or not; without, the evaluator plans them.
+//!   The answer carries the name and its `id` (hex).
+//! - `answer-get [by=<evaluator>] <definition> [<input>...]`: `get` of the
+//!   same question: `{"answer": {"name","id","kind","by","reads","result":
+//!   {"len","sha256","text"},"how"}}`, where `how` says whether this device
+//!   recomputed it (`recomputed`, with the signers whose answers it held and
+//!   found equal or different) or took a trusted signer's (`trusted`,
+//!   `provider`); `text` shows a short UTF-8 result. A question about a
+//!   collection this device cannot read is refused as `get` of that
+//!   collection is. A question that names an answer by its exact name is `get
+//!   <device>/32=answer/<id>`.
+//! - `provide <function> <result> [<input>...]`: sign `<result>` (text) as
+//!   this device's answer of the provider function `<function>` over the
+//!   newest version of each input collection it holds; the answer carries
+//!   the name and `id`.
+//! - `provider-get <device> <function> [<input>...]`: `get` of the provider
+//!   question to `<device>` about `<function>` over the same inputs, shown
+//!   as `answer-get` shows an answer.
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -273,6 +326,7 @@
 
 mod element;
 mod signal;
+mod words;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -293,13 +347,15 @@ use tokio::task::JoinSet;
 use ndn_app::{Connection, Consumer, IpcConnection, Node, demux_cert_fetcher};
 use ndn_cert::CutFile;
 use ndn_cert::report::TrustEvent;
-use ndn_data::wire::{Range, log_name, range_name};
+use ndn_data::wire::{Range, log_name, parse_answer_name, range_name};
 use ndn_data::{
-    Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
-    CutBound, DataError, DataLayer, Device, Entries, Equivocal, Frontier, Got, Hold, IntroRefusal,
-    Introducer, Keep, Lease, MergeRule, NextStep, NotCounted, Offer, Payload, Prune, PutOptions,
-    Refusal, Role, Rule, Seq, Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId,
-    Version, VersionId, Writer, Yrs,
+    Age, Answer, AnswerAsk, AnswerFault, AnswerRefusal, Audience, Audit, BlockEntry, Breach,
+    Change, Clock, Config, Content, Custody, CutBound, DataError, DataLayer, Device, DeviceEvent,
+    Entries, EntryRef, Equivocal, Evaluator, Evaluators, EventDetail, EventId, EventSubject,
+    Frontier, Got, Hold, IntroRefusal, Introducer, Keep, Lease, Meaning, MergeRule, NextStep,
+    NotCounted, Offer, Payload, Prune, PutOptions, ReadRef, ReadSet, ReadSetFault, Refusal, Role,
+    Rule, Seq, Share, ShareChange, Sharing, Signers, State, Timestamp, Transport, TypeId, Version,
+    VersionId, WithdrawnBy, Writer, Yrs,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -333,6 +389,55 @@ fn merge_rule(function: &str) -> Result<Arc<dyn MergeRule>> {
                 element::FUNCTION
             )
         })
+}
+
+/// The evaluator `--evaluator <function>` names, among those this program
+/// ships.
+fn evaluator(function: &str) -> Result<Arc<dyn Evaluator>> {
+    let name: Name = function
+        .parse()
+        .map_err(|e| anyhow!("--evaluator {function:?} is no name: {e}"))?;
+    let evaluators: [Arc<dyn Evaluator>; 1] = [Arc::new(words::Words::new())];
+    evaluators
+        .into_iter()
+        .find(|e| *e.evaluator() == name)
+        .ok_or_else(|| {
+            anyhow!(
+                "--evaluator {name}: this program knows the evaluator {}; name it, or run a \
+                 program that knows {name}",
+                words::FUNCTION
+            )
+        })
+}
+
+/// Whom `--answer-signers` trusts for pure answers.
+fn answer_signers(words: &str) -> Result<Signers> {
+    Ok(match words {
+        "none" => Signers::None,
+        "own" => Signers::Own,
+        "own-and-members" => Signers::OwnAndMembers,
+        devices => Signers::Devices(
+            devices
+                .split(',')
+                .map(|d| {
+                    d.parse::<Name>()
+                        .map_err(|e| anyhow!("--answer-signers {d:?} is no device name: {e}"))
+                })
+                .collect::<Result<_>>()?,
+        ),
+    })
+}
+
+/// A `--provider <function> <device>` pair.
+fn provider(pair: &[String]) -> Result<(Name, Signers)> {
+    let [function, device] = pair else {
+        return Err(anyhow!("--provider takes a function and a device"));
+    };
+    let name = |s: &str| {
+        s.parse::<Name>()
+            .map_err(|e| anyhow!("--provider {function} {device}: {s:?} is no name: {e}"))
+    };
+    Ok((name(function)?, Signers::Devices(vec![name(device)?])))
 }
 
 #[derive(Parser)]
@@ -375,6 +480,23 @@ struct Cli {
     /// `/merge/yrs`: `/ndn-tools/merge/element/v=1` (see `put_op`).
     #[arg(long = "merge-rule")]
     merge_rules: Vec<String>,
+
+    /// Also know this pure evaluator, by its full name (repeatable). The
+    /// evaluators this program ships: `/ndn-tools/eval/words/v=1` (see
+    /// `answer-put`).
+    #[arg(long = "evaluator")]
+    evaluators: Vec<String>,
+
+    /// Whom to trust for the pure answers this device does not recompute:
+    /// `none`, `own`, `own-and-members` (default), or device names, comma
+    /// separated.
+    #[arg(long)]
+    answer_signers: Option<String>,
+
+    /// Take the answers of provider function `<function>` from device
+    /// `<device>` (repeatable). Default: no provider.
+    #[arg(long = "provider", num_args = 2, value_names = ["FUNCTION", "DEVICE"])]
+    providers: Vec<String>,
 
     /// Open no local ring per signal run: this device's signals reach
     /// subscribers on this host through the forwarder only, as they reach
@@ -441,6 +563,18 @@ async fn main() -> Result<()> {
     config.rules = cli.merge_rules.iter().try_fold(config.rules, |rules, r| {
         Ok::<_, anyhow::Error>(rules.with(merge_rule(r)?))
     })?;
+    config.evaluators = cli
+        .evaluators
+        .iter()
+        .try_fold(Evaluators::none(), |evaluators, e| {
+            Ok::<_, anyhow::Error>(evaluators.with(evaluator(e)?))
+        })?;
+    if let Some(signers) = &cli.answer_signers {
+        config.answers.policy.pure = answer_signers(signers)?;
+    }
+    for pair in cli.providers.chunks(2) {
+        config.answers.policy.providers.push(provider(pair)?);
+    }
     // Introductions (`offer`, `join`): the anchor this device shows is its
     // namespace's context as the daemon stored it; another person's is
     // adopted through the daemon, as `ndn-ctl adopt` does. A writer's
@@ -1616,11 +1750,90 @@ async fn run(
             })))
         }
         ("join", _) => usage(JOIN_USAGE),
+        ("events", rest) if rest.len() <= 1 => {
+            let after = match rest.first().map(|c| c.parse::<u64>()) {
+                None => 0,
+                Some(Ok(c)) => c,
+                Some(Err(_)) => return usage(EVENTS_USAGE),
+            };
+            let shown: Vec<_> = layer
+                .pending_events()
+                .into_iter()
+                .filter(|e| e.cursor.0 > after)
+                .collect();
+            let cursor = shown.last().map_or(after, |e| e.cursor.0);
+            Ok(Verb::Done(json!({
+                "events": shown.iter().map(event).collect::<Vec<_>>(),
+                "cursor": cursor,
+            })))
+        }
+        ("events", _) => usage(EVENTS_USAGE),
+        ("ack", ids) if !ids.is_empty() => {
+            let mut parsed = Vec::new();
+            for id in ids {
+                match event_id(id) {
+                    Ok(id) => parsed.push(id),
+                    Err(e) => return Ok(Verb::Usage(format!("{e}; {ACK_USAGE}"))),
+                }
+            }
+            layer.acknowledge(&parsed).await?;
+            Ok(Verb::Done(json!({"acknowledged": ids})))
+        }
+        ("ack", _) => usage(ACK_USAGE),
+        ("answer-put", [_, ..]) => {
+            let question = match pure_question(layer, args).await {
+                Ok(q) => q,
+                Err(Bad::Usage(e)) => return Ok(Verb::Usage(format!("{e}; {ANSWER_USAGE}"))),
+                Err(Bad::Data(e)) => return Err(e),
+            };
+            let made = layer.publish_answer(&question).await?;
+            Ok(Verb::Done(answer_made(&made)))
+        }
+        ("answer-get", [_, ..]) => {
+            let question = match pure_question(layer, args).await {
+                Ok(q) => q,
+                Err(Bad::Usage(e)) => return Ok(Verb::Usage(format!("{e}; {ANSWER_USAGE}"))),
+                Err(Bad::Data(e)) => return Err(e),
+            };
+            Ok(Verb::Done(answer(layer.get(&question).await?)))
+        }
+        ("answer-put" | "answer-get", _) => usage(ANSWER_USAGE),
+        ("provide", [function, result, inputs @ ..]) => {
+            let function = match name(function) {
+                Ok(f) => f,
+                Err(e) => return Ok(Verb::Usage(e)),
+            };
+            let inputs = match provider_inputs(layer, &function, inputs).await {
+                Ok(i) => i,
+                Err(Bad::Usage(e)) => return Ok(Verb::Usage(format!("{e}; {PROVIDE_USAGE}"))),
+                Err(Bad::Data(e)) => return Err(e),
+            };
+            let made = layer
+                .provide(&function, inputs, Bytes::from(result.clone().into_bytes()))
+                .await?;
+            Ok(Verb::Done(answer_made(&made)))
+        }
+        ("provide", _) => usage(PROVIDE_USAGE),
+        ("provider-get", [device, function, inputs @ ..]) => {
+            let (device, function) = match (name(device), name(function)) {
+                (Ok(d), Ok(f)) => (d, f),
+                (Err(e), _) | (_, Err(e)) => return Ok(Verb::Usage(e)),
+            };
+            let inputs = match provider_inputs(layer, &function, inputs).await {
+                Ok(i) => i,
+                Err(Bad::Usage(e)) => return Ok(Verb::Usage(format!("{e}; {PROVIDE_USAGE}"))),
+                Err(Bad::Data(e)) => return Err(e),
+            };
+            let question = AnswerAsk::provider(function, inputs).name(Some(&device))?;
+            Ok(Verb::Done(answer(layer.get(&question).await?)))
+        }
+        ("provider-get", _) => usage(PROVIDE_USAGE),
         _ => usage(
             "verbs: share, share_folder, members, put, put_op, put_group, get, range, watch, \
              hold, prune, release, suspect, unsuspect, cut, refused, offer, close_offer, join, \
-             signal-subscribe, signal-open, signal-send, signal-stream, signal-close, \
-             signal-stats, signal-capture, quit",
+             events, ack, answer-put, answer-get, provide, provider-get, signal-subscribe, \
+             signal-open, signal-send, signal-stream, signal-close, signal-stats, signal-capture, \
+             quit",
         ),
     }
 }
@@ -2381,6 +2594,10 @@ fn data_error(e: &DataError) -> Value {
             v["rule_unknown"] =
                 json!({"collection": collection.to_string(), "rule": rule.to_string()});
         }
+        DataError::CannotCheck { evaluator, .. } => {
+            v["cannot_check"] = json!({"evaluator": evaluator.to_string()});
+        }
+        DataError::Answer { why, .. } => v["answer_refused"] = json!(answer_refusal(why)),
         DataError::Introduction { offer, why } => {
             let mut i = json!({"offer": offer.to_string(), "why": intro_refusal(why)});
             if let IntroRefusal::WrongProof { left } = why {
@@ -2475,8 +2692,9 @@ fn next_step(n: NextStep) -> &'static str {
 }
 
 /// A named answer (`get` of a question or an exact answer name): what it
-/// binds, how many reads it names, its result's size and digest, and how this
-/// device came by it. The result's octets belong to the evaluator's program.
+/// binds, how many reads it names, its result's size and digest (and the
+/// result itself when it is short UTF-8 text) and how this device came by
+/// it.
 fn answered(a: &ndn_data::Answered) -> Value {
     let how = match &a.how {
         ndn_data::Provenance::Recomputed {
@@ -2503,6 +2721,12 @@ fn answered(a: &ndn_data::Answered) -> Value {
             "unverified_reads": unverified_reads,
         }}),
     };
+    let mut result = json!({"len": a.result.len(), "sha256": hex(&Sha256::digest(&a.result))});
+    if a.result.len() <= SHOWN_MAX
+        && let Ok(text) = std::str::from_utf8(&a.result)
+    {
+        result["text"] = json!(text);
+    }
     json!({
         "name": a.name.to_string(),
         "id": hex(a.id.as_bytes()),
@@ -2511,9 +2735,286 @@ fn answered(a: &ndn_data::Answered) -> Value {
             ndn_data::AnswerKind::Provider => "provider",
         },
         "reads": a.reads.reads().len(),
-        "result": {"len": a.result.len(), "sha256": hex(&Sha256::digest(&a.result))},
+        "by": a.binding.by.to_string(),
+        "result": result,
         "how": how,
     })
+}
+
+/// The answer a `answer-put` or `provide` made: its name and id.
+fn answer_made(made: &Name) -> Value {
+    let id = parse_answer_name(made).map(|(_, id)| hex(&id));
+    json!({"answer": made.to_string(), "id": id})
+}
+
+const EVENTS_USAGE: &str = "usage: events [<cursor>] (the cursor an earlier answer ended with)";
+
+const ACK_USAGE: &str = "usage: ack <id>... (event ids as events shows them: 32 hex digits)";
+
+const ANSWER_USAGE: &str = "usage: answer-put|answer-get [by=<evaluator>] <definition> \
+                            [<input>...] (collections of a folder this device reads; with \
+                            inputs the question states its reads)";
+
+const PROVIDE_USAGE: &str = "usage: provide <function> <result> [<input>...] | provider-get \
+                             <device> <function> [<input>...] (inputs are collections this \
+                             device holds)";
+
+/// An event id as `events` shows it.
+fn event_id(word: &str) -> Result<EventId, String> {
+    let octets = unhex(word)?;
+    let id: [u8; 16] = octets
+        .try_into()
+        .map_err(|_| format!("{word:?} is not an event id: 32 hex digits"))?;
+    Ok(EventId(id))
+}
+
+/// The pure question the words of `answer-put` and `answer-get` mean:
+/// `[by=<evaluator>] <definition> [<input>...]`, the definition and the
+/// inputs read as this device holds them now.
+async fn pure_question(layer: &Device, words: &[String]) -> Result<Name, Bad> {
+    let parse = |s: &str| {
+        s.parse::<Name>()
+            .map_err(|e| format!("{s:?} is no name: {e}"))
+    };
+    let (by, words) = match words.split_first() {
+        Some((first, rest)) if first.starts_with("by=") => (parse(&first[3..])?, rest),
+        _ => (
+            words::FUNCTION.parse::<Name>().expect("a valid name"),
+            words,
+        ),
+    };
+    let Some((definition, inputs)) = words.split_first() else {
+        return Err(Bad::Usage("no definition".into()));
+    };
+    let definition = parse(definition)?;
+    let (read, _) = layer.current_read(&definition).await?;
+    let mut ask = AnswerAsk::pure(read.clone(), by);
+    if !inputs.is_empty() {
+        let mut reads = vec![read];
+        reads.extend(collection_reads(layer, inputs).await?);
+        let set = ReadSet::new(reads).map_err(|why| DataError::Answer {
+            name: definition.clone(),
+            why,
+        })?;
+        ask = ask.stating(set);
+    }
+    Ok(ask.name(None)?)
+}
+
+/// The inputs of a provider answer: the newest version this device holds of
+/// each collection.
+async fn provider_inputs(
+    layer: &Device,
+    function: &Name,
+    collections: &[String],
+) -> Result<ReadSet, Bad> {
+    let reads = collection_reads(layer, collections).await?;
+    ReadSet::new(reads).map_err(|why| {
+        Bad::Data(DataError::Answer {
+            name: function.clone(),
+            why,
+        })
+    })
+}
+
+/// The exact read of what this device holds newest of each collection.
+async fn collection_reads(layer: &Device, collections: &[String]) -> Result<Vec<ReadRef>, Bad> {
+    let mut reads = Vec::new();
+    for c in collections {
+        let c = c
+            .parse::<Name>()
+            .map_err(|e| format!("{c:?} is no name: {e}"))?;
+        reads.push(layer.current_read(&c).await?.0);
+    }
+    Ok(reads)
+}
+
+fn meaning(m: Meaning) -> &'static str {
+    match m {
+        Meaning::BothKept => "both-kept",
+        Meaning::Withdrawn => "withdrawn",
+        Meaning::WriterCut => "writer-cut",
+        Meaning::KeyRefused => "key-refused",
+        Meaning::ReportsDropped => "reports-dropped",
+        Meaning::AnswerKept => "answer-kept",
+    }
+}
+
+/// A device-wide event (data-layer spec §21) as `events` answers it.
+fn event(e: &DeviceEvent) -> Value {
+    let mut evidence: Vec<Name> = Vec::new();
+    for d in std::iter::once(&e.detail).chain(e.last.as_ref()) {
+        for n in evidence_names(d) {
+            if !evidence.contains(&n) {
+                evidence.push(n);
+            }
+        }
+    }
+    json!({
+        "id": hex(&e.id.0),
+        "cursor": e.cursor.0,
+        "first_seen_ms": e.first_seen.0,
+        "kind": e.kind().to_string().replace(' ', "-"),
+        "subject": match e.subject() {
+            EventSubject::Writer(n) => json!({"writer": n.to_string()}),
+            EventSubject::Revoked(n) => json!({"revoked": n.to_string()}),
+            EventSubject::Device => json!("device"),
+        },
+        "evidence": evidence.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "detail": event_detail(&e.detail),
+        "last": e.last.as_ref().map(event_detail),
+        "meaning": meaning(e.meaning()),
+        "next": next_token(e.next_step()),
+        "next_step": next_step(e.next_step()),
+        "what_to_do": e.what_to_do(),
+        "why": e.why(),
+        "count": e.count,
+    })
+}
+
+/// The names an event's evidence is: log entries, records, collections,
+/// keys and answers — never content.
+fn evidence_names(d: &EventDetail) -> Vec<Name> {
+    match d {
+        EventDetail::Equivocation { first, second, .. } => {
+            vec![first.name.clone(), second.name.clone()]
+        }
+        EventDetail::Withdrawal { entry, .. } => vec![entry.name.clone()],
+        EventDetail::Cut {
+            subject, record, ..
+        } => vec![subject.clone(), record.clone()],
+        EventDetail::Revocation {
+            namespace, revoked, ..
+        } => vec![namespace.clone(), revoked.clone()],
+        EventDetail::Overflow { .. } => Vec::new(),
+        EventDetail::Answer { answer, .. } => vec![answer.clone()],
+    }
+}
+
+fn entry_ref(e: &EntryRef) -> Value {
+    json!({
+        "name": e.name.to_string(),
+        "kind": e.kind.map(|k| k.to_string()),
+        "digest": e.digest.as_ref().map(|d| hex(d)),
+    })
+}
+
+/// What one occurrence of an event says, the kind's own facts.
+fn event_detail(d: &EventDetail) -> Value {
+    match d {
+        EventDetail::Equivocation {
+            writer,
+            seq,
+            first,
+            second,
+        } => json!({
+            "writer": writer.to_string(),
+            "seq": seq,
+            "first": entry_ref(first),
+            "second": entry_ref(second),
+        }),
+        EventDetail::Withdrawal {
+            writer,
+            collection,
+            entry,
+            by,
+        } => json!({
+            "writer": writer.to_string(),
+            "collection": collection.as_ref().map(ToString::to_string),
+            "entry": entry_ref(entry),
+            "by": match by {
+                WithdrawnBy::Cut { of, signer } => {
+                    json!({"cut": {"of": of.to_string(), "signer": signer.to_string()}})
+                }
+                WithdrawnBy::Chain { why } => json!({"chain": {"why": why}}),
+                WithdrawnBy::Group { member } => json!({"group": {"member": member.to_string()}}),
+            },
+        }),
+        EventDetail::Cut {
+            subject,
+            folder,
+            of,
+            signer,
+            record,
+            revision,
+            kept,
+        } => json!({
+            "subject": subject.to_string(),
+            "folder": folder,
+            "of": of.to_string(),
+            "signer": signer.to_string(),
+            "record": record.to_string(),
+            "revision": revision,
+            "kept": kept,
+        }),
+        EventDetail::Revocation {
+            namespace,
+            revoked,
+            version,
+        } => json!({
+            "namespace": namespace.to_string(),
+            "revoked": revoked.to_string(),
+            "version": version,
+        }),
+        EventDetail::Overflow { dropped } => json!({
+            "dropped": dropped
+                .iter()
+                .map(|(k, n)| json!({"kind": k.to_string().replace(' ', "-"), "count": n}))
+                .collect::<Vec<_>>(),
+        }),
+        EventDetail::Answer {
+            answer,
+            signer,
+            id,
+            readset,
+            fault,
+        } => json!({
+            "answer": answer.to_string(),
+            "signer": signer.to_string(),
+            "id": hex(id),
+            "readset": hex(readset),
+            "fault": match fault {
+                AnswerFault::Mismatch { signed, recomputed, evaluator } => json!({"mismatch": {
+                    "signed": hex(signed),
+                    "recomputed": hex(recomputed),
+                    "evaluator": evaluator.to_string(),
+                }}),
+                AnswerFault::Equivocation { other_result } => {
+                    json!({"equivocation": {"other_result": hex(other_result)}})
+                }
+                AnswerFault::Conflict { other, other_signer, other_result } => json!({"conflict": {
+                    "other": other.to_string(),
+                    "other_signer": other_signer.to_string(),
+                    "other_result": hex(other_result),
+                }}),
+                AnswerFault::Binding => json!("binding"),
+                AnswerFault::ReadSet(why) => json!({"read_set": match why {
+                    ReadSetFault::NotCanonical => "not-canonical",
+                    ReadSetFault::Digest => "digest",
+                    ReadSetFault::Epochs => "epochs",
+                    ReadSetFault::HeldConflict => "held-conflict",
+                    ReadSetFault::NotItsReads => "not-its-reads",
+                }}),
+            },
+        }),
+    }
+}
+
+/// An answer refusal's kind, as the error answers name it.
+fn answer_refusal(why: &AnswerRefusal) -> &'static str {
+    match why {
+        AnswerRefusal::Malformed(_) => "malformed",
+        AnswerRefusal::Binding => "binding",
+        AnswerRefusal::ReadSet(_) => "read-set",
+        AnswerRefusal::ReadsChanged(_) => "reads-changed",
+        AnswerRefusal::NotProvider { .. } => "not-provider",
+        AnswerRefusal::Untrusted { .. } => "untrusted",
+        AnswerRefusal::Equivocal => "equivocal",
+        AnswerRefusal::TooLarge { .. } => "too-large",
+        AnswerRefusal::OverBudget { .. } => "over-budget",
+        AnswerRefusal::Busy => "busy",
+        AnswerRefusal::AlreadySigned => "already-signed",
+    }
 }
 
 fn id(id: &VersionId) -> Value {
