@@ -75,6 +75,11 @@ jobs:
           cargo fmt $PKGS -- --check
       - name: clippy (default-members, all targets)
         run: cargo clippy --all-targets
+      # ndn-link's test-only fault layer must not be on in the shipped daemon
+      # (the file is the same in ndn-ext, ndn-fwd and ndn-mobile; it resolves
+      # the feature graph and builds nothing).
+      - name: forbidden test-only features
+        run: tools/check-forbidden-features.sh ndn-fwd
 
   test:
     name: tests (nextest + doctests)
