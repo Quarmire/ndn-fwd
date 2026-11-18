@@ -1742,6 +1742,25 @@ fn link_phrase(w: &W<'_>) -> Option<String> {
             "the relay's places for joining devices are full{}; the device tries again by itself",
             w.paren("max")
         ),
+        "grant-ended" => {
+            let how = match w.get("ended") {
+                Some("expired") => "ran out",
+                Some("revoked") => "was withdrawn",
+                Some("replaced") => "was replaced by one for other trusted prefixes",
+                _ => "ended",
+            };
+            format!(
+                "the invitation that let this device link here {how}{}; whoever invited it invites \
+                 it again",
+                w.wrap("until", " (it was good until ", ")")
+            )
+        }
+        "grant-unmatched" => format!(
+            "this device is invited here as a person of {}, and the certificates it showed are of \
+             {}, none of them invited",
+            w.or("namespaces", "a trusted prefix"),
+            w.or("shown", "no trusted prefix")
+        ),
         "enrollment-possible" => format!(
             "a device can join {} over this relay while it shows no certificate of another \
              trusted prefix",
