@@ -3015,6 +3015,7 @@ fn answer_refusal(why: &AnswerRefusal) -> &'static str {
         AnswerRefusal::TooManyStates { .. } => "too-many-states",
         AnswerRefusal::Busy => "busy",
         AnswerRefusal::AlreadySigned => "already-signed",
+        AnswerRefusal::AskRefused { .. } => "ask-refused",
     }
 }
 
