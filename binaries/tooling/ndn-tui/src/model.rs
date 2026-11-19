@@ -91,6 +91,10 @@ pub struct RootFacts {
     /// The keys whose authority over data ended that the held version
     /// does not revoke yet.
     pub ending: Vec<EndingFact>,
+    /// Set when the held version lists fewer than every device role in
+    /// `DataRequiresCut`: what to say of it (the notice `ndn-fwd status`
+    /// prints), naming the command that lists them all.
+    pub notice: Option<String>,
 }
 
 impl RootFacts {
@@ -267,6 +271,11 @@ pub enum Warning {
     /// Keys of `namespace` whose authority over data ended wait for the
     /// main device to end them with their cuts.
     KeysToEnd { namespace: String, count: usize },
+    /// The held trust context lists fewer than every device role in
+    /// `DataRequiresCut` (one made before `init` listed all four): `notice`
+    /// says which roles' lapsed keys are refused and the command that lists
+    /// them all.
+    ListsFewRoles { notice: String },
 }
 
 /// What this device may do in a prefix.
@@ -550,6 +559,11 @@ impl Model {
                 out.push(Warning::KeysToEnd {
                     namespace: root.namespace.clone(),
                     count: root.ending.len(),
+                });
+            }
+            if let Some(notice) = &root.notice {
+                out.push(Warning::ListsFewRoles {
+                    notice: notice.clone(),
                 });
             }
         }

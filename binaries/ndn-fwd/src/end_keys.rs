@@ -30,12 +30,13 @@
 //!   a timer on the root device running the ndn-data host's `cut` lines and
 //!   then `end-keys --yes`. The running daemon never unlocks the root.
 
+use std::path::Path;
+
 use anyhow::Result;
 use ndn_cert::RootUnlockKind;
-use ndn_cert::roles::Role;
+use ndn_namespace::root::RootError;
 use ndn_namespace::root::end_keys;
 use ndn_namespace::root::revoke::format_when;
-use ndn_packet::Name;
 
 use crate::onboard::{flag_values, pib_dir};
 use crate::revoke::{cut_refused, cut_text, print_left_out, read_cut_file};
@@ -44,49 +45,55 @@ use crate::root_host::{
     render_before_signing,
 };
 
-/// What `ndn-fwd status` says of a held root context that lists fewer than
-/// every device role in `DataRequiresCut`: such a context was made before
-/// `ndn-fwd init` listed every role, and a context is root-signed data that
-/// nothing rewrites, so the owner is told the one command that does. `None`
-/// when `listed` (the roles the held version lists) holds every role.
-pub(crate) fn data_requires_cut_notice(namespace: &Name, listed: &[String]) -> Option<String> {
-    if Role::ALL
-        .iter()
-        .all(|role| listed.iter().any(|l| l == role.as_str()))
-    {
-        return None;
-    }
-    let every = Role::ALL.map(Role::as_str).join(",");
-    let refused = if listed.is_empty() {
-        "for no role".to_string()
-    } else {
-        format!("only for roles {}", listed.join(","))
-    };
-    Some(format!(
-        "{namespace}: Data of lapsed keys is refused {refused}; to refuse it for every role, \
-         run on the root device: ndn-fwd schema data-requires-cut {every} --namespace {namespace}"
-    ))
-}
-
 /// The notices `ndn-fwd status` prints under the roots it holds
-/// ([`data_requires_cut_notice`] of each).
+/// ([`end_keys::data_requires_cut_notice`] of each).
 fn status_notices(pending: &[end_keys::Pending]) -> Vec<String> {
     pending
         .iter()
-        .filter_map(|p| data_requires_cut_notice(&p.namespace, &p.data_requires_cut))
+        .filter_map(|p| end_keys::data_requires_cut_notice(&p.namespace, &p.data_requires_cut))
         .collect()
 }
 
-/// `ndn-fwd status`: the roots this PIB holds, their held versions, and
-/// the keys to end.
+/// What `ndn-fwd status` says of this PIB's own keys whose certificates
+/// lapsed at `now` (ms since the Unix epoch) — the keys of a relay or member
+/// PIB, which holds no root to list them as keys to end: every node refuses
+/// the Data such a key signs until the device is enrolled again. A key the
+/// root device lists as one to end (`pending`) is said there instead, where
+/// its owner ends it.
+fn own_lapse_lines(
+    pib_dir: &Path,
+    pending: &[end_keys::Pending],
+    now: u64,
+) -> Result<Vec<String>, RootError> {
+    Ok(end_keys::lapsed_own_keys(pib_dir, now)?
+        .into_iter()
+        .filter(|own| {
+            !pending
+                .iter()
+                .any(|p| p.ending.iter().any(|e| e.key == own.key))
+        })
+        .map(|own| {
+            format!(
+                "own_key        = {}: this device's certificate lapsed at {}: Data it signs is \
+                 refused until it is re-enrolled (ask the owner of the namespace for a new \
+                 invite, then `ndn-fwd enroll <invite-link>`)",
+                own.key,
+                format_when(own.not_after)
+            )
+        })
+        .collect())
+}
+
+/// `ndn-fwd status`: the roots this PIB holds, their held versions, the
+/// keys to end, and this device's own keys whose certificates lapsed.
 pub(crate) fn run_status(args: &[String]) -> Result<()> {
     let pib_dir = pib_dir(args)?;
-    let pending = end_keys::pending_all(&pib_dir, now_ms()).map_err(render)?;
+    let now = now_ms();
+    let pending = end_keys::pending_all(&pib_dir, now).map_err(render)?;
     println!("# ndn-fwd status");
     println!("pib            = {}", pib_dir.display());
     if pending.is_empty() {
         println!("root_of        = (none: this PIB holds no namespace root)");
-        return Ok(());
     }
     for ns in &pending {
         println!(
@@ -99,20 +106,24 @@ pub(crate) fn run_status(args: &[String]) -> Result<()> {
     for notice in status_notices(&pending) {
         println!("notice         = {notice}");
     }
+    for line in own_lapse_lines(&pib_dir, &pending, now).map_err(render)? {
+        println!("{line}");
+    }
     print_keys_to_end(&pib_dir);
     Ok(())
 }
 
-/// Ask once whether to sign `what`; `--yes` answers yes without asking.
-fn confirmed(args: &[String], what: &str) -> Result<bool> {
+/// Ask once whether to proceed with `what`; `--yes` answers yes without
+/// asking. `command` is the subcommand that refuses without a terminal.
+pub(crate) fn confirmed(args: &[String], command: &str, what: &str) -> Result<bool> {
     use std::io::IsTerminal as _;
     if args.iter().any(|a| a == "--yes") {
         return Ok(true);
     }
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         anyhow::bail!(
-            "end-keys refused: there is no terminal to confirm {what}; run it on a terminal, or \
-             with --yes (only for a root that unlocks without a secret). Nothing was signed"
+            "{command} refused: there is no terminal to confirm {what}; run it on a terminal, \
+             or with --yes. Nothing was signed"
         );
     }
     eprint!("{what}? [y/N] ");
@@ -171,7 +182,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         "Revoke these {} key(s) of {ns}, each with its cut, in one new version",
         planned.ending.len()
     );
-    if !confirmed(args, &what)? {
+    if !confirmed(args, "end-keys", &what)? {
         println!("trust_context  = v{held} (not confirmed; nothing signed)");
         return Ok(());
     }
@@ -199,9 +210,11 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use ndn_cert::roles::Role;
     use ndn_cert::{NewRootStore, bump_context_data_requires_cut, persist_context};
-    use ndn_packet::Data;
-    use ndn_security::FilePib;
+    use ndn_namespace::root::end_keys::data_requires_cut_notice;
+    use ndn_packet::{Data, Name};
+    use ndn_security::{FilePib, Signer};
 
     use super::*;
 
@@ -286,5 +299,54 @@ mod tests {
                  admin,member,node,guest --namespace /home/bob"
             ]
         );
+    }
+
+    /// Round-8 L-b: `status` on a relay's or member's PIB, which holds no
+    /// root, still explains a lapsed own certificate: the key, when its
+    /// certificate lapsed, that its Data is refused until it is enrolled
+    /// again. A key whose certificate is current is not mentioned.
+    #[test]
+    fn status_explains_a_lapsed_own_certificate_on_a_pib_that_holds_no_root() {
+        // The owner's root device makes the namespace.
+        let owner = tempfile::tempdir().unwrap();
+        let made = futures::executor::block_on(ndn_cert::init_namespace_in_pib(
+            &FilePib::new(owner.path()).unwrap(),
+            &ns(),
+            "desk",
+            false,
+            &NewRootStore::File,
+        ))
+        .unwrap();
+
+        // A member's PIB: the owner's context as adopted, no root, and two
+        // member keys: one whose only certificate was valid for a
+        // millisecond, one with a certificate good for a day.
+        let dir = tempfile::tempdir().unwrap();
+        let pib = FilePib::new(dir.path()).unwrap();
+        persist_context(dir.path(), &made.init.context, &made.init.context_data).unwrap();
+        let mgr = ndn_security::SecurityManager::new();
+        let ca: Name = "/home/bob/CA/KEY/ca".parse().unwrap();
+        mgr.generate_ed25519(ca.clone()).unwrap();
+        for (device, validity_ms) in [("tv", 1), ("phone", 24 * 3600 * 1000)] {
+            let key: Name = format!("/home/bob/member/{device}/KEY/k1").parse().unwrap();
+            let public = pib.generate_ed25519(&key).unwrap().public_key().unwrap();
+            let cert =
+                futures::executor::block_on(mgr.certify(&key, public, &ca, validity_ms)).unwrap();
+            pib.store_cert(&key, &cert).unwrap();
+        }
+
+        let pending = end_keys::pending_all(dir.path(), now_ms()).unwrap();
+        assert!(pending.is_empty(), "a member PIB holds no root");
+        let lines = own_lapse_lines(dir.path(), &pending, now_ms() + 60_000).unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        for want in [
+            "/home/bob/member/tv/KEY/k1",
+            "this device's certificate lapsed at",
+            "Data it signs is refused until it is re-enrolled",
+        ] {
+            assert!(line.contains(want), "{want:?} missing from: {line}");
+        }
+        assert!(!line.contains("phone"), "a current certificate: {line}");
     }
 }

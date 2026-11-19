@@ -36,8 +36,11 @@
 //!   it. `ndn-fwd init` lists every role; a role that renews (admin, member,
 //!   node) is refused only when its renewal fails, so an honest device
 //!   never waits. Every other field is carried over. A listed role's lapsed
-//!   keys are then ended by the root (`ndn-fwd end-keys`). A namespace made
-//!   before every role was listed lists `guest` alone; `ndn-fwd status`
+//!   keys are then ended by the root (`ndn-fwd end-keys`). Before signing it
+//!   lists the keys whose certificates have lapsed already and that the new
+//!   version would refuse on every node, and asks to confirm as `end-keys`
+//!   does (`--yes` skips the question); declining signs nothing. A namespace
+//!   made before every role was listed lists `guest` alone; `ndn-fwd status`
 //!   names `ndn-fwd schema data-requires-cut admin,member,node,guest` for it.
 //!
 //! **An explicit verb**, not something every root-signed version does: a
@@ -59,18 +62,19 @@ use ndn_namespace::root::RootError;
 use ndn_namespace::root::schema::{self, Adopted, SchemaBlobView, SchemaUpdate};
 use ndn_packet::Name;
 
+use crate::end_keys::confirmed;
 use crate::onboard::{flag, pib_dir, positionals};
 use crate::root_host::{
-    Secrets, daemon, handed_text, listed, namespace_arg, print_keys_to_end, render,
-    render_before_signing,
+    Secrets, daemon, ending_text, handed_text, listed, namespace_arg, now_ms, print_keys_to_end,
+    render, render_before_signing,
 };
 
 const USAGE: &str = "usage: ndn-fwd schema show [-c <config>] [--pib <dir>] [--namespace <ns>]\n       \
      ndn-fwd schema explain <data-name> <key-name> [-c <config>] [--pib <dir>] \
      [--namespace <ns>]\n       \
      ndn-fwd schema update [--namespace <ns>] [--accept-narrowing] [-c <config>] [--pib <dir>]\n       \
-     ndn-fwd schema data-requires-cut <role>[,<role>...]|none [--namespace <ns>] [-c <config>] \
-     [--pib <dir>]";
+     ndn-fwd schema data-requires-cut <role>[,<role>...]|none [--namespace <ns>] [--yes] \
+     [-c <config>] [--pib <dir>]";
 
 pub(crate) async fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
@@ -456,6 +460,37 @@ fn roles_text(roles: &[String]) -> String {
     }
 }
 
+/// What `data-requires-cut` says before it signs: the keys of `namespace`
+/// whose certificates have lapsed already (`lapsed`) and whose Data every
+/// node refuses once it holds a version listing `roles`, which the held
+/// version does not.
+fn lapsed_preview(
+    namespace: &Name,
+    roles: &[String],
+    lapsed: &[ndn_cert::EndingKey],
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "# Listing {} refuses, on every node that holds the new version, the Data of these \
+         keys of {namespace}, whose certificates have lapsed already:",
+        roles_text(roles)
+    )];
+    lines.extend(
+        lapsed
+            .iter()
+            .map(|key| format!("lapsed_key     = {}", ending_text(key))),
+    );
+    lines.extend(
+        [
+            "# Only a key with a cut file can then be ended (`ndn-fwd end-keys --cut <file>`):",
+            "# its Data from before its NotAfter stays accepted, what it signed after stays",
+            "# refused until the owner re-admits exact packets (`ndn-fwd readmit`), and a",
+            "# device that was offline across NotAfter enrols again.",
+        ]
+        .map(str::to_string),
+    );
+    lines
+}
+
 /// `ndn-fwd schema data-requires-cut <role>[,<role>…]|none`.
 async fn data_requires_cut(args: &[String]) -> Result<()> {
     let words = positionals(args);
@@ -486,6 +521,24 @@ async fn data_requires_cut(args: &[String]) -> Result<()> {
         );
         print_keys_to_end(&pib_dir);
         return Ok(());
+    }
+    // Keys lapsed now of a role this version newly lists are refused by every
+    // node the moment it holds it: say so before the root signs.
+    let refused = planned.newly_refused(&pib_dir, now_ms()).map_err(render)?;
+    if !refused.is_empty() {
+        for line in lapsed_preview(&namespace, &planned.after, &refused) {
+            println!("{line}");
+        }
+        let what = format!(
+            "Sign the next version of {namespace} listing {}, which refuses the Data of the {} \
+             lapsed key(s) above on every node that holds it",
+            roles_text(&planned.after),
+            refused.len()
+        );
+        if !confirmed(args, "schema data-requires-cut", &what)? {
+            println!("trust_context  = v{held} (not confirmed; nothing signed)");
+            return Ok(());
+        }
     }
     let daemon = daemon(args)?;
     let set = schema::set_data_requires_cut(planned, &pib_dir, &daemon, &Secrets { args })
@@ -768,5 +821,106 @@ mod tests {
                 .is_empty()
         );
         node.shutdown.shutdown().await;
+    }
+
+    /// Round-8 L-c: `data-requires-cut` lists, before signing, the keys
+    /// lapsed now that listing the roles would refuse, and asks to confirm;
+    /// declined (here: no terminal and no `--yes`), nothing is signed and the
+    /// held version is unchanged.
+    #[tokio::test]
+    async fn data_requires_cut_lists_the_lapsed_keys_it_would_refuse_and_declining_signs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let pib = FilePib::new(dir.path()).unwrap();
+        let made = ndn_cert::init_namespace_in_pib(
+            &pib,
+            &ns(),
+            "desk",
+            false,
+            &ndn_cert::NewRootStore::File,
+        )
+        .await
+        .unwrap();
+        // A namespace from before every role was listed: version 2 lists
+        // `guest` alone.
+        let root = pib.get_signer(&ndn_cert::root_key_name(&ns())).unwrap();
+        let held = Data::decode(made.init.context_data.raw().clone()).unwrap();
+        let bump = ndn_cert::bump_context_data_requires_cut(
+            root.as_ref(),
+            &held,
+            &[ndn_cert::roles::Role::Guest],
+        )
+        .await
+        .unwrap()
+        .expect("a change");
+        ndn_cert::persist_context(dir.path(), &bump.context, &bump.data).unwrap();
+        // The namespace CA issued a member key's certificate, valid a
+        // millisecond: lapsed by the time anything reads it.
+        let mgr = ndn_security::SecurityManager::new();
+        let ca: Name = "/home/bob/CA/KEY/ca".parse().unwrap();
+        mgr.generate_ed25519(ca.clone()).unwrap();
+        let key: Name = "/home/bob/member/tv/KEY/k1".parse().unwrap();
+        let public = mgr
+            .generate_ed25519(key.clone())
+            .map(|k| mgr.get_signer_sync(&k).unwrap().public_key().unwrap())
+            .unwrap();
+        let cert = mgr.certify(&key, public, &ca, 1).await.unwrap();
+        ndn_cert::CaStore::record_issued(
+            &ndn_cert::FileCaStore::open(ndn_cert::ca_dir(dir.path(), &ns())).unwrap(),
+            &cert.name.to_string(),
+            &cert.data_wire().unwrap(),
+        )
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // The preview: the lapsed member key is named; a plan that lists no
+        // role the held version does not names nothing.
+        let plan = |roles: &[ndn_cert::roles::Role]| {
+            schema::plan_data_requires_cut(schema::root_of(dir.path(), Some(&ns())).unwrap(), roles)
+        };
+        let planned = plan(&[ndn_cert::roles::Role::Member, ndn_cert::roles::Role::Guest]);
+        let refused = planned
+            .newly_refused(dir.path(), crate::root_host::now_ms())
+            .unwrap();
+        assert_eq!(
+            refused
+                .iter()
+                .map(|k| k.key.to_string())
+                .collect::<Vec<_>>(),
+            [key.to_string()]
+        );
+        let preview = lapsed_preview(&ns(), &planned.after, &refused).join("\n");
+        assert!(
+            preview.contains(&key.to_string()) && preview.contains("end-keys"),
+            "{preview}"
+        );
+        assert!(
+            plan(&[ndn_cert::roles::Role::Guest])
+                .newly_refused(dir.path(), crate::root_host::now_ms())
+                .unwrap()
+                .is_empty()
+        );
+
+        // Declined: nothing signed, the held version stays 2.
+        let args: Vec<String> = [
+            "member,guest",
+            "--pib",
+            dir.path().to_str().unwrap(),
+            "--namespace",
+            "/home/bob",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let refused = data_requires_cut(&args).await.unwrap_err().to_string();
+        assert!(
+            refused.contains("Nothing was signed") && refused.contains("confirm"),
+            "{refused}"
+        );
+        assert_eq!(
+            schema::root_of(dir.path(), Some(&ns()))
+                .unwrap()
+                .context
+                .version(),
+            2
+        );
     }
 }

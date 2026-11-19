@@ -154,7 +154,8 @@ pub(crate) fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// The keys whose authority over Data ended (lapsed guests, replaced keys)
+/// The keys whose authority over Data ended (lapsed keys of a role in
+/// DataRequiresCut, replaced keys)
 /// that the held versions of the roots in the PIB at `pib_dir` do not
 /// revoke yet, each with what to do: what every root command shows after
 /// its own outcome, and `ndn-fwd status`. Nothing when there are none; a

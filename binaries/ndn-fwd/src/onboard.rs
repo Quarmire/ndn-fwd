@@ -63,7 +63,9 @@
 //!   adds exact packets to such a cut ([`crate::readmit`]).
 //! - `status` lists the keys whose authority over Data ended (lapsed keys of
 //!   a role in DataRequiresCut, replaced keys) that no version revokes yet,
-//!   and `end-keys --cut <file>... [--yes]` ends them with their cuts in one
+//!   and, on any PIB, a key of this device whose own certificate lapsed (Data
+//!   it signs is refused until it is enrolled again);
+//!   `end-keys --cut <file>... [--yes]` ends them with their cuts in one
 //!   version ([`crate::end_keys`]); every root command lists them too.
 //!   `schema data-requires-cut <roles>|none` sets which roles those are
 //!   (every role in a namespace `init` makes; `status` names the command
@@ -1361,7 +1363,7 @@ async fn run_renew(args: &[String]) -> Result<()> {
             "a certificate was not renewed (see above); it keeps working until it expires. A \
              failed renewal can be retried (the daemon also retries on its own); a refused one \
              needs what the reason says — for an expired certificate, a revoked key or a role \
-             that does not renew, a new invite"
+             that does not renew, the device enrols again with a new invite"
         );
     }
     Ok(())

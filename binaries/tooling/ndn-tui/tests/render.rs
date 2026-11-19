@@ -90,6 +90,32 @@ fn issued(device: &str, revoked: bool) -> IssuedEntry {
     }
 }
 
+/// The root key of /home/bob as its main device holds it: a plain file, no
+/// recovery kit, one expired guest key to end; `notice` is what the held
+/// context's roles earn.
+fn root_facts(notice: Option<&str>) -> RootFacts {
+    RootFacts {
+        namespace: "/home/bob".into(),
+        key: "/home/bob/KEY/root".into(),
+        store: "file".into(),
+        location: "/var/lib/ndn/pib/root".into(),
+        version: Some(7),
+        anchors: vec![Anchor {
+            key: "/home/bob/KEY/root".into(),
+            recovery_kit: false,
+            fingerprint: ROOT_FP.into(),
+        }],
+        ending: vec![EndingFact {
+            key: "/home/bob/guest/ann/KEY/%02".into(),
+            why: "expired 2026-11-01T00:00:00.000Z".into(),
+            cut_line: "cut /home/bob/guest/ann/KEY/%02 <file> --held-before \
+                       2026-11-01T00:00:00.000Z"
+                .into(),
+        }],
+        notice: notice.map(str::to_owned),
+    }
+}
+
 /// A main device of /home/bob (no recovery kit, a plain-file root key),
 /// a member of /work, following /news; one request waiting.
 fn app() -> App {
@@ -115,25 +141,7 @@ fn app() -> App {
             membership("/work", MembershipRelation::Member, "member"),
             membership("/news", MembershipRelation::Following, ""),
         ])),
-        Update::Roots(Ok(vec![RootFacts {
-            namespace: "/home/bob".into(),
-            key: "/home/bob/KEY/root".into(),
-            store: "file".into(),
-            location: "/var/lib/ndn/pib/root".into(),
-            version: Some(7),
-            anchors: vec![Anchor {
-                key: "/home/bob/KEY/root".into(),
-                recovery_kit: false,
-                fingerprint: ROOT_FP.into(),
-            }],
-            ending: vec![EndingFact {
-                key: "/home/bob/guest/ann/KEY/%02".into(),
-                why: "expired 2026-11-01T00:00:00.000Z".into(),
-                cut_line: "cut /home/bob/guest/ann/KEY/%02 <file> --held-before \
-                           2026-11-01T00:00:00.000Z"
-                    .into(),
-            }],
-        }])),
+        Update::Roots(Ok(vec![root_facts(None)])),
         Update::Approvals(Ok(ApprovalListing {
             rows: vec![pending()],
             notes: Vec::new(),
@@ -227,6 +235,39 @@ fn home_lists_every_prefix_with_relation_trust_and_the_waiting_request() {
     // The safety warnings: no recovery kit, plain-file main key, a key whose
     // authority over data ended waiting to be ended.
     assert_eq!(screen.matches('⚠').count(), 3, "warnings:\n{screen}");
+}
+
+/// Round-8 L-b: a root whose held context lists fewer than every device role
+/// in DataRequiresCut (a namespace made before `init` listed all four) shows
+/// the notice that names the command listing them all, with the other
+/// warnings of the home screen; one that lists every role shows none.
+#[test]
+fn a_root_listing_fewer_roles_shows_the_notice_naming_the_command() {
+    let notice = "/home/bob: Data of lapsed keys is refused only for roles guest; to refuse it \
+                  for every role, run on the root device: ndn-fwd schema data-requires-cut \
+                  admin,member,node,guest --namespace /home/bob";
+    let mut app = app();
+    app.handle(Msg::Update(Update::Roots(Ok(vec![root_facts(Some(
+        notice,
+    ))]))));
+    let screen = render(&app, 160, 30);
+    for want in [
+        "Data of lapsed keys is refused only for roles guest",
+        "schema data-requires-cut",
+    ] {
+        assert!(
+            screen.contains(want),
+            "the notice ({want:?}) is missing:\n{screen}"
+        );
+    }
+    assert_eq!(screen.matches('⚠').count(), 4, "warnings:\n{screen}");
+
+    app.handle(Msg::Update(Update::Roots(Ok(vec![root_facts(None)]))));
+    let screen = render(&app, 160, 30);
+    assert!(
+        !screen.contains("data-requires-cut"),
+        "a context listing every role is told nothing:\n{screen}"
+    );
 }
 
 #[test]

@@ -262,10 +262,10 @@ USAGE:
                                           daemon as revoke does; names its cut
                                           accepts already sign nothing
   ndn-fwd status [--pib <dir>] [-c <config>]
-                                          on the root device: list the keys
-                                          whose authority over Data ended and
-                                          that no version revokes yet — lapsed
-                                          keys of a role listed in
+                                          list the keys whose authority over
+                                          Data ended and that no version
+                                          revokes yet (on the root device) —
+                                          lapsed keys of a role listed in
                                           DataRequiresCut (every role in a
                                           namespace init makes) and keys
                                           replaced by a newer key of the same
@@ -273,7 +273,10 @@ USAGE:
                                           that writes its cut file; for a
                                           context that lists fewer roles,
                                           the schema data-requires-cut
-                                          command that lists them all
+                                          command that lists them all; on any
+                                          device, a key of its own whose
+                                          certificate lapsed (its Data is
+                                          refused until it is enrolled again)
   ndn-fwd end-keys [--cut <file>]... [--namespace <prefix>] [--yes]
                 [--pib <dir>] [-c <config>]
                 [--passphrase-file <path> | --pin-file <path>]
@@ -282,7 +285,12 @@ USAGE:
                                           is given for (bounded at or before
                                           the key's end), each with its cut; a
                                           key without a cut file is listed and
-                                          never revoked. --yes: no
+                                          never revoked. What a key signed
+                                          before its end stays accepted; what
+                                          it signed after (a device offline
+                                          across its NotAfter) stays refused
+                                          until readmit. The root device's own
+                                          key ends this way too. --yes: no
                                           confirmation, only for a root store
                                           that unlocks without a secret (e.g.
                                           run from a timer)
@@ -294,8 +302,9 @@ USAGE:
                                           fraction of the lifetime, or a time
                                           before expiry such as \"30d\");
                                           an expired certificate, a revoked key
-                                          or a non-renewable role (guest) needs
-                                          a new invite
+                                          or a non-renewable role (guest) is
+                                          not renewed: the device enrols again
+                                          with a new invite
   ndn-fwd node-identity [<identity>] [--pib <dir>] [-c <config>]
                                           show the node identity — what the
                                           daemon signs its own packets as
@@ -340,7 +349,7 @@ USAGE:
                                           link policy narrows or an advertised
                                           relay is dropped, unless
                                           --accept-narrowing
-  ndn-fwd schema data-requires-cut <role>[,<role>...]|none [--namespace <ns>]
+  ndn-fwd schema data-requires-cut <role>[,<role>...]|none [--namespace <ns>] [--yes]
                 [-c <config>] [--pib <dir>]
                 [--passphrase-file <path> | --pin-file <path>]
                                           on the root device: a new version
@@ -349,7 +358,11 @@ USAGE:
                                           listed role signs is accepted only
                                           while a certificate of the key is
                                           valid, or once the key is revoked
-                                          with a cut (init lists guest)
+                                          with a cut (init lists every role).
+                                          Before signing it lists the keys
+                                          that lapsed already and that every
+                                          node would then refuse, and asks to
+                                          confirm (--yes: no question)
   ndn-fwd root-key status [--namespace <prefix>] [--pib <dir>]
                                           where this root device keeps its
                                           namespace root keys (each trusted

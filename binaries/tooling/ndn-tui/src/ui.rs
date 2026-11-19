@@ -336,6 +336,7 @@ fn warning_line(w: &Warning) -> Line<'static> {
             "{namespace} has {count} key{} whose authority over data ended (expired or replaced) and that no version ends yet. Open it: Keys to end.",
             if *count == 1 { "" } else { "s" }
         ),
+        Warning::ListsFewRoles { notice } => notice.clone(),
     };
     Line::from(vec![
         Span::styled(" ⚠ ", Style::new().fg(Color::Black).bg(WARN)),

@@ -311,11 +311,13 @@ pub fn read_roots(pib: &Path) -> Result<Vec<RootFacts>, Failure> {
                 .contexts
                 .iter()
                 .find(|c| c.namespace == status.namespace);
+            let pending = pending.iter().find(|p| p.namespace == status.namespace);
             let ending = pending
-                .iter()
-                .find(|p| p.namespace == status.namespace)
                 .map(|p| p.ending.iter().map(ending_fact).collect())
                 .unwrap_or_default();
+            let notice = pending.and_then(|p| {
+                end_keys::data_requires_cut_notice(&p.namespace, &p.data_requires_cut)
+            });
             RootFacts {
                 namespace: status.namespace.to_string(),
                 key: status.key.to_string(),
@@ -335,6 +337,7 @@ pub fn read_roots(pib: &Path) -> Result<Vec<RootFacts>, Failure> {
                     })
                     .unwrap_or_default(),
                 ending,
+                notice,
             }
         })
         .collect())
