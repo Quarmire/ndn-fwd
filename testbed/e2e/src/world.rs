@@ -98,6 +98,9 @@ pub struct NodeCfg {
     /// `[[face]] kind = "quic"` with `listen = false` on this node's
     /// address (port 0): links are dialled from it, none accepted.
     pub quic_dial_only: bool,
+    /// `[[face]] kind = "quic"` on every address (`0.0.0.0`), [`QUIC_PORT`]:
+    /// the link socket follows the device when its address changes.
+    pub quic_listen_any: bool,
     /// `[[peer]]` entries: QUIC links this node dials.
     pub peers: Vec<PeerCfg>,
     /// Further config, appended verbatim (e.g. `[relay_service]`).
@@ -118,6 +121,8 @@ pub struct PeerCfg {
     pub relay: Option<String>,
     /// `routes = [...]`: prefixes routed to this peer.
     pub routes: Vec<String>,
+    /// `mode = "..."`: `always` (the default), `on-demand` or `off`.
+    pub mode: Option<String>,
 }
 
 impl PeerCfg {
@@ -139,6 +144,9 @@ impl PeerCfg {
             let routes: Vec<String> = self.routes.iter().map(|r| format!("\"{r}\"")).collect();
             s.push_str(&format!("routes = [{}]\n", routes.join(", ")));
         }
+        if let Some(m) = &self.mode {
+            s.push_str(&format!("mode = \"{m}\"\n"));
+        }
         s
     }
 
@@ -159,6 +167,9 @@ impl PeerCfg {
         }
         if !self.routes.is_empty() {
             parts.push(format!("routes {}", self.routes.join(" ")));
+        }
+        if let Some(m) = &self.mode {
+            parts.push(format!("mode {m}"));
         }
         format!("config: [[peer]] {}", parts.join(", "))
     }
@@ -239,6 +250,11 @@ impl Node {
                 self.ip
             ));
         }
+        if c.quic_listen_any {
+            s.push_str(&format!(
+                "[[face]]\nkind = \"quic\"\nbind = \"0.0.0.0:{QUIC_PORT}\"\n\n"
+            ));
+        }
         for peer in &c.peers {
             s.push_str(&peer.render());
             s.push('\n');
@@ -293,6 +309,11 @@ impl Node {
             v.push(format!(
                 "config: [[face]] kind = \"quic\" listen = false (dial links from {})",
                 self.ip
+            ));
+        }
+        if c.quic_listen_any {
+            v.push(format!(
+                "config: [[face]] kind = \"quic\" (listen for links on every address, 0.0.0.0:{QUIC_PORT})"
             ));
         }
         for peer in &c.peers {
@@ -368,6 +389,18 @@ impl World {
             .expect("add_behind: no NAT boxes")
             .nat_box(nat_box);
         let (ip, netns) = (b.device_ip, b.device_netns());
+        self.insert(name, ip, Some(netns), cfg);
+    }
+
+    /// A node whose daemon runs in roamer `roamer`'s namespace (see
+    /// [`Nat::add_roamer`]), its faces bound to the roamer's home address.
+    pub fn add_roaming(&mut self, name: &str, roamer: u8, cfg: NodeCfg) {
+        let r = self
+            .nat
+            .as_ref()
+            .expect("add_roaming: no roamers")
+            .roamer(roamer);
+        let (ip, netns) = (r.home, r.device_netns());
         self.insert(name, ip, Some(netns), cfg);
     }
 

@@ -11,6 +11,7 @@ use crate::run::Op;
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{addr, now_unix, parse_utc};
 
+mod address_change;
 mod answers;
 mod approval;
 mod compromised;
@@ -66,6 +67,7 @@ pub const ALL: &[&str] = &[
     "signals",
     "events",
     "answers",
+    "address-change",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -96,6 +98,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "signals" => signals::run(sc),
         "events" => events::run(sc),
         "answers" => answers::run(sc),
+        "address-change" => address_change::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

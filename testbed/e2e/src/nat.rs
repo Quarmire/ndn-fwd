@@ -2,7 +2,8 @@
 //! scenarios: the harness's namespace is "the internet" (it routes between
 //! the boxes and carries the public nodes on `lo`), each box is a network
 //! namespace that masquerades its LAN behind its public address, and each
-//! box's LAN holds one device namespace a daemon runs in.
+//! box's LAN holds one device namespace a daemon runs in. A roamer is a
+//! device namespace with no NAT that changes its address.
 //!
 //! Box `k` (1, 2, …):
 //! - `w<k>` (harness, 10.0.k.1/24) ↔ `wan` (box, 10.0.k.2/24, default route
@@ -147,10 +148,37 @@ impl NatBox {
     }
 }
 
+/// A device namespace that changes its address: `r<k>` (harness,
+/// 10.1.k.1/24 and 10.2.k.1/24) ↔ `eth0` (device, 10.1.k.2/24 at home,
+/// default route via 10.1.k.1). No NAT: the harness's namespace sees the
+/// device at its own address, and answers at both gateways, so the device
+/// can [`Nat::move_roamer`] to 10.2.k.2/24 and be reached there.
+pub struct Roamer {
+    pub index: u8,
+    /// The device's address before it moves.
+    pub home: Ipv4Addr,
+    /// Its address after.
+    pub away: Ipv4Addr,
+    device: Holder,
+}
+
+impl Roamer {
+    /// `/proc/<pid>/ns/net` of the device namespace: where a daemon that
+    /// moves runs.
+    pub fn device_netns(&self) -> PathBuf {
+        self.device.netns()
+    }
+
+    fn harness_if(&self) -> String {
+        format!("r{}", self.index)
+    }
+}
+
 pub struct Nat {
     dir: PathBuf,
     log: PathBuf,
     boxes: Vec<NatBox>,
+    roamers: Vec<Roamer>,
     /// `ip_forward` of the harness's namespace before, restored on drop.
     forward_was: String,
     cut: bool,
@@ -201,6 +229,7 @@ impl Nat {
             log: dir.join("nat.log"),
             dir,
             boxes: Vec::new(),
+            roamers: Vec::new(),
             forward_was,
             cut: false,
         })
@@ -360,6 +389,114 @@ impl Nat {
             .unwrap_or_else(|| panic!("no NAT box {k}"))
     }
 
+    /// Build roamer `k` (the next index): a device namespace on a veth of
+    /// the harness's namespace, at its home address.
+    pub fn add_roamer(&mut self) -> Result<u8, String> {
+        let k = u8::try_from(self.roamers.len() + 1).map_err(|_| "too many roamers")?;
+        let r = Roamer {
+            index: k,
+            home: Ipv4Addr::new(10, 1, k, 2),
+            away: Ipv4Addr::new(10, 2, k, 2),
+            device: Holder::new()?,
+        };
+        let dev = r.device_netns();
+        let dev = Some(dev.as_path());
+        let h = r.harness_if();
+        let home_gw = format!("10.1.{k}.1");
+        self.run(
+            None,
+            &[
+                "ip",
+                "link",
+                "add",
+                &h,
+                "type",
+                "veth",
+                "peer",
+                "name",
+                "eth0",
+                "netns",
+                &r.device.pid().to_string(),
+            ],
+        )?;
+        // The harness answers at the gateway address of both networks.
+        self.run(
+            None,
+            &["ip", "addr", "add", &format!("{home_gw}/24"), "dev", &h],
+        )?;
+        self.run(
+            None,
+            &["ip", "addr", "add", &format!("10.2.{k}.1/24"), "dev", &h],
+        )?;
+        self.run(None, &["ip", "link", "set", &h, "up"])?;
+        self.run(dev, &["ip", "link", "set", "lo", "up"])?;
+        self.run(
+            dev,
+            &[
+                "ip",
+                "addr",
+                "add",
+                &format!("{}/24", r.home),
+                "dev",
+                "eth0",
+            ],
+        )?;
+        self.run(dev, &["ip", "link", "set", "eth0", "up"])?;
+        self.run(dev, &["ip", "route", "add", "default", "via", &home_gw])?;
+        self.roamers.push(r);
+        Ok(k)
+    }
+
+    pub fn roamer(&self, k: u8) -> &Roamer {
+        self.roamers
+            .iter()
+            .find(|r| r.index == k)
+            .unwrap_or_else(|| panic!("no roamer {k}"))
+    }
+
+    /// Roamer `k` changes its address as a laptop moving networks does: the
+    /// new address is added, the old one deleted, the default route
+    /// replaced by one through the new network's gateway.
+    pub fn move_roamer(&self, k: u8) -> Result<(), String> {
+        let r = self.roamer(k);
+        let dev = r.device_netns();
+        let dev = Some(dev.as_path());
+        self.run(
+            dev,
+            &[
+                "ip",
+                "addr",
+                "add",
+                &format!("{}/24", r.away),
+                "dev",
+                "eth0",
+            ],
+        )?;
+        self.run(
+            dev,
+            &[
+                "ip",
+                "addr",
+                "del",
+                &format!("{}/24", r.home),
+                "dev",
+                "eth0",
+            ],
+        )?;
+        self.run(
+            dev,
+            &[
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "via",
+                &format!("10.2.{k}.1"),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Drop UDP between the public addresses of boxes `a` and `b`, both
     /// ways, where the harness's namespace forwards it: whatever path the
     /// devices behind them punched dies, their paths to the relay stay.
@@ -442,8 +579,12 @@ impl Drop for Nat {
             // namespace's own teardown is deferred).
             let _ = self.run(None, &["ip", "link", "del", &b.harness_if()]);
         }
+        for r in &self.roamers {
+            let _ = self.run(None, &["ip", "link", "del", &r.harness_if()]);
+        }
         // Kills the holders; a namespace goes with its last process.
         self.boxes.clear();
+        self.roamers.clear();
         let _ = fs::write(FORWARD, self.forward_was.trim());
     }
 }
