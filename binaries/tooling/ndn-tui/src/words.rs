@@ -287,6 +287,21 @@ pub fn secret_prompt(request: &SecretRequest) -> String {
     format!("{what} {purpose}")
 }
 
+/// The shape a device certificate has, and what to do when one has another: for the
+/// refusals "not a device certificate". The link's fact `expected` is the shape under the
+/// trusted prefix (`/home/<role>/<device>`).
+fn device_shape(w: &W<'_>) -> String {
+    let shape = w.or("expected", "<trusted prefix>/<role>/<device>");
+    let example = w
+        .get("namespace")
+        .map_or_else(|| "<trusted prefix>".to_owned(), str::to_owned);
+    format!(
+        "A device certificate is named {shape}/KEY/<key-id>/<issuer>/<version>, the role being \
+         one component naming what the device does there, such as member. Issue this device's \
+         certificate under that shape, for example {example}/member/<device>"
+    )
+}
+
 // --- phrases -------------------------------------------------------------
 
 /// A code with its params and its causes' phrases (link details only).
@@ -1600,6 +1615,13 @@ fn link_phrase(w: &W<'_>) -> Option<String> {
             w.secs("retry_secs", " in ", "")
         ),
         "peer-shutting-down" => "the other device is shutting down".to_owned(),
+        "offline" => "this device is offline: it links again when it is back online".to_owned(),
+        "no-path" => format!(
+            "no way to reach the other device now{}: every address kept for it failed and no relay \
+             you both use is linked; it reaches this device when it dials this device's current \
+             address, or when you both link to a relay",
+            w.wrap("device", " (", ")")
+        ),
         "link-tls" => format!("the secure handshake failed{}", w.error()),
         "link-connect" => format!("the connection could not be made{}", w.error()),
         "link-unexpected-key" => format!(
@@ -1761,6 +1783,13 @@ fn link_phrase(w: &W<'_>) -> Option<String> {
             w.or("namespaces", "a trusted prefix"),
             w.or("shown", "no trusted prefix")
         ),
+        "let-go" => format!(
+            "this device was let go of {}: the members record {} leaves it out, and the device \
+             that let it go carried the record and closed the link; whoever invited it invites \
+             it again",
+            w.or("folder", "a shared folder"),
+            w.or("record", "that lists the members")
+        ),
         "enrollment-possible" => format!(
             "a device can join {} over this relay while it shows no certificate of another \
              trusted prefix",
@@ -1777,8 +1806,9 @@ fn link_phrase(w: &W<'_>) -> Option<String> {
         // why a certificate identifies nobody here
         "no-certificate" => "it sent no certificate".to_owned(),
         "not-device-certificate" => format!(
-            "{} is not a device certificate of {ns}",
-            w.named("certificate", "its certificate")
+            "{} is not a device certificate of {ns}. {}",
+            w.named("certificate", "its certificate"),
+            device_shape(w)
         ),
         "certificate-expired" => format!(
             "{} is outside its validity period: that device renews it on its Node screen",
@@ -1807,9 +1837,10 @@ fn link_phrase(w: &W<'_>) -> Option<String> {
             w.wrap("root", " ", "")
         ),
         "foreign-not-device-certificate" => format!(
-            "{} is not a device certificate of {ns}{}",
+            "{} is not a device certificate of {ns}{}. {}",
             w.named("certificate", "its certificate"),
-            w.wrap("root", " (main device ", ")")
+            w.wrap("root", " (main device ", ")"),
+            device_shape(w)
         ),
         "foreign-root-invalid-namespace" => format!(
             "the main-device certificate{} names no valid trusted prefix",
@@ -2579,6 +2610,53 @@ mod tests {
         newer.append(" ", cause);
         let shown = link_detail(&newer);
         assert!(shown.contains(&cause_words) && shown.contains("Something new happened"));
+    }
+
+    /// "Not a device certificate" says the shape expected, what the certificate's name was
+    /// and what to do, in the TUI's words ("trusted prefix", never "namespace"), with the
+    /// facts the link sends and without them.
+    #[test]
+    fn a_certificate_not_of_the_device_shape_says_the_shape_and_what_to_do() {
+        let facts = |extra: &[(&str, &str)]| -> Params {
+            [
+                ("certificate", "/home/phone/KEY/k/NDNCERT/v=1"),
+                ("namespace", "/home"),
+                ("expected", "/home/<role>/<device>"),
+            ]
+            .iter()
+            .chain(extra)
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+        };
+        for (code, extra, whose) in [
+            ("not-device-certificate", &[][..], ""),
+            (
+                "foreign-not-device-certificate",
+                &[("root", "/home/KEY/root/self/v=1")][..],
+                " (main device /home/KEY/root/self/v=1)",
+            ),
+        ] {
+            let text = sentence(code, &facts(extra)).unwrap();
+            assert_clean(code, &text);
+            for part in [
+                "/home/phone/KEY/k/NDNCERT/v=1 is not a device certificate of /home",
+                whose,
+                "named /home/<role>/<device>/KEY/<key-id>/<issuer>/<version>",
+                "one component naming what the device does there, such as member",
+                "Issue this device's certificate under that shape, for example /home/member/<device>",
+            ] {
+                assert!(text.contains(part), "{code}: {part:?} is not in {text:?}");
+            }
+            // Without the facts the sentence still says the shape, in the TUI's words.
+            let bare = sentence(code, &Params::new()).unwrap();
+            assert_clean(code, &bare);
+            assert!(
+                bare.contains("<trusted prefix>/<role>/<device>")
+                    && bare.contains("<trusted prefix>/member/<device>")
+                    && bare.contains("Issue this device's certificate"),
+                "{code}: {bare:?}"
+            );
+        }
     }
 
     /// A refusal wrapping a cause, or carrying a token denial, words it in
