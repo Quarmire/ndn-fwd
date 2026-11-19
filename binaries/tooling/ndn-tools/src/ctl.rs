@@ -1493,6 +1493,26 @@ fn render_link_list_into(out: &mut String, listing: &ndn_mgmt_wire::LinkListing)
     }
     let _ = writeln!(out, "held-total {}", listing.held_total);
     let _ = writeln!(out, "wakes-sent {}", listing.wakes_sent);
+    if let Some(fault) = &listing.fault_injection {
+        let _ = writeln!(
+            out,
+            "fault-injection profile={} met={} dropped={} duplicated={} forged={} delayed={} \
+             passed={} predicate-panics={}",
+            fault.profile.as_deref().unwrap_or("none"),
+            fault.met,
+            fault.dropped,
+            fault.duplicated,
+            fault.forged,
+            fault.delayed,
+            fault.passed,
+            fault.predicate_panics
+        );
+        out.push_str(
+            "WARNING this daemon was built with the link library's test-only fault layer: it can \
+             drop, duplicate, forge and delay packets on its links. Do not run it outside tests; \
+             rebuild ndn-fwd without the `fault-injection` feature of ndn-link.\n",
+        );
+    }
     let yes_no = |b: bool| if b { "yes" } else { "no" };
     for link in &listing.links {
         let _ = writeln!(out, "link {}", link.label);
@@ -1880,6 +1900,7 @@ mod ctl_tests {
             serve: Some(ndn_mgmt_wire::LinkDetail::new("serve-own", "own")),
             held_total: 4,
             wakes_sent: 0,
+            fault_injection: None,
         };
         let mut out = String::new();
         render_link_list_into(&mut out, &listing);
@@ -1903,5 +1924,36 @@ mod ctl_tests {
             "01".repeat(32),
         );
         assert_eq!(out, expected);
+        assert!(
+            !out.contains("fault"),
+            "a build without the layer says nothing of it:\n{out}"
+        );
+    }
+
+    /// A daemon with the test-only fault layer says so in `link list`: its
+    /// profile and counters, and a warning that says what to do.
+    #[test]
+    fn link_list_warns_of_the_fault_layer() {
+        let listing = ndn_mgmt_wire::LinkListing {
+            fault_injection: Some(Box::new(ndn_mgmt_wire::LinkFaultReport {
+                profile: Some("drop=0.2,seed=3".into()),
+                met: 9,
+                dropped: 2,
+                forged: 1,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mut out = String::new();
+        render_link_list_into(&mut out, &listing);
+        assert!(
+            out.contains(
+                "fault-injection profile=drop=0.2,seed=3 met=9 dropped=2 duplicated=0 forged=1 \
+                 delayed=0 passed=0 predicate-panics=0\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("WARNING this daemon was built with"), "{out}");
+        assert!(out.contains("rebuild ndn-fwd without"), "{out}");
     }
 }

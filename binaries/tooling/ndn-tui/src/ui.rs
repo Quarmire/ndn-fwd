@@ -901,10 +901,15 @@ fn draw_connections(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let relays: Vec<_> = listing.links.iter().filter(|l| l.relay.is_some()).collect();
-    let [links_area, relays_area, serve_area] = Layout::vertical([
+    let [links_area, relays_area, serve_area, fault_area] = Layout::vertical([
         Constraint::Min(5),
         Constraint::Length(relays.len() as u16 + 3),
         Constraint::Length(if listing.serve.is_some() { 3 } else { 0 }),
+        Constraint::Length(if listing.fault_injection.is_some() {
+            4
+        } else {
+            0
+        }),
     ])
     .areas(area);
 
@@ -1042,6 +1047,27 @@ fn draw_connections(f: &mut Frame, app: &App, area: Rect) {
                 .block(block("As a relay"))
                 .wrap(Wrap { trim: true }),
             serve_area,
+        );
+    }
+    if let Some(fault) = &listing.fault_injection {
+        let plan = match &fault.profile {
+            Some(p) => format!(
+                "Profile {p}: {} packets met it, {} dropped, {} forged.",
+                fault.met, fault.dropped, fault.forged
+            ),
+            None => "No profile is installed, so it touches nothing now.".to_owned(),
+        };
+        f.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "This is a test build: it can drop, forge and delay packets. Do not run it outside tests.",
+                    Style::new().fg(BAD),
+                )),
+                Line::from(plan),
+            ])
+            .block(block("Test build (fault layer)"))
+            .wrap(Wrap { trim: true }),
+            fault_area,
         );
     }
 }

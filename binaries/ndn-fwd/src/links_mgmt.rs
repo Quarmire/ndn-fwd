@@ -14,13 +14,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ndn_cert::report::{Detail, TrustRefusal, code};
-use ndn_link::{LinkMode, LinkReport, LinkStatus, Links, PathStatus, PeerId};
+use ndn_link::{FaultReport, LinkMode, LinkReport, LinkStatus, Links, PathStatus, PeerId};
 use ndn_mgmt::{MgmtContext, MgmtModule, MgmtResponse, refusal_response};
 use ndn_mgmt_wire::control_response::status;
 use ndn_mgmt_wire::nfd_command::{module, verb};
 use ndn_mgmt_wire::{
-    ControlParameters, ControlResponse, LinkAsleepEntry, LinkCommandError, LinkEntry, LinkListing,
-    LinkModeArg, LinkPathEntry, LinkRelayEntry, link_code, parse_link_command,
+    ControlParameters, ControlResponse, LinkAsleepEntry, LinkCommandError, LinkEntry,
+    LinkFaultReport, LinkListing, LinkModeArg, LinkPathEntry, LinkRelayEntry, link_code,
+    parse_link_command,
 };
 
 /// Serves the links module. `links = None` when this daemon runs no QUIC
@@ -243,6 +244,22 @@ pub(crate) fn listing(report: LinkReport) -> LinkListing {
         serve: Some(report.serve),
         held_total: report.held_total as u64,
         wakes_sent: report.wakes_sent,
+        fault_injection: report.fault_injection.map(|f| Box::new(fault_report(f))),
+    }
+}
+
+/// The fault layer's notice as the wire carries it: `Some` exactly when
+/// this daemon was built with ndn-link's test-only fault layer.
+fn fault_report(report: FaultReport) -> LinkFaultReport {
+    LinkFaultReport {
+        profile: report.profile,
+        met: report.met,
+        dropped: report.dropped,
+        duplicated: report.duplicated,
+        forged: report.forged,
+        delayed: report.delayed,
+        passed: report.passed,
+        predicate_panics: report.predicate_panics,
     }
 }
 
@@ -463,6 +480,54 @@ mod tests {
             assert!(!names_the_host(&detail.text), "{detail:?}");
             details.extend(&detail.causes);
         }
+        cancel.cancel();
+    }
+
+    /// The fault layer's notice reaches the dataset: nothing from a build
+    /// without the layer (`LinkReport::fault_injection` is `None`), the
+    /// profile and every counter from one that has it.
+    #[tokio::test]
+    async fn the_fault_layer_notice_is_forwarded_in_the_listing() {
+        let cancel = CancellationToken::new();
+        let links = links(&cancel);
+        let mut report = links.report();
+        assert_eq!(
+            report.fault_injection.is_some(),
+            FaultReport::compiled_in(),
+            "the library reports the layer exactly when it has it"
+        );
+        assert_eq!(
+            listing(report.clone()).fault_injection.is_some(),
+            FaultReport::compiled_in()
+        );
+        report.fault_injection = Some(FaultReport {
+            profile: Some("drop=0.2,seed=3".into()),
+            met: 9,
+            dropped: 2,
+            duplicated: 1,
+            forged: 3,
+            delayed: 4,
+            passed: 5,
+            predicate_panics: 6,
+        });
+        let wire = listing(report);
+        assert_eq!(
+            wire.fault_injection,
+            Some(Box::new(LinkFaultReport {
+                profile: Some("drop=0.2,seed=3".into()),
+                met: 9,
+                dropped: 2,
+                duplicated: 1,
+                forged: 3,
+                delayed: 4,
+                passed: 5,
+                predicate_panics: 6,
+            }))
+        );
+        assert_eq!(
+            ndn_mgmt_wire::LinkListing::decode(wire.encode()).unwrap(),
+            wire
+        );
         cancel.cancel();
     }
 }

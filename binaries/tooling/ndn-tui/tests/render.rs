@@ -10,7 +10,8 @@ use ndn_cert::{
     IssuedEntry,
 };
 use ndn_mgmt_wire::{
-    ApprovalListing, LinkEntry, LinkListing, LinkPathEntry, LinkRelayEntry, PendingApproval,
+    ApprovalListing, LinkEntry, LinkFaultReport, LinkListing, LinkPathEntry, LinkRelayEntry,
+    PendingApproval,
 };
 use ndn_tui::app::{App, Command, Effect, Key, Modal, Msg, Screen, Section};
 use ndn_tui::model::{Anchor, EndingFact, RootFacts, Update};
@@ -399,6 +400,29 @@ fn connections_show_peer_carried_prefix_path_and_relays() {
     );
     assert!(screen.contains("4 ms"), "rtt missing:\n{screen}");
     assert!(screen.contains("Relays"), "relays missing:\n{screen}");
+}
+
+/// A daemon built with the test-only fault layer says so on the connections
+/// screen; one without says nothing.
+#[test]
+fn connections_say_when_the_daemon_has_the_fault_layer() {
+    let mut app = app();
+    app.screen = Screen::Connections;
+    let plain = render(&app, 120, 30);
+    assert!(
+        !plain.contains("fault layer"),
+        "a notice without the layer:\n{plain}"
+    );
+    app.handle(Msg::Update(Update::Links(Ok(LinkListing {
+        fault_injection: Some(Box::new(LinkFaultReport {
+            profile: Some("drop=0.2".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }))));
+    let screen = render(&app, 120, 30);
+    assert!(screen.contains("fault layer"), "{screen}");
+    assert!(screen.contains("drop=0.2"), "{screen}");
 }
 
 #[test]

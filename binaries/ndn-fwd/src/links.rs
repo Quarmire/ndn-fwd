@@ -346,6 +346,34 @@ impl LinkTrust for DaemonTrust {
     }
 }
 
+/// Refuse to start a daemon built with ndn-link's test-only fault layer
+/// (`built`: [`ndn_link::FaultReport::compiled_in`]) unless `[links]
+/// allow_fault_injection = true` (`allowed`). A build that drops,
+/// duplicates, forges and delays packets on its links must not run in a
+/// shipped daemon by accident (a feature enabled by a CI flag, a workspace
+/// `--all-features` build), and a log line nobody reads is not enough.
+fn refuse_fault_layer(built: bool, allowed: bool) -> anyhow::Result<()> {
+    if built && !allowed {
+        anyhow::bail!(
+            "this ndn-fwd was built with ndn-link's test-only fault layer (cargo feature \
+             `fault-injection`), which drops, duplicates, forges and delays packets on its \
+             links, and it will not start with it: rebuild without that feature (a shipped \
+             daemon never has it), or, for a test run, set `allow_fault_injection = true` \
+             under [links] in the configuration"
+        );
+    }
+    Ok(())
+}
+
+/// [`refuse_fault_layer`] for this build and `config`: called before anything
+/// else starts.
+pub(crate) fn check_fault_layer(config: &ForwarderConfig) -> anyhow::Result<()> {
+    refuse_fault_layer(
+        ndn_link::FaultReport::compiled_in(),
+        config.links.allow_fault_injection,
+    )
+}
+
 /// Start this device's links whenever it has a key: listen when `[[face]]
 /// kind = "quic"` is configured (and not `listen = false`), link to its
 /// relays (the namespace's and `[[relay]]`) and each `[[peer]]` by its mode,
@@ -536,5 +564,42 @@ mod tests {
             })
         );
         assert_eq!(specs[1].mode, LinkMode::Off);
+    }
+
+    /// A daemon built with the test-only fault layer refuses to start, says
+    /// why and what to do, unless `[links] allow_fault_injection = true`;
+    /// every other build starts, whatever that setting says.
+    #[test]
+    fn a_build_with_the_fault_layer_refuses_to_start_unless_allowed() {
+        let refusal = refuse_fault_layer(true, false)
+            .expect_err("must refuse")
+            .to_string();
+        for words in [
+            "fault layer",
+            "will not start",
+            "rebuild without",
+            "allow_fault_injection = true",
+            "[links]",
+        ] {
+            assert!(refusal.contains(words), "{words:?} missing from: {refusal}");
+        }
+        assert!(refuse_fault_layer(true, true).is_ok());
+        assert!(refuse_fault_layer(false, false).is_ok());
+        assert!(refuse_fault_layer(false, true).is_ok());
+    }
+
+    /// The option is read from `[links]`, off unless set; and this build
+    /// answers as ndn-link's feature says.
+    #[test]
+    fn the_option_comes_from_the_links_section_and_the_build_from_the_feature() {
+        let off: ForwarderConfig = "".parse().unwrap();
+        let on: ForwarderConfig = "[links]\nallow_fault_injection = true\n".parse().unwrap();
+        assert!(!off.links.allow_fault_injection);
+        assert!(on.links.allow_fault_injection);
+        assert!(check_fault_layer(&on).is_ok());
+        assert_eq!(
+            check_fault_layer(&off).is_err(),
+            ndn_link::FaultReport::compiled_in()
+        );
     }
 }

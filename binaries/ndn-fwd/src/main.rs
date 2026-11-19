@@ -654,6 +654,10 @@ async fn main() -> Result<()> {
         Some(s) => s.parse::<ForwarderConfig>()?,
         None => ForwarderConfig::default(),
     };
+    // A build with ndn-link's test-only fault layer does not start unless the
+    // configuration allows it (before anything is opened).
+    #[cfg(feature = "quic")]
+    links::check_fault_layer(&fwd_config)?;
 
     // Build the span publisher first so it can attach to the tracing
     // subscriber before any spans open. Installed on the engine after build.
