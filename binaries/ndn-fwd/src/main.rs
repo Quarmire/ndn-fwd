@@ -266,10 +266,14 @@ USAGE:
                                           whose authority over Data ended and
                                           that no version revokes yet — lapsed
                                           keys of a role listed in
-                                          DataRequiresCut (guest) and keys
+                                          DataRequiresCut (every role in a
+                                          namespace init makes) and keys
                                           replaced by a newer key of the same
                                           device — each with the data-host line
-                                          that writes its cut file
+                                          that writes its cut file; for a
+                                          context that lists fewer roles,
+                                          the schema data-requires-cut
+                                          command that lists them all
   ndn-fwd end-keys [--cut <file>]... [--namespace <prefix>] [--yes]
                 [--pib <dir>] [-c <config>]
                 [--passphrase-file <path> | --pin-file <path>]

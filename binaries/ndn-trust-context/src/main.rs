@@ -63,7 +63,7 @@ enum Cmd {
         revocations: Vec<String>,
         /// Device role whose Data is accepted only while a certificate of
         /// its key is valid, or once the key is revoked with a cut
-        /// (DataRequiresCut; `ndn-fwd init` lists `guest`). Repeatable.
+        /// (DataRequiresCut; `ndn-fwd init` lists every role). Repeatable.
         #[arg(long = "data-requires-cut")]
         data_requires_cut: Vec<String>,
         /// PIB directory holding `--sign-key`.

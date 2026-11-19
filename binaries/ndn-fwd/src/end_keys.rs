@@ -5,8 +5,9 @@
 //! Data is judged without a clock, so a key's authority over Data ends only
 //! by a revocation. Two kinds of keys must end although nobody lost them: a
 //! **lapsed** key of a role the trust context lists in `DataRequiresCut`
-//! (`guest` in a namespace `ndn-fwd init` made) whose newest certificate
-//! expired — every node refuses its Data meanwhile — and a key **replaced**
+//! (every role in a namespace `ndn-fwd init` makes; `guest` alone in an
+//! older one) whose newest certificate expired — every node refuses its
+//! Data meanwhile — and a key **replaced**
 //! by a newer key the CA certified for the same device — whose Data stays
 //! accepted until it is revoked. Each is ended by a revocation with a cut
 //! bounded at the moment it ended (its NotAfter, or the replacement's
@@ -15,7 +16,10 @@
 //! - `ndn-fwd status [--pib <dir>]` lists them (read from the PIB: the
 //!   namespace CA's issued certificates and the held version), each with
 //!   the ndn-data host line that writes its cut file. Every root command
-//!   lists them too after its own outcome.
+//!   lists them too after its own outcome. For a held context that lists
+//!   fewer than every role in `DataRequiresCut` (one made before `init`
+//!   listed all four) it also prints a `notice` naming the
+//!   `ndn-fwd schema data-requires-cut` command that lists them all.
 //! - `ndn-fwd end-keys --cut <file>... [--namespace <ns>] [--yes]` signs
 //!   ONE version revoking every key to end that has a cut file, with its
 //!   cut, after one confirmation. A key without a cut file is listed and
@@ -28,8 +32,10 @@
 
 use anyhow::Result;
 use ndn_cert::RootUnlockKind;
+use ndn_cert::roles::Role;
 use ndn_namespace::root::end_keys;
 use ndn_namespace::root::revoke::format_when;
+use ndn_packet::Name;
 
 use crate::onboard::{flag_values, pib_dir};
 use crate::revoke::{cut_refused, cut_text, print_left_out, read_cut_file};
@@ -37,6 +43,39 @@ use crate::root_host::{
     Secrets, daemon, ending_text, handed_text, namespace_arg, now_ms, print_keys_to_end, render,
     render_before_signing,
 };
+
+/// What `ndn-fwd status` says of a held root context that lists fewer than
+/// every device role in `DataRequiresCut`: such a context was made before
+/// `ndn-fwd init` listed every role, and a context is root-signed data that
+/// nothing rewrites, so the owner is told the one command that does. `None`
+/// when `listed` (the roles the held version lists) holds every role.
+pub(crate) fn data_requires_cut_notice(namespace: &Name, listed: &[String]) -> Option<String> {
+    if Role::ALL
+        .iter()
+        .all(|role| listed.iter().any(|l| l == role.as_str()))
+    {
+        return None;
+    }
+    let every = Role::ALL.map(Role::as_str).join(",");
+    let refused = if listed.is_empty() {
+        "for no role".to_string()
+    } else {
+        format!("only for roles {}", listed.join(","))
+    };
+    Some(format!(
+        "{namespace}: Data of lapsed keys is refused {refused}; to refuse it for every role, \
+         run on the root device: ndn-fwd schema data-requires-cut {every} --namespace {namespace}"
+    ))
+}
+
+/// The notices `ndn-fwd status` prints under the roots it holds
+/// ([`data_requires_cut_notice`] of each).
+fn status_notices(pending: &[end_keys::Pending]) -> Vec<String> {
+    pending
+        .iter()
+        .filter_map(|p| data_requires_cut_notice(&p.namespace, &p.data_requires_cut))
+        .collect()
+}
 
 /// `ndn-fwd status`: the roots this PIB holds, their held versions, and
 /// the keys to end.
@@ -56,6 +95,9 @@ pub(crate) fn run_status(args: &[String]) -> Result<()> {
             ns.version,
             ns.ending.len()
         );
+    }
+    for notice in status_notices(&pending) {
+        println!("notice         = {notice}");
     }
     print_keys_to_end(&pib_dir);
     Ok(())
@@ -153,4 +195,96 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     println!("#   ndn-fwd readmit <key> <full-name>");
     print_keys_to_end(&pib_dir);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ndn_cert::{NewRootStore, bump_context_data_requires_cut, persist_context};
+    use ndn_packet::Data;
+    use ndn_security::FilePib;
+
+    use super::*;
+
+    fn ns() -> Name {
+        "/home/bob".parse().unwrap()
+    }
+
+    fn roles(listed: &[&str]) -> Vec<String> {
+        listed.iter().map(|r| r.to_string()).collect()
+    }
+
+    /// A context that lists every role says nothing; one that lists fewer
+    /// (made before `init` listed all four) names the command that lists them
+    /// all, the namespace, and the roles it lists now.
+    #[test]
+    fn a_context_listing_fewer_than_every_role_is_told_the_command_that_lists_them_all() {
+        assert_eq!(
+            data_requires_cut_notice(&ns(), &roles(&["admin", "guest", "member", "node"])),
+            None
+        );
+        assert_eq!(
+            data_requires_cut_notice(&ns(), &roles(&["guest"])).as_deref(),
+            Some(
+                "/home/bob: Data of lapsed keys is refused only for roles guest; to refuse it \
+                 for every role, run on the root device: ndn-fwd schema data-requires-cut \
+                 admin,member,node,guest --namespace /home/bob"
+            )
+        );
+        let some = data_requires_cut_notice(&ns(), &roles(&["guest", "member"])).unwrap();
+        assert!(some.contains("only for roles guest,member"), "{some}");
+        let none = data_requires_cut_notice(&ns(), &[]).unwrap();
+        assert!(none.contains("refused for no role"), "{none}");
+    }
+
+    /// `status` over a real PIB: a root made by `init` lists every role and
+    /// gets no notice; the same root whose held version lists `guest` alone
+    /// (a namespace from an earlier release) gets one naming the command.
+    #[test]
+    fn status_notes_a_held_root_context_that_lists_only_guest() {
+        let dir = tempfile::tempdir().unwrap();
+        let pib = FilePib::new(dir.path()).unwrap();
+        let made = futures::executor::block_on(ndn_cert::init_namespace_in_pib(
+            &pib,
+            &ns(),
+            "desk",
+            false,
+            &NewRootStore::File,
+        ))
+        .unwrap();
+
+        let pending = end_keys::pending_all(dir.path(), now_ms()).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].data_requires_cut,
+            ["admin", "guest", "member", "node"]
+        );
+        assert_eq!(status_notices(&pending), Vec::<String>::new());
+
+        // The root signs version 2 listing `guest` alone, as a namespace made
+        // by an earlier release holds.
+        let root = pib
+            .get_signer(&ndn_cert::root_key_name(&ns()))
+            .expect("the root key is in the PIB");
+        let held = Data::decode(made.init.context_data.raw().clone()).unwrap();
+        let bump = futures::executor::block_on(bump_context_data_requires_cut(
+            root.as_ref(),
+            &held,
+            &[Role::Guest],
+        ))
+        .unwrap()
+        .expect("a change");
+        persist_context(dir.path(), &bump.context, &bump.data).unwrap();
+
+        let pending = end_keys::pending_all(dir.path(), now_ms()).unwrap();
+        assert_eq!(pending[0].version, 2);
+        assert_eq!(pending[0].data_requires_cut, ["guest"]);
+        assert_eq!(
+            status_notices(&pending),
+            [
+                "/home/bob: Data of lapsed keys is refused only for roles guest; to refuse it \
+                 for every role, run on the root device: ndn-fwd schema data-requires-cut \
+                 admin,member,node,guest --namespace /home/bob"
+            ]
+        );
+    }
 }

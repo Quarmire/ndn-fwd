@@ -55,7 +55,8 @@ pub struct ContextSpec {
     /// `/<namespace>/<role>/<device>/KEY/<k>` of a listed role signs is
     /// accepted only while a certificate of the key is valid by the
     /// reader's clock, or once the key is revoked with a cut that accepts
-    /// it. `ndn-fwd init` lists `guest`.
+    /// it. `ndn-fwd init` lists every role (`admin`, `member`, `node`,
+    /// `guest`).
     pub data_requires_cut: Vec<String>,
 }
 

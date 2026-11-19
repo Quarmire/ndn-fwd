@@ -66,7 +66,8 @@
 //!   and `end-keys --cut <file>... [--yes]` ends them with their cuts in one
 //!   version ([`crate::end_keys`]); every root command lists them too.
 //!   `schema data-requires-cut <roles>|none` sets which roles those are
-//!   ([`crate::schema_cmd`]).
+//!   (every role in a namespace `init` makes; `status` names the command
+//!   for an older context that lists fewer) ([`crate::schema_cmd`]).
 //! - `context refresh [<ns>]` asks the running daemon to check its held trust
 //!   contexts for a newer version now (see [`crate::context_refresh`]).
 //! - `root-key status|move` shows or moves where the root key lives

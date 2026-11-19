@@ -33,9 +33,12 @@
 //!   ([`ndn_cert::bump_context_data_requires_cut`]): Data a key of a listed
 //!   role signs is accepted only while a certificate of the key is valid by
 //!   the reader's clock, or once the key is revoked with a cut that accepts
-//!   it. `ndn-fwd init` lists `guest`; a role that renews (admin, member,
-//!   node) need not be listed. Every other field is carried over. A listed
-//!   role's lapsed keys are then ended by the root (`ndn-fwd end-keys`).
+//!   it. `ndn-fwd init` lists every role; a role that renews (admin, member,
+//!   node) is refused only when its renewal fails, so an honest device
+//!   never waits. Every other field is carried over. A listed role's lapsed
+//!   keys are then ended by the root (`ndn-fwd end-keys`). A namespace made
+//!   before every role was listed lists `guest` alone; `ndn-fwd status`
+//!   names `ndn-fwd schema data-requires-cut admin,member,node,guest` for it.
 //!
 //! **An explicit verb**, not something every root-signed version does: a
 //! revocation or a recovery kit (`ndn-fwd revoke`, `ndn-fwd recovery-kit`)
