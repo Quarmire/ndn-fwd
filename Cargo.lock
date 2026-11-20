@@ -2946,6 +2946,7 @@ dependencies = [
  "ndn-face",
  "ndn-face-local",
  "ndn-ipc",
+ "ndn-mgmt-wire",
  "ndn-packet",
  "ndn-runtime",
  "ndn-security",
