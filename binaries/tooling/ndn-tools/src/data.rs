@@ -215,7 +215,11 @@
 //!   through `security/context-adopt`, as `ndn-ctl adopt` asks, so it also
 //!   routes it over its relay links). An offer refused answers
 //!   `"introduction"`: the offer and why (`unknown`, `used`, `expired`,
-//!   `closed`, `wrong-proof` with `left`, `forged`, `conflict`, or
+//!   `closed`, `wrong-proof` with `left`, `forged`, `conflict`, `hint` (a
+//!   short code's first contact came damaged or does not prove itself:
+//!   retry at most three times), `hint-mismatch` (it proves itself, but is
+//!   not the inviter the code names: ask for a new code), `gone-unproven`
+//!   (it says the offer is closed and cannot prove it: retry), or
 //!   `inviter-conflict` when the inviter's namespace overlaps one this
 //!   device trusts). The other writers a folder's records list, whose
 //!   self-certifying namespaces this device's daemon does not hold, are
@@ -2628,6 +2632,8 @@ fn intro_refusal(why: &IntroRefusal) -> &'static str {
         IntroRefusal::Conflict => "conflict",
         IntroRefusal::InviterConflict { .. } => "inviter-conflict",
         IntroRefusal::Hint { .. } => "hint",
+        IntroRefusal::HintMismatch { .. } => "hint-mismatch",
+        IntroRefusal::GoneUnproven { .. } => "gone-unproven",
     }
 }
 
