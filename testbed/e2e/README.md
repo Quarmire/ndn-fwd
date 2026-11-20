@@ -2,7 +2,7 @@
 
 Runs real `ndn-fwd` daemons and the operator CLIs (`ndn-fwd`,
 `ndn-fwd-tokens`, `ndn-put`, `ndn-peek`, `ndn-ctl`, `ndn-sec`; `ndn-data`
-hosts a device's data layer for `notes`, `shared`, `photos`, `sensor`,
+hosts a device's data layer for `notes`, `shared`, `invite`, `photos`, `sensor`,
 `stolen`, `folder`, `signals`, `events` and `answers` (and, with no device,
 the relay's capture of `signals`), and `ndn-repo hold` is the holder of
 `photos` and `sensor`) through the

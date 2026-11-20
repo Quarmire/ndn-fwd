@@ -1726,6 +1726,9 @@ async fn run(
                 "offer": code.offer.to_string(),
                 "link": code.link,
                 "words": code.words,
+                "short": code.short,
+                "short_why": code.short_why,
+                "share": code.share(),
             })))
         }
         ("offer", _) => usage(OFFER_USAGE),
@@ -1741,8 +1744,11 @@ async fn run(
             })))
         }
         ("close_offer", _) => usage(CLOSE_OFFER_USAGE),
-        ("join", [code]) => {
-            let joined = layer.join(code).await?;
+        ("join", parts @ [_, ..]) => {
+            // A short code is several tokens (a device name, a contact, words): they
+            // are one code.
+            let code = parts.join(" ");
+            let joined = layer.join(&code).await?;
             Ok(Verb::Done(json!({
                 "folder": joined.folder.to_string(),
                 "role": role_word(joined.role),
@@ -2621,6 +2627,7 @@ fn intro_refusal(why: &IntroRefusal) -> &'static str {
         IntroRefusal::Forged => "forged",
         IntroRefusal::Conflict => "conflict",
         IntroRefusal::InviterConflict { .. } => "inviter-conflict",
+        IntroRefusal::Hint { .. } => "hint",
     }
 }
 
