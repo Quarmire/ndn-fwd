@@ -492,6 +492,7 @@ pub(crate) fn spawn(
                 membership: config.direct.membership,
                 max_paths: config.direct.max_paths,
             },
+            reliability: Default::default(),
         },
         cancel.clone(),
     );
