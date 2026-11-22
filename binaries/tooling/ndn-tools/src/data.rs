@@ -129,21 +129,6 @@
 //!   and when it counts), for a folder of every collection under it,
 //!   those created later included, each line naming the change's
 //!   collection.
-//! - `hold <collection> copies=<n> until=<ms since the epoch>
-//!   holders=<device>[,<device>...]`: ask the named holder devices (at
-//!   least `copies` of them, none this device) to keep the collection,
-//!   audit every live lease and repair: the custody, each live lease (holder
-//!   key, name, what it holds, until when, this device's last audit) and the
-//!   leases this call found broken or unanswered, and the versions asked for
-//!   that no kept lease holds and this device does not hold whole (`unkept`:
-//!   lost unless a copy turns up).
-//! - `prune <collection or version> upto=<writer key>:<seq>[,...]`: drop
-//!   this device's own versions up to that point.
-//! - `release <collection or version>`: drop this device's copies of the
-//!   pieces of large versions once enough named holders prove, to a fresh
-//!   audit over every piece while this device serves none of them, that
-//!   they keep them (the host's storage policy): how many versions, pieces
-//!   and octets, and the versions kept here (`kept`: each name with why).
 //! - `suspect <key> [<when>]`: mark key `<key>` (`<id>/KEY/<k>`; a
 //!   certificate name stands for its key) suspected since `<when>` — ms
 //!   since the epoch or RFC 3339 in UTC (`2026-11-04T10:00:00.123Z`);
@@ -244,8 +229,7 @@
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
 //! `{"verb":…,"ok":{…}}` or `{"verb":…,"error":{"message","retry","next",
-//! "next_step"}}` (with `"pruned_by"`, the prune record, when the name was
-//! pruned, `"expired"`, the name and its keep, when it expired, and
+//! "next_step"}}` (with `"expired"`, the name and its keep, when it expired, and
 //! `"outside_cut"`, the revoked key and the cut's signer, when a revocation's
 //! cut refuses it, `"suspected"`, the key and since when, when this device
 //! takes nothing new of a suspected key, `"untrusted"`, why, when the
@@ -293,11 +277,10 @@ use ndn_cert::CutFile;
 use ndn_cert::report::TrustEvent;
 use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
-    Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
-    CutBound, DataError, DataLayer, Device, Entries, Equivocal, Frontier, Got, Hold, IntroRefusal,
-    Introducer, Keep, Lease, MergeRule, NextStep, NotCounted, Offer, Payload, Prune, PutOptions,
-    Refusal, Role, Rule, Seq, Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId,
-    Version, VersionId, Writer, Yrs,
+    Age, Answer, Audience, BlockEntry, Change, Clock, Config, Content, CutBound, DataError,
+    DataLayer, Device, Entries, Equivocal, Frontier, Got, IntroRefusal, Introducer, Keep,
+    MergeRule, NextStep, NotCounted, Offer, Payload, PutOptions, Refusal, Role, Rule, Share,
+    ShareChange, Sharing, State, Timestamp, Transport, TypeId, Version, VersionId, Yrs,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -1356,54 +1339,6 @@ async fn run(
             Ok(Verb::Done(json!({"collection": collection.to_string()})))
         }
         ("watch", _) => usage("usage: watch <collection or folder>"),
-        ("hold", [collection, options @ ..]) => {
-            let collection = match name(collection) {
-                Ok(c) => c,
-                Err(e) => return Ok(Verb::Usage(e)),
-            };
-            let want = match hold_options(options) {
-                Ok(h) => h,
-                Err(e) => return Ok(Verb::Usage(format!("{e}; {HOLD_USAGE}"))),
-            };
-            let c = layer.hold(&collection, want).await?;
-            Ok(Verb::Done(json!({"custody": custody(&c)})))
-        }
-        ("hold", _) => usage(HOLD_USAGE),
-        ("prune", [prefix, upto]) => {
-            let prefix = match name(prefix) {
-                Ok(p) => p,
-                Err(e) => return Ok(Verb::Usage(e)),
-            };
-            let upto = match upto_frontier(upto) {
-                Ok(f) => f,
-                Err(e) => return Ok(Verb::Usage(format!("{e}; {PRUNE_USAGE}"))),
-            };
-            layer.prune(&prefix, &upto).await?;
-            Ok(Verb::Done(json!({
-                "prefix": prefix.to_string(),
-                "upto": frontier(&upto),
-            })))
-        }
-        ("prune", _) => usage(PRUNE_USAGE),
-        ("release", [n]) => {
-            let n = match name(n) {
-                Ok(n) => n,
-                Err(e) => return Ok(Verb::Usage(e)),
-            };
-            let r = layer.release(&n).await?;
-            Ok(Verb::Done(json!({
-                "name": n.to_string(),
-                "versions": r.versions,
-                "pieces": r.pieces,
-                "bytes": r.bytes,
-                "kept": r
-                    .kept
-                    .iter()
-                    .map(|(v, why)| json!({"name": v.to_string(), "why": why}))
-                    .collect::<Vec<_>>(),
-            })))
-        }
-        ("release", _) => usage("usage: release <collection or version>"),
         ("suspect", [key, since @ ..]) if since.len() <= 1 => {
             let key = match name(key) {
                 Ok(k) => k,
@@ -1551,7 +1486,7 @@ async fn run(
         ("join", _) => usage(JOIN_USAGE),
         _ => usage(
             "verbs: share, share_folder, members, put, put_op, get, range, watch, \
-             hold, prune, release, suspect, unsuspect, cut, refused, offer, close_offer, join, \
+             suspect, unsuspect, cut, refused, offer, close_offer, join, \
              signal-subscribe, \
              signal-open, signal-send, signal-stream, signal-close, signal-stats, signal-capture, \
              quit",
@@ -1754,12 +1689,6 @@ fn text_shown(text: &str) -> Value {
 const RANGE_USAGE: &str = "usage: range <collection> seq=<low>..<high>|time=<from>..<to> (seqs \
                            both included; dates in ms since the epoch, from included, to \
                            excluded)";
-
-const HOLD_USAGE: &str = "usage: hold <collection> copies=<n> until=<ms since the epoch> \
-                          holders=<device>[,<device>...]";
-
-const PRUNE_USAGE: &str =
-    "usage: prune <collection or version> upto=<writer key>:<seq>[,<writer key>:<seq>...]";
 
 const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key is suspected: \
                              when the device was lost, as ms since the epoch or RFC 3339; \
@@ -2174,72 +2103,6 @@ async fn field_value(value: &str) -> Result<Bytes, String> {
     }
 }
 
-/// A `hold` line's options: `copies=`, `until=` and `holders=` are all
-/// required.
-fn hold_options(options: &[String]) -> Result<Hold, String> {
-    let (mut copies, mut until, mut holders) = (None, None, None);
-    for o in options {
-        match o.split_once('=') {
-            Some(("copies", n)) => {
-                copies = Some(n.parse::<u32>().map_err(|e| format!("copies {n:?}: {e}"))?);
-            }
-            Some(("until", t)) => {
-                until = Some(Timestamp(t.parse::<u64>().map_err(|e| {
-                    format!("until {t:?} is no date in ms since the epoch: {e}")
-                })?));
-            }
-            Some(("holders", v)) => {
-                holders = Some(
-                    v.split(',')
-                        .filter(|s| !s.is_empty())
-                        .map(|h| {
-                            h.parse::<Name>()
-                                .map_err(|e| format!("holder {h:?} is no name: {e}"))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
-            }
-            _ => return Err(format!("{o:?} is not copies=, until= or holders=")),
-        }
-    }
-    match (copies, until, holders) {
-        (Some(copies), Some(until), Some(holders)) => Ok(Hold {
-            copies,
-            until,
-            holders,
-        }),
-        _ => Err("copies=, until= and holders= are all required".into()),
-    }
-}
-
-/// A `prune` line's `upto=<writer key>:<seq>[,...]` as a frontier. A key
-/// name may hold `:`, a seq never does: each item splits at its last `:`.
-fn upto_frontier(word: &str) -> Result<Frontier, String> {
-    let list = word
-        .strip_prefix("upto=")
-        .ok_or_else(|| format!("{word:?} is not upto=<writer key>:<seq>[,...]"))?;
-    let mut upto = Frontier::new();
-    for item in list.split(',').filter(|s| !s.is_empty()) {
-        let (key, seq) = item
-            .rsplit_once(':')
-            .ok_or_else(|| format!("{item:?} is not <writer key>:<seq>"))?;
-        let key = key
-            .parse::<Name>()
-            .map_err(|e| format!("{key:?} is no name: {e}"))?;
-        let seq = seq
-            .parse::<u64>()
-            .map_err(|e| format!("seq {seq:?}: {e}"))?;
-        upto.include(&VersionId {
-            writer: Writer::new(key),
-            seq: Seq(seq),
-        });
-    }
-    if upto.is_empty() {
-        return Err("upto= names no writer".into());
-    }
-    Ok(upto)
-}
-
 /// A line split into words: whitespace separates them, double quotes keep
 /// a value's spaces (`text="on the plane"`), `\"` and `\\` escape inside
 /// quotes.
@@ -2300,7 +2163,6 @@ fn data_error(e: &DataError) -> Value {
         "next_step": next_step(next),
     });
     match e {
-        DataError::Pruned { by, .. } => v["pruned_by"] = prune(by),
         DataError::Refused { why, .. } => refusal(&mut v, why),
         DataError::Expired { name, keep: k } => {
             v["expired"] = json!({"name": name.to_string(), "keep": keep(k)});
@@ -2367,7 +2229,6 @@ fn next_token(n: NextStep) -> &'static str {
         NextStep::EditInstead => "edit-instead",
         NextStep::FixLocal => "fix-local",
         NextStep::FixName => "fix-name",
-        NextStep::HoldFirst => "hold-first",
         NextStep::FixRequest => "fix-request",
         NextStep::UpdateProgram => "update-program",
     }
@@ -2384,10 +2245,6 @@ fn next_step(n: NextStep) -> &'static str {
         NextStep::EditInstead => "remove it with an edit to the collection: it is not yours",
         NextStep::FixLocal => "fix this device: its storage or its keys",
         NextStep::FixName => "ask again with a well-formed name: the message says how",
-        NextStep::HoldFirst => {
-            "ask holders to keep it (hold) and release it once their audit passes: nothing \
-             confirms it is kept anywhere else"
-        }
         NextStep::FixRequest => {
             "ask again as the message says: the request, as given, asks for something no \
              device does"
@@ -2628,7 +2485,6 @@ fn change(c: &Change) -> Value {
             }
             json!({ "withdrawn": w })
         }
-        Change::Pruned { id: i, by, .. } => json!({"pruned": {"id": id(i), "by": prune(by)}}),
         Change::Expired { id: i, keep: k, .. } => {
             json!({"expired": {"id": id(i), "keep": keep(k)}})
         }
@@ -2671,49 +2527,4 @@ fn equivocal(e: &Equivocal) -> Value {
             "name": name.to_string(),
         }),
     }
-}
-
-fn prune(p: &Prune) -> Value {
-    json!({
-        "id": id(&p.id),
-        "name": p.name.to_string(),
-        "prefix": p.prefix.to_string(),
-        "upto": frontier(&p.upto),
-    })
-}
-
-fn custody(c: &Custody) -> Value {
-    json!({
-        "prefix": c.prefix.to_string(),
-        "copies": c.copies,
-        "until_ms": c.until.0,
-        "leases": c.leases.iter().map(lease).collect::<Vec<_>>(),
-        "broken": c.broken.iter().map(lease).collect::<Vec<_>>(),
-        "unkept": c.unkept.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
-    })
-}
-
-fn lease(l: &Lease) -> Value {
-    json!({
-        "holder": l.holder.key().to_string(),
-        "name": l.name.to_string(),
-        "prefix": l.prefix.to_string(),
-        "holds": frontier(&l.holds),
-        "until_ms": l.until.0,
-        "audit": match &l.audit {
-            Audit::NotAudited => json!("not-audited"),
-            Audit::Kept { pieces } => json!({"kept": {"pieces": pieces}}),
-            Audit::Broken { piece, breach } => json!({"broken": {
-                "piece": piece.to_string(),
-                "breach": match breach {
-                    Breach::Missing => "missing",
-                    Breach::Wrong => "wrong",
-                    Breach::Expired => "expired",
-                },
-            }}),
-            Audit::Unanswered { asked, answered } => {
-                json!({"unanswered": {"asked": asked, "answered": answered}})
-            }
-        },
-    })
 }

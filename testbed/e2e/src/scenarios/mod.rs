@@ -27,11 +27,9 @@ mod negatives;
 mod notes;
 mod on_demand;
 mod phone_links;
-mod photos;
 mod quic_links;
 mod relays;
 mod self_certifying;
-mod sensor;
 mod shared;
 mod signals;
 mod stolen;
@@ -55,8 +53,6 @@ pub const ALL: &[&str] = &[
     "dv",
     "notes",
     "shared",
-    "photos",
-    "sensor",
     "stolen",
     "folder",
     "invite",
@@ -84,8 +80,6 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "dv" => dv::run(sc),
         "notes" => notes::run(sc),
         "shared" => shared::run(sc),
-        "photos" => photos::run(sc),
-        "sensor" => sensor::run(sc),
         "stolen" => stolen::run(sc),
         "folder" => folder::run(sc),
         "invite" => invite::run(sc),

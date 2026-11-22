@@ -50,8 +50,8 @@ OPTIONS:
 SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
            recovery-compromised, negatives, approval, quic-links,
            direct-paths, phone-links, relays, on-demand, membership,
-           multi-prefix, tui, dv, notes, shared, photos, sensor, stolen,
-           folder, invite, self-certifying, signals
+           multi-prefix, tui, dv, notes, shared, stolen, folder, invite,
+           self-certifying, signals
 ";
 
 #[derive(Clone, Debug, Default)]
@@ -176,18 +176,6 @@ fn binaries(args: &Args) -> Result<PathBuf, String> {
         if !ok {
             return Err("cargo build of the ndn-boltffi phone host failed".into());
         }
-        // The holder of `photos` and `sensor`: ndn-repo's daemon, from the ndn-repo
-        // workspace (same shared target dir).
-        println!("ndn-e2e: building the ndn-repo holder daemon (ndn-repo) …");
-        let ok = Command::new("cargo")
-            .args(["build", "-p", "ndn-repo", "--features", "bin"])
-            .current_dir(ws.join("../ndn-repo"))
-            .status()
-            .map_err(|e| format!("cargo: {e}"))?
-            .success();
-        if !ok {
-            return Err("cargo build of the ndn-repo daemon failed".into());
-        }
     }
     let meta = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
@@ -212,7 +200,6 @@ fn outer(args: &Args) -> Result<bool, String> {
         "ndn-peek",
         "ndn-sec",
         "examples/phone_host",
-        "ndn-repo",
     ] {
         if !bin_dir.join(b).is_file() {
             return Err(format!("{b} not found in {}", bin_dir.display()));
