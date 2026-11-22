@@ -26,8 +26,8 @@
 //! version. Applying a write drops the variants inside its past, so the
 //! value depends only on which versions are applied, never on their order.
 //! Every applied version counts; the value leaves out the versions the
-//! layer holds back (a group waiting on another member), as though they
-//! were not applied.
+//! layer holds back (one waiting for its pieces), as though they were not
+//! applied.
 //!
 //! Wire (all integers big-endian; a text is a u32 length and UTF-8; the
 //! octets are consumed exactly). Operation: `basis` (u8 0, or u8 1 and 32

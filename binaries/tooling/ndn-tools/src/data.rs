@@ -108,11 +108,6 @@
 //!   wrote the changed setting's one variant in the state here (several
 //!   variants: name one). The collection's rule checks it before anything
 //!   is signed. The answer shows the operation.
-//! - `put_group [--keep <keep>] <collection> fields|op <words>... [;
-//!   <collection> fields|op <words>...]...`: several versions as one
-//!   group, all or none — one per collection, all of one folder — each
-//!   `fields` words as `put`'s or `op` words as `put_op`'s. A reader counts
-//!   none of them until it holds them all.
 //! - `get <name>`: a collection's merged state (its newest version under
 //!   the log and one-key rules), an exact version, state or entry
 //!   (`<version>/32=entry/seg=<i>`) by its name, or the entries a range name
@@ -120,8 +115,8 @@
 //!   256 octets is shown as its length and SHA-256, not its bytes. A state
 //!   lists the versions held here that are not in its value
 //!   (`not_counted`, each `{"id","why","kind"}`: `kind` is `"waits"` for the
-//!   layer's own wait, such as a group incomplete, which ends by the version
-//!   counting, and `"excluded"` for a rule's own exclusion).
+//!   layer's own wait, such as a basis still arriving, which ends by the
+//!   version counting, and `"excluded"` for a rule's own exclusion).
 //!   Every version shown carries its packet's implicit digest (`digest`,
 //!   hex) and, of a merge version whose operation is open here, the
 //!   operation's octets (`op`, hex).
@@ -255,8 +250,7 @@
 //! cut refuses it, `"suspected"`, the key and since when, when this device
 //! takes nothing new of a suspected key, `"untrusted"`, why, when the
 //! chain of its signer is refused, `"rule_unknown"`, the collection and its
-//! rule, when this program does not know the rule, and `"group_member"`
-//! when a member of its group is refused); per watched change
+//! rule, when this program does not know the rule); per watched change
 //! `{"watch":<collection or folder>,"collection":<the change's collection>,
 //! "change":{…}}` (a withdrawn version says `why`,
 //! with `cut_of` and `cut_signer` when a cut withdrew it; a version not
@@ -1303,77 +1297,6 @@ async fn run(
             Ok(Verb::Done(ok))
         }
         ("put_op", _) => usage(PUT_OP_USAGE),
-        ("put_group", [_, ..]) => {
-            let (keep, words) = match keep_option(args) {
-                Ok(o) => o,
-                Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_GROUP_USAGE}"))),
-            };
-            let mut items = Vec::new();
-            let mut shown = Vec::new();
-            for item in words.split(|w| w == ";") {
-                let [collection, kind, edit @ ..] = item else {
-                    return Ok(Verb::Usage(format!(
-                        "item {:?} is not <collection> fields|op <words>...; {PUT_GROUP_USAGE}",
-                        item.join(" ")
-                    )));
-                };
-                let collection = match name(collection) {
-                    Ok(c) => c,
-                    Err(e) => return Ok(Verb::Usage(e)),
-                };
-                let (edit, show) = match kind.as_str() {
-                    "fields" => match fields_of(edit).await {
-                        Ok(c) => {
-                            let show = json!({"fields": content(&c)});
-                            (ndn_data::Edit::Fields(c), show)
-                        }
-                        Err(e) => {
-                            return Ok(Verb::Usage(format!(
-                                "{collection}: {e}; {PUT_GROUP_USAGE}"
-                            )));
-                        }
-                    },
-                    "op" => match op_of(layer, &collection, edit).await {
-                        Ok(op) => {
-                            let show = json!({"op": op_shown(&op)});
-                            (ndn_data::Edit::Op(op), show)
-                        }
-                        Err(Bad::Usage(e)) => {
-                            return Ok(Verb::Usage(format!(
-                                "{collection}: {e}; {PUT_GROUP_USAGE}"
-                            )));
-                        }
-                        Err(Bad::Data(e)) => return Err(e),
-                    },
-                    other => {
-                        return Ok(Verb::Usage(format!(
-                            "{collection}: {other:?} is neither fields nor op; {PUT_GROUP_USAGE}"
-                        )));
-                    }
-                };
-                shown.push((collection.clone(), show));
-                items.push((collection, edit));
-            }
-            let all_ops = items
-                .iter()
-                .all(|(_, e)| matches!(e, ndn_data::Edit::Op(_)));
-            let options = put_type(if all_ops { ELEMENT } else { NOTE }, keep, None);
-            let ids = layer.put_group(items, options).await?;
-            let versions = ids
-                .iter()
-                .zip(shown)
-                .map(|(id, (collection, show))| {
-                    let mut v = put_answer(layer, &collection, id);
-                    v["collection"] = json!(collection.to_string());
-                    if let (Value::Object(v), Value::Object(show)) = (&mut v, show) {
-                        v.extend(show);
-                    }
-                    v
-                })
-                .collect::<Vec<_>>();
-            Ok(Verb::Done(json!({"versions": versions})))
-        }
-        ("put_group", _) => usage(PUT_GROUP_USAGE),
         ("get", [n]) => {
             let n = match name(n) {
                 Ok(n) => n,
@@ -1627,7 +1550,7 @@ async fn run(
         }
         ("join", _) => usage(JOIN_USAGE),
         _ => usage(
-            "verbs: share, share_folder, members, put, put_op, put_group, get, range, watch, \
+            "verbs: share, share_folder, members, put, put_op, get, range, watch, \
              hold, prune, release, suspect, unsuspect, cut, refused, offer, close_offer, join, \
              signal-subscribe, \
              signal-open, signal-send, signal-stream, signal-close, signal-stats, signal-capture, \
@@ -1774,15 +1697,9 @@ const PUT_OP_USAGE: &str = "usage: put_op <collection> [--keep forever|until=<ms
                             text its basis wrote, by default the version that wrote the \
                             setting's one variant here; a text @<path> is the file's)";
 
-const PUT_GROUP_USAGE: &str = "usage: put_group [--keep forever|until=<ms>|last=<n>] <collection> \
-                               fields|op <words>... [; <collection> fields|op <words>...]... \
-                               (all or none, one collection each, all of one folder; fields \
-                               words as put's, op words as put_op's)";
-
 /// The type of versions `put` writes.
 const NOTE: &str = "/types/note";
-/// The type of versions `put_op` writes (and `put_group` of operations
-/// only).
+/// The type of versions `put_op` writes.
 const ELEMENT: &str = "/types/element";
 
 fn put_type(type_name: &str, keep: Keep, batch: Option<Duration>) -> PutOptions {
@@ -2020,7 +1937,7 @@ fn keep_value(value: &str) -> Result<Keep, String> {
     }
 }
 
-/// A `put_op` or `put_group` line's `--keep <keep>` (before the rest), at
+/// A `put_op` line's `--keep <keep>` (before the rest), at
 /// most once, and the words after it, at least one.
 fn keep_option(words: &[String]) -> Result<(Keep, &[String]), String> {
     let (keep, rest) = match words {
@@ -2437,7 +2354,6 @@ fn refusal(v: &mut Value, why: &Refusal) {
             v["suspected"] = json!({"key": key.to_string(), "since_ms": since.0});
         }
         Refusal::Untrusted { why } => v["untrusted"] = json!(why),
-        Refusal::Group { member, .. } => v["group_member"] = json!(member.to_string()),
         _ => {}
     }
 }
@@ -2648,7 +2564,6 @@ fn version(v: &Version) -> Value {
         "type": {"name": v.type_id.name.to_string(), "revision": v.type_id.revision},
         "keep": keep(&v.keep),
         "dated_ms": v.dated.0,
-        "group": v.group.map(|g| json!({"id": g.id, "count": g.count})),
         "digest": hex(&v.digest),
         "op": v.op.as_deref().map(hex),
         "payload": match &v.payload {
@@ -2709,8 +2624,6 @@ fn change(c: &Change) -> Value {
                 }
                 // An issuer refused by the durable rule: never re-admitted.
                 Refusal::Untrusted { .. } => w["untrusted"] = json!(true),
-                // A member of its group refused: none of the group counts.
-                Refusal::Group { member, .. } => w["group_member"] = json!(member.to_string()),
                 _ => {}
             }
             json!({ "withdrawn": w })

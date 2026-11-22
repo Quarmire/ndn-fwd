@@ -1,8 +1,8 @@
 //! folder: two people share a folder of elements under an app's own merge
-//! rule; one saves several elements as one group and pastes a long text;
-//! the other counts the group whole or not at all — the data layer's
-//! folder records, rules by name, app-built operations in pieces and groups
-//! (data-layer spec §5.1, §5.2, §5.5, §6.1, §13) on real daemons.
+//! rule; one writes while the other is away and pastes a long text; the
+//! other catches up — the data layer's folder records, rules by name and
+//! app-built operations in pieces (data-layer spec §5.1, §5.2, §6.1, §13)
+//! on real daemons.
 //!
 //! Topology and gestures as in [`super::shared`]: alice (/fa) and bob
 //! (/fb), each the root device of their namespace, pointing at each other,
@@ -25,37 +25,25 @@
 //! `get` answers RuleUnknown naming the rule (next: update the program).
 //! Started again knowing the rule, bob reads the cover and writes a page;
 //! alice reads it — both collections governed by the folder record alone.
-//! With bob cut from the relay (nftables), alice saves the cover and two
-//! pages as one group (`put_group`: three versions, consecutive seqs, each
-//! carrying the group `{id: first seq, count: 3}`) and then pastes 20 KiB
-//! into a page (`put_op` with a change over the group's page version, by
-//! its digest): one operation whose version carries it in pieces (its
-//! packet is far smaller than the paste). Alice's device then serves only
-//! part of the group: stopped, the page member's entries moved out of its
-//! store, every cached copy erased, started again. Once bob is back he
-//! holds the other two members and counts neither — each not counted
-//! ("group incomplete"), the states' frontiers holding no member and no
-//! paste, the values without the group's text, his watch delivering no
-//! member — while no device answers the withheld member: a verdict from
-//! the group's signed versions alone, not timing. Alice's store whole
-//! again, bob counts the whole group and the paste: on every element the
-//! same frontier and value as alice, nothing not counted, every member
-//! delivered to his watch of the folder only now, each named with its
-//! collection.
+//! With bob cut from the relay (nftables), alice writes the cover's title
+//! again and page 1's body (`put_op`) and then pastes 20 KiB into the body
+//! (`put_op` with a change over the body's version, by its digest): one
+//! operation whose version carries it in pieces (its packet is far smaller
+//! than the paste). Bob's watch delivers none of them while he is away.
+//! Once he is back he counts all three: on the cover and page 1 the same
+//! frontier and value as alice, nothing not counted, every version
+//! delivered to his watch only now, each named with its collection.
 
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::data_host::{
-    CONVERGE, Host, Put, delivered, erase_cs, includes, name, stored, unanswered,
-};
+use super::data_host::{CONVERGE, Host, Put, includes, name};
 use super::shared::{BOB, People, RELAY, content_at, people_through_relay};
 use crate::scenarios::*;
-use crate::step::{Abort, Scenario, StepResult};
+use crate::step::{Abort, Scenario};
 use crate::world::addr;
 
 const NAMESPACES: People = People {
@@ -76,7 +64,7 @@ const BOTH: &str = "writers=/fa,/fb readers=person:/fa,person:/fb";
 const CUT_TABLE: &str = "ndn_e2e_folder_cut";
 /// The paste: 20 KiB of text.
 const PASTE_LEN: usize = 20 * 1024;
-/// Page 1's text the group saves, and where the paste goes into it.
+/// Page 1's text, and where the paste goes into it.
 const DAY2: &str = "Day 2: the museum, then dinner by the river.";
 const PASTE_AT: usize = 7;
 /// How long bob's host prints nothing before every change it delivered so
@@ -126,33 +114,6 @@ fn tagged(w: &Value) -> bool {
     };
     let version = &w["change"]["version"];
     under && (!version.is_object() || version["collection"] == tag)
-}
-
-/// The files of the `--store` directory `store` holding entries under the
-/// name `prefix`.
-fn entries_under(store: &Path, prefix: &str) -> StepResult<Vec<PathBuf>> {
-    let prefix = name(prefix)?;
-    Ok(stored(store)?
-        .into_iter()
-        .filter(|(stored, _)| stored.has_prefix(&prefix))
-        .map(|(_, path)| path)
-        .collect())
-}
-
-/// Move every file of `files` into `to`.
-fn move_all(files: &[PathBuf], to: &Path) -> StepResult<Vec<PathBuf>> {
-    files
-        .iter()
-        .map(|f| {
-            let dest = to.join(
-                f.file_name()
-                    .ok_or_else(|| format!("{}: no file name", f.display()))?,
-            );
-            fs::rename(f, &dest)
-                .map_err(|e| format!("move {} to {}: {e}", f.display(), dest.display()))?;
-            Ok(dest)
-        })
-        .collect()
 }
 
 /// The 20 KiB the paste puts: numbered lines of text.
@@ -285,8 +246,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     if !crate::works(std::process::Command::new("nft").arg("--version")) {
         sc.skip(
-            "group save and paste while bob is away; alice serves part of the group; bob counts \
-             it whole or not at all",
+            "writes and a paste while bob is away; bob catches up",
             "nft (nftables) not on PATH; run inside `nix-shell -p util-linux iproute2 nftables`",
         );
         return Ok(());
@@ -303,54 +263,23 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             Ok(cut)
         },
     )?;
-    let members = sc.step(
-        "alice saves the cover and two pages as one group (put_group): three versions, \
-         consecutive seqs, each carrying the group {id: first seq, count: 3}",
+    let written = sc.step(
+        "alice writes the cover's day-2 title and page 1's body (put_op) while bob is away",
         |cx| {
-            cx.concept("groups of versions");
             let ok = alice.ok(
                 cx,
-                &format!(
-                    "put_group {COVER} op set:title=\"Trip notes, day 2\" ; {PAGE1} op \
-                     set:body=\"{DAY2}\" ; {PAGE2} op set:caption=\"the river at night\""
-                ),
+                &format!("put_op {COVER} set:title=\"Trip notes, day 2\""),
             )?;
-            let versions = ok["versions"]
-                .as_array()
-                .ok_or_else(|| format!("put_group answered {ok}"))?;
-            let members = [COVER, PAGE1, PAGE2]
-                .iter()
-                .zip(versions)
-                .map(|(c, v)| alice.put_of(c, v))
-                .collect::<StepResult<Vec<_>>>()?;
-            if members.len() != 3 || members.windows(2).any(|w| w[1].seq != w[0].seq + 1) {
-                return Err(format!("put_group answered {ok}"));
-            }
-            let group = json!({"id": members[0].seq, "count": 3});
-            for (c, m) in [COVER, PAGE1, PAGE2].iter().zip(&members) {
-                let v = alice.version(cx, c, m)?;
-                if v["group"] != group {
-                    return Err(format!(
-                        "{} carries the group {}, not {group}",
-                        m.name, v["group"]
-                    ));
-                }
-            }
-            cx.evidence(&format!(
-                "put_group: {} ; each carries group {group}",
-                members
-                    .iter()
-                    .map(|m| m.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            Ok(members)
+            let cover = alice.put_of(COVER, &ok)?;
+            let ok = alice.ok(cx, &format!("put_op {PAGE1} set:body=\"{DAY2}\""))?;
+            let body = alice.put_of(PAGE1, &ok)?;
+            cx.evidence(&format!("put_op: {}, {}", cover.name, body.name));
+            Ok([cover, body])
         },
     )?;
-    let page1_member = members[1].clone();
     let (paste, pasted) = sc.step(
-        "alice pastes 20 KiB into page 1 (put_op: a change over the group's page version, its \
-         basis by digest): one operation, carried in pieces",
+        "alice pastes 20 KiB into page 1 (put_op: a change over the body's version, its basis by \
+         digest): one operation, carried in pieces",
         |cx| {
             cx.concept("app-built operations in pieces");
             let file = cx.w.node("alice").dir.join("paste.txt");
@@ -394,146 +323,31 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             Ok((paste, expected))
         },
     )?;
-    let withheld = store.with_file_name("withheld");
-    let moved = sc.step(
-        "alice's device serves only part of the group: stopped, page 1's member moved out of its \
-         store, every cached copy erased, started again",
+    let members = [written[0].clone(), written[1].clone(), paste.clone()];
+    let before = sc.step(
+        "bob is still away: his watch has delivered none of the three versions; the nftables \
+         table goes",
         |cx| {
-            alice.stop(cx);
-            let files = entries_under(&store, &page1_member.name)?;
-            if files.is_empty() {
-                return Err(format!(
-                    "alice's store {} holds no entry of {}",
-                    store.display(),
-                    page1_member.name
-                ));
-            }
-            fs::create_dir_all(&withheld).map_err(|e| format!("{}: {e}", withheld.display()))?;
-            let moved = move_all(&files, &withheld)?;
-            for node in ["alice", "relay", "bob"] {
-                erase_cs(cx, node, &page1_member.name)?;
-            }
-            alice = Host::start_with(cx, "alice", &alice_root.identity, &alice_options)?;
-            cx.evidence(&format!(
-                "{} entr(ies) of {} moved to {}; caches erased at alice, relay and bob",
-                moved.len(),
-                page1_member.name,
-                withheld.display()
-            ));
-            Ok(moved)
-        },
-    )?;
-    sc.step("bob is back: the nftables table goes", |cx| {
-        drop(cut);
-        cx.evidence("UDP between bob and the relay flows again");
-        Ok(())
-    })?;
-    sc.step(
-        "bob holds the cover's and page 2's members and counts neither (group incomplete): no \
-         member and no paste in his frontiers, none of the group's text in his values, no member \
-         delivered to his watch; no device answers page 1's member",
-        |cx| {
-            // The path is back: bob's daemon fetches the cover's member from
-            // alice's device.
-            wait_for(
-                cx,
-                "bob's daemon fetches the cover's member",
-                CONVERGE,
-                |cx| Ok(delivered(cx, "bob", &members[0].name).is_ok()),
-            )?;
-            cx.evidence(&format!("bob's daemon fetches {}", members[0].name));
-            let held = [(COVER, &members[0]), (PAGE2, &members[2])];
-            let mut shown = Vec::new();
-            wait_for(
-                cx,
-                "bob reports both held members not counted",
-                CONVERGE,
-                |cx| {
-                    shown.clear();
-                    for (c, m) in held {
-                        let Some(state) = bob.merged(cx, c)? else {
-                            return Ok(false);
-                        };
-                        let Some(n) = state["not_counted"]
-                            .as_array()
-                            .and_then(|n| n.iter().find(|n| is(&n["id"], m)))
-                        else {
-                            return Ok(false);
-                        };
-                        if !n["why"]
-                            .as_str()
-                            .is_some_and(|w| w.contains("group incomplete"))
-                        {
-                            return Err(format!(
-                                "bob does not count {} because {}",
-                                m.name, n["why"]
-                            ));
-                        }
-                        shown.push(format!("{c}: {} not counted: {}", m.name, n["why"]));
-                    }
-                    Ok(true)
-                },
-            )?;
-            for line in &shown {
-                cx.evidence(line);
-            }
-            for (c, expect) in [
-                (COVER, Some(json!("Trip notes"))),
-                (PAGE1, None),
-                (PAGE2, Some(json!("from bob"))),
-            ] {
-                let (at, value) = bob
-                    .state(cx, c)?
-                    .ok_or_else(|| format!("bob holds no state of {c}"))?;
-                if let Some(m) = members.iter().chain([&paste]).find(|m| includes(&at, m)) {
-                    return Err(format!("bob's state of {c} includes {}: at {at}", m.name));
-                }
-                let setting = match c {
-                    COVER => "title",
-                    PAGE1 => "body",
-                    _ => "caption",
-                };
-                if text(&value, setting) != expect.as_ref() {
-                    return Err(format!("bob's {c} value is {value}"));
-                }
-                cx.evidence(&format!("bob's {c}: at {at}, value {value}"));
-            }
             bob.drain(cx, QUIET)?;
             if let Some(early) = bob.watched.iter().find_map(|w| counts_member(w, &members)) {
                 return Err(format!(
-                    "bob's watch counted a member of an incomplete group: {early}"
+                    "bob's watch delivered a version while he was away: {early}"
                 ));
             }
-            cx.evidence("bob's watch delivered no member of the group");
-            unanswered(cx, "bob", &page1_member.name)?;
-            cx.evidence(&format!("no device answers {} at bob", page1_member.name));
-            Ok(())
+            cx.evidence("bob's watch delivered none of alice's versions while he was away");
+            drop(cut);
+            cx.evidence("UDP between bob and the relay flows again");
+            Ok(bob.watched.len())
         },
     )?;
     sc.step(
-        "alice's store whole again (stopped, the member put back, started): bob counts the whole \
-         group and the paste — on every element the same frontier and value as alice, nothing \
-         not counted, every member delivered to his watch only now",
+        "bob catches up: on the cover and page 1 the same frontier and value as alice (the \
+         paste's length and SHA-256 equal), nothing not counted, every version delivered to his \
+         watch only now",
         |cx| {
-            // Everything bob's watch delivered while the group was
-            // incomplete (none of it a member, checked above).
-            bob.drain(cx, QUIET)?;
-            let before = bob.watched.len();
-            if let Some(early) = bob.watched.iter().find_map(|w| counts_member(w, &members)) {
-                return Err(format!(
-                    "bob's watch counted a member of an incomplete group: {early}"
-                ));
-            }
-            alice.stop(cx);
-            for from in &moved {
-                let to = store.join(from.file_name().expect("a file name"));
-                fs::rename(from, &to).map_err(|e| format!("move {} back: {e}", from.display()))?;
-            }
-            alice = Host::start_with(cx, "alice", &alice_root.identity, &alice_options)?;
             for (c, own) in [
                 (COVER, vec![&members[0]]),
                 (PAGE1, vec![&members[1], &paste]),
-                (PAGE2, vec![&members[2]]),
             ] {
                 let mut last = (Value::Null, Value::Null);
                 let converged = wait_for(
@@ -582,7 +396,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     })?;
                 if !bob.watched[before..].contains(&w) {
                     return Err(format!(
-                        "bob's watch delivered {} before the group was whole",
+                        "bob's watch delivered {} while he was away",
                         m.name
                     ));
                 }
