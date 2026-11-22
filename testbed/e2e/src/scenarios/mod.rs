@@ -18,7 +18,6 @@ mod data_host;
 mod destroyed;
 mod direct_paths;
 mod dv;
-mod events;
 mod folder;
 mod invite;
 mod lifecycle;
@@ -36,7 +35,6 @@ mod sensor;
 mod shared;
 mod signals;
 mod stolen;
-mod trio;
 mod tui;
 
 pub const ALL: &[&str] = &[
@@ -64,7 +62,6 @@ pub const ALL: &[&str] = &[
     "invite",
     "self-certifying",
     "signals",
-    "events",
     "address-change",
 ];
 
@@ -94,7 +91,6 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "invite" => invite::run(sc),
         "self-certifying" => self_certifying::run(sc),
         "signals" => signals::run(sc),
-        "events" => events::run(sc),
         "address-change" => address_change::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }

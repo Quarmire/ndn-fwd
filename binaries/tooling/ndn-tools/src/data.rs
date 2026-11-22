@@ -245,21 +245,6 @@
 //!   it is given — what a relay's operator sees of the signals its daemon
 //!   forwards. Needs no device: started without `--device` (and `--pib`),
 //!   the tool answers this verb and `quit` only.
-//! - `events [<cursor>]`: the device-wide events this device has not had
-//!   acknowledged (data-layer spec §21: equivocation, a withdrawal, a cut, a
-//!   revocation, answer evidence), those with a cursor above `<cursor>`
-//!   (default: all), whether or not anything watches. Each carries its `id`
-//!   (32 hex digits, stable across restarts), `cursor`, `kind`, `subject`,
-//!   the `evidence` names it was derived from (`detail` has their digests
-//!   and the rest), `meaning` (what this device did already), `next` and
-//!   `next_step` (the class of step), `what_to_do` and `why` (in words) and
-//!   `count` (occurrences coalesced into it). `cursor`, in the answer, is
-//!   the highest one shown. At least once: an event stays until
-//!   acknowledged, a restart included.
-//! - `ack <id>...`: acknowledge events handled (their ids as `events` shows
-//!   them): the answer comes once no restart redelivers them. An id already
-//!   acknowledged is accepted again; an id this device never had refuses the
-//!   whole line, saying to take ids from `events`.
 //! - `quit` (or end of input).
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
@@ -315,11 +300,10 @@ use ndn_cert::report::TrustEvent;
 use ndn_data::wire::{Range, log_name, range_name};
 use ndn_data::{
     Age, Answer, Audience, Audit, BlockEntry, Breach, Change, Clock, Config, Content, Custody,
-    CutBound, DataError, DataLayer, Device, DeviceEvent, Entries, EntryRef, Equivocal, EventDetail,
-    EventId, EventSubject, Frontier, Got, Hold, IntroRefusal, Introducer, Keep, Lease, Meaning,
-    MergeRule, NextStep, NotCounted, Offer, Payload, Prune, PutOptions, Refusal, Role, Rule, Seq,
-    Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId, Version, VersionId,
-    WithdrawnBy, Writer, Yrs,
+    CutBound, DataError, DataLayer, Device, Entries, Equivocal, Frontier, Got, Hold, IntroRefusal,
+    Introducer, Keep, Lease, MergeRule, NextStep, NotCounted, Offer, Payload, Prune, PutOptions,
+    Refusal, Role, Rule, Seq, Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId,
+    Version, VersionId, Writer, Yrs,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -1642,40 +1626,10 @@ async fn run(
             })))
         }
         ("join", _) => usage(JOIN_USAGE),
-        ("events", rest) if rest.len() <= 1 => {
-            let after = match rest.first().map(|c| c.parse::<u64>()) {
-                None => 0,
-                Some(Ok(c)) => c,
-                Some(Err(_)) => return usage(EVENTS_USAGE),
-            };
-            let shown: Vec<_> = layer
-                .pending_events()
-                .into_iter()
-                .filter(|e| e.cursor.0 > after)
-                .collect();
-            let cursor = shown.last().map_or(after, |e| e.cursor.0);
-            Ok(Verb::Done(json!({
-                "events": shown.iter().map(event).collect::<Vec<_>>(),
-                "cursor": cursor,
-            })))
-        }
-        ("events", _) => usage(EVENTS_USAGE),
-        ("ack", ids) if !ids.is_empty() => {
-            let mut parsed = Vec::new();
-            for id in ids {
-                match event_id(id) {
-                    Ok(id) => parsed.push(id),
-                    Err(e) => return Ok(Verb::Usage(format!("{e}; {ACK_USAGE}"))),
-                }
-            }
-            layer.acknowledge(&parsed).await?;
-            Ok(Verb::Done(json!({"acknowledged": ids})))
-        }
-        ("ack", _) => usage(ACK_USAGE),
         _ => usage(
             "verbs: share, share_folder, members, put, put_op, put_group, get, range, watch, \
              hold, prune, release, suspect, unsuspect, cut, refused, offer, close_offer, join, \
-             events, ack, signal-subscribe, \
+             signal-subscribe, \
              signal-open, signal-send, signal-stream, signal-close, signal-stats, signal-capture, \
              quit",
         ),
@@ -2526,153 +2480,6 @@ fn next_step(n: NextStep) -> &'static str {
             "run a program that knows the collection's merge rule: this one holds its versions \
              but reads them under no other rule"
         }
-    }
-}
-
-const EVENTS_USAGE: &str = "usage: events [<cursor>] (the cursor an earlier answer ended with)";
-
-const ACK_USAGE: &str = "usage: ack <id>... (event ids as events shows them: 32 hex digits)";
-
-/// An event id as `events` shows it.
-fn event_id(word: &str) -> Result<EventId, String> {
-    let octets = unhex(word)?;
-    let id: [u8; 16] = octets
-        .try_into()
-        .map_err(|_| format!("{word:?} is not an event id: 32 hex digits"))?;
-    Ok(EventId(id))
-}
-
-fn meaning(m: Meaning) -> &'static str {
-    match m {
-        Meaning::BothKept => "both-kept",
-        Meaning::Withdrawn => "withdrawn",
-        Meaning::WriterCut => "writer-cut",
-        Meaning::KeyRefused => "key-refused",
-        Meaning::ReportsDropped => "reports-dropped",
-    }
-}
-
-/// A device-wide event (data-layer spec §21) as `events` answers it.
-fn event(e: &DeviceEvent) -> Value {
-    let mut evidence: Vec<Name> = Vec::new();
-    for d in std::iter::once(&e.detail).chain(e.last.as_ref()) {
-        for n in evidence_names(d) {
-            if !evidence.contains(&n) {
-                evidence.push(n);
-            }
-        }
-    }
-    json!({
-        "id": hex(&e.id.0),
-        "cursor": e.cursor.0,
-        "first_seen_ms": e.first_seen.0,
-        "kind": e.kind().to_string().replace(' ', "-"),
-        "subject": match e.subject() {
-            EventSubject::Writer(n) => json!({"writer": n.to_string()}),
-            EventSubject::Revoked(n) => json!({"revoked": n.to_string()}),
-            EventSubject::Device => json!("device"),
-        },
-        "evidence": evidence.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        "detail": event_detail(&e.detail),
-        "last": e.last.as_ref().map(event_detail),
-        "meaning": meaning(e.meaning()),
-        "next": next_token(e.next_step()),
-        "next_step": next_step(e.next_step()),
-        "what_to_do": e.what_to_do(),
-        "why": e.why(),
-        "count": e.count,
-    })
-}
-
-/// The names an event's evidence is: log entries, records, collections,
-/// and keys — never content.
-fn evidence_names(d: &EventDetail) -> Vec<Name> {
-    match d {
-        EventDetail::Equivocation { first, second, .. } => {
-            vec![first.name.clone(), second.name.clone()]
-        }
-        EventDetail::Withdrawal { entry, .. } => vec![entry.name.clone()],
-        EventDetail::Cut {
-            subject, record, ..
-        } => vec![subject.clone(), record.clone()],
-        EventDetail::Revocation {
-            namespace, revoked, ..
-        } => vec![namespace.clone(), revoked.clone()],
-        EventDetail::Overflow { .. } => Vec::new(),
-    }
-}
-
-fn entry_ref(e: &EntryRef) -> Value {
-    json!({
-        "name": e.name.to_string(),
-        "kind": e.kind.map(|k| k.to_string()),
-        "digest": e.digest.as_ref().map(|d| hex(d)),
-    })
-}
-
-/// What one occurrence of an event says, the kind's own facts.
-fn event_detail(d: &EventDetail) -> Value {
-    match d {
-        EventDetail::Equivocation {
-            writer,
-            seq,
-            first,
-            second,
-        } => json!({
-            "writer": writer.to_string(),
-            "seq": seq,
-            "first": entry_ref(first),
-            "second": entry_ref(second),
-        }),
-        EventDetail::Withdrawal {
-            writer,
-            collection,
-            entry,
-            by,
-        } => json!({
-            "writer": writer.to_string(),
-            "collection": collection.as_ref().map(ToString::to_string),
-            "entry": entry_ref(entry),
-            "by": match by {
-                WithdrawnBy::Cut { of, signer } => {
-                    json!({"cut": {"of": of.to_string(), "signer": signer.to_string()}})
-                }
-                WithdrawnBy::Chain { why } => json!({"chain": {"why": why}}),
-                WithdrawnBy::Group { member } => json!({"group": {"member": member.to_string()}}),
-            },
-        }),
-        EventDetail::Cut {
-            subject,
-            folder,
-            of,
-            signer,
-            record,
-            revision,
-            kept,
-        } => json!({
-            "subject": subject.to_string(),
-            "folder": folder,
-            "of": of.to_string(),
-            "signer": signer.to_string(),
-            "record": record.to_string(),
-            "revision": revision,
-            "kept": kept,
-        }),
-        EventDetail::Revocation {
-            namespace,
-            revoked,
-            version,
-        } => json!({
-            "namespace": namespace.to_string(),
-            "revoked": revoked.to_string(),
-            "version": version,
-        }),
-        EventDetail::Overflow { dropped } => json!({
-            "dropped": dropped
-                .iter()
-                .map(|(k, n)| json!({"kind": k.to_string().replace(' ', "-"), "count": n}))
-                .collect::<Vec<_>>(),
-        }),
     }
 }
 
