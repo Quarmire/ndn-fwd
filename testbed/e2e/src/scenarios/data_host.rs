@@ -294,8 +294,8 @@ impl Host {
         Ok(started.elapsed())
     }
 
-    /// Send one verb line without waiting for its answer: a batched `put`
-    /// answers once its block is signed, while the next lines are read.
+    /// Send one verb line without waiting for its answer: a `signal-stream`
+    /// answers once all its signals are sent, while the next lines are read.
     /// [`answers`](Self::answers) collects what they came to.
     pub fn send(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<()> {
         cx.note(&format!("{}> {line}", self.node));
@@ -381,8 +381,8 @@ impl Host {
         Ok(put)
     }
 
-    /// The version a `put` into `collection` answered `ok` with (for a
-    /// batched put, the block carrying the entry): its name checked to be
+    /// The version a `put` into `collection` answered `ok` with: its name
+    /// checked to be
     /// `<device>/32=log/<collection>/seq=<n>` and its writer this device's
     /// key.
     pub fn put_of(&self, collection: &str, ok: &Value) -> StepResult<Put> {

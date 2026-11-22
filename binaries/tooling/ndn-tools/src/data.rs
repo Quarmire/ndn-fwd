@@ -59,15 +59,12 @@
 //! Verbs (one per line; values with spaces in double quotes, `\"` and `\\`
 //! escaped inside them):
 //!
-//! - `share <collection> [rule=merge|merge:<function>|log|one-key]
+//! - `share <collection> [rule=merge|merge:<function>|log]
 //!   [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...]`: the
 //!   members record of a collection of this device's namespace, its first
 //!   revision or the next. `rule=merge` (the default) merges with
 //!   `/merge/yrs`, `rule=merge:<function>` with the rule of that full name,
-//!   `rule=log` keeps every member's
-//!   versions (the newest is the latest), `rule=one-key` is written by
-//!   exactly one key, which `writers=` names (a key name `<D>/KEY/<id>`, or
-//!   this device's name for its own key), read through its signed head.
+//!   `rule=log` keeps every member's versions (the newest is the latest).
 //!   Writers are key-name prefixes (default: `<ns>`); readers are
 //!   `person:<namespace>`, `device:<device name>` or `group:<group name>`
 //!   (default: `person:<ns>`), and a collection that lists readers is sealed
@@ -87,18 +84,13 @@
 //! - `members <folder or collection>`: the members record in force over
 //!   it — rule, writers, readers — whoever signed it; a watch shows each
 //!   change of it as `members`.
-//! - `put <collection> [--batch <ms>] [--keep forever|until=<ms since the
-//!   epoch>|last=<n>] <field>=<value>...`: a version of type `/types/note`
-//!   revision 1, kept forever unless `--keep` says otherwise; an empty value
+//! - `put <collection> <field>=<value>...`: a version of type `/types/note`
+//!   revision 1, kept forever; an empty value
 //!   removes the field. A value `@<path>` is the bytes of the file at
 //!   `<path>` (`@@…` is a value starting with `@`). A payload larger than a
-//!   version carries inline travels in pieces (log and one-key rules). With
-//!   `--batch`, the entry waits up to that long in this device's open block
-//!   (log and one-key rules: several entries under one signature) and the
-//!   tool reads the next line meanwhile; the answer comes once the block is
-//!   signed, naming the block, so answers to batched puts may come after
-//!   answers to later lines. Every put answer shows the fields it put.
-//! - `put_op <collection> [--keep <keep>] <operation>`: a version of a
+//!   version carries inline travels in pieces (log rule). Every put answer
+//!   shows the fields it put.
+//! - `put_op <collection> <operation>`: a version of a
 //!   merge collection carrying the operation the app built, of type
 //!   `/types/element`: `hex=<octets>` (any rule's operation as built), or an
 //!   element operation as words — `basis=<digest hex>`,
@@ -109,9 +101,7 @@
 //!   variants: name one). The collection's rule checks it before anything
 //!   is signed. The answer shows the operation.
 //! - `get <name>`: a collection's merged state (its newest version under
-//!   the log and one-key rules), an exact version, state or entry
-//!   (`<version>/32=entry/seg=<i>`) by its name, or the entries a range name
-//!   (`<collection>/32=range/<range>`) selects. A field value longer than
+//!   the log rule), or an exact version or state by its name. A field value longer than
 //!   256 octets is shown as its length and SHA-256, not its bytes. A state
 //!   lists the versions held here that are not in its value
 //!   (`not_counted`, each `{"id","why","kind"}`: `kind` is `"waits"` for the
@@ -120,12 +110,8 @@
 //!   Every version shown carries its packet's implicit digest (`digest`,
 //!   hex) and, of a merge version whose operation is open here, the
 //!   operation's octets (`op`, hex).
-//! - `range <collection> seq=<low>..<high>|time=<from>..<to>`: `get` of the
-//!   range name of a one-key collection: the blocks from seq `low` to `high`
-//!   (both included), or the entries dated from `from` (included) to `to`
-//!   (excluded), in ms since the epoch.
 //! - `watch <collection or folder>`: from now on, every change as its own
-//!   line (a version that expired here, too; one not counted, with why,
+//!   line (a version not counted, with why,
 //!   and when it counts), for a folder of every collection under it,
 //!   those created later included, each line naming the change's
 //!   collection.
@@ -229,7 +215,7 @@
 //!
 //! Output lines: `{"ready":{…}}` once the layer runs; per verb
 //! `{"verb":…,"ok":{…}}` or `{"verb":…,"error":{"message","retry","next",
-//! "next_step"}}` (with `"expired"`, the name and its keep, when it expired, and
+//! "next_step"}}` (with
 //! `"outside_cut"`, the revoked key and the cut's signer, when a revocation's
 //! cut refuses it, `"suspected"`, the key and since when, when this device
 //! takes nothing new of a suspected key, `"untrusted"`, why, when the
@@ -275,12 +261,12 @@ use tokio::task::JoinSet;
 use ndn_app::{Connection, Consumer, IpcConnection, Node, demux_cert_fetcher};
 use ndn_cert::CutFile;
 use ndn_cert::report::TrustEvent;
-use ndn_data::wire::{Range, log_name, range_name};
+use ndn_data::wire::log_name;
 use ndn_data::{
-    Age, Answer, Audience, BlockEntry, Change, Clock, Config, Content, CutBound, DataError,
-    DataLayer, Device, Entries, Equivocal, Frontier, Got, IntroRefusal, Introducer, Keep,
-    MergeRule, NextStep, NotCounted, Offer, Payload, PutOptions, Refusal, Role, Rule, Share,
-    ShareChange, Sharing, State, Timestamp, Transport, TypeId, Version, VersionId, Yrs,
+    Age, Answer, Audience, Change, Clock, Config, Content, CutBound, DataError, DataLayer, Device,
+    Equivocal, Frontier, Got, IntroRefusal, Introducer, Keep, MergeRule, NextStep, NotCounted,
+    Offer, Payload, PutOptions, Refusal, Role, Rule, Share, ShareChange, Sharing, State, Timestamp,
+    Transport, TypeId, Version, VersionId, Yrs,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -480,8 +466,8 @@ async fn main() -> Result<()> {
         },
     );
 
-    // Batched puts and signal streams in flight: each prints its answer
-    // once done, while the next lines are read.
+    // Signal streams in flight: each prints its answer once done, while
+    // the next lines are read.
     let mut later = JoinSet::new();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read stdin")? {
@@ -510,8 +496,7 @@ async fn main() -> Result<()> {
             println!("{line}");
         }
     }
-    // Every batched put and stream still waiting answers before the layer
-    // stops.
+    // Every signal stream still waiting answers before the layer stops.
     while later.join_next().await.is_some() {}
     signals.shutdown();
     layer.shutdown();
@@ -1166,8 +1151,8 @@ impl DataStore for DirStore {
 /// What one verb line came to.
 enum Verb {
     Done(Value),
-    /// Replied to later, while the next lines are read (a batched put, a
-    /// signal stream): its `ok` object, or its error object.
+    /// Replied to later, while the next lines are read (a signal stream):
+    /// its `ok` object, or its error object.
     Later(BoxFuture<'static, Result<Value, Value>>),
     /// The line is not a verb this tool knows, or its arguments are wrong.
     Usage(String),
@@ -1227,34 +1212,15 @@ async fn run(
                 Ok(c) => c,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            let (keep, batch, fields) = match put_options(rest) {
-                Ok(o) => o,
-                Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_USAGE}"))),
-            };
-            let content = match fields_of(fields).await {
+            let content = match fields_of(rest).await {
                 Ok(c) => c,
                 Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_USAGE}"))),
             };
-            let options = put_type(NOTE, keep, batch);
-            let layer = layer.clone();
-            let put = async move {
-                let shown = self::content(&content);
-                let id = layer.put(&collection, content, options).await?;
-                let version = log_name(layer.name(), Some(&collection), id.seq.0);
-                Ok(json!({
-                    "writer": id.writer.key().to_string(),
-                    "seq": id.seq.0,
-                    "name": version.to_string(),
-                    "fields": shown,
-                }))
-            };
-            if batch.is_some() {
-                Ok(Verb::Later(Box::pin(async move {
-                    put.await.map_err(|e: DataError| data_error(&e))
-                })))
-            } else {
-                put.await.map(Verb::Done)
-            }
+            let shown = self::content(&content);
+            let id = layer.put(&collection, content, put_type(NOTE)).await?;
+            let mut ok = put_answer(layer, &collection, &id);
+            ok["fields"] = shown;
+            Ok(Verb::Done(ok))
         }
         ("put", _) => usage(PUT_USAGE),
         ("put_op", [collection, rest @ ..]) => {
@@ -1262,19 +1228,16 @@ async fn run(
                 Ok(c) => c,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            let (keep, words) = match keep_option(rest) {
-                Ok(o) => o,
-                Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_OP_USAGE}"))),
-            };
-            let op = match op_of(layer, &collection, words).await {
+            if rest.is_empty() {
+                return Ok(Verb::Usage(format!("nothing to put; {PUT_OP_USAGE}")));
+            }
+            let op = match op_of(layer, &collection, rest).await {
                 Ok(op) => op,
                 Err(Bad::Usage(e)) => return Ok(Verb::Usage(format!("{e}; {PUT_OP_USAGE}"))),
                 Err(Bad::Data(e)) => return Err(e),
             };
             let shown = op_shown(&op);
-            let id = layer
-                .put_op(&collection, op, put_type(ELEMENT, keep, None))
-                .await?;
+            let id = layer.put_op(&collection, op, put_type(ELEMENT)).await?;
             let mut ok = put_answer(layer, &collection, &id);
             ok["op"] = shown;
             Ok(Verb::Done(ok))
@@ -1288,21 +1251,6 @@ async fn run(
             Ok(Verb::Done(answer(layer.get(&n).await?)))
         }
         ("get", _) => usage("usage: get <name>"),
-        ("range", [collection, bounds]) => {
-            let collection = match name(collection) {
-                Ok(c) => c,
-                Err(e) => return Ok(Verb::Usage(e)),
-            };
-            let range = match range_bounds(bounds) {
-                Ok(r) => r,
-                Err(e) => return Ok(Verb::Usage(format!("{e}; {RANGE_USAGE}"))),
-            };
-            let n = range_name(&collection, &range);
-            let mut ok = answer(layer.get(&n).await?);
-            ok["name"] = json!(n.to_string());
-            Ok(Verb::Done(ok))
-        }
-        ("range", _) => usage(RANGE_USAGE),
         ("watch", [collection]) => {
             let collection = match name(collection) {
                 Ok(c) => c,
@@ -1485,7 +1433,7 @@ async fn run(
         }
         ("join", _) => usage(JOIN_USAGE),
         _ => usage(
-            "verbs: share, share_folder, members, put, put_op, get, range, watch, \
+            "verbs: share, share_folder, members, put, put_op, get, watch, \
              suspect, unsuspect, cut, refused, offer, close_offer, join, \
              signal-subscribe, \
              signal-open, signal-send, signal-stream, signal-close, signal-stats, signal-capture, \
@@ -1494,13 +1442,12 @@ async fn run(
     }
 }
 
-const SHARE_USAGE: &str = "usage: share <collection> [rule=merge|merge:<function>|log|one-key] \
+const SHARE_USAGE: &str = "usage: share <collection> [rule=merge|merge:<function>|log] \
                            [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...] (kind \
-                           person, device or group; one-key: writers=<the one key or this \
-                           device>)";
+                           person, device or group)";
 
 const SHARE_FOLDER_USAGE: &str = "usage: share_folder <folder> \
-                                  [rule=merge|merge:<function>|log|one-key] \
+                                  [rule=merge|merge:<function>|log] \
                                   [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...] \
                                   | [add_writers=<prefix>,...] [remove_writers=<prefix>,...] \
                                   [add_readers=<kind>:<name>,...] \
@@ -1534,7 +1481,6 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
         match o.split_once('=') {
             Some(("rule", "merge")) => share.rule = merge(),
             Some(("rule", "log")) => share.rule = Rule::Log,
-            Some(("rule", "one-key")) => share.rule = Rule::OneKey,
             Some(("rule", r)) => match r.strip_prefix("merge:") {
                 Some(function) => {
                     share.rule = Rule::Merge {
@@ -1543,7 +1489,7 @@ fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
                 }
                 None => {
                     return Err(format!(
-                        "rule {r:?} is neither merge, merge:<function>, log nor one-key"
+                        "rule {r:?} is neither merge, merge:<function> nor log"
                     ));
                 }
             },
@@ -1621,11 +1567,10 @@ fn folder_sharing(ns: &Name, options: &[String]) -> Result<Sharing, String> {
     Ok(Sharing::Change(change))
 }
 
-const PUT_USAGE: &str = "usage: put <collection> [--batch <ms>] [--keep forever|until=<ms since \
-                         the epoch>|last=<n>] <field>=<value>... (a value @<path> is the file's \
-                         bytes, @@... a value starting with @)";
+const PUT_USAGE: &str = "usage: put <collection> <field>=<value>... (a value @<path> is the \
+                         file's bytes, @@... a value starting with @)";
 
-const PUT_OP_USAGE: &str = "usage: put_op <collection> [--keep forever|until=<ms>|last=<n>] \
+const PUT_OP_USAGE: &str = "usage: put_op <collection> \
                             hex=<operation> | [basis=<digest hex>] [set:<setting>=<text>]... \
                             [change:<setting>=<at>,<delete>,<insert>]... (an element operation, \
                             /ndn-tools/merge/element/v=1: a change splices, in characters, the \
@@ -1637,14 +1582,13 @@ const NOTE: &str = "/types/note";
 /// The type of versions `put_op` writes.
 const ELEMENT: &str = "/types/element";
 
-fn put_type(type_name: &str, keep: Keep, batch: Option<Duration>) -> PutOptions {
+fn put_type(type_name: &str) -> PutOptions {
     PutOptions {
         type_id: TypeId {
             name: type_name.parse().expect("a valid name"),
             revision: 1,
         },
-        keep,
-        batch,
+        keep: Keep::Forever,
     }
 }
 
@@ -1685,10 +1629,6 @@ fn text_shown(text: &str) -> Value {
         json!(text)
     }
 }
-
-const RANGE_USAGE: &str = "usage: range <collection> seq=<low>..<high>|time=<from>..<to> (seqs \
-                           both included; dates in ms since the epoch, from included, to \
-                           excluded)";
 
 const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key is suspected: \
                              when the device was lost, as ms since the epoch or RFC 3339; \
@@ -1816,68 +1756,6 @@ fn cut_options(words: &[String]) -> Result<(Option<Timestamp>, BTreeMap<Name, u6
         None => Ok((held_before, upto)),
         Some(o) if o == "--held-before" || o == "--upto" => Err(format!("{o:?} needs a value")),
         Some(o) => Err(format!("{o:?} is not --held-before or --upto")),
-    }
-}
-
-/// A `put` line's `--batch <ms>` and `--keep <keep>` (before the fields)
-/// and its fields, at least one: the keep (default forever), the batch
-/// delay (default none) and the fields.
-fn put_options(words: &[String]) -> Result<(Keep, Option<Duration>, &[String]), String> {
-    let (mut keep, mut batch) = (Keep::Forever, None);
-    let mut rest = words;
-    while let [option, value, more @ ..] = rest
-        && option.starts_with("--")
-    {
-        match option.as_str() {
-            "--batch" => {
-                let ms = value
-                    .parse::<u64>()
-                    .map_err(|e| format!("--batch {value:?} is no delay in ms: {e}"))?;
-                batch = Some(Duration::from_millis(ms));
-            }
-            "--keep" => keep = keep_value(value)?,
-            _ => return Err(format!("{option:?} is not --batch or --keep")),
-        }
-        rest = more;
-    }
-    match rest.first() {
-        None => Err("no field to put".into()),
-        Some(o) if o.starts_with("--") => Err(format!("{o:?} needs a value")),
-        Some(_) => Ok((keep, batch, rest)),
-    }
-}
-
-/// A `--keep` value: `forever`, `until=<ms since the epoch>` or
-/// `last=<n>`.
-fn keep_value(value: &str) -> Result<Keep, String> {
-    match value.split_once('=') {
-        None if value == "forever" => Ok(Keep::Forever),
-        Some(("until", t)) => t
-            .parse::<u64>()
-            .map(|t| Keep::Until(Timestamp(t)))
-            .map_err(|e| format!("--keep until={t:?} is no date in ms since the epoch: {e}")),
-        Some(("last", n)) => n
-            .parse()
-            .map(Keep::LastN)
-            .map_err(|e| format!("--keep last={n:?} is no count: {e}")),
-        _ => Err(format!(
-            "--keep {value:?} is not forever, until=<ms> or last=<n>"
-        )),
-    }
-}
-
-/// A `put_op` line's `--keep <keep>` (before the rest), at
-/// most once, and the words after it, at least one.
-fn keep_option(words: &[String]) -> Result<(Keep, &[String]), String> {
-    let (keep, rest) = match words {
-        [option, value, rest @ ..] if option == "--keep" => (keep_value(value)?, rest),
-        [option, ..] if option == "--keep" => return Err("--keep needs a value".into()),
-        _ => (Keep::Forever, words),
-    };
-    match rest.first() {
-        None => Err("nothing to put".into()),
-        Some(o) if o.starts_with("--") => Err(format!("{o:?} is not --keep (given once)")),
-        Some(_) => Ok((keep, rest)),
     }
 }
 
@@ -2068,28 +1946,6 @@ fn digest_of(s: &str) -> Result<[u8; 32], String> {
         .map_err(|v: Vec<u8>| format!("{s:?} is {} octets, a digest 32", v.len()))
 }
 
-/// A `range` line's `seq=<low>..<high>` or `time=<from>..<to>`.
-fn range_bounds(word: &str) -> Result<Range, String> {
-    let (kind, bounds) = word
-        .split_once('=')
-        .ok_or_else(|| format!("{word:?} is not seq=<low>..<high> or time=<from>..<to>"))?;
-    let (low, high) = bounds
-        .split_once("..")
-        .ok_or_else(|| format!("{bounds:?} is not <low>..<high>"))?;
-    let number = |s: &str| {
-        s.parse::<u64>()
-            .map_err(|e| format!("{s:?} in {word:?} is no number: {e}"))
-    };
-    match kind {
-        "seq" => Ok(Range::Seqs(number(low)?, number(high)?)),
-        "time" => Ok(Range::Times(
-            Timestamp(number(low)?),
-            Timestamp(number(high)?),
-        )),
-        _ => Err(format!("{kind:?} is neither seq nor time")),
-    }
-}
-
 /// A `put` field's value: the text itself, the bytes of the file `@<path>`
 /// names, or (`@@…`) the text after its first `@`.
 async fn field_value(value: &str) -> Result<Bytes, String> {
@@ -2164,9 +2020,6 @@ fn data_error(e: &DataError) -> Value {
     });
     match e {
         DataError::Refused { why, .. } => refusal(&mut v, why),
-        DataError::Expired { name, keep: k } => {
-            v["expired"] = json!({"name": name.to_string(), "keep": keep(k)});
-        }
         DataError::RuleUnknown { collection, rule } => {
             v["rule_unknown"] =
                 json!({"collection": collection.to_string(), "rule": rule.to_string()});
@@ -2269,10 +2122,6 @@ fn not_counted(i: &VersionId, why: &NotCounted) -> Value {
     json!({"id": id(i), "why": why.to_string(), "kind": kind})
 }
 
-fn ids(ids: &[VersionId]) -> Value {
-    Value::Array(ids.iter().map(id).collect())
-}
-
 /// A `get`'s answer: what it got and how old it may be.
 fn answer(a: Answer) -> Value {
     let mut ok = match a.got {
@@ -2283,7 +2132,6 @@ fn answer(a: Answer) -> Value {
             "name": s.name.to_string(),
             "pins": s.pins.iter().map(ToString::to_string).collect::<Vec<_>>(),
         }}),
-        Got::Entries(e) => json!({"entries": entries(&e)}),
     };
     ok["age"] = match a.age {
         Age::Exact => json!("exact"),
@@ -2339,26 +2187,6 @@ fn merged(v: &ndn_data::Value) -> Value {
             Err(_) => json!({"rule": {"len": b.len(), "sha256": hex(&Sha256::digest(b))}}),
         },
     }
-}
-
-/// Entries of one writer's stream: each with its name, block, index, date
-/// and fields; the blocks no path answered, the blocks expired here, and
-/// the versions in pieces (read by name).
-fn entries(e: &Entries) -> Value {
-    json!({
-        "collection": e.collection.to_string(),
-        "writer": e.writer.key().to_string(),
-        "entries": e.entries.iter().map(|x| json!({
-            "name": x.name.to_string(),
-            "id": id(&x.id),
-            "index": x.index,
-            "dated_ms": x.dated.0,
-            "fields": content(&x.content),
-        })).collect::<Vec<_>>(),
-        "missing": ids(&e.missing),
-        "expired": ids(&e.expired),
-        "large": ids(&e.large),
-    })
 }
 
 fn frontier(f: &Frontier) -> Value {
@@ -2419,13 +2247,11 @@ fn version(v: &Version) -> Value {
         "parents": frontier(v.parents.frontier()),
         "rule": v.rule.as_ref().map(ToString::to_string),
         "type": {"name": v.type_id.name.to_string(), "revision": v.type_id.revision},
-        "keep": keep(&v.keep),
         "dated_ms": v.dated.0,
         "digest": hex(&v.digest),
         "op": v.op.as_deref().map(hex),
         "payload": match &v.payload {
             Payload::Entry(c) => json!({"entry": content(c)}),
-            Payload::Block(es) => json!({"block": es.iter().map(block_entry).collect::<Vec<_>>()}),
             Payload::Large { size } => json!({"large": size}),
         },
     })
@@ -2439,7 +2265,6 @@ fn members(s: &Share) -> Value {
         "rule": match &s.rule {
             Rule::Merge { function } => format!("merge:{function}"),
             Rule::Log => "log".into(),
-            Rule::OneKey => "one-key".into(),
         },
         "writers": s.writers.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "readers": s.readers.iter().map(|r| match r {
@@ -2448,18 +2273,6 @@ fn members(s: &Share) -> Value {
             Audience::Group(n) => format!("group:{n}"),
         }).collect::<Vec<_>>(),
     })
-}
-
-fn block_entry(e: &BlockEntry) -> Value {
-    json!({"dated_ms": e.dated.0, "fields": content(&e.content)})
-}
-
-fn keep(k: &Keep) -> Value {
-    match k {
-        Keep::Forever => json!("forever"),
-        Keep::Until(t) => json!({"until_ms": t.0}),
-        Keep::LastN(n) => json!({"last": n}),
-    }
 }
 
 fn change(c: &Change) -> Value {
@@ -2484,9 +2297,6 @@ fn change(c: &Change) -> Value {
                 _ => {}
             }
             json!({ "withdrawn": w })
-        }
-        Change::Expired { id: i, keep: k, .. } => {
-            json!({"expired": {"id": id(i), "keep": keep(k)}})
         }
         Change::NotCounted { id: i, why, .. } => {
             json!({"not_counted": not_counted(i, why)})

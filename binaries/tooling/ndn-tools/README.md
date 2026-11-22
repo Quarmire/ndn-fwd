@@ -185,12 +185,10 @@ The remaining binaries back the `testbed/` harness; each takes
   the daemon's PIB and verifying with the PIB's trust contexts (adopting
   each newer version the daemon tells of on its trust stream,
   `/localhost/nfd/security/notifications`, from the PIB it stored it in);
-  reads `share`/`put`/`get`/`range`/`watch`/
+  reads `share`/`put`/`get`/`watch`/
   `suspect`/`unsuspect`/`cut`/`refused` lines on stdin and answers one
   JSON object per line (the host of the `notes`, `shared`
-  and `stolen` e2e scenarios; `put --batch <ms>` puts an entry
-  into a signed block and answers once the block is signed, while the next
-  lines are read; `suspect <key> [<when>]`, on reporting a device lost,
+  and `stolen` e2e scenarios; `suspect <key> [<when>]`, on reporting a device lost,
   stops the device taking new entries of that key; `cut <key> <file>
   [--held-before <when>] [--upto <collection>=<seq>]...` (`<when>`: ms
   since the epoch or RFC 3339) writes the cut file
