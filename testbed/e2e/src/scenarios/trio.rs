@@ -1,5 +1,4 @@
-//! One namespace, three devices on three daemons: the setup `events` and
-//! `answers` share.
+//! One namespace, three devices on three daemons: the setup `events` uses.
 //!
 //! Topology, on the harness's `lo`: laptop (10.200.0.1, the root device of
 //! the namespace as `<ns>/admin/laptop`, with its CA, listening for QUIC
