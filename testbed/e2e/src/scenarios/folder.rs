@@ -22,8 +22,9 @@
 //! (next: update the program). Bob reads the cover and writes a page; alice
 //! reads it — both collections governed by the folder record alone. With
 //! bob cut from the relay (nftables), alice writes the cover's title again
-//! and page 1's body (`put_op`) and then pastes 4 KiB into the body (the
-//! page's new text, from a file): Bob's watch delivers none of them while
+//! and page 1's body (`put_op`) and then pastes 20 KiB into the body (the
+//! page's new text, from a file; its version carries it in pieces, its
+//! packet far smaller than the paste): Bob's watch delivers none of them while
 //! he is away. Once he is back he reads all three: on the cover and page 1
 //! the same frontier and value as alice, every version delivered to his
 //! watch only now, each named with its collection.
@@ -57,8 +58,8 @@ const OTHER: &str = "/ndn-tools/merge/element/v=1";
 const BOTH: &str = "writers=/fa,/fb readers=person:/fa,person:/fb";
 /// The nftables table that cuts bob–relay.
 const CUT_TABLE: &str = "ndn_e2e_folder_cut";
-/// The paste: 4 KiB of text (a register's bytes ride inline in one version).
-const PASTE_LEN: usize = 4 * 1024;
+/// The paste: 20 KiB of text.
+const PASTE_LEN: usize = 20 * 1024;
 /// Page 1's text, and where the paste goes into it.
 const DAY2: &str = "Day 2: the museum, then dinner by the river.";
 const PASTE_AT: usize = 7;
@@ -92,7 +93,7 @@ fn tagged(w: &Value) -> bool {
     under && (!version.is_object() || version["collection"] == tag)
 }
 
-/// The 4 KiB the paste puts: numbered lines of text.
+/// The 20 KiB the paste puts: numbered lines of text.
 fn paste_text() -> String {
     let mut text = String::with_capacity(PASTE_LEN + 64);
     let mut i = 0;
@@ -243,8 +244,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let (paste, pasted) = sc.step(
-        "alice pastes 4 KiB into page 1 (put_op: the page's new text, from a file): one \
-         version, its value the newest",
+        "alice pastes 20 KiB into page 1 (put_op: the page's new text, from a file): one \
+         version, carried in pieces, its value the newest",
         |cx| {
             let file = cx.w.node("alice").dir.join("paste.txt");
             let text = paste_text();
@@ -263,6 +264,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 return Err(format!("alice's page 1 after the paste is {value}"));
             }
             let packet = content_at(cx, "alice", &paste.name)?;
+            if packet.len() >= PASTE_LEN {
+                return Err(format!(
+                    "{} carries {} octets in its own packet: not in pieces",
+                    paste.name,
+                    packet.len()
+                ));
+            }
             cx.evidence(&format!(
                 "put_op {PAGE1}: {} ({} octets in its packet, the text {} octets); alice's page 1: {}",
                 paste.name,
