@@ -398,7 +398,7 @@ impl Host {
     /// Rule R (b): of the `versions` written to a register (each with the
     /// text it wrote), the heads — those no other of them supersedes, by the
     /// parents each is read with here — and, of those, the text of the one
-    /// with the highest digest: what the register's value must be.
+    /// with the highest signed digest: what the register's value must be.
     pub fn winner<'a>(
         &mut self,
         cx: &mut Cx<'_>,
@@ -408,9 +408,9 @@ impl Host {
         let mut read = Vec::new();
         for (put, text) in versions {
             let v = self.version(cx, collection, put)?;
-            let digest = v["digest"]
+            let digest = v["signed"]
                 .as_str()
-                .ok_or_else(|| format!("{} reads {} with no digest", self.node, put.name))?
+                .ok_or_else(|| format!("{} reads {} with no signed digest", self.node, put.name))?
                 .to_owned();
             read.push((*put, *text, digest, v["parents"].clone()));
         }

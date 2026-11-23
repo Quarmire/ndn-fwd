@@ -98,7 +98,9 @@
 //!   by its name. A field value longer than 256 octets is shown as its
 //!   length and SHA-256, not its bytes.
 //!   Every version shown carries its packet's implicit digest (`digest`,
-//!   hex) and, of a register version, its bytes (`bytes`, as in `put_op`).
+//!   hex), the digest of what its key signed (`signed`, hex: the same on
+//!   every copy of the packet, and what the register breaks a tie by),
+//!   and, of a register version, its bytes (`bytes`, as in `put_op`).
 //! - `watch <collection or folder>`: from now on, every change as its own
 //!   line, for a folder of every collection under it,
 //!   those created later included, each line naming the change's
@@ -2003,6 +2005,7 @@ fn version(v: &Version) -> Value {
         "type": {"name": v.type_id.name.to_string(), "revision": v.type_id.revision},
         "dated_ms": v.dated.0,
         "digest": hex(&v.digest),
+        "signed": hex(&v.signed),
         "bytes": v.op.as_deref().map(bytes_shown),
         "payload": match &v.payload {
             Payload::Entry(c) => json!({"entry": content(c)}),
