@@ -40,7 +40,7 @@ ndn-namespace = { workspace = true }
 # it: ciphertext beside its epoch, no fields.
 bytes    = { workspace = true }
 ndn-data = { workspace = true }
-# The `folder` scenario compares a large element's text read back with what
+# The `folder` scenario compares a large register value read back with what
 # was put, by its SHA-256 (`ndn-data` shows large values by length and digest).
 sha2     = { workspace = true }
 # The `stolen` scenario answers `ndn-fwd revoke --lost` with the exact

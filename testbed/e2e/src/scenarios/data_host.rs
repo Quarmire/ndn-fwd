@@ -381,6 +381,52 @@ impl Host {
         Ok(put)
     }
 
+    /// `put_op` of `text` into the register collection `collection` (`text`
+    /// as the host reads it: `@<path>` is a file's bytes, empty a removal):
+    /// the version, its name and writer checked as for [`put`](Self::put).
+    pub fn put_op(&mut self, cx: &mut Cx<'_>, collection: &str, text: &str) -> StepResult<Put> {
+        let quoted = text.replace('\\', "\\\\").replace('"', "\\\"");
+        let ok = self.ok(cx, &format!("put_op {collection} text=\"{quoted}\""))?;
+        let put = self.put_of(collection, &ok)?;
+        cx.evidence(&format!(
+            "{} put_op {}: {} (writer {})",
+            self.node, ok["bytes"], put.name, put.writer
+        ));
+        Ok(put)
+    }
+
+    /// Rule R (b): of the `versions` written to a register (each with the
+    /// text it wrote), the heads — those no other of them supersedes, by the
+    /// parents each is read with here — and, of those, the text of the one
+    /// with the highest digest: what the register's value must be.
+    pub fn winner<'a>(
+        &mut self,
+        cx: &mut Cx<'_>,
+        collection: &str,
+        versions: &[(&Put, &'a str)],
+    ) -> StepResult<&'a str> {
+        let mut read = Vec::new();
+        for (put, text) in versions {
+            let v = self.version(cx, collection, put)?;
+            let digest = v["digest"]
+                .as_str()
+                .ok_or_else(|| format!("{} reads {} with no digest", self.node, put.name))?
+                .to_owned();
+            read.push((*put, *text, digest, v["parents"].clone()));
+        }
+        let mut best: Option<(&str, &'a str)> = None;
+        for (put, text, digest, _) in &read {
+            let superseded = read
+                .iter()
+                .any(|(other, _, _, parents)| other.name != put.name && includes(parents, put));
+            if !superseded && best.is_none_or(|(d, _)| digest.as_str() > d) {
+                best = Some((digest, text));
+            }
+        }
+        best.map(|(_, text)| text)
+            .ok_or_else(|| "a register has no head".into())
+    }
+
     /// The version a `put` into `collection` answered `ok` with: its name
     /// checked to be
     /// `<device>/32=log/<collection>/seq=<n>` and its writer this device's
@@ -433,19 +479,6 @@ impl Host {
                 self.node, e["message"], e["next_step"]
             )),
         }
-    }
-
-    /// Stop the host (SIGTERM, then SIGKILL), leaving its daemon and its
-    /// `--store` directory; [`start_with`](Self::start_with) with the same
-    /// options starts it again where it stopped (this `Host` answers no
-    /// more).
-    pub fn stop(&mut self, cx: &mut Cx<'_>) {
-        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut cx.w.producers)
-            .into_iter()
-            .partition(|(n, p)| *n == self.node && p.label == self.label);
-        cx.w.producers = rest;
-        drop(mine);
-        cx.note(&format!("{}: {} stopped", self.node, self.label));
     }
 
     /// Take in what the host printed on its own (watched changes, signals,

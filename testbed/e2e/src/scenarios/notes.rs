@@ -18,13 +18,14 @@
 //! and answering one JSON object per line — standing in for the host an app
 //! runs in, not for anything the person does.
 //!
-//! Proves: the laptop shares a note collection and writes `text=day 1`; the
-//! phone reads that version. With UDP between the two cut (nftables), the
-//! laptop writes `text=on the plane` while the phone writes `tags=trip` and
-//! then `text=in the taxi`, each seeing only its own (neither daemon gets
-//! the other's new entry); once the link is back
+//! Proves: the laptop shares a note collection (the built-in newest register,
+//! `/ndf/merge/newest/v=1`) and writes "day 1"; the phone reads that version.
+//! With UDP between the two cut (nftables), the laptop writes "on the plane"
+//! while the phone writes "trip" and then "in the taxi", each seeing only its
+//! own (neither daemon gets the other's new entry); once the link is back
 //! both reach the same state (same frontier, same value) holding all four
-//! versions, with no step by the person. Every version is named
+//! versions, with no step by the person, the value being the head with the
+//! highest digest (the register's newest). Every version is named
 //! `<its device>/32=log/<collection>/seq=<n>`, the two devices write with
 //! different keys (each the key its PIB certifies), each offline version's
 //! parents include `day 1` and neither side's offline versions name the
@@ -173,10 +174,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let day1 = sc.step(
-        "the laptop shares the note collection (owner-signed members record) and writes text=day 1",
+        "the laptop shares the note collection (owner-signed members record) and writes \"day 1\"",
         |cx| {
             laptop.ok(cx, &format!("share {NOTES}"))?;
-            laptop.put(cx, NOTES, "text=\"day 1\"")
+            laptop.put_op(cx, NOTES, "day 1")
         },
     )?;
     sc.step(
@@ -186,9 +187,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             wait_for(cx, "the phone holds day 1", SHORT, |cx| {
                 Ok(phone
                     .state(cx, NOTES)?
-                    .is_some_and(|(at, value)| includes(&at, &day1) && value["text"] == "day 1"))
+                    .is_some_and(|(at, value)| includes(&at, &day1) && value["bytes"] == "day 1"))
             })?;
-            cx.evidence("the phone's state includes day 1, text = \"day 1\"");
+            cx.evidence("the phone's state includes day 1, value \"day 1\"");
             Ok(())
         },
     )?;
@@ -213,24 +214,34 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let (plane, trip, taxi) = sc.step(
-        "apart: the laptop writes text=on the plane; the phone writes tags=trip, then text=in \
-         the taxi; each holds only its own",
+        "apart: the laptop writes \"on the plane\"; the phone writes \"trip\", then \"in the \
+         taxi\"; each holds only its own",
         |cx| {
-            let plane = laptop.put(cx, NOTES, "text=\"on the plane\"")?;
-            let trip = phone.put(cx, NOTES, "tags=trip")?;
-            let taxi = phone.put(cx, NOTES, "text=\"in the taxi\"")?;
+            let plane = laptop.put_op(cx, NOTES, "on the plane")?;
+            let trip = phone.put_op(cx, NOTES, "trip")?;
+            let taxi = phone.put_op(cx, NOTES, "in the taxi")?;
             let (at, value) = laptop
                 .state(cx, NOTES)?
                 .ok_or("the laptop holds no state of its own notes")?;
-            if !includes(&at, &plane) || includes(&at, &trip) || includes(&at, &taxi) {
-                return Err(format!("the laptop's state while apart is at {at}"));
+            if !includes(&at, &plane)
+                || includes(&at, &trip)
+                || includes(&at, &taxi)
+                || value["bytes"] != "on the plane"
+            {
+                return Err(format!(
+                    "the laptop's state while apart is at {at}: {value}"
+                ));
             }
             cx.evidence(&format!("laptop apart: at {at}, value {value}"));
             let (at, value) = phone
                 .state(cx, NOTES)?
                 .ok_or("the phone holds no state of the notes")?;
-            if !includes(&at, &trip) || !includes(&at, &taxi) || includes(&at, &plane) {
-                return Err(format!("the phone's state while apart is at {at}"));
+            if !includes(&at, &trip)
+                || !includes(&at, &taxi)
+                || includes(&at, &plane)
+                || value["bytes"] != "in the taxi"
+            {
+                return Err(format!("the phone's state while apart is at {at}: {value}"));
             }
             cx.evidence(&format!("phone apart: at {at}, value {value}"));
             // The cut holds: each daemon asks for the other's new entry, which
@@ -263,14 +274,28 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 Ok(done)
             })?;
             let (at, value) = last;
-            let text = value["text"].as_str().unwrap_or_default();
-            if value["tags"] != "trip" || !["on the plane", "in the taxi"].contains(&text) {
+            // The heads are the two offline versions that end each side's
+            // line (day 1 and the trip tag are superseded); the register's
+            // value is the one with the highest digest.
+            let want = laptop.winner(
+                cx,
+                NOTES,
+                &[
+                    (&day1, "day 1"),
+                    (&plane, "on the plane"),
+                    (&trip, "trip"),
+                    (&taxi, "in the taxi"),
+                ],
+            )?;
+            if value["bytes"] != want {
                 return Err(format!(
-                    "the merged value {value} lacks tags=trip or one offline text"
+                    "the merged value {value} is not the head with the highest digest ({want:?})"
                 ));
             }
             cx.evidence(&format!("both at {at}"));
-            cx.evidence(&format!("both hold {value}"));
+            cx.evidence(&format!(
+                "both hold {value}: the head with the highest digest"
+            ));
             Ok(())
         },
     )?;
@@ -292,7 +317,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.evidence(&format!("phone reads {}: {read_day1}", day1.name));
             for (label, v) in [
                 ("on the plane", &read_plane),
-                ("tags=trip", &read_trip),
+                ("trip", &read_trip),
                 ("in the taxi", &read_taxi),
             ] {
                 if parent(v, &day1.writer).is_none_or(|s| s < day1.seq) {
@@ -308,7 +333,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             if parent(&read_taxi, &trip.writer).is_none_or(|s| s < trip.seq) {
                 return Err(format!(
-                    "in the taxi's parents do not include tags=trip: {read_taxi}"
+                    "in the taxi's parents do not include \"trip\": {read_taxi}"
                 ));
             }
             Ok(())

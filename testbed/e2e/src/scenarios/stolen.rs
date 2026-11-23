@@ -107,8 +107,10 @@ const THIEF_HOST: u8 = 4;
 /// Link timing that notices a lost link within seconds.
 const FAST_LINKS: &str = "[links]\nkeep_alive_secs = 2\nidle_timeout_secs = 6\n";
 
-/// What the phone wrote offline, and what the thief writes.
+/// What the phone wrote offline, what the thief writes, and what the honest
+/// devices wrote.
 const OFFLINE_TEXT: &str = "written on the plane";
+const HONEST_TEXTS: [&str; 4] = ["day 1", "flight at nine", "trip", OFFLINE_TEXT];
 const THIEF_TEXTS: [&str; 5] = [
     "thief: wire the deposit",
     "thief: new bank details",
@@ -155,11 +157,11 @@ fn peer(device: &str, host: u8) -> PeerCfg {
     }
 }
 
-/// The `text` field of version `v` as `host` reads it by name: `Ok(text)`
-/// when it answers a version, `Err(error)` when it answers an error.
+/// The bytes of version `v` as `host` reads it by name: `Ok(text)` when it
+/// answers a version, `Err(error)` when it answers an error.
 fn text_at(cx: &mut Cx<'_>, host: &mut Host, v: &Put) -> StepResult<Result<String, Value>> {
     Ok(host.call(cx, &format!("get {}", v.name))?.map(|ok| {
-        ok["version"]["payload"]["entry"]["text"]
+        ok["version"]["bytes"]
             .as_str()
             .unwrap_or_default()
             .to_owned()
@@ -449,10 +451,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let phone_key = phone.writer.clone();
 
     let day1 = sc.step(
-        "the laptop shares the notes and writes text=day 1; every device watches them",
+        "the laptop shares the notes and writes \"day 1\"; every device watches them",
         |cx| {
             laptop.ok(cx, &format!("share {NOTES}"))?;
-            let day1 = laptop.put(cx, NOTES, "text=\"day 1\"")?;
+            let day1 = laptop.put_op(cx, NOTES, "day 1")?;
             laptop.ok(cx, &format!("watch {NOTES}"))?;
             tab.ok(cx, &format!("watch {NOTES}"))?;
             phone.ok(cx, &format!("watch {NOTES}"))?;
@@ -467,8 +469,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     .state(cx, NOTES)?
                     .is_some_and(|(at, _)| includes(&at, &day1)))
             })?;
-            let n1 = phone.put(cx, NOTES, "text=\"flight at nine\"")?;
-            let n2 = phone.put(cx, NOTES, "tags=trip")?;
+            let n1 = phone.put_op(cx, NOTES, "flight at nine")?;
+            let n2 = phone.put_op(cx, NOTES, "trip")?;
             for host in [&mut laptop, &mut tab] {
                 wait_for(
                     cx,
@@ -540,7 +542,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let n3 = sc.step(
         "on the flight, the phone writes a note that nobody sees",
         |cx| {
-            let n3 = phone.put(cx, NOTES, &format!("text=\"{OFFLINE_TEXT}\""))?;
+            let n3 = phone.put_op(cx, NOTES, OFFLINE_TEXT)?;
             unanswered(cx, "laptop", &n3.name)?;
             unanswered(cx, "tab", &n3.name)?;
             cx.evidence(&format!(
@@ -598,8 +600,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "the thief writes two notes as the phone, continuing its log from the image; the tab \
          takes them (the key is not revoked yet), the laptop hears nothing",
         |cx| {
-            let t1 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[0]))?;
-            let t2 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[1]))?;
+            let t1 = thief.put_op(cx, NOTES, THIEF_TEXTS[0])?;
+            let t2 = thief.put_op(cx, NOTES, THIEF_TEXTS[1])?;
             if t1.seq <= n2.seq {
                 return Err(format!(
                     "the thief wrote seq {}, expected it past the phone's seq {} (the log \
@@ -694,7 +696,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "after the report, the thief writes again: the tab takes it; the laptop takes nothing \
          new of the suspected key (its get is refused, suspected) and keeps what it took before",
         |cx| {
-            let ts = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[2]))?;
+            let ts = thief.put_op(cx, NOTES, THIEF_TEXTS[2])?;
             wait_for(
                 cx,
                 &format!("the tab reads {} as the thief wrote it", ts.name),
@@ -978,7 +980,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "after the revocation, the thief writes a note dated before it; the tab, which has not \
          heard of the revocation, takes it",
         |cx| {
-            let t3 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[3]))?;
+            let t3 = thief.put_op(cx, NOTES, THIEF_TEXTS[3])?;
             wait_for(
                 cx,
                 &format!("the tab reads {} as the thief wrote it", t3.name),
@@ -1024,9 +1026,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                         host.node, n2.seq
                     ));
                 }
-                if THIEF_TEXTS.iter().any(|t| value["text"] == *t) {
+                // Rule R (c): nothing the thief signed after the cut is the
+                // value; it is one the honest devices wrote.
+                if !HONEST_TEXTS.iter().any(|t| value["bytes"] == *t) {
                     return Err(format!(
-                        "{}'s notes read {value}, a thief's text",
+                        "{}'s notes read {value}, not one of the honest texts {HONEST_TEXTS:?}",
                         host.node
                     ));
                 }
@@ -1056,7 +1060,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 |cx| Ok(routes_over_link(cx, "tab", PHONE, THIEF_HOST)?.is_none()),
             )?;
             cx.evidence(&format!("the tab routes {PHONE} to no link with the thief"));
-            let t4 = thief.put(cx, NOTES, &format!("text=\"{}\"", THIEF_TEXTS[4]))?;
+            let t4 = thief.put_op(cx, NOTES, THIEF_TEXTS[4])?;
             for host in [&mut laptop, &mut tab] {
                 let how = never_answers(cx, host, &t4)?;
                 cx.evidence(&format!("{} get {}: {how}", host.node, t4.name));
@@ -1190,13 +1194,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                         let Some(s) = host.state(cx, NOTES)? else {
                             return Ok(false);
                         };
-                        let done = includes(&s.0, &n3) && s.1["text"] == OFFLINE_TEXT;
+                        let done = includes(&s.0, &n3) && s.1["bytes"] == OFFLINE_TEXT;
                         last = s;
                         Ok(done)
                     },
                 )?;
                 let read = host.version(cx, NOTES, &n3)?;
-                if read["payload"]["entry"]["text"] != OFFLINE_TEXT {
+                if read["bytes"] != OFFLINE_TEXT {
                     return Err(format!(
                         "{} reads {} as {read}, expected the phone's text {OFFLINE_TEXT:?}",
                         host.node, n3.name
@@ -1237,7 +1241,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 |w| {
                     let v = &w["change"]["version"];
                     name(v["name"].as_str().unwrap_or_default()).ok() == name(&n3.name).ok()
-                        && v["payload"]["entry"]["text"] == OFFLINE_TEXT
+                        && v["bytes"] == OFFLINE_TEXT
                 },
             )?;
             cx.evidence(&format!(

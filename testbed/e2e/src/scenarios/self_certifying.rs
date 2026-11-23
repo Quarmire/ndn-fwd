@@ -341,7 +341,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     ns = alice.ns
                 ),
             )?;
-            alice_host.put(cx, &notes, "text=\"packing list\"")
+            alice_host.put_op(cx, &notes, "packing list")
         },
     )?;
 
@@ -369,33 +369,34 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let bobs = sc.step(
-        "bob writes into the folder; alice reads it beside her own",
+        "bob writes into the folder, over alice's first; alice reads it",
         |cx| {
-            let bobs = bob_host.put(cx, &notes, "bob=\"hotel booked\"")?;
+            wait_for(cx, "bob holds alice's first notes", CONVERGE, |cx| {
+                Ok(bob_host
+                    .state(cx, &notes)?
+                    .is_some_and(|(at, _)| includes(&at, &first_put)))
+            })?;
+            let bobs = bob_host.put_op(cx, &notes, "hotel booked")?;
             wait_for(cx, "alice holds bob's notes", CONVERGE, |cx| {
                 Ok(alice_host.state(cx, &notes)?.is_some_and(|(at, v)| {
                     includes(&at, &bobs)
                         && includes(&at, &first_put)
-                        && v["bob"] == "hotel booked"
-                        && v["text"] == "packing list"
+                        && v["bytes"] == "hotel booked"
                 }))
             })?;
-            cx.evidence("alice's notes state includes bob's version: bob = \"hotel booked\"");
+            cx.evidence("alice's notes state includes bob's version: \"hotel booked\"");
             Ok(bobs)
         },
     )?;
 
     sc.step("alice writes the notes again; bob reads it", |cx| {
-        let second = alice_host.put(cx, &notes, "text=\"packing list v2\"")?;
+        let second = alice_host.put_op(cx, &notes, "packing list v2")?;
         wait_for(cx, "bob holds alice's v2", CONVERGE, |cx| {
             Ok(bob_host.state(cx, &notes)?.is_some_and(|(at, v)| {
-                includes(&at, &second)
-                    && includes(&at, &bobs)
-                    && v["text"] == "packing list v2"
-                    && v["bob"] == "hotel booked"
+                includes(&at, &second) && includes(&at, &bobs) && v["bytes"] == "packing list v2"
             }))
         })?;
-        cx.evidence("bob's notes state includes alice's v2: text = \"packing list v2\"");
+        cx.evidence("bob's notes state includes alice's v2: \"packing list v2\"");
         Ok(())
     })?;
 
@@ -425,7 +426,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     ns = alice.ns
                 ),
             )?;
-            let first_plan = alice_host.put(cx, &agenda, "text=\"day one: museum\"")?;
+            let first_plan = alice_host.put_op(cx, &agenda, "day one: museum")?;
             Ok((offer_writer(cx, &mut alice_host, &plans)?, first_plan))
         },
     )?;
@@ -454,37 +455,34 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         |cx| {
             wait_for(cx, "carol holds alice's agenda", CONVERGE, |cx| {
                 Ok(carol_host.state(cx, &agenda)?.is_some_and(|(at, v)| {
-                    includes(&at, &first_plan) && v["text"] == "day one: museum"
+                    includes(&at, &first_plan) && v["bytes"] == "day one: museum"
                 }))
             })?;
-            let carols = carol_host.put(cx, &agenda, "carol=\"tickets bought\"")?;
+            let carols = carol_host.put_op(cx, &agenda, "tickets bought")?;
             wait_for(cx, "alice holds carol's agenda", CONVERGE, |cx| {
                 Ok(alice_host.state(cx, &agenda)?.is_some_and(|(at, v)| {
                     includes(&at, &carols)
                         && includes(&at, &first_plan)
-                        && v["carol"] == "tickets bought"
+                        && v["bytes"] == "tickets bought"
                 }))
             })?;
-            cx.evidence(
-                "alice's agenda state includes carol's version: carol = \"tickets bought\"",
-            );
+            cx.evidence("alice's agenda state includes carol's version: \"tickets bought\"");
             Ok(carols)
         },
     )?;
 
     sc.step("alice writes the agenda again; carol reads it", |cx| {
-        let again = alice_host.put(cx, &agenda, "text=\"day one: museum, then the park\"")?;
+        let again = alice_host.put_op(cx, &agenda, "day one: museum, then the park")?;
         wait_for(cx, "carol holds alice's second agenda", CONVERGE, |cx| {
             Ok(carol_host.state(cx, &agenda)?.is_some_and(|(at, v)| {
                 includes(&at, &again)
                     && includes(&at, &carols)
-                    && v["text"] == "day one: museum, then the park"
-                    && v["carol"] == "tickets bought"
+                    && v["bytes"] == "day one: museum, then the park"
             }))
         })?;
         cx.evidence(
-            "carol's agenda state includes alice's second version: text = \"day one: museum, \
-             then the park\"",
+            "carol's agenda state includes alice's second version: \"day one: museum, then the \
+             park\"",
         );
         Ok(())
     })?;
@@ -531,10 +529,26 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         |cx| {
             cx.concept("a writer's namespace adopted for one folder (security/transit)");
             let puts = [
-                alice_host.put(cx, &board, "alice=\"bring the map\"")?,
-                bob_host.put(cx, &board, "bob=\"bring the tent\"")?,
-                carol_host.put(cx, &board, "carol=\"bring the stove\"")?,
+                alice_host.put_op(cx, &board, "bring the map")?,
+                bob_host.put_op(cx, &board, "bring the tent")?,
+                carol_host.put_op(cx, &board, "bring the stove")?,
             ];
+            // Rule R: all three read one value, the head with the highest
+            // digest of the three (as alice reads their parents).
+            wait_for(cx, "alice holds the three writes", CONVERGE * 2, |cx| {
+                Ok(alice_host
+                    .state(cx, &board)?
+                    .is_some_and(|(at, _)| puts.iter().all(|put| includes(&at, put))))
+            })?;
+            let want = alice_host.winner(
+                cx,
+                &board,
+                &[
+                    (&puts[0], "bring the map"),
+                    (&puts[1], "bring the tent"),
+                    (&puts[2], "bring the stove"),
+                ],
+            )?;
             for (who, host) in [
                 ("alice", &mut alice_host),
                 ("bob", &mut bob_host),
@@ -546,15 +560,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     CONVERGE * 2,
                     |cx| {
                         Ok(host.state(cx, &board)?.is_some_and(|(at, v)| {
-                            puts.iter().all(|put| includes(&at, put))
-                                && v["alice"] == "bring the map"
-                                && v["bob"] == "bring the tent"
-                                && v["carol"] == "bring the stove"
+                            puts.iter().all(|put| includes(&at, put)) && v["bytes"] == want
                         }))
                     },
                 )?;
                 cx.evidence(&format!(
-                    "{who}'s board state includes alice's, bob's and carol's versions"
+                    "{who}'s board state includes alice's, bob's and carol's versions: {want:?}, \
+                     the head with the highest digest"
                 ));
             }
             holds_nothing_of(cx, "bob", &carol.ns)?;

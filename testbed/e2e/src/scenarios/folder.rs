@@ -1,8 +1,7 @@
-//! folder: two people share a folder of elements under an app's own merge
+//! folder: two people share a folder of registers under the built-in merge
 //! rule; one writes while the other is away and pastes a long text; the
-//! other catches up — the data layer's folder records, rules by name and
-//! app-built operations in pieces (data-layer spec §5.1, §5.2, §6.1, §13)
-//! on real daemons.
+//! other catches up — the data layer's folder records and rules by name
+//! (data-layer spec §6.1, §13) on real daemons.
 //!
 //! Topology and gestures as in [`super::shared`]: alice (/fa) and bob
 //! (/fb), each the root device of their namespace, pointing at each other,
@@ -12,27 +11,22 @@
 //! (see [`super::data_host`]); alice's keeps its entries in a store
 //! directory (`--store`).
 //!
-//! The rule: `/ndn-tools/merge/element/v=1`, which `ndn-data` ships and
-//! registers with `--merge-rule` — an element of named text settings, each
-//! operation made over a basis it names by implicit digest (`set:` writes a
-//! setting, `change:` splices the text its basis wrote), concurrent writes
-//! kept as ordered variants.
+//! The rule: `/ndf/merge/newest/v=1`, built into the data layer — a
+//! register holds the bytes of its newest version (the head with the
+//! highest digest of the versions nothing supersedes), `put_op` writes it.
 //!
-//! Proves: alice shares the folder `/fa/32=data/notebook` (rule
-//! `/ndn-tools/merge/element/v=1`, writers /fa and /fb, readers both
-//! people) with `share_folder`, and writes the cover; bob's device, running
-//! a program that does not know the rule, holds the cover unreadable: its
-//! `get` answers RuleUnknown naming the rule (next: update the program).
-//! Started again knowing the rule, bob reads the cover and writes a page;
-//! alice reads it — both collections governed by the folder record alone.
-//! With bob cut from the relay (nftables), alice writes the cover's title
-//! again and page 1's body (`put_op`) and then pastes 20 KiB into the body
-//! (`put_op` with a change over the body's version, by its digest): one
-//! operation whose version carries it in pieces (its packet is far smaller
-//! than the paste). Bob's watch delivers none of them while he is away.
-//! Once he is back he counts all three: on the cover and page 1 the same
-//! frontier and value as alice, nothing not counted, every version
-//! delivered to his watch only now, each named with its collection.
+//! Proves: alice shares the folder `/fa/32=data/notebook` (the newest
+//! register, writers /fa and /fb, readers both people) with `share_folder`,
+//! and writes the cover. A collection under it that names a rule no device
+//! knows is held unreadable: `get` answers RuleUnknown naming the rule
+//! (next: update the program). Bob reads the cover and writes a page; alice
+//! reads it — both collections governed by the folder record alone. With
+//! bob cut from the relay (nftables), alice writes the cover's title again
+//! and page 1's body (`put_op`) and then pastes 4 KiB into the body (the
+//! page's new text, from a file): Bob's watch delivers none of them while
+//! he is away. Once he is back he reads all three: on the cover and page 1
+//! the same frontier and value as alice, every version delivered to his
+//! watch only now, each named with its collection.
 
 use std::fs;
 use std::time::Duration;
@@ -56,14 +50,15 @@ const FOLDER: &str = "/fa/32=data/notebook";
 const COVER: &str = "/fa/32=data/notebook/cover";
 const PAGE1: &str = "/fa/32=data/notebook/page1";
 const PAGE2: &str = "/fa/32=data/notebook/page2";
-/// The app's rule, by its full name.
-const RULE: &str = "/ndn-tools/merge/element/v=1";
+const APPENDIX: &str = "/fa/32=data/notebook/appendix";
+/// A merge rule by a name no program here implements.
+const OTHER: &str = "/ndn-tools/merge/element/v=1";
 /// Both people write and read.
 const BOTH: &str = "writers=/fa,/fb readers=person:/fa,person:/fb";
 /// The nftables table that cuts bob–relay.
 const CUT_TABLE: &str = "ndn_e2e_folder_cut";
-/// The paste: 20 KiB of text.
-const PASTE_LEN: usize = 20 * 1024;
+/// The paste: 4 KiB of text (a register's bytes ride inline in one version).
+const PASTE_LEN: usize = 4 * 1024;
 /// Page 1's text, and where the paste goes into it.
 const DAY2: &str = "Day 2: the museum, then dinner by the river.";
 const PASTE_AT: usize = 7;
@@ -71,36 +66,17 @@ const PASTE_AT: usize = 7;
 /// far is taken in (the log checks; no verdict depends on it).
 const QUIET: Duration = Duration::from_secs(2);
 
-/// `ndn-data` options that make the device know the rule.
-fn knows_rule() -> Vec<String> {
-    vec!["--merge-rule".to_owned(), RULE.to_owned()]
-}
-
-/// The text of setting `setting` in an element value, when it has exactly
-/// one variant.
-fn text<'a>(value: &'a Value, setting: &str) -> Option<&'a Value> {
-    match value["element"][setting].as_array().map(Vec::as_slice) {
-        Some([one]) => Some(&one["text"]),
-        _ => None,
-    }
-}
-
 /// A frontier entry or id (`{writer, seq}`) is version `v`.
 fn is(id: &Value, v: &Put) -> bool {
     id["writer"] == v.writer.as_str() && id["seq"] == v.seq
 }
 
-/// The watched change delivers or counts one of `members`.
+/// The watched change delivers one of `members`.
 fn counts_member(w: &Value, members: &[Put]) -> Option<String> {
     let change = &w["change"];
-    let id = if change["version"].is_object() {
-        &change["version"]["id"]
-    } else {
-        &change["counted"]["id"]
-    };
     members
         .iter()
-        .find(|m| is(id, m))
+        .find(|m| is(&change["version"]["id"], m))
         .map(|m| format!("{}: {change}", m.name))
 }
 
@@ -116,7 +92,7 @@ fn tagged(w: &Value) -> bool {
     under && (!version.is_object() || version["collection"] == tag)
 }
 
-/// The 20 KiB the paste puts: numbered lines of text.
+/// The 4 KiB the paste puts: numbered lines of text.
 fn paste_text() -> String {
     let mut text = String::with_capacity(PASTE_LEN + 64);
     let mut i = 0;
@@ -133,16 +109,11 @@ fn paste_text() -> String {
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let (alice_root, bob_root) = people_through_relay(sc, NAMESPACES)?;
     let store = sc.world.node("alice").dir.join("data-store");
-    let alice_options = {
-        let mut o = vec!["--store".to_owned(), store.display().to_string()];
-        o.extend(knows_rule());
-        o
-    };
+    let alice_options = vec!["--store".to_owned(), store.display().to_string()];
 
-    let (mut alice, bob) = sc.step(
-        "start the data layer on alice's device (ndn-data knowing the rule \
-         /ndn-tools/merge/element/v=1, its entries kept in a store directory) and on bob's \
-         (a program that does not know it)",
+    let (mut alice, mut bob) = sc.step(
+        "start the data layer on alice's device (its entries kept in a store directory) and on \
+         bob's",
         |cx| {
             cx.concept("data layer host (ndn-data)");
             let alice = Host::start_with(cx, "alice", &alice_root.identity, &alice_options)?;
@@ -155,79 +126,79 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let first = sc.step(
-        "alice shares the folder /fa/32=data/notebook (rule /ndn-tools/merge/element/v=1, writers \
-         /fa,/fb, readers person:/fa,person:/fb) and writes the cover: set title",
+        "alice shares the folder /fa/32=data/notebook (the newest register, writers /fa,/fb, \
+         readers person:/fa,person:/fb) and writes the cover: \"Trip notes\"",
         |cx| {
             cx.concept("folder members record");
-            alice.ok(
-                cx,
-                &format!("share_folder {FOLDER} rule=merge:{RULE} {BOTH}"),
-            )?;
+            alice.ok(cx, &format!("share_folder {FOLDER} rule=merge {BOTH}"))?;
             alice.ok(cx, &format!("watch {FOLDER}"))?;
-            let ok = alice.ok(cx, &format!("put_op {COVER} set:title=\"Trip notes\""))?;
-            let first = alice.put_of(COVER, &ok)?;
+            bob.ok(cx, &format!("watch {FOLDER}"))?;
+            let first = alice.put_op(cx, COVER, "Trip notes")?;
             let (_, value) = alice
                 .state(cx, COVER)?
                 .ok_or("alice holds no state of her cover")?;
-            if text(&value, "title") != Some(&json!("Trip notes")) {
+            if value["bytes"] != "Trip notes" {
                 return Err(format!("alice's cover value is {value}"));
             }
             cx.evidence(&format!(
-                "alice shared {FOLDER}: rule {RULE}, {BOTH}; put_op {COVER}: {} ({}); her cover: \
-                 {value}",
-                first.name, ok["op"]
+                "alice shared {FOLDER}: {BOTH}; put_op {COVER}: {}; her cover: {value}",
+                first.name
             ));
             Ok(first)
         },
     )?;
-    let mut bob = sc.step(
-        "bob's device, whose program does not know the rule, holds the cover unreadable: get \
-         answers RuleUnknown naming the rule (next: update the program); started again knowing \
-         it, bob watches the folder",
+    sc.step(
+        "alice shares the appendix under a rule no device knows (/ndn-tools/merge/element/v=1, \
+         which no program here implements): get answers RuleUnknown naming the rule (next: \
+         update the program) at alice's device and at bob's",
         |cx| {
             cx.concept("merge rules by name");
-            let mut bob = bob;
-            let mut last = Value::Null;
-            wait_for(
-                cx,
-                "bob's get of the cover answers RuleUnknown",
-                CONVERGE,
-                |cx| match bob.call(cx, &format!("get {COVER}"))? {
-                    Ok(ok) => Err(format!("bob reads the cover under no known rule: {ok}")),
-                    Err(e) => {
-                        let unknown = e["next"] == "update-program";
-                        last = e;
-                        Ok(unknown)
-                    }
-                },
-            )?;
-            if name(last["rule_unknown"]["rule"].as_str().unwrap_or_default())? != name(RULE)?
-                || last["retry"] != false
-            {
-                return Err(format!("bob's RuleUnknown answer is {last}"));
+            alice.ok(cx, &format!("share {APPENDIX} rule=merge:{OTHER} {BOTH}"))?;
+            for host in [&mut alice, &mut bob] {
+                let mut last = Value::Null;
+                wait_for(
+                    cx,
+                    &format!("{}'s get of the appendix answers RuleUnknown", host.node),
+                    CONVERGE,
+                    |cx| match host.call(cx, &format!("get {APPENDIX}"))? {
+                        // Nothing held yet: the appendix's own record has not
+                        // reached this device, the folder's applies meanwhile.
+                        Ok(ok) if ok["state"]["at"] == json!([]) => Ok(false),
+                        Ok(ok) => Err(format!(
+                            "{} reads the appendix under no rule: {ok}",
+                            host.node
+                        )),
+                        Err(e) => {
+                            let unknown = e["next"] == "update-program";
+                            last = e;
+                            Ok(unknown)
+                        }
+                    },
+                )?;
+                if name(last["rule_unknown"]["rule"].as_str().unwrap_or_default())? != name(OTHER)?
+                    || last["retry"] != false
+                {
+                    return Err(format!("{}'s RuleUnknown answer is {last}", host.node));
+                }
+                cx.evidence(&format!(
+                    "{}> get {APPENDIX}: {} (next: {}; rule {})",
+                    host.node, last["message"], last["next"], last["rule_unknown"]["rule"]
+                ));
             }
-            cx.evidence(&format!(
-                "bob> get {COVER}: {} (next: {}; rule {})",
-                last["message"], last["next"], last["rule_unknown"]["rule"]
-            ));
-            bob.stop(cx);
-            let mut bob = Host::start_with(cx, "bob", &bob_root.identity, &knows_rule())?;
-            bob.ok(cx, &format!("watch {FOLDER}"))?;
-            Ok(bob)
+            Ok(())
         },
     )?;
     sc.step(
-        "bob reads the cover and writes page 2 (set caption); alice reads his page: both \
+        "bob reads the cover and writes page 2 (\"from bob\"); alice reads his page: both \
          elements governed by the folder record alone",
         |cx| {
             wait_for(cx, "bob reads the cover", CONVERGE, |cx| {
-                Ok(bob.state(cx, COVER)?.is_some_and(|(at, v)| {
-                    includes(&at, &first) && text(&v, "title") == Some(&json!("Trip notes"))
-                }))
+                Ok(bob
+                    .state(cx, COVER)?
+                    .is_some_and(|(at, v)| includes(&at, &first) && v["bytes"] == "Trip notes"))
             })?;
-            cx.evidence("bob's cover state includes alice's first version: title \"Trip notes\"");
-            let ok = bob.ok(cx, &format!("put_op {PAGE2} set:caption=\"from bob\""))?;
-            let caption = bob.put_of(PAGE2, &ok)?;
+            cx.evidence("bob's cover state includes alice's first version: \"Trip notes\"");
+            let caption = bob.put_op(cx, PAGE2, "from bob")?;
             let mut value = Value::Null;
             wait_for(cx, "alice reads bob's page", CONVERGE, |cx| {
                 Ok(alice.state(cx, PAGE2)?.is_some_and(|(at, v)| {
@@ -235,8 +206,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     includes(&at, &caption)
                 }))
             })?;
-            let variants = &value["element"]["caption"];
-            if variants[0]["writer"] != bob.writer.as_str() || variants[0]["text"] != "from bob" {
+            if value["bytes"] != "from bob" {
                 return Err(format!("alice's page 2 value is {value}"));
             }
             cx.evidence(&format!("alice's page 2: {value}"));
@@ -266,59 +236,39 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let written = sc.step(
         "alice writes the cover's day-2 title and page 1's body (put_op) while bob is away",
         |cx| {
-            let ok = alice.ok(
-                cx,
-                &format!("put_op {COVER} set:title=\"Trip notes, day 2\""),
-            )?;
-            let cover = alice.put_of(COVER, &ok)?;
-            let ok = alice.ok(cx, &format!("put_op {PAGE1} set:body=\"{DAY2}\""))?;
-            let body = alice.put_of(PAGE1, &ok)?;
+            let cover = alice.put_op(cx, COVER, "Trip notes, day 2")?;
+            let body = alice.put_op(cx, PAGE1, DAY2)?;
             cx.evidence(&format!("put_op: {}, {}", cover.name, body.name));
             Ok([cover, body])
         },
     )?;
     let (paste, pasted) = sc.step(
-        "alice pastes 20 KiB into page 1 (put_op: a change over the body's version, its basis by \
-         digest): one operation, carried in pieces",
+        "alice pastes 4 KiB into page 1 (put_op: the page's new text, from a file): one \
+         version, its value the newest",
         |cx| {
-            cx.concept("app-built operations in pieces");
             let file = cx.w.node("alice").dir.join("paste.txt");
             let text = paste_text();
-            fs::write(&file, &text).map_err(|e| format!("{}: {e}", file.display()))?;
-            let ok = alice.ok(
-                cx,
-                &format!("put_op {PAGE1} change:body={PASTE_AT},0,@{}", file.display()),
-            )?;
-            let paste = alice.put_of(PAGE1, &ok)?;
+            let mut body = DAY2.to_owned();
+            body.insert_str(PASTE_AT, &text);
+            fs::write(&file, &body).map_err(|e| format!("{}: {e}", file.display()))?;
+            let paste = alice.put_op(cx, PAGE1, &format!("@{}", file.display()))?;
             let (_, value) = alice
                 .state(cx, PAGE1)?
                 .ok_or("alice holds no state of page 1")?;
-            let variant = &value["element"]["body"][0];
-            let variants = value["element"]["body"].as_array().map_or(0, Vec::len);
-            let mut body = DAY2.to_owned();
-            body.insert_str(PASTE_AT, &text);
             let expected = json!({
                 "len": body.len(),
                 "sha256": Sha256::digest(body.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>(),
             });
-            if variants != 1 || !is(variant, &paste) || variant["text"] != expected {
+            if value["bytes"] != expected {
                 return Err(format!("alice's page 1 after the paste is {value}"));
             }
             let packet = content_at(cx, "alice", &paste.name)?;
-            if packet.len() >= PASTE_LEN {
-                return Err(format!(
-                    "{} carries {} octets in its own packet: not in pieces",
-                    paste.name,
-                    packet.len()
-                ));
-            }
             cx.evidence(&format!(
-                "put_op {PAGE1}: {} (op {}); its packet {} octets, the paste {PASTE_LEN}; alice's \
-                 page 1 body: {}",
+                "put_op {PAGE1}: {} ({} octets in its packet, the text {} octets); alice's page 1: {}",
                 paste.name,
-                ok["op"],
                 packet.len(),
-                variant["text"]
+                body.len(),
+                value["bytes"]
             ));
             Ok((paste, expected))
         },
@@ -342,8 +292,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
     sc.step(
         "bob catches up: on the cover and page 1 the same frontier and value as alice (the \
-         paste's length and SHA-256 equal), nothing not counted, every version delivered to his \
-         watch only now",
+         paste's length and SHA-256 equal; each the newest of alice's writes), every version \
+         delivered to his watch only now",
         |cx| {
             for (c, own) in [
                 (COVER, vec![&members[0]]),
@@ -360,8 +310,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                         };
                         let done = a["at"] == b["at"]
                             && a["value"] == b["value"]
-                            && own.iter().all(|m| includes(&b["at"], m))
-                            && b["not_counted"].as_array().is_some_and(Vec::is_empty);
+                            && own.iter().all(|m| includes(&b["at"], m));
                         last = (a, b);
                         Ok(done)
                     },
@@ -386,7 +335,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let (_, page1) = bob
                 .state(cx, PAGE1)?
                 .ok_or("bob holds no state of page 1")?;
-            if text(&page1, "body") != Some(&pasted) {
+            if page1["bytes"] != pasted {
                 return Err(format!("bob's page 1 is {page1}, not the paste {pasted}"));
             }
             for m in &members {

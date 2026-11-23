@@ -38,8 +38,8 @@
 //! Each person's device hosts its data layer with `ndn-data` (see
 //! [`super::data_host`]).
 //!
-//! Proves: alice shares a document (merge rule) and a chat (log rule) with
-//! bob as writer and reader; each reads what the other wrote, the chat by
+//! Proves: alice shares a document (the newest register) and a chat (log
+//! rule) with bob as writer and reader; each reads what the other wrote, the chat by
 //! watch, every version named `<its device>/32=log/<collection>/seq=<n>`.
 //! The relay fetches the versions (in transit: it holds no context of /sa)
 //! and their Content is a sealed record (an epoch and a ciphertext, no
@@ -651,10 +651,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let (draft1, hi_bob) = sc.step(
-        "alice writes the document text=draft 1 and the chat text=hi bob",
+        "alice writes the document \"draft 1\" and the chat text=hi bob",
         |cx| {
             Ok((
-                alice.put(cx, DOC, "text=\"draft 1\"")?,
+                alice.put_op(cx, DOC, "draft 1")?,
                 alice.put(cx, CHAT, "text=\"hi bob\"")?,
             ))
         },
@@ -666,9 +666,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             wait_for(cx, "bob holds draft 1", CONVERGE, |cx| {
                 Ok(bob
                     .state(cx, DOC)?
-                    .is_some_and(|(at, v)| includes(&at, &draft1) && v["text"] == "draft 1"))
+                    .is_some_and(|(at, v)| includes(&at, &draft1) && v["bytes"] == "draft 1"))
             })?;
-            cx.evidence("bob's document state includes draft 1, text = \"draft 1\"");
+            cx.evidence("bob's document state includes draft 1, value \"draft 1\"");
             let w = bob.watched_until(cx, "hi bob in bob's chat watch", CONVERGE, |w| {
                 delivers(w, CHAT, &hi_bob, "text", "hi bob")
             })?;
@@ -688,9 +688,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let looks_good = sc.step(
-        "bob writes the document bob=looks good and the chat text=hi alice; alice holds both",
+        "bob writes the document \"looks good\" and the chat text=hi alice; alice holds both",
         |cx| {
-            let looks_good = bob.put(cx, DOC, "bob=\"looks good\"")?;
+            let looks_good = bob.put_op(cx, DOC, "looks good")?;
             let hi_alice = bob.put(cx, CHAT, "text=\"hi alice\"")?;
             let mut last = Value::Null;
             wait_for(cx, "alice holds looks good", CONVERGE, |cx| {
@@ -700,7 +700,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     done
                 }))
             })?;
-            if last["bob"] != "looks good" || last["text"] != "draft 1" {
+            // Bob wrote after reading draft 1, so his version supersedes it:
+            // the one head is looks good.
+            if last["bytes"] != "looks good" {
                 return Err(format!("alice's document value is {last}"));
             }
             cx.evidence(&format!(
@@ -749,13 +751,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let offline = sc.step(
-        "offline, bob writes the document bob=offline edit; his own state holds it",
+        "offline, bob writes the document \"offline edit\"; his own state holds it",
         |cx| {
-            let offline = bob.put(cx, DOC, "bob=\"offline edit\"")?;
+            let offline = bob.put_op(cx, DOC, "offline edit")?;
             let (at, value) = bob
                 .state(cx, DOC)?
                 .ok_or("bob holds no state of the document")?;
-            if !includes(&at, &offline) || value["bob"] != "offline edit" {
+            if !includes(&at, &offline) || value["bytes"] != "offline edit" {
                 return Err(format!("bob's state offline is at {at}, value {value}"));
             }
             cx.evidence(&format!("bob offline: at {at}, value {value}"));
@@ -795,9 +797,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let (at, value) = alice
                 .state(cx, DOC)?
                 .ok_or("alice holds no state of her document")?;
+            // Rule R (c): nothing the removed writer signed after the cut
+            // appears in the value.
             if includes(&at, &offline)
                 || !includes(&at, &looks_good)
-                || value["bob"] != "looks good"
+                || value["bytes"] != "looks good"
             {
                 return Err(format!("alice's document state is at {at}, value {value}"));
             }
@@ -829,14 +833,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     sc.step(
-        "alice writes the document text=draft 2 in a new epoch; bob cannot read it (sealed: ask \
+        "alice writes the document \"draft 2\" in a new epoch; bob cannot read it (sealed: ask \
          the owner)",
         |cx| {
-            let draft2 = alice.put(cx, DOC, "text=\"draft 2\"")?;
+            let draft2 = alice.put_op(cx, DOC, "draft 2")?;
             let (_, value) = alice
                 .state(cx, DOC)?
                 .ok_or("alice holds no state of her document")?;
-            if value["text"] != "draft 2" {
+            if value["bytes"] != "draft 2" {
                 return Err(format!("alice's document value is {value}"));
             }
             let epoch2 = relay_sees_sealed(cx, &draft2, &["draft 2"])?;

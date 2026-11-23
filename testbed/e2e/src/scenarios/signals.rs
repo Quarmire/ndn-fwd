@@ -188,11 +188,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             alice.ok(cx, &format!("share_folder {FOLDER} {BOTH}"))?;
             alice.ok(cx, &format!("watch {FOLDER}"))?;
             bob.ok(cx, &format!("watch {FOLDER}"))?;
-            let first = alice.put(cx, BOARD, "text=\"(empty board)\"")?;
+            let first = alice.put_op(cx, BOARD, "(empty board)")?;
             wait_for(cx, "bob reads the board", CONVERGE, |cx| {
                 Ok(bob
                     .state(cx, BOARD)?
-                    .is_some_and(|(at, v)| includes(&at, &first) && v["text"] == "(empty board)"))
+                    .is_some_and(|(at, v)| includes(&at, &first) && v["bytes"] == "(empty board)"))
             })?;
             cx.evidence(&format!(
                 "alice shared {FOLDER}: {BOTH}; bob's board state includes {}",
@@ -567,7 +567,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                  delivered no version since he subscribed"
             ));
             let mark = bob.watched.len();
-            let commit = alice.put(cx, BOARD, &format!("{TEXT}=\"{newest}\""))?;
+            let commit = alice.put_op(cx, BOARD, newest)?;
             if commit.seq != first.seq + 1 {
                 return Err(format!(
                     "alice's commit is seq {}, not {} (her version after the board's first)",
@@ -578,7 +578,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             wait_for(cx, "bob reads the committed text", CONVERGE, |cx| {
                 Ok(bob
                     .state(cx, BOARD)?
-                    .is_some_and(|(at, v)| includes(&at, &commit) && v[TEXT] == newest))
+                    .is_some_and(|(at, v)| includes(&at, &commit) && v["bytes"] == newest))
             })?;
             bob.watched_until(cx, "the commit in bob's watch", CONVERGE, |w| {
                 is_version(w, &commit)
@@ -592,8 +592,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 ));
             }
             cx.evidence(&format!(
-                "alice committed {} ({TEXT}={newest:?}); bob's watch delivered exactly that one \
-                 version, his board state includes it with {TEXT} = {newest:?}",
+                "alice committed {} ({newest:?}); bob's watch delivered exactly that one \
+                 version, his board state includes it with the value {newest:?}",
                 commit.name
             ));
             Ok(())

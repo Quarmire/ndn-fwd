@@ -121,7 +121,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 cx,
                 &format!("share_folder {FOLDER} rule=merge {ALICE_ONLY}"),
             )?;
-            let first = alice.put(cx, NOTES, "text=\"packing list\"")?;
+            let first = alice.put_op(cx, NOTES, "packing list")?;
             cx.evidence(&format!("alice shared {FOLDER}: {ALICE_ONLY}"));
             Ok(first)
         },
@@ -228,35 +228,36 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let bobs = sc.step(
-        "bob writes into the folder: notes bob=hotel booked; alice reads it, beside her own",
+        "bob writes into the folder: notes \"hotel booked\", over alice's first; alice reads it",
         |cx| {
-            let bobs = bob.put(cx, NOTES, "bob=\"hotel booked\"")?;
+            wait_for(cx, "bob holds alice's first notes", CONVERGE, |cx| {
+                Ok(bob
+                    .state(cx, NOTES)?
+                    .is_some_and(|(at, _)| includes(&at, &first)))
+            })?;
+            let bobs = bob.put_op(cx, NOTES, "hotel booked")?;
             wait_for(cx, "alice holds bob's notes", CONVERGE, |cx| {
                 Ok(alice.state(cx, NOTES)?.is_some_and(|(at, v)| {
-                    includes(&at, &bobs)
-                        && includes(&at, &first)
-                        && v["bob"] == "hotel booked"
-                        && v["text"] == "packing list"
+                    includes(&at, &bobs) && includes(&at, &first) && v["bytes"] == "hotel booked"
                 }))
             })?;
-            cx.evidence("alice's notes state includes bob's version: bob = \"hotel booked\"");
+            cx.evidence("alice's notes state includes bob's version: \"hotel booked\"");
             Ok(bobs)
         },
     )?;
 
     sc.step(
-        "alice writes the notes text=packing list v2; bob reads it",
+        "alice writes the notes \"packing list v2\"; bob reads it",
         |cx| {
-            let second = alice.put(cx, NOTES, "text=\"packing list v2\"")?;
+            let second = alice.put_op(cx, NOTES, "packing list v2")?;
             wait_for(cx, "bob holds alice's v2", CONVERGE, |cx| {
                 Ok(bob.state(cx, NOTES)?.is_some_and(|(at, v)| {
                     includes(&at, &second)
                         && includes(&at, &bobs)
-                        && v["text"] == "packing list v2"
-                        && v["bob"] == "hotel booked"
+                        && v["bytes"] == "packing list v2"
                 }))
             })?;
-            cx.evidence("bob's notes state includes alice's v2: text = \"packing list v2\"");
+            cx.evidence("bob's notes state includes alice's v2: \"packing list v2\"");
             Ok(())
         },
     )?;
@@ -282,7 +283,7 @@ fn short_code(
                 cx,
                 &format!("share_folder {FOLDER2} rule=merge {ALICE_ONLY}"),
             )?;
-            let first = alice.put(cx, NOTES2, "text=\"packing list\"")?;
+            let first = alice.put_op(cx, NOTES2, "packing list")?;
             cx.evidence(&format!("alice shared {FOLDER2}: {ALICE_ONLY}"));
             Ok(first)
         },
@@ -446,36 +447,36 @@ fn short_code(
     )?;
 
     let bobs = sc.step(
-        "bob writes into the second folder: notes bob=hotel booked; alice reads it, beside her \
-         own",
+        "bob writes into the second folder: notes \"hotel booked\" (over her first); alice reads it",
         |cx| {
-            let bobs = bob.put(cx, NOTES2, "bob=\"hotel booked\"")?;
+            wait_for(cx, "bob holds alice's first trip2 notes", CONVERGE, |cx| {
+                Ok(bob
+                    .state(cx, NOTES2)?
+                    .is_some_and(|(at, _)| includes(&at, &first)))
+            })?;
+            let bobs = bob.put_op(cx, NOTES2, "hotel booked")?;
             wait_for(cx, "alice holds bob's notes of trip2", CONVERGE, |cx| {
                 Ok(alice.state(cx, NOTES2)?.is_some_and(|(at, v)| {
-                    includes(&at, &bobs)
-                        && includes(&at, &first)
-                        && v["bob"] == "hotel booked"
-                        && v["text"] == "packing list"
+                    includes(&at, &bobs) && includes(&at, &first) && v["bytes"] == "hotel booked"
                 }))
             })?;
-            cx.evidence("alice's trip2 notes state includes bob's version: bob = \"hotel booked\"");
+            cx.evidence("alice's trip2 notes state includes bob's version: \"hotel booked\"");
             Ok(bobs)
         },
     )?;
 
     sc.step(
-        "alice writes the second folder's notes text=packing list v2; bob reads it",
+        "alice writes the second folder's notes \"packing list v2\"; bob reads it",
         |cx| {
-            let second = alice.put(cx, NOTES2, "text=\"packing list v2\"")?;
+            let second = alice.put_op(cx, NOTES2, "packing list v2")?;
             wait_for(cx, "bob holds alice's trip2 v2", CONVERGE, |cx| {
                 Ok(bob.state(cx, NOTES2)?.is_some_and(|(at, v)| {
                     includes(&at, &second)
                         && includes(&at, &bobs)
-                        && v["text"] == "packing list v2"
-                        && v["bob"] == "hotel booked"
+                        && v["bytes"] == "packing list v2"
                 }))
             })?;
-            cx.evidence("bob's trip2 notes state includes alice's v2: text = \"packing list v2\"");
+            cx.evidence("bob's trip2 notes state includes alice's v2: \"packing list v2\"");
             Ok(())
         },
     )?;

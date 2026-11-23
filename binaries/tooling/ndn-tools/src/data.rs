@@ -30,13 +30,9 @@
 //! dates the device writes into its versions (`dated_ms`), never what any
 //! device accepts: validity of data does not depend on a clock.
 //!
-//! `--merge-rule <function>` (repeatable) makes the device know a merge
-//! rule beside `/merge/yrs`, by its full name; this program ships one,
-//! `/ndn-tools/merge/element/v=1` (`element.rs`: an element of named text
-//! settings, each operation made over a basis it names by implicit digest,
-//! concurrent writes kept as ordered variants). A collection whose members
-//! record names a rule the device does not know is held unreadable: `get`
-//! and the puts answer `RuleUnknown` (next: update the program).
+//! A collection whose members record names a merge rule the device does
+//! not know is held unreadable: `get` and the puts answer `RuleUnknown`
+//! (next: update the program).
 //!
 //! Two connections to the forwarder: a `Node` (fetching, and serving the
 //! device's prefix) and a second one for State Vector Sync. A forwarder
@@ -62,8 +58,10 @@
 //! - `share <collection> [rule=merge|merge:<function>|log]
 //!   [writers=<prefix>,<prefix>...] [readers=<kind>:<name>,...]`: the
 //!   members record of a collection of this device's namespace, its first
-//!   revision or the next. `rule=merge` (the default) merges with
-//!   `/merge/yrs`, `rule=merge:<function>` with the rule of that full name,
+//!   revision or the next. `rule=merge` (the default) is the newest
+//!   register, `/ndf/merge/newest/v=1`; `rule=merge:<function>` names the
+//!   rule by its full name (a device that does not know it holds the
+//!   collection unreadable: `RuleUnknown`, next: update the program);
 //!   `rule=log` keeps every member's versions (the newest is the latest).
 //!   Writers are key-name prefixes (default: `<ns>`); readers are
 //!   `person:<namespace>`, `device:<device name>` or `group:<group name>`
@@ -85,34 +83,24 @@
 //!   it — rule, writers, readers — whoever signed it; a watch shows each
 //!   change of it as `members`.
 //! - `put <collection> <field>=<value>...`: a version of type `/types/note`
-//!   revision 1, kept forever; an empty value
-//!   removes the field. A value `@<path>` is the bytes of the file at
-//!   `<path>` (`@@…` is a value starting with `@`). A payload larger than a
-//!   version carries inline travels in pieces (log rule). Every put answer
-//!   shows the fields it put.
-//! - `put_op <collection> <operation>`: a version of a
-//!   merge collection carrying the operation the app built, of type
-//!   `/types/element`: `hex=<octets>` (any rule's operation as built), or an
-//!   element operation as words — `basis=<digest hex>`,
-//!   `set:<setting>=<text>`, `change:<setting>=<at>,<delete>,<insert>` (a
-//!   splice in characters of the text the basis wrote; a text `@<path>` is
-//!   the file's). Without `basis=`, a change's basis is the version that
-//!   wrote the changed setting's one variant in the state here (several
-//!   variants: name one). The collection's rule checks it before anything
-//!   is signed. The answer shows the operation.
-//! - `get <name>`: a collection's merged state (its newest version under
-//!   the log rule), or an exact version or state by its name. A field value longer than
-//!   256 octets is shown as its length and SHA-256, not its bytes. A state
-//!   lists the versions held here that are not in its value
-//!   (`not_counted`, each `{"id","why","kind"}`: `kind` is `"waits"` for the
-//!   layer's own wait, such as a basis still arriving, which ends by the
-//!   version counting, and `"excluded"` for a rule's own exclusion).
+//!   revision 1, kept forever, into a collection that keeps entries (the log
+//!   rule; a register collection answers `use put_op`). A value `@<path>` is
+//!   the bytes of the file at `<path>` (`@@…` is a value starting with `@`).
+//!   A payload larger than a version carries inline travels in pieces.
+//!   Every put answer shows the fields it put.
+//! - `put_op <collection> text=<value> | hex=<octets>`: a version of a
+//!   register collection (rule `/ndf/merge/newest/v=1`), of type
+//!   `/types/bytes`, carrying those bytes; `text=` alone is a removal. A text
+//!   `@<path>` is the bytes of the file. The answer shows the bytes.
+//! - `get <name>`: a collection's state (the register's value: the newest
+//!   version's bytes, as `{"by","bytes"}` with `by` the writer's person in
+//!   hex; or, under the log rule, its newest version), or an exact version
+//!   by its name. A field value longer than 256 octets is shown as its
+//!   length and SHA-256, not its bytes.
 //!   Every version shown carries its packet's implicit digest (`digest`,
-//!   hex) and, of a merge version whose operation is open here, the
-//!   operation's octets (`op`, hex).
+//!   hex) and, of a register version, its bytes (`bytes`, as in `put_op`).
 //! - `watch <collection or folder>`: from now on, every change as its own
-//!   line (a version not counted, with why,
-//!   and when it counts), for a folder of every collection under it,
+//!   line, for a folder of every collection under it,
 //!   those created later included, each line naming the change's
 //!   collection.
 //! - `suspect <key> [<when>]`: mark key `<key>` (`<id>/KEY/<k>`; a
@@ -223,9 +211,7 @@
 //! rule, when this program does not know the rule); per watched change
 //! `{"watch":<collection or folder>,"collection":<the change's collection>,
 //! "change":{…}}` (a withdrawn version says `why`,
-//! with `cut_of` and `cut_signer` when a cut withdrew it; a version not
-//! counted is `{"not_counted":{"id","why","kind"}}` (`kind` as in `get`), one that counts later
-//! `{"counted":{"id"}}`); per received signal `{"signal":{"scope",
+//! with `cut_of` and `cut_signer` when a cut withdrew it); per received signal `{"signal":{"scope",
 //! "sender","run","seq","address","payload","expires_ms","local"}}`
 //! (address and payload as text, or `{"hex"}` when not UTF-8; with
 //! `"latency_us"`, by this host's clock, when the payload carries
@@ -239,7 +225,6 @@
 //! sender's rate. `--no-signal-ring` opens no local ring per run.
 //! Logs go to stderr.
 
-mod element;
 mod signal;
 
 use std::collections::BTreeMap;
@@ -264,9 +249,9 @@ use ndn_cert::report::TrustEvent;
 use ndn_data::wire::log_name;
 use ndn_data::{
     Age, Answer, Audience, Change, Clock, Config, Content, CutBound, DataError, DataLayer, Device,
-    Equivocal, Frontier, Got, IntroRefusal, Introducer, Keep, MergeRule, NextStep, NotCounted,
-    Offer, Payload, PutOptions, Refusal, Role, Rule, Share, ShareChange, Sharing, State, Timestamp,
-    Transport, TypeId, Version, VersionId, Yrs,
+    Equivocal, Frontier, Got, IntroRefusal, Introducer, Keep, NextStep, Offer, Payload, PutOptions,
+    Refusal, Role, Rule, Share, ShareChange, Sharing, State, Timestamp, Transport, TypeId, Version,
+    VersionId,
 };
 use ndn_ipc::events::{EventSubscription, Notice};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -278,29 +263,8 @@ use ndn_surface::signal::SignalOptions;
 use ndn_sync::{DataStore, MemoryStore};
 use ndn_trust_envelope::TrustEnvelope;
 
-use crate::element::{ElementOp, ElementValue};
-
 /// Longest certificate chain the validator walks (device → CA → root).
 const MAX_CHAIN: usize = 5;
-
-/// The rule `--merge-rule <function>` names, among those this program
-/// ships.
-fn merge_rule(function: &str) -> Result<Arc<dyn MergeRule>> {
-    let name: Name = function
-        .parse()
-        .map_err(|e| anyhow!("--merge-rule {function:?} is no name: {e}"))?;
-    let rules: [Arc<dyn MergeRule>; 2] = [Arc::new(Yrs::new()), Arc::new(element::Element::new())];
-    rules
-        .into_iter()
-        .find(|r| *r.function() == name)
-        .ok_or_else(|| {
-            anyhow!(
-                "--merge-rule {name}: this program knows the merge rules /merge/yrs and {}; name \
-                 one of them, or run a program that knows {name}",
-                element::FUNCTION
-            )
-        })
-}
 
 #[derive(Parser)]
 #[command(
@@ -335,13 +299,6 @@ struct Cli {
     /// (negative: behind). Only the dates it writes change.
     #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     clock_offset_ms: i64,
-
-    /// Also know this merge rule, by its full name (repeatable): a
-    /// collection that merges with a rule the device does not know is held
-    /// unreadable (`RuleUnknown`). The rules this program ships beside
-    /// `/merge/yrs`: `/ndn-tools/merge/element/v=1` (see `put_op`).
-    #[arg(long = "merge-rule")]
-    merge_rules: Vec<String>,
 
     /// Open no local ring per signal run: this device's signals reach
     /// subscribers on this host through the forwarder only, as they reach
@@ -405,9 +362,6 @@ async fn main() -> Result<()> {
         let offset = cli.clock_offset_ms;
         config.clock = Arc::new(move || Timestamp(system().0.saturating_add_signed(offset)));
     }
-    config.rules = cli.merge_rules.iter().try_fold(config.rules, |rules, r| {
-        Ok::<_, anyhow::Error>(rules.with(merge_rule(r)?))
-    })?;
     // Introductions (`offer`, `join`): the anchor this device shows is its
     // namespace's context as the daemon stored it; another person's is
     // adopted through the daemon, as `ndn-ctl adopt` does. A writer's
@@ -1228,18 +1182,14 @@ async fn run(
                 Ok(c) => c,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            if rest.is_empty() {
-                return Ok(Verb::Usage(format!("nothing to put; {PUT_OP_USAGE}")));
-            }
-            let op = match op_of(layer, &collection, rest).await {
+            let op = match op_of(rest).await {
                 Ok(op) => op,
-                Err(Bad::Usage(e)) => return Ok(Verb::Usage(format!("{e}; {PUT_OP_USAGE}"))),
-                Err(Bad::Data(e)) => return Err(e),
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {PUT_OP_USAGE}"))),
             };
-            let shown = op_shown(&op);
-            let id = layer.put_op(&collection, op, put_type(ELEMENT)).await?;
+            let shown = bytes_shown(&op);
+            let id = layer.put_op(&collection, op, put_type(BYTES)).await?;
             let mut ok = put_answer(layer, &collection, &id);
-            ok["op"] = shown;
+            ok["bytes"] = shown;
             Ok(Verb::Done(ok))
         }
         ("put_op", _) => usage(PUT_OP_USAGE),
@@ -1458,12 +1408,12 @@ const SHARE_FOLDER_USAGE: &str = "usage: share_folder <folder> \
                                   name)";
 
 /// A `share` (or `share_folder`) line's options over the defaults: the
-/// merge rule `/merge/yrs`, writers the namespace `ns`, readers the person
-/// `ns`. `rule=merge:<function>` merges with the rule of that full name.
-/// `readers=` with nothing after it lists no readers (not sealed).
+/// merge rule `/ndf/merge/newest/v=1`, writers the namespace `ns`, readers
+/// the person `ns`. `rule=merge:<function>` merges with the rule of that
+/// full name. `readers=` with nothing after it lists no readers (not sealed).
 fn share_options(ns: &Name, options: &[String]) -> Result<Share, String> {
     let merge = || Rule::Merge {
-        function: "/merge/yrs".parse().expect("a valid name"),
+        function: "/ndf/merge/newest/v=1".parse().expect("a valid name"),
     };
     let name = |s: &str| {
         s.parse::<Name>()
@@ -1570,17 +1520,15 @@ fn folder_sharing(ns: &Name, options: &[String]) -> Result<Sharing, String> {
 const PUT_USAGE: &str = "usage: put <collection> <field>=<value>... (a value @<path> is the \
                          file's bytes, @@... a value starting with @)";
 
-const PUT_OP_USAGE: &str = "usage: put_op <collection> \
-                            hex=<operation> | [basis=<digest hex>] [set:<setting>=<text>]... \
-                            [change:<setting>=<at>,<delete>,<insert>]... (an element operation, \
-                            /ndn-tools/merge/element/v=1: a change splices, in characters, the \
-                            text its basis wrote, by default the version that wrote the \
-                            setting's one variant here; a text @<path> is the file's)";
+const PUT_OP_USAGE: &str = "usage: put_op <collection> text=<value> | hex=<octets> (the \
+                            register's write: the collection's newest value, `text=` alone a \
+                            removal; a text @<path> is the file's bytes, @@... a text starting \
+                            with @)";
 
 /// The type of versions `put` writes.
 const NOTE: &str = "/types/note";
 /// The type of versions `put_op` writes.
-const ELEMENT: &str = "/types/element";
+const BYTES: &str = "/types/bytes";
 
 fn put_type(type_name: &str) -> PutOptions {
     PutOptions {
@@ -1599,35 +1547,6 @@ fn put_answer(layer: &Device, collection: &Name, id: &VersionId) -> Value {
         "seq": id.seq.0,
         "name": log_name(layer.name(), Some(collection), id.seq.0).to_string(),
     })
-}
-
-/// An operation as an answer shows it: an element operation's basis and
-/// edits (texts as [`text_shown`]), else its length and SHA-256.
-fn op_shown(op: &[u8]) -> Value {
-    let Ok(op) = ElementOp::decode(op) else {
-        return json!({"len": op.len(), "sha256": hex(&Sha256::digest(op))});
-    };
-    json!({
-        "basis": op.basis.map(|d| hex(&d)),
-        "edits": op.edits.iter().map(|e| match e {
-            element::Edit::Set { setting, text } => {
-                json!({"set": setting, "text": text_shown(text)})
-            }
-            element::Edit::Change { setting, at, delete, insert } => json!({
-                "change": setting, "at": at, "delete": delete, "insert": text_shown(insert),
-            }),
-        }).collect::<Vec<_>>(),
-    })
-}
-
-/// A text up to [`SHOWN_MAX`] octets as itself, longer as its length and
-/// SHA-256.
-fn text_shown(text: &str) -> Value {
-    if text.len() > SHOWN_MAX {
-        json!({"len": text.len(), "sha256": hex(&Sha256::digest(text))})
-    } else {
-        json!(text)
-    }
 }
 
 const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key is suspected: \
@@ -1759,25 +1678,6 @@ fn cut_options(words: &[String]) -> Result<(Option<Timestamp>, BTreeMap<Name, u6
     }
 }
 
-/// A line that cannot be done: its words are wrong (answered as usage), or
-/// the layer refused what it needed first.
-enum Bad {
-    Usage(String),
-    Data(DataError),
-}
-
-impl From<String> for Bad {
-    fn from(why: String) -> Self {
-        Bad::Usage(why)
-    }
-}
-
-impl From<DataError> for Bad {
-    fn from(e: DataError) -> Self {
-        Bad::Data(e)
-    }
-}
-
 /// The fields of `<field>=<value>` words, at least one (values as
 /// [`field_value`] reads them).
 async fn fields_of(words: &[String]) -> Result<Content, String> {
@@ -1799,129 +1699,18 @@ async fn fields_of(words: &[String]) -> Result<Content, String> {
     Ok(content)
 }
 
-/// The operation an `op` line gives for `collection`: `hex=<octets>` alone
-/// (any rule's operation, as built), or the words of an element operation
-/// (`/ndn-tools/merge/element/v=1`) — `basis=<digest hex>`,
-/// `set:<setting>=<text>`, `change:<setting>=<at>,<delete>,<insert>` (texts
-/// as field values: `@<path>` a file's text). A change without `basis=`
-/// takes as basis the version that wrote the changed setting's one variant
-/// in the collection's state here.
-async fn op_of(layer: &Device, collection: &Name, words: &[String]) -> Result<Bytes, Bad> {
-    if let [only] = words
-        && let Some(octets) = only.strip_prefix("hex=")
-    {
-        return Ok(Bytes::from(unhex(octets)?));
+/// The bytes a `put_op` line gives for a register collection: `text=<value>`
+/// (a value as [`field_value`] reads it; `text=` alone is empty, a removal)
+/// or `hex=<octets>`.
+async fn op_of(words: &[String]) -> Result<Bytes, String> {
+    let [word] = words else {
+        return Err(format!("{} words, not one", words.len()));
+    };
+    match word.split_once('=') {
+        Some(("hex", octets)) => unhex(octets).map(Bytes::from),
+        Some(("text", value)) => field_value(value).await,
+        _ => Err(format!("{word:?} is neither text= nor hex=")),
     }
-    let mut basis = None;
-    let mut edits = Vec::new();
-    for w in words {
-        if let Some(d) = w.strip_prefix("basis=") {
-            basis = Some(digest_of(d)?);
-        } else if let Some(rest) = w.strip_prefix("set:") {
-            let (setting, value) = rest
-                .split_once('=')
-                .ok_or_else(|| format!("{w:?} is not set:<setting>=<text>"))?;
-            edits.push(element::Edit::Set {
-                setting: setting.to_owned(),
-                text: field_text(value)
-                    .await
-                    .map_err(|e| format!("{setting}: {e}"))?,
-            });
-        } else if let Some(rest) = w.strip_prefix("change:") {
-            let not_change = || format!("{w:?} is not change:<setting>=<at>,<delete>,<insert>");
-            let (setting, splice) = rest.split_once('=').ok_or_else(not_change)?;
-            let mut parts = splice.splitn(3, ',');
-            let (Some(at), Some(delete), Some(insert)) = (parts.next(), parts.next(), parts.next())
-            else {
-                return Err(not_change().into());
-            };
-            let count = |s: &str| {
-                s.parse::<u32>()
-                    .map_err(|e| format!("{w:?}: {s:?} is no count of characters: {e}"))
-            };
-            edits.push(element::Edit::Change {
-                setting: setting.to_owned(),
-                at: count(at)?,
-                delete: count(delete)?,
-                insert: field_text(insert)
-                    .await
-                    .map_err(|e| format!("{setting}: {e}"))?,
-            });
-        } else {
-            return Err(
-                format!("{w:?} is not hex=, basis=, set:<setting>= or change:<setting>=").into(),
-            );
-        }
-    }
-    if basis.is_none()
-        && edits
-            .iter()
-            .any(|e| matches!(e, element::Edit::Change { .. }))
-    {
-        let Got::State(state) = layer.get(collection).await?.got else {
-            return Err(
-                format!("{collection} has no merged state here; give basis=<digest>").into(),
-            );
-        };
-        basis = Some(change_basis(&state, &edits)?);
-    }
-    let op = ElementOp { basis, edits };
-    op.well_formed()?;
-    Ok(op.encode())
-}
-
-/// The basis of `edits`' changes in `state`: the digest of the version
-/// that wrote the one variant of every changed setting.
-fn change_basis(state: &State, edits: &[element::Edit]) -> Result<[u8; 32], String> {
-    let value = element_value(&state.value).ok_or_else(|| {
-        format!(
-            "{}'s value is not an element's ({}): give basis=<digest>, or hex=<operation>",
-            state.collection,
-            element::FUNCTION
-        )
-    })?;
-    let mut basis = None;
-    for e in edits {
-        let element::Edit::Change { setting, .. } = e else {
-            continue;
-        };
-        let variants = value.settings.get(setting).map_or(&[][..], Vec::as_slice);
-        let [one] = variants else {
-            return Err(if variants.is_empty() {
-                format!("{setting:?} has no text here to change: set it first")
-            } else {
-                format!(
-                    "{setting:?} has {} concurrent variants here: give basis=<digest> of the one \
-                     to change (get shows each variant's digest)",
-                    variants.len()
-                )
-            });
-        };
-        match basis {
-            None => basis = Some(one.digest),
-            Some(d) if d == one.digest => {}
-            Some(_) => {
-                return Err(
-                    "the changed settings were last written by different versions: \
-                            change them in separate operations, or give basis=<digest>"
-                        .into(),
-                );
-            }
-        }
-    }
-    basis.ok_or_else(|| "no edit changes a setting, so there is no basis to find".into())
-}
-
-/// A value decoded as an element's, when it is one.
-fn element_value(v: &ndn_data::Value) -> Option<ElementValue> {
-    v.bytes().and_then(|b| ElementValue::decode(b).ok())
-}
-
-/// A text value as [`field_value`] reads it, which must be UTF-8: element
-/// settings hold text.
-async fn field_text(value: &str) -> Result<String, String> {
-    String::from_utf8(field_value(value).await?.into())
-        .map_err(|e| format!("not UTF-8 text ({e}): element settings hold text"))
 }
 
 /// Octets written as hex.
@@ -1937,13 +1726,6 @@ fn unhex(s: &str) -> Result<Vec<u8>, String> {
                 .ok_or_else(|| format!("{s:?} is no hex"))
         })
         .collect()
-}
-
-/// A digest (32 octets) written as hex.
-fn digest_of(s: &str) -> Result<[u8; 32], String> {
-    unhex(s)?
-        .try_into()
-        .map_err(|v: Vec<u8>| format!("{s:?} is {} octets, a digest 32", v.len()))
 }
 
 /// A `put` field's value: the text itself, the bytes of the file `@<path>`
@@ -2113,25 +1895,11 @@ fn id(id: &VersionId) -> Value {
     json!({"writer": id.writer.key().to_string(), "seq": id.seq.0})
 }
 
-/// A version's reason not to be counted, with its kind.
-fn not_counted(i: &VersionId, why: &NotCounted) -> Value {
-    let kind = match why {
-        NotCounted::Waits(_) => "waits",
-        NotCounted::Excluded(_) => "excluded",
-    };
-    json!({"id": id(i), "why": why.to_string(), "kind": kind})
-}
-
 /// A `get`'s answer: what it got and how old it may be.
 fn answer(a: Answer) -> Value {
     let mut ok = match a.got {
         Got::State(s) => json!({"state": state(&s)}),
         Got::Version(v) => json!({"version": version(&v)}),
-        Got::Snapshot(s) => json!({"snapshot": {
-            "id": id(&s.id),
-            "name": s.name.to_string(),
-            "pins": s.pins.iter().map(ToString::to_string).collect::<Vec<_>>(),
-        }}),
     };
     ok["age"] = match a.age {
         Age::Exact => json!("exact"),
@@ -2142,50 +1910,31 @@ fn answer(a: Answer) -> Value {
     ok
 }
 
-/// A merged state: its name, collection, frontier, value, and the versions
-/// held here that are not in the value, each with why.
+/// A merged state: its collection, frontier and value.
 fn state(s: &State) -> Value {
     json!({
-        "name": s.name.to_string(),
         "collection": s.collection.to_string(),
         "at": frontier(&s.at),
-        "value": merged(&s.value),
-        "not_counted": s.not_counted.iter().map(|(i, why)| not_counted(i, why)).collect::<Vec<_>>(),
+        "value": value(&s.value),
     })
 }
 
-/// A merged value: fields (`/merge/yrs`) as [`content`]; an element's
-/// (`/ndn-tools/merge/element/v=1`, the one rule this program knows with
-/// its own encoding) as `{"element": {<setting>: [variant...]}}`, each
-/// variant its version (writer, seq), that version's digest (the basis a
-/// change names) and its text as [`text_shown`].
-fn merged(v: &ndn_data::Value) -> Value {
-    match v {
-        ndn_data::Value::Fields(c) => content(c),
-        ndn_data::Value::Rule(b) => match ElementValue::decode(b) {
-            Ok(e) => {
-                let settings: Map<String, Value> = e
-                    .settings
-                    .iter()
-                    .map(|(s, variants)| {
-                        let variants = variants
-                            .iter()
-                            .map(|v| {
-                                json!({
-                                    "writer": v.writer,
-                                    "seq": v.seq,
-                                    "digest": hex(&v.digest),
-                                    "text": text_shown(&v.text),
-                                })
-                            })
-                            .collect();
-                        (s.clone(), Value::Array(variants))
-                    })
-                    .collect();
-                json!({"element": settings})
+/// A state's value, the newest register's `by ‖ bytes`: `by`, the 32
+/// octets of the writer's person (hex; zeros when its key lies under no
+/// person's namespace), and `bytes` as [`bytes_shown`] (`""`, with
+/// `"removed": true`, when the winner is a removal); `{"empty": true}` while
+/// the register holds no version.
+fn value(v: &ndn_data::Value) -> Value {
+    match v.bytes() {
+        Some(b) if b.len() >= 32 => {
+            let (by, bytes) = b.split_at(32);
+            let mut shown = json!({"by": hex(by), "bytes": bytes_shown(bytes)});
+            if bytes.is_empty() {
+                shown["removed"] = json!(true);
             }
-            Err(_) => json!({"rule": {"len": b.len(), "sha256": hex(&Sha256::digest(b))}}),
-        },
+            shown
+        }
+        _ => json!({"empty": true}),
     }
 }
 
@@ -2205,17 +1954,22 @@ const SHOWN_MAX: usize = 256;
 fn content(c: &Content) -> Value {
     let mut m = Map::new();
     for (field, value) in c.fields() {
-        let v = if value.len() > SHOWN_MAX {
-            json!({"len": value.len(), "sha256": hex(&Sha256::digest(value))})
-        } else {
-            match std::str::from_utf8(value) {
-                Ok(s) => json!(s),
-                Err(_) => json!({"hex": hex(value)}),
-            }
-        };
-        m.insert(field.to_owned(), v);
+        m.insert(field.to_owned(), bytes_shown(value));
     }
     Value::Object(m)
+}
+
+/// Octets as text when they are UTF-8, else as `{"hex": …}`; longer than
+/// [`SHOWN_MAX`] octets, as `{"len": …, "sha256": …}`.
+fn bytes_shown(value: &[u8]) -> Value {
+    if value.len() > SHOWN_MAX {
+        json!({"len": value.len(), "sha256": hex(&Sha256::digest(value))})
+    } else {
+        match std::str::from_utf8(value) {
+            Ok(s) => json!(s),
+            Err(_) => json!({"hex": hex(value)}),
+        }
+    }
 }
 
 /// A revocation cut: its key, its runs of seqs per prefix, its exact
@@ -2249,7 +2003,7 @@ fn version(v: &Version) -> Value {
         "type": {"name": v.type_id.name.to_string(), "revision": v.type_id.revision},
         "dated_ms": v.dated.0,
         "digest": hex(&v.digest),
-        "op": v.op.as_deref().map(hex),
+        "bytes": v.op.as_deref().map(bytes_shown),
         "payload": match &v.payload {
             Payload::Entry(c) => json!({"entry": content(c)}),
             Payload::Large { size } => json!({"large": size}),
@@ -2298,14 +2052,6 @@ fn change(c: &Change) -> Value {
             }
             json!({ "withdrawn": w })
         }
-        Change::NotCounted { id: i, why, .. } => {
-            json!({"not_counted": not_counted(i, why)})
-        }
-        Change::Counted { id: i, .. } => json!({"counted": {"id": id(i)}}),
-        Change::Remerged { bases, .. } => json!({"remerged": {
-            "bases": bases.iter().map(id).collect::<Vec<_>>(),
-            "what_to_do": "the collection's value changed; get it again",
-        }}),
         Change::Equivocation { first, second, .. } => json!({"equivocation": {
             "first": equivocal(first),
             "second": equivocal(second),
