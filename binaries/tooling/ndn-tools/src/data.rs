@@ -2082,5 +2082,10 @@ fn equivocal(e: &Equivocal) -> Value {
             "id": id(i),
             "name": name.to_string(),
         }),
+        Equivocal::Record { name, id: i, kind } => json!({
+            "id": id(i),
+            "name": name.to_string(),
+            "record": format!("{kind:?}").to_lowercase(),
+        }),
     }
 }
