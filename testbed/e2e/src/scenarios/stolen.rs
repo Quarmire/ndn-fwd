@@ -215,13 +215,15 @@ fn cut_covers(cut: &Value, seq: u64) -> StepResult<bool> {
 }
 
 /// `host` withdraws each of `notes` (written with `key`, outside its cut):
-/// its watch reports each withdrawn by the cut of `key`, none is its value of
+/// its watch reports each withdrawn by the cut of the device of `key` (the cut
+/// names the device; its entries are all of that device's log), none is its value of
 /// `TRIP` any more, and it reports each refused by its full name with digest.
 fn withdraws(cx: &mut Cx<'_>, host: &mut Host, notes: &[&Put], key: &str) -> StepResult<()> {
     for v in notes {
         let w = host.watched_until(cx, &format!("{} withdrawn", v.name), CONVERGE, |w| {
             let d = &w["change"]["withdrawn"];
-            v.is(&d["id"]) && name(d["cut_of"].as_str().unwrap_or_default()).ok() == name(key).ok()
+            v.is(&d["id"])
+                && name(d["cut_of"].as_str().unwrap_or_default()).ok() == name(&v.device).ok()
         })?;
         cx.evidence(&format!("{} watch: {}", host.node, w["change"]));
         let node = host.node.clone();
