@@ -1,8 +1,8 @@
-//! The data layer on real daemons, as the scenarios drive it: `ndn-data`
-//! (ndn-tools) hosting one device's `ndn_data::Device` on its daemon's
-//! socket, with the key `ndn-fwd init`/`enroll` put in the PIB, verifying
-//! with the PIB's trust contexts, driven line by line over stdin and
-//! answering one JSON object per line — standing in for the host an app
+//! The data layer on real daemons, as the scenarios drive it: `ndn-heap`
+//! (ndn-tools) hosting one device's `ndn_heap::Node` and its invitations on
+//! its daemon's socket, with the key `ndn-fwd init`/`enroll` put in the PIB,
+//! verifying with the PIB's trust contexts, driven line by line over stdin
+//! and answering one JSON object per line — standing in for the host an app
 //! runs in, not for anything the person does. Beside it, the harness's
 //! inspection of what the daemons route and fetch for it.
 
@@ -15,6 +15,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ndn_heap::wire::{Entry, log_name};
 use serde_json::Value;
 
 use crate::run::Proc;
@@ -34,11 +35,11 @@ pub fn name(s: &str) -> StepResult<ndn_packet::Name> {
 }
 
 /// The host's label among a node's producers.
-const HOST: &str = "ndn-data";
-/// A capture's label among a node's producers (`ndn-data` with no device).
-const CAPTURE: &str = "ndn-data-capture";
+const HOST: &str = "ndn-heap";
+/// A capture's label among a node's producers (`ndn-heap` with no device).
+const CAPTURE: &str = "ndn-heap-capture";
 
-/// One device's `ndn-data` host: its stdin, its answers, the changes its
+/// One device's `ndn-heap` host: its stdin, its answers, the changes its
 /// watches delivered, the signals its subscriptions delivered and, for a
 /// capture, the signal Interests it was given.
 pub struct Host {
@@ -55,14 +56,14 @@ pub struct Host {
 }
 
 impl Host {
-    /// Start `ndn-data` for `device` on `node`'s daemon; ready once it says
+    /// Start `ndn-heap` for `device` on `node`'s daemon; ready once it says
     /// so. The process is the node's producer: stopped with it, its log
     /// shown when a step fails.
     pub fn start(cx: &mut Cx<'_>, node: &str, device: &str) -> StepResult<Host> {
         Self::start_with(cx, node, device, &[])
     }
 
-    /// [`start`](Self::start) with further `ndn-data` options
+    /// [`start`](Self::start) with further `ndn-heap` options
     /// (`--store <dir>`, `--clock-offset-ms <ms>`).
     pub fn start_with(
         cx: &mut Cx<'_>,
@@ -86,7 +87,7 @@ impl Host {
         let ready = &ready["ready"];
         if ready["device"] != device {
             return Err(format!(
-                "{node}: ndn-data did not start as {device}: {ready}"
+                "{node}: ndn-heap did not start as {device}: {ready}"
             ));
         }
         host.writer = ready["writer"]
@@ -96,7 +97,7 @@ impl Host {
         Ok(host)
     }
 
-    /// `ndn-data` with no device on `node`'s daemon — what an operator runs
+    /// `ndn-heap` with no device on `node`'s daemon — what an operator runs
     /// to see the signals the daemon forwards (`signal-capture <group>`);
     /// ready once it says so. The node's producer, as a host is.
     pub fn capture(cx: &mut Cx<'_>, node: &str) -> StepResult<Host> {
@@ -104,13 +105,13 @@ impl Host {
         let ready = host.next(cx, "start", Duration::from_secs(20))?;
         if !ready["ready"]["device"].is_null() {
             return Err(format!(
-                "{node}: ndn-data without --device did not start bare: {ready}"
+                "{node}: ndn-heap without --device did not start bare: {ready}"
             ));
         }
         Ok(host)
     }
 
-    /// Spawn `ndn-data` with `args` on `node`'s daemon socket, its stderr
+    /// Spawn `ndn-heap` with `args` on `node`'s daemon socket, its stderr
     /// appended to `<label>.log` in the node's directory (a host started
     /// again on the node keeps the log of the run before it).
     fn spawn(
@@ -123,10 +124,10 @@ impl Host {
             let nd = cx.w.node(node);
             (nd.sock(), nd.dir.join(format!("{label}.log")))
         };
-        let program = cx.w.bins.dir.join("ndn-data");
+        let program = cx.w.bins.dir.join("ndn-heap");
         args.push("--face-socket".to_owned());
         args.push(sock.display().to_string());
-        cx.note(&format!("$ ndn-data {} &", args.join(" ")));
+        cx.note(&format!("$ ndn-heap {} &", args.join(" ")));
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -143,8 +144,8 @@ impl Host {
             .stderr(stderr)
             .spawn()
             .map_err(|e| format!("{}: {e}", program.display()))?;
-        let stdin = child.stdin.take().ok_or("ndn-data: no stdin")?;
-        let stdout = child.stdout.take().ok_or("ndn-data: no stdout")?;
+        let stdin = child.stdin.take().ok_or("ndn-heap: no stdin")?;
+        let stdout = child.stdout.take().ok_or("ndn-heap: no stdout")?;
         let (tx, lines) = channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -199,7 +200,7 @@ impl Host {
             Err(RecvTimeoutError::Timeout) => return Ok(None),
             Err(RecvTimeoutError::Disconnected) => {
                 return Err(format!(
-                    "{}> {what}: ndn-data exited{}",
+                    "{}> {what}: ndn-heap exited{}",
                     self.node,
                     self.tail()
                 ));
@@ -301,7 +302,7 @@ impl Host {
         cx.note(&format!("{}> {line}", self.node));
         writeln!(self.stdin, "{line}")
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("{}: ndn-data stdin: {e}{}", self.node, self.tail()))
+            .map_err(|e| format!("{}: ndn-heap stdin: {e}{}", self.node, self.tail()))
     }
 
     /// The answers to `n` lines [`send`](Self::send) sent, in the order they
@@ -346,7 +347,7 @@ impl Host {
     }
 
     /// [`call`](Self::call) for a verb that may take longer than one
-    /// answer (a `hold` waits for holders to fetch what they hold).
+    /// answer (a `join` waits for the listing, the epoch key and the admission).
     pub fn call_within(
         &mut self,
         cx: &mut Cx<'_>,
@@ -368,117 +369,118 @@ impl Host {
         })
     }
 
-    /// `put` into `collection`: the version, its name checked to be
-    /// `<device>/32=log/<collection>/seq=<n>` and its writer this device's
-    /// key.
-    pub fn put(&mut self, cx: &mut Cx<'_>, collection: &str, fields: &str) -> StepResult<Put> {
-        let ok = self.ok(cx, &format!("put {collection} {fields}"))?;
-        let put = self.put_of(collection, &ok)?;
+    /// `put` `text` at `path` of `space` (`text` as the host reads it: `@<path>`
+    /// is a file's bytes, empty a removal): the entry, its name checked to be
+    /// `<device>/32=log/<space>/seq=<n>` and its device this host's. A put
+    /// the layer answers NotReady to (the key of the epoch in force is still on
+    /// its way: "put again") is put again, as that answer says, for up to
+    /// [`CONVERGE`].
+    pub fn put(&mut self, cx: &mut Cx<'_>, space: &str, path: &str, text: &str) -> StepResult<Put> {
+        let quoted = text.replace('\\', "\\\\").replace('"', "\\\"");
+        let line = format!("put {space} {path} text=\"{quoted}\"");
+        let deadline = Instant::now() + CONVERGE;
+        let ok = loop {
+            match self.call(cx, &line)? {
+                Ok(ok) => break ok,
+                Err(e) if e["retry"] == true && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "{}> {line}: {} (next: {})",
+                        self.node, e["message"], e["next_step"]
+                    ));
+                }
+            }
+        };
+        let put = self.put_of(space, path, &ok)?;
         cx.evidence(&format!(
-            "{} put {fields}: {} (writer {})",
+            "{} put {path}: {} (writer {})",
             self.node, put.name, put.writer
         ));
         Ok(put)
     }
 
-    /// `put_op` of `text` into the register collection `collection` (`text`
-    /// as the host reads it: `@<path>` is a file's bytes, empty a removal):
-    /// the version, its name and writer checked as for [`put`](Self::put).
-    pub fn put_op(&mut self, cx: &mut Cx<'_>, collection: &str, text: &str) -> StepResult<Put> {
-        let quoted = text.replace('\\', "\\\\").replace('"', "\\\"");
-        let ok = self.ok(cx, &format!("put_op {collection} text=\"{quoted}\""))?;
-        let put = self.put_of(collection, &ok)?;
-        cx.evidence(&format!(
-            "{} put_op {}: {} (writer {})",
-            self.node, ok["bytes"], put.name, put.writer
-        ));
-        Ok(put)
-    }
-
-    /// Rule R (b): of the `versions` written to a register (each with the
-    /// text it wrote), the heads — those no other of them supersedes, by the
-    /// parents each is read with here — and, of those, the text of the one
-    /// with the highest signed digest: what the register's value must be.
-    pub fn winner<'a>(
-        &mut self,
-        cx: &mut Cx<'_>,
-        collection: &str,
-        versions: &[(&Put, &'a str)],
-    ) -> StepResult<&'a str> {
-        let mut read = Vec::new();
-        for (put, text) in versions {
-            let v = self.version(cx, collection, put)?;
-            let digest = v["signed"]
-                .as_str()
-                .ok_or_else(|| format!("{} reads {} with no signed digest", self.node, put.name))?
-                .to_owned();
-            read.push((*put, *text, digest, v["parents"].clone()));
-        }
-        let mut best: Option<(&str, &'a str)> = None;
-        for (put, text, digest, _) in &read {
-            let superseded = read
-                .iter()
-                .any(|(other, _, _, parents)| other.name != put.name && includes(parents, put));
-            if !superseded && best.is_none_or(|(d, _)| digest.as_str() > d) {
-                best = Some((digest, text));
-            }
-        }
-        best.map(|(_, text)| text)
-            .ok_or_else(|| "a register has no head".into())
-    }
-
-    /// The version a `put` into `collection` answered `ok` with: its name
-    /// checked to be
-    /// `<device>/32=log/<collection>/seq=<n>` and its writer this device's
-    /// key.
-    pub fn put_of(&self, collection: &str, ok: &Value) -> StepResult<Put> {
-        let put = Put {
-            writer: ok["writer"].as_str().unwrap_or_default().to_owned(),
-            seq: ok["seq"]
-                .as_u64()
-                .ok_or_else(|| format!("no seq in {ok}"))?,
-            name: ok["name"].as_str().unwrap_or_default().to_owned(),
-        };
-        if put.writer != self.writer {
+    /// The entry a `put` into `space` answered `ok` with: its name checked to
+    /// be `<device>/32=log/<space>/seq=<n>` and its device this host's.
+    pub fn put_of(&self, space: &str, path: &str, ok: &Value) -> StepResult<Put> {
+        let id = &ok["id"];
+        let seq = id["seq"].as_u64().ok_or_else(|| format!("no id in {ok}"))?;
+        let device = id["device"].as_str().unwrap_or_default();
+        if name(device)? != name(&self.device)? {
             return Err(format!(
-                "{}'s put was written by {}, not its key {}",
-                self.node, put.writer, self.writer
+                "{}'s put was written by device {device}, not {}",
+                self.node, self.device
             ));
         }
-        let expected = format!("{}/32=log{collection}/seq={}", self.device, put.seq);
-        if name(&put.name)? != name(&expected)? {
-            return Err(format!(
-                "{} is named {}, not {expected}",
-                ok["fields"], put.name
-            ));
-        }
-        Ok(put)
+        let expected = log_name(&name(device)?, &name(space)?, seq);
+        Ok(Put {
+            path: path.to_owned(),
+            device: device.to_owned(),
+            writer: self.writer.clone(),
+            seq,
+            digest: id["digest"].as_str().unwrap_or_default().to_owned(),
+            name: expected.to_string(),
+        })
     }
 
-    /// `collection`'s merged state here (frontier, value); `None` while no
-    /// path answered and nothing is held yet (an error that says retry).
-    pub fn state(
-        &mut self,
-        cx: &mut Cx<'_>,
-        collection: &str,
-    ) -> StepResult<Option<(Value, Value)>> {
-        Ok(self
-            .merged(cx, collection)?
-            .map(|mut s| (s["at"].take(), s["value"].take())))
-    }
-
-    /// `collection`'s merged state here, whole (name, frontier, value, the
-    /// versions held but not counted); `None` while no path answered and
-    /// nothing is held yet (an error that says retry).
-    pub fn merged(&mut self, cx: &mut Cx<'_>, collection: &str) -> StepResult<Option<Value>> {
-        match self.call(cx, &format!("get {collection}"))? {
-            Ok(mut ok) => Ok(Some(ok["state"].take())),
+    /// The value at `path` of `space` here: its item; `None` while nothing is
+    /// there (never put, removed) or the space is not held yet (an error that
+    /// says retry).
+    pub fn item(&mut self, cx: &mut Cx<'_>, space: &str, path: &str) -> StepResult<Option<Value>> {
+        match self.call(cx, &format!("get {space} {path}"))? {
+            Ok(mut ok) => Ok(match ok["item"].take() {
+                Value::Null => None,
+                item => Some(item),
+            }),
             Err(e) if e["retry"] == true => Ok(None),
             Err(e) => Err(format!(
-                "{}> get {collection}: {} (next: {})",
+                "{}> get {space} {path}: {} (next: {})",
                 self.node, e["message"], e["next_step"]
             )),
         }
+    }
+
+    /// Whether `path` of `space` here reads as `put` wrote it: the item is
+    /// that entry's.
+    pub fn holds(
+        &mut self,
+        cx: &mut Cx<'_>,
+        space: &str,
+        path: &str,
+        put: &Put,
+    ) -> StepResult<bool> {
+        Ok(self
+            .item(cx, space, path)?
+            .is_some_and(|item| put.is(&item["id"])))
+    }
+
+    /// `space`'s members as this device reads them.
+    pub fn members(&mut self, cx: &mut Cx<'_>, space: &str) -> StepResult<Value> {
+        let mut ok = self.ok(cx, &format!("members {space}"))?;
+        Ok(ok["members"].take())
+    }
+
+    /// `watch space` of a space made elsewhere, asked again while the host
+    /// answers an error that says retry (the space's members have not
+    /// reached this device yet).
+    pub fn watch_when_ready(&mut self, cx: &mut Cx<'_>, space: &str) -> StepResult<()> {
+        let line = format!("watch {space}");
+        let node = self.node.clone();
+        super::wait_for(
+            cx,
+            &format!("{node}'s watch of {space} is answered"),
+            CONVERGE,
+            |cx| match self.call(cx, &line)? {
+                Ok(_) => Ok(true),
+                Err(e) if e["retry"] == true => Ok(false),
+                Err(e) => Err(format!(
+                    "{node}> {line}: {} (next: {})",
+                    e["message"], e["next_step"]
+                )),
+            },
+        )?;
+        Ok(())
     }
 
     /// Take in what the host printed on its own (watched changes, signals,
@@ -496,24 +498,6 @@ impl Host {
             }
         }
         Ok(())
-    }
-
-    /// Version `v` of `collection` as this device reads it by its exact
-    /// name.
-    pub fn version(&mut self, cx: &mut Cx<'_>, collection: &str, v: &Put) -> StepResult<Value> {
-        let mut ok = self.ok(cx, &format!("get {}", v.name))?;
-        let got = ok["version"].take();
-        if got["id"]["writer"] != v.writer.as_str()
-            || got["id"]["seq"] != v.seq
-            || name(got["collection"].as_str().unwrap_or_default())? != name(collection)?
-            || name(got["name"].as_str().unwrap_or_default())? != name(&v.name)?
-        {
-            return Err(format!(
-                "{} reads {} as {got}, not ({}, {})",
-                self.node, v.name, v.writer, v.seq
-            ));
-        }
-        Ok(got)
     }
 
     fn tail(&self) -> String {
@@ -563,19 +547,112 @@ pub fn stored(store: &Path) -> StepResult<Vec<(ndn_packet::Name, PathBuf)>> {
     Ok(found)
 }
 
-/// A version a host put.
+/// An entry a host wrote: `<device>/32=log/<space>/seq=<seq>`, at `path`.
 #[derive(Clone, Debug)]
 pub struct Put {
+    pub path: String,
+    /// The writing device (`id.device`), its key, the entry's seq in the
+    /// device's log of the space, its signed-region digest (hex) and its
+    /// name.
+    pub device: String,
     pub writer: String,
     pub seq: u64,
+    pub digest: String,
     pub name: String,
 }
 
-/// Whether frontier `at` (`[{writer, seq}]`) includes version `v`.
-pub fn includes(at: &Value, v: &Put) -> bool {
-    at.as_array().is_some_and(|a| {
-        a.iter().any(|e| {
-            e["writer"] == v.writer.as_str() && e["seq"].as_u64().is_some_and(|s| s >= v.seq)
+impl Put {
+    /// Whether `id` (`{device, seq, digest}`, as an item or a watched change
+    /// shows it) is this entry.
+    pub fn is(&self, id: &Value) -> bool {
+        id["seq"] == self.seq
+            && id["digest"] == self.digest.as_str()
+            && name(id["device"].as_str().unwrap_or_default()).ok() == name(&self.device).ok()
+    }
+}
+
+/// Of the heads of one path, the entry the register reads as the path's value:
+/// the one with the highest signed-region digest.
+pub fn highest<'a>(heads: &[&'a Put]) -> &'a Put {
+    heads
+        .iter()
+        .copied()
+        .max_by(|a, b| a.digest.cmp(&b.digest))
+        .expect("a register has a head")
+}
+
+/// Of `puts`, all at one path, the entry the register reads as its value: the
+/// highest signed-region digest of those no other of them supersedes (each
+/// entry's `after`, as `node`'s daemon fetches it).
+pub fn head_winner<'a>(cx: &mut Cx<'_>, node: &str, puts: &[&'a Put]) -> StepResult<&'a Put> {
+    let mut entries = Vec::new();
+    for put in puts {
+        entries.push(entry_at(cx, node, put)?);
+    }
+    let heads: Vec<&'a Put> = puts
+        .iter()
+        .copied()
+        .filter(|put| {
+            !puts
+                .iter()
+                .zip(&entries)
+                .any(|(other, entry)| other.name != put.name && supersedes(entry, put))
+        })
+        .collect();
+    if heads.is_empty() {
+        return Err("a register has no head".into());
+    }
+    Ok(highest(&heads))
+}
+
+/// `name` fetched through `node`'s daemon (which validates it against the
+/// trust context before delivering it, or forwards it unvalidated when its
+/// namespace is in transit there): its Content's octets.
+pub fn content_at(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<Vec<u8>> {
+    let sock = cx.w.node(node).sock().display().to_string();
+    let op = cx
+        .tool("ndn-peek")
+        .args(["--face-socket", &sock, "--hex", name])
+        .timeout(Duration::from_secs(15));
+    let out = cx.exec(op);
+    if !out.success() {
+        return Err(format!(
+            "ndn-peek of {name} at {node}: {}: {}",
+            out.status_text(),
+            out.stderr.trim()
+        ));
+    }
+    let hex = out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty() && l.len() % 2 == 0 && l.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| format!("ndn-peek --hex of {name} shows no content: {}", out.stdout))?;
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("{hex}: {e}")))
+        .collect()
+}
+
+/// Entry `put` as `node`'s daemon fetches it (by its name, validated): the
+/// entry's wire form, whose `after` names the heads it supersedes and whose
+/// body, in a sealed space, is the ciphertext.
+pub fn entry_at(cx: &mut Cx<'_>, node: &str, put: &Put) -> StepResult<Entry> {
+    let content = content_at(cx, node, &put.name)?;
+    Entry::decode(&content).map_err(|e| format!("{} at {node}: {e}", put.name))
+}
+
+/// Whether `entry` names `put` among the entries it supersedes (`after`).
+pub fn supersedes(entry: &Entry, put: &Put) -> bool {
+    name(&put.device).is_ok_and(|device| {
+        entry.after.iter().any(|r| {
+            r.device == device
+                && r.seq == put.seq
+                && r.digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+                    == put.digest
         })
     })
 }

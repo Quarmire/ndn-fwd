@@ -36,13 +36,15 @@ ndn-trust-envelope = { workspace = true }
 ndn-tui = { path = "../../binaries/tooling/ndn-tui" }
 ndn-config    = { workspace = true }
 ndn-namespace = { workspace = true }
-# The `shared` scenario reads a sealed version's record as a relay fetched
-# it: ciphertext beside its epoch, no fields.
-bytes    = { workspace = true }
-ndn-data = { workspace = true }
-# The `folder` scenario compares a large register value read back with what
-# was put, by its SHA-256 (`ndn-data` shows large values by length and digest).
-sha2     = { workspace = true }
+# The `shared` scenario reads a sealed entry as a relay fetched it
+# (`ndn_heap::wire::Entry`): ciphertext beside its epoch, no path.
+bytes      = { workspace = true }
+ndn-heap   = { workspace = true }
+# The `invite` scenario parses and mistypes the short code it was offered.
+ndn-invite = { workspace = true }
+# The `folder` scenario compares a large value read back with what was put,
+# by its SHA-256 (`ndn-heap` shows large values by length and digest).
+sha2       = { workspace = true }
 # The `stolen` scenario answers `ndn-fwd revoke --lost` with the exact
 # loss time it marked the phone suspected since (RFC 3339, milliseconds).
 humantime = "2"
