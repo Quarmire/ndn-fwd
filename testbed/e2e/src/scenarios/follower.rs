@@ -24,9 +24,10 @@
 //! Proves: once the repo holds the space's three entries (its creation and the
 //! two writes) ann goes away: her host and her daemon stop, and bob's daemon
 //! gets none of her entries by name. A new host on bob's device, with an empty
-//! store, opens the space and reads the title and the chapter as ann wrote them
-//! (right ids, right text, ann's person as owner and writer), the only holder
-//! the repo.
+//! store, opens the space (naming the repo's device as a holder, `--holder`: a
+//! reader asks only the members it heard and the holders its person names) and
+//! reads the title and the chapter as ann wrote them (right ids, right text,
+//! ann's person as owner and writer), the only holder the repo.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -103,7 +104,10 @@ impl Carrier {
             .map_err(|e| format!("{}: {e}", log.display()))?;
         let mut child = Command::new(&program)
             .args(&args)
-            .env("RUST_LOG", "info")
+            .env(
+                "RUST_LOG",
+                std::env::var("NDN_E2E_LOG").unwrap_or_else(|_| "info".into()),
+            )
             .env("NO_COLOR", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -311,7 +315,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
          and the chapter as ann wrote them, from the repo alone",
         |cx| {
             cx.concept("reading a space through a repo");
-            let mut bob = Host::start(cx, "bob", &bob_root.identity)?;
+            let mut bob = Host::start_with(
+                cx,
+                "bob",
+                &bob_root.identity,
+                &["--holder".to_owned(), REPO_DEVICE.to_owned()],
+            )?;
             bob.watch_when_ready(cx, SPACE)?;
             for (put, text) in [
                 (&title, "A guide to the coast"),
