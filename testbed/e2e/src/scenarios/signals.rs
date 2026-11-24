@@ -13,13 +13,14 @@
 //! (`--no-signal-ring`): the harness runs every daemon on one host, where a
 //! ring would carry a run past the relay, as it would between two apps on
 //! one real host. The relay's operator is curious: on the relay a capture
-//! (`ndn-heap` with no device, `signal-capture`) registers both people's
-//! sync groups on the relay's daemon and prints every signal Interest the
-//! daemon gives it.
+//! (`ndn-heap` with no device, `signal-capture`) registers the owner's sync
+//! group on the relay's daemon and prints every signal Interest the daemon
+//! gives it.
 //!
-//! The pushes ride the sync groups the relay already carries: alice's
-//! signals reach bob as Interests `/gb/32=sync/32=signal/<digest>`, bob's
-//! reach alice in `/ga/32=sync`; nothing answers them.
+//! The pushes ride the sync group the relay already carries: a space has one,
+//! the owner's, so alice's signals and bob's both are Interests
+//! `/ga/32=sync/sketch/32=signal/<digest>`, the one reaching the other
+//! person; nothing answers them.
 //!
 //! Proves: alice creates the sealed space `/ga/32=data/sketch` (writer /gb,
 //! reader /gb) and writes its board; bob reads it. Both
@@ -59,8 +60,11 @@ const NAMESPACES: People = People {
     b: "/gb",
     relay: "/gr",
 };
-/// The people's sync groups, which carry the pushes.
-const GROUPS: [&str; 2] = ["/ga/32=sync", "/gb/32=sync"];
+/// The sync group route that carries the pushes: a space has one sync group,
+/// its owner's (`<owner>/32=sync/<name>`), whoever writes or reads.
+const GROUP: &str = "/ga/32=sync";
+/// The space's sync group itself, under which the pushes are named.
+const SPACE_GROUP: &str = "/ga/32=sync/sketch";
 /// Alice's space, the scope of the signals, and its board's path.
 const SPACE: &str = "/ga/32=data/sketch";
 const BOARD: &str = "board";
@@ -159,8 +163,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     let (mut alice, mut bob, mut capture) = sc.step(
         "start each person's data layer and signals (ndn-heap, entries in a store directory, no \
-         local ring) and, on the relay, its operator's capture of both people's sync groups \
-         (ndn-heap with no device: signal-capture /ga/32=sync and /gb/32=sync)",
+         local ring) and, on the relay, its operator's capture of the space owner's sync group \
+         (ndn-heap with no device: signal-capture /ga/32=sync)",
         |cx| {
             cx.concept("signals: live data that is never a version");
             let alice_options = options(cx, "alice");
@@ -168,11 +172,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let bob_options = options(cx, "bob");
             let bob = Host::start_with(cx, "bob", &bob_root.identity, &bob_options)?;
             let mut capture = Host::capture(cx, "relay")?;
-            for group in GROUPS {
-                capture.ok(cx, &format!("signal-capture {group}"))?;
-            }
+            capture.ok(cx, &format!("signal-capture {GROUP}"))?;
             cx.evidence(&format!(
-                "alice writes as {}, bob as {}; the relay's capture registered {GROUPS:?} on the \
+                "alice writes as {}, bob as {}; the relay's capture registered {GROUP} on the \
                  relay's daemon",
                 alice.writer, bob.writer
             ));
@@ -371,15 +373,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 delivered_to.push(delivered);
                 cx.evidence(&format!(
                     "{}'s stats over the streams: {packets} packets sent (one signal each), \
-                     {octets} octets of push Interests ({} per packet: one Interest into each \
-                     of the {} groups, {} octets each); {delivered} of {sender}'s {COUNT} \
+                     {octets} octets of push Interests ({} per packet: one Interest into the \
+                     space's group); {delivered} of {sender}'s {COUNT} \
                      delivered to its subscriber ({lost} lost: unknown_run +{}, stale +{}, \
                      replayed +{}, expired +{}, flood +{}); its reader read {read} of them, {} \
                      superseded unread (the newest per address, never a backlog)",
                     host.node,
                     octets / packets,
-                    GROUPS.len(),
-                    octets / packets / GROUPS.len() as u64,
                     delta("unknown_run"),
                     delta("stale"),
                     delta("replayed"),
@@ -403,30 +403,31 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "the relay's capture: every signal Interest its daemon gave it — in each group at least \
-         as many as that group's member delivered of the other's stream — decodes as \
-         SignalSealed and holds no folder name, device or key name, address or payload text",
+        "the relay's capture: every signal Interest its daemon gave it, in the space's one \
+         group (the owner's), at least as many as the two members delivered of each other's \
+         streams, decodes as SignalSealed and holds no folder name, device or key name, \
+         address or payload text",
         |cx| {
             cx.concept("sealed signals in transit");
-            // Alice's counters came first, then bob's: alice's group
-            // carries bob's stream to her, bob's group alice's to him.
-            for (group, member, need) in [
-                (GROUPS[0], "alice", delivered[0]),
-                (GROUPS[1], "bob", delivered[1]),
-            ] {
-                let took = capture.until(
+            // A space has one sync group, the owner's: alice's stream to bob
+            // and bob's to alice both ride it.
+            let need: u64 = delivered.iter().sum();
+            let took = capture
+                .until(
                     cx,
-                    &format!("{need} signal Interests captured in {group}"),
+                    &format!("{need} signal Interests captured in {GROUP}"),
                     STREAMED,
-                    |c| captured(c, group).count() as u64 >= need,
-                )?;
-                cx.evidence(&format!(
-                    "{group} ({member}'s group): {} Interests captured on the relay, at least \
-                     the {need} signals {member} delivered ({:.1} s)",
-                    captured(&capture, group).count(),
-                    took.as_secs_f64()
-                ));
-            }
+                    |c| captured(c, GROUP).count() as u64 >= need,
+                )
+                .map_err(|e| {
+                    format!("{e} (captured {} of them)", captured(&capture, GROUP).count())
+                })?;
+            cx.evidence(&format!(
+                "{GROUP} (the owner's group, the space's only one): {} Interests captured on \
+                 the relay, at least the {need} signals the two delivered ({:.1} s)",
+                captured(&capture, GROUP).count(),
+                took.as_secs_f64()
+            ));
             capture.drain(cx, QUIET)?;
             let plain: Vec<(String, Vec<u8>)> = [
                 (SPACE, true),
@@ -451,7 +452,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             })
             .collect::<StepResult<_>>()?;
             let mut octets = Vec::new();
-            for c in captured(&capture, GROUPS[0]).chain(captured(&capture, GROUPS[1])) {
+            for c in captured(&capture, GROUP) {
                 if c["decodes_as"] != "SignalSealed" || c["digest_ok"] != true {
                     return Err(format!("the relay captured {c}"));
                 }
@@ -469,15 +470,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             let total: u64 = octets.iter().sum();
             cx.evidence(&format!(
-                "the relay captured {} signal Interests ({} in {}, {} in {}), every one \
+                "the relay captured {} signal Interests in {GROUP}, every one \
                  SignalSealed (a key id, e.g. {}, a nonce, a ciphertext) with its digest; \
                  {} octets of parameters each on average ({}..={}); none holds any of {:?}",
                 octets.len(),
-                captured(&capture, GROUPS[0]).count(),
-                GROUPS[0],
-                captured(&capture, GROUPS[1]).count(),
-                GROUPS[1],
-                captured(&capture, GROUPS[1])
+                captured(&capture, GROUP)
                     .next()
                     .map(|c| c["key_id"].clone())
                     .unwrap_or_default(),
@@ -497,8 +494,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         |cx| {
             cx.concept("signals are never cached or stored");
             let prefixes = [
-                format!("{}/32=signal", GROUPS[0]),
-                format!("{}/32=signal", GROUPS[1]),
+                format!("{SPACE_GROUP}/32=signal"),
                 format!("{SPACE}/32=signal"),
             ];
             for node in ["relay", "alice", "bob"] {
