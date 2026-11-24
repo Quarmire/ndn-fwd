@@ -28,6 +28,14 @@
 //! a cut's bound), never what any device accepts: validity of data does not
 //! depend on a clock.
 //!
+//! `--holder <device>` (repeatable) names a device that keeps copies of the
+//! spaces, such as the node `ndn-repo follow` runs on (`/hold/node/repo`): the
+//! data layer asks the holders for a held copy of an entry, in the order given,
+//! after the vouched relays and within the same bound on asks, so a holder
+//! never displaces a relay. A holder is asked for copies alone (never for an
+//! epoch key) and is only a place to ask: what it serves is verified like every
+//! packet. A name that is empty or no name is refused at the command line.
+//!
 //! Two connections to the forwarder carry the data layer (fetching and
 //! serving the device's prefix; State Vector Sync), a third the introductions'
 //! transit marks (below). A space's sync group `<ns>/32=sync/<rest>` needs
@@ -296,6 +304,15 @@ struct Cli {
     #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     clock_offset_ms: i64,
 
+    /// A device that holds copies of this device's spaces (a repo follower
+    /// of the `ndn-repo follow` kind), by its name, e.g. `/hold/node/repo`;
+    /// given once per holder. The data layer asks the holders for a held copy
+    /// of an entry, after the vouched relays and within the same bound on
+    /// asks; a holder is asked for copies alone and is only a place to ask:
+    /// whatever it serves is verified like any packet.
+    #[arg(long = "holder", value_name = "DEVICE", value_parser = parse_holder)]
+    holder: Vec<Name>,
+
     /// Open no local ring per signal run: this device's signals reach
     /// subscribers on this host through the forwarder only, as they reach
     /// other hosts.
@@ -390,6 +407,7 @@ async fn main() -> Result<()> {
         carried: std::sync::Mutex::new(std::collections::HashSet::new()),
     });
     config.adopter = Some(host.clone());
+    config.holders = cli.holder.clone();
     let store: Arc<dyn DataStore> = match &cli.store {
         Some(dir) => Arc::new(DirStore::open(dir)?),
         None => Arc::new(MemoryStore::new()),
@@ -946,6 +964,19 @@ fn path_name(path: &str) -> Result<Name, String> {
         .map_err(|e| format!("{path:?} is no path: {e}"))
 }
 
+/// A `--holder`: the name of a device, at least one component.
+fn parse_holder(device: &str) -> Result<Name, String> {
+    let name = device
+        .parse::<Name>()
+        .map_err(|e| format!("{device:?} is no name: {e}"))?;
+    if name.is_empty() {
+        return Err(format!(
+            "{device:?} names no device: give the holder's device name, e.g. /hold/node/repo"
+        ));
+    }
+    Ok(name)
+}
+
 /// Persons, names separated by commas (none: an empty list).
 fn names(list: &str) -> Result<Vec<Name>, String> {
     list.split(',')
@@ -1250,6 +1281,31 @@ mod tests {
     fn a_path_is_read_with_or_without_a_leading_slash() {
         assert_eq!(path_name("trip/day1").unwrap(), n("/trip/day1"));
         assert_eq!(path_name("/trip/day1").unwrap(), n("/trip/day1"));
+    }
+
+    /// `--holder` is repeatable, each a device name; an empty or malformed one
+    /// is refused at the command line, with why.
+    #[test]
+    fn holders_are_repeatable_device_names() {
+        let cli = Cli::try_parse_from([
+            "ndn-heap",
+            "--holder",
+            "/hold/node/repo",
+            "--holder",
+            "/other/node/repo",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.holder,
+            vec![n("/hold/node/repo"), n("/other/node/repo")]
+        );
+        assert!(Cli::try_parse_from(["ndn-heap"]).unwrap().holder.is_empty());
+        let refused = Cli::try_parse_from(["ndn-heap", "--holder", "/"])
+            .err()
+            .expect("the root names no device")
+            .to_string();
+        assert!(refused.contains("names no device"), "{refused}");
+        assert!(Cli::try_parse_from(["ndn-heap", "--holder", "no-slash"]).is_err());
     }
 
     /// A space is private to its owner unless the line lists readers, public

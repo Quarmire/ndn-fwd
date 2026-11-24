@@ -201,7 +201,10 @@ The remaining binaries back the `testbed/` harness; each takes
   introduction prefixes in transit for the length of the join, so the host
   runs as a member of a group in the daemon's `[security] transit_groups` (or
   as an operator). `--store <dir>` keeps the device's entries on disk too, so
-  a host started again resumes its logs; `--clock-offset-ms` shifts only the
+  a host started again resumes its logs; `--holder <device>` (repeatable)
+  names a device that keeps copies of the spaces, such as the node
+  `ndn-repo follow` runs on (`/hold/node/repo`): it is asked for held copies
+  after the vouched relays; `--clock-offset-ms` shifts only the
   times it reads. Spaces are named `<ns>/32=data/<name>` (e.g.
   `/nt/32=data/notes`), `<ns>` the namespace of the trust context that
   governs the device; a path inside one is relative to it. Without `--device`
