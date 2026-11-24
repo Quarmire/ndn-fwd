@@ -420,7 +420,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     |c| captured(c, GROUP).count() as u64 >= need,
                 )
                 .map_err(|e| {
-                    format!("{e} (captured {} of them)", captured(&capture, GROUP).count())
+                    format!(
+                        "{e} (captured {} of them)",
+                        captured(&capture, GROUP).count()
+                    )
                 })?;
             cx.evidence(&format!(
                 "{GROUP} (the owner's group, the space's only one): {} Interests captured on \

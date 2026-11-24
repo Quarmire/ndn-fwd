@@ -347,7 +347,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 }
                 cx.evidence(&format!("bob reads {path}: {item}"));
             }
-            let members = bob.members(cx, SPACE)?;
+            // The creation entry is the oldest: a reader takes the newest
+            // entries first (heap spec §7.3), so the members record may arrive
+            // after the paths do.
+            let mut members = serde_json::Value::Null;
+            wait_for(cx, "bob knows the space's members", CONVERGE, |cx| {
+                members = bob.members(cx, SPACE)?;
+                Ok(members["readers"] == "anyone")
+            })?;
             if members["owner"] != NAMESPACES.a || members["readers"] != "anyone" {
                 return Err(format!("bob reads the space's members as {members}"));
             }
