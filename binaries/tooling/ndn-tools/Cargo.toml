@@ -1,6 +1,6 @@
 [package]
 name = "ndn-tools"
-description = "NDN command-line tools: ndn-peek, ndn-put, ndn-ping, ndn-ls, ndn-data"
+description = "NDN command-line tools: ndn-peek, ndn-put, ndn-ping, ndn-ls, ndn-heap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,8 +17,8 @@ name = "ndn-put"
 path = "src/put.rs"
 
 [[bin]]
-name = "ndn-data"
-path = "src/data.rs"
+name = "ndn-heap"
+path = "src/heap.rs"
 
 [[bin]]
 name = "ndn-ping"
@@ -70,7 +70,8 @@ ndn-mgmt-wire  = { workspace = true }
 ndn-packet     = { workspace = true, features = ["std"] }
 ndn-security   = { workspace = true }
 ndn-sync       = { workspace = true }
-ndn-data       = { workspace = true }
+ndn-heap       = { workspace = true }
+ndn-invite     = { workspace = true }
 ndn-surface    = { workspace = true }
 ndn-trust-envelope = { workspace = true }
 ndn-config     = { workspace = true }
@@ -89,7 +90,7 @@ tracing        = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow         = { workspace = true }
 clap           = { version = "4", features = ["derive", "env"] }
-# ndn-data's `suspect` and `cut --held-before` take a time as ms since the
+# ndn-heap's `suspect` and `cut --held-before` take a time as ms since the
 # epoch or RFC 3339, as `ndn-fwd revoke --lost` and its hints write it.
 humantime      = "2"
 

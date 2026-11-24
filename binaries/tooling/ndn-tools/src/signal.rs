@@ -1,4 +1,4 @@
-//! The signal verbs of `ndn-data`: live data that is never a version and
+//! The signal verbs of `ndn-heap`: live data that is never an entry and
 //! never stored (`ndn_surface::signal`, signals spec), and the capture a
 //! relay's operator runs to see what a relay sees of them.
 //!
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as RunLock, OnceCell};
 
 use ndn_app::{Connection, IpcConnection};
-use ndn_data::Device;
+use ndn_heap::host::NodeHandle;
 use ndn_ipc::ForwarderClient;
 use ndn_packet::lp::{LpPacket, is_lp_packet};
 use ndn_packet::{Interest, Name, NameComponent};
@@ -26,24 +26,25 @@ use ndn_surface::signal::wire::{Packet, decode_packet, push_packet};
 use ndn_surface::signal::{
     RunId, Signal, SignalError, SignalOptions, SignalRun, SignalStats, Signals,
 };
+use ndn_sync::DataStore;
 
-use crate::{Verb, data_error, hex, next_step, next_token};
+use crate::Verb;
+use crate::shapes::{heap_error, hex, next_step, next_token};
 
-pub const SUBSCRIBE_USAGE: &str = "usage: signal-subscribe <folder or collection> (every signal \
-                                   of the scope from now on, one line each)";
-pub const OPEN_USAGE: &str = "usage: signal-open <folder or collection> (a run: a fresh run key, \
-                              its header signed by this device's key)";
-pub const SEND_USAGE: &str = "usage: signal-send <folder or collection> <address> <payload> (one \
-                              signal on the scope's run; address at most 64 octets, payload at \
-                              most 768)";
-pub const STREAM_USAGE: &str = "usage: signal-stream <folder or collection> <address> <count> \
-                                <hz> (count signals at hz per second on the scope's run, each \
-                                payload `n=<i> sent_us=<µs since the epoch>`; answered once all \
-                                are sent)";
-pub const CLOSE_USAGE: &str = "usage: signal-close <folder or collection> (ends the scope's run)";
-pub const CAPTURE_USAGE: &str = "usage: signal-capture <group> (a sync group `<ns>/32=sync`: \
-                                 every signal pushed into it that reaches this daemon, one line \
-                                 each)";
+pub const SUBSCRIBE_USAGE: &str = "usage: signal-subscribe <space> (every signal of the space \
+                                   from now on, one line each)";
+pub const OPEN_USAGE: &str = "usage: signal-open <space> (a run: a fresh run key, its header \
+                              signed by this device's key)";
+pub const SEND_USAGE: &str = "usage: signal-send <space> <address> <payload> (one signal on the \
+                              space's run; address at most 64 octets, payload at most 768)";
+pub const STREAM_USAGE: &str = "usage: signal-stream <space> <address> <count> <hz> (count \
+                                signals at hz per second on the space's run, each payload \
+                                `n=<i> sent_us=<µs since the epoch>`; answered once all are \
+                                sent)";
+pub const CLOSE_USAGE: &str = "usage: signal-close <space> (ends the space's run)";
+pub const CAPTURE_USAGE: &str = "usage: signal-capture <group> (a sync group \
+                                 `<ns>/32=sync/…`: every signal pushed into it that reaches \
+                                 this daemon, one line each)";
 
 /// The highest rate a stream may ask for: the sender's limit is 120
 /// packets per second per run. The process's push budget (80 push
@@ -53,7 +54,8 @@ const STREAM_HZ_MAX: f64 = 120.0;
 
 /// One device's signals, as this host drives them.
 pub struct SignalHost {
-    device: Device,
+    node: NodeHandle,
+    store: Arc<dyn DataStore>,
     face_socket: String,
     options: SignalOptions,
     signals: OnceCell<Signals>,
@@ -61,9 +63,15 @@ pub struct SignalHost {
 }
 
 impl SignalHost {
-    pub fn new(device: Device, face_socket: String, options: SignalOptions) -> Self {
+    pub fn new(
+        node: NodeHandle,
+        store: Arc<dyn DataStore>,
+        face_socket: String,
+        options: SignalOptions,
+    ) -> Self {
         Self {
-            device,
+            node,
+            store,
             face_socket,
             options,
             signals: OnceCell::new(),
@@ -77,7 +85,13 @@ impl SignalHost {
         self.signals
             .get_or_try_init(|| async {
                 let conn = connect(&self.face_socket).await?;
-                Signals::start(self.device.clone(), conn, self.options.clone()).await
+                Signals::start(
+                    self.node.clone(),
+                    conn,
+                    self.options.clone(),
+                    Arc::clone(&self.store),
+                )
+                .await
             })
             .await
     }
@@ -446,10 +460,10 @@ fn stats(s: &SignalStats) -> Value {
 
 /// A signal refusal as an error answer: why, whether to ask again, and
 /// what to do next (`retry_after_ms` when over the sender's rate); one the
-/// data layer gave answers as `data_error` does.
+/// data layer gave answers as `heap_error` does.
 pub fn error(e: &SignalError) -> Value {
-    if let SignalError::Data(d) = e {
-        return data_error(d);
+    if let SignalError::Heap(d) = e {
+        return heap_error(d);
     }
     let next = e.next();
     let mut v = json!({

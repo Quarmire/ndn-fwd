@@ -3038,34 +3038,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ndn-data"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "futures-core",
- "getrandom 0.2.17",
- "hkdf 0.13.0",
- "hmac 0.13.0",
- "ndn-app",
- "ndn-foundation-types",
- "ndn-packet",
- "ndn-security",
- "ndn-sync",
- "ndn-tlv",
- "ndn-trust-envelope",
- "parking_lot",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "web-time",
- "zeroize",
-]
-
-[[package]]
 name = "ndn-discovery"
 version = "0.1.0"
 dependencies = [
@@ -3107,7 +3079,8 @@ dependencies = [
  "humantime",
  "ndn-cert",
  "ndn-config",
- "ndn-data",
+ "ndn-heap",
+ "ndn-invite",
  "ndn-ipc",
  "ndn-namespace",
  "ndn-packet",
@@ -3226,6 +3199,7 @@ dependencies = [
  "ring",
  "rustls",
  "sha2 0.11.0",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3417,6 +3391,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndn-heap"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "getrandom 0.2.17",
+ "hkdf 0.13.0",
+ "ndn-app",
+ "ndn-foundation-types",
+ "ndn-packet",
+ "ndn-security",
+ "ndn-sync",
+ "ndn-tlv",
+ "parking_lot",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "web-time",
+ "zeroize",
+]
+
+[[package]]
 name = "ndn-identity"
 version = "0.1.0"
 dependencies = [
@@ -3438,6 +3437,33 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "ndn-invite"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures",
+ "getrandom 0.2.17",
+ "hkdf 0.13.0",
+ "hmac 0.13.0",
+ "ndn-app",
+ "ndn-foundation-types",
+ "ndn-heap",
+ "ndn-packet",
+ "ndn-security",
+ "ndn-sync",
+ "ndn-tlv",
+ "ndn-trust-envelope",
+ "parking_lot",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "web-time",
+ "zeroize",
 ]
 
 [[package]]
@@ -3926,11 +3952,13 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "ndn-app",
- "ndn-data",
  "ndn-face-shm",
  "ndn-foundation-types",
+ "ndn-heap",
  "ndn-packet",
+ "ndn-security",
  "ndn-storage",
+ "ndn-sync",
  "ndn-tlv",
  "ndn-transport",
  "sha2 0.11.0",
@@ -3996,9 +4024,10 @@ dependencies = [
  "ndn-app",
  "ndn-cert",
  "ndn-config",
- "ndn-data",
  "ndn-engine",
  "ndn-face",
+ "ndn-heap",
+ "ndn-invite",
  "ndn-ipc",
  "ndn-mgmt-wire",
  "ndn-packet",
