@@ -178,7 +178,7 @@ pub(crate) fn print_keys_to_end(pib_dir: &Path) {
             }
             println!("ending_key     = {}", ending_text(key));
             println!(
-                "#   in the ndn-data host: cut {} <file> --held-before {}",
+                "#   in the ndn-heap host: cut {} <file> --held-before {}",
                 key.key,
                 format_when(key.held_before)
             );

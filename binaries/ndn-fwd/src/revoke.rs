@@ -127,7 +127,7 @@ pub(crate) fn cut_refused(e: RootError, command: &str) -> anyhow::Error {
                 return anyhow::anyhow!(
                     "{command} refused: the cut file of {} keeps entries first verified until \
                      {}, after {} (when it was lost): what a thief wrote after the loss could be \
-                     in it. Write the cut again in the ndn-data host: `cut {} <file> \
+                     in it. Write the cut again in the ndn-heap host: `cut {} <file> \
                      --held-before {}`. Nothing was signed",
                     p("key"),
                     ms("held_before"),
@@ -140,7 +140,7 @@ pub(crate) fn cut_refused(e: RootError, command: &str) -> anyhow::Error {
                 return anyhow::anyhow!(
                     "{command} refused: the cut file of {} was written without a time bound, so \
                      it may accept what a thief wrote after the loss. Write it again in the \
-                     ndn-data host: `cut {} <file> --held-before <when you lost it>`. Nothing \
+                     ndn-heap host: `cut {} <file> --held-before <when you lost it>`. Nothing \
                      was signed",
                     p("key"),
                     p("key")

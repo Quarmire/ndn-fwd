@@ -15,7 +15,7 @@
 //!
 //! - `ndn-fwd status [--pib <dir>]` lists them (read from the PIB: the
 //!   namespace CA's issued certificates and the held version), each with
-//!   the ndn-data host line that writes its cut file. Every root command
+//!   the ndn-heap host line that writes its cut file. Every root command
 //!   lists them too after its own outcome. For a held context that lists
 //!   fewer than every role in `DataRequiresCut` (one made before `init`
 //!   listed all four) it also prints a `notice` naming the
@@ -27,7 +27,7 @@
 //!   honestly (a cut comes only with its key's revocation). `--yes` signs
 //!   without asking, and only when the root unlocks without a secret (OS
 //!   keychain, plain file): that is how an owner ends keys unattended, from
-//!   a timer on the root device running the ndn-data host's `cut` lines and
+//!   a timer on the root device running the ndn-heap host's `cut` lines and
 //!   then `end-keys --yes`. The running daemon never unlocks the root.
 
 use std::path::Path;
@@ -158,7 +158,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             ending_text(key)
         );
         println!(
-            "#   in the ndn-data host: cut {} <file> --held-before {}",
+            "#   in the ndn-heap host: cut {} <file> --held-before {}",
             key.key,
             format_when(key.held_before)
         );
