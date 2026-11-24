@@ -25,17 +25,17 @@
 //!    the kit (`--old-root compromised`: v4 by the kit, v5 by spare's new
 //!    root) and becomes the root device; bob follows to v5 by refresh, under
 //!    the same name;
-//! 4. alice's device (spare, `ndn-data`, signing as its new identity) shares
-//!    a folder with herself and offers it; bob's device joins with the
+//! 4. alice's device (spare, `ndn-heap`, signing as its new identity) creates
+//!    a space for herself and offers it; bob's device joins with the
 //!    code's link alone (see [`super::data_host`] and [`super::invite`]);
-//! 5. alice, recovered, shares another folder with herself and offers it;
+//! 5. alice, recovered, creates another space for herself and offers it;
 //!    carol's device — a stranger, holding nothing of alice's namespace —
 //!    joins with that code's link alone;
-//! 6. three people, one folder: alice shares a third folder and offers it
+//! 6. three people, one space: alice creates a third space and offers it
 //!    twice, bob and carol each join with a code of their own, and each of
 //!    the three writes into it. Bob's and carol's daemons never adopt each
 //!    other's namespace: each one's data host adopts the other for the
-//!    folder alone (data-layer spec §6.3), its daemon carrying that
+//!    space alone (heap spec §9), its daemon carrying that
 //!    namespace's Data to it in transit (`security/transit`).
 //!
 //! Proves: the namespaces are `/user/<0xA1 component>`; the name-only link
@@ -45,10 +45,10 @@
 //! host adopt bob's namespace from his genesis (his credentials carry v2,
 //! and alice's host vouches for it from what her daemon stored), bob's host
 //! finds alice's recovered context already held under the same anchor —
-//! and each reads what the other writes in the folder. Carol, given alice's
+//! and each reads what the other writes in the space. Carol, given alice's
 //! recovered v5 in the answer, reaches it from alice's genesis (by name,
 //! through her daemon) and is admitted; carol and alice read each other's
-//! writes in the second folder. In the third, all three read everything all
+//! writes in the second space. In the third, all three read everything all
 //! three wrote, while bob's daemon holds nothing of carol's namespace and
 //! carol's nothing of bob's.
 
@@ -58,13 +58,17 @@ use ndn_security::self_certifying::self_certifying_digest;
 use ndn_trust_envelope::TrustEnvelope;
 use serde_json::Value;
 
-use super::data_host::{CONVERGE, Host, includes, name};
+use super::data_host::{CONVERGE, Host, head_winner, name};
 use crate::scenarios::*;
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{NodeCfg, now_unix};
 
 /// How long the offer stands, in ms.
 const OFFER_FOR_MS: i64 = 3_600_000;
+/// The register paths the spaces' writers write.
+const NOTES: &str = "notes";
+const AGENDA: &str = "agenda";
+const BOARD: &str = "board";
 
 /// A namespace `ndn-fwd init --self-certifying` made: what it printed.
 struct Named {
@@ -208,6 +212,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 route(alice.ns.clone(), "alice"),
                 route(bob.ns.clone(), "bob"),
                 route(carol.ns.clone(), "carol"),
+                // A space has one group, the owner's `<ns>/32=sync/<rest>`: on
+                // these static UDP links (no link layer to carry it) alice's
+                // group is routed to the people she shares with.
+                route(format!("{}/32=sync", alice.ns), "bob"),
+                route(format!("{}/32=sync", alice.ns), "carol"),
             ];
             let b = cx.w.node_mut("bob");
             b.cfg.identity = Some(bob.root.identity.clone());
@@ -318,7 +327,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "start the data layer on alice's device (spare, signing as its recovered identity) and \
          on bob's",
         |cx| {
-            cx.concept("data layer host (ndn-data)");
+            cx.concept("data layer host (ndn-heap)");
             let a = Host::start(cx, "spare", &recovered.identity)?;
             let b = Host::start(cx, "bob", &bob.root.identity)?;
             cx.evidence(&format!(
@@ -329,34 +338,27 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
 
-    let folder = format!("{}/32=data/trip", alice.ns);
-    let notes = format!("{folder}/notes");
+    let trip = format!("{}/32=data/trip", alice.ns);
     let first_put = sc.step(
-        "alice shares her folder with herself alone and writes its notes",
+        "alice creates her space for herself alone and writes its notes",
         |cx| {
-            alice_host.ok(
-                cx,
-                &format!(
-                    "share_folder {folder} rule=merge writers={ns} readers=person:{ns}",
-                    ns = alice.ns
-                ),
-            )?;
-            alice_host.put_op(cx, &notes, "packing list")
+            alice_host.ok(cx, &format!("create {trip}"))?;
+            alice_host.put(cx, &trip, NOTES, "packing list")
         },
     )?;
 
     let code = sc.step(
-        "alice offers the folder: writer, for an hour, three wrong tries",
-        |cx| offer_writer(cx, &mut alice_host, &folder),
+        "alice offers the space: writer, for an hour, three wrong tries",
+        |cx| offer_writer(cx, &mut alice_host, &trip),
     )?;
 
     sc.step(
-        "bob's device joins with the code's link alone: admitted as writer of alice's folder; \
+        "bob's device joins with the code's link alone: admitted as writer of alice's space; \
          alice's daemon now holds bob's namespace from his genesis",
         |cx| {
             cx.concept("an introduction between two people named by their keys");
             let joined = joins(cx, &mut bob_host, &code, "bob")?;
-            joined_as_writer(&joined, &folder, &alice.ns, "bob")?;
+            joined_as_writer(&joined, &trip, &alice.ns, "bob")?;
             cx.evidence(&format!("bob joined: {joined}"));
             cx.expect_version("spare", &bob.ns, 2)?;
             cx.expect_version("bob", &alice.ns, 5)?;
@@ -368,35 +370,31 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
 
-    let bobs = sc.step(
-        "bob writes into the folder, over alice's first; alice reads it",
+    sc.step(
+        "bob writes into the space, over alice's first; alice reads it",
         |cx| {
             wait_for(cx, "bob holds alice's first notes", CONVERGE, |cx| {
-                Ok(bob_host
-                    .state(cx, &notes)?
-                    .is_some_and(|(at, _)| includes(&at, &first_put)))
+                bob_host.holds(cx, &trip, NOTES, &first_put)
             })?;
-            let bobs = bob_host.put_op(cx, &notes, "hotel booked")?;
+            let bobs = bob_host.put(cx, &trip, NOTES, "hotel booked")?;
             wait_for(cx, "alice holds bob's notes", CONVERGE, |cx| {
-                Ok(alice_host.state(cx, &notes)?.is_some_and(|(at, v)| {
-                    includes(&at, &bobs)
-                        && includes(&at, &first_put)
-                        && v["bytes"] == "hotel booked"
-                }))
+                Ok(alice_host
+                    .item(cx, &trip, NOTES)?
+                    .is_some_and(|item| bobs.is(&item["id"]) && item["text"] == "hotel booked"))
             })?;
-            cx.evidence("alice's notes state includes bob's version: \"hotel booked\"");
-            Ok(bobs)
+            cx.evidence("alice's notes are bob's entry: \"hotel booked\"");
+            Ok(())
         },
     )?;
 
     sc.step("alice writes the notes again; bob reads it", |cx| {
-        let second = alice_host.put_op(cx, &notes, "packing list v2")?;
+        let second = alice_host.put(cx, &trip, NOTES, "packing list v2")?;
         wait_for(cx, "bob holds alice's v2", CONVERGE, |cx| {
-            Ok(bob_host.state(cx, &notes)?.is_some_and(|(at, v)| {
-                includes(&at, &second) && includes(&at, &bobs) && v["bytes"] == "packing list v2"
-            }))
+            Ok(bob_host
+                .item(cx, &trip, NOTES)?
+                .is_some_and(|item| second.is(&item["id"]) && item["text"] == "packing list v2"))
         })?;
-        cx.evidence("bob's notes state includes alice's v2: \"packing list v2\"");
+        cx.evidence("bob's notes are alice's v2: \"packing list v2\"");
         Ok(())
     })?;
 
@@ -414,19 +412,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let plans = format!("{}/32=data/plans", alice.ns);
-    let agenda = format!("{plans}/agenda");
     let (code, first_plan) = sc.step(
-        "alice, recovered (v5, rooted on spare), shares another folder with herself alone, \
+        "alice, recovered (v5, rooted on spare), creates another space for herself alone, \
          writes its agenda and offers it: writer",
         |cx| {
-            alice_host.ok(
-                cx,
-                &format!(
-                    "share_folder {plans} rule=merge writers={ns} readers=person:{ns}",
-                    ns = alice.ns
-                ),
-            )?;
-            let first_plan = alice_host.put_op(cx, &agenda, "day one: museum")?;
+            alice_host.ok(cx, &format!("create {plans}"))?;
+            let first_plan = alice_host.put(cx, &plans, AGENDA, "day one: museum")?;
             Ok((offer_writer(cx, &mut alice_host, &plans)?, first_plan))
         },
     )?;
@@ -450,57 +441,43 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
 
-    let carols = sc.step(
+    sc.step(
         "carol reads alice's agenda and writes into it; alice reads carol's",
         |cx| {
             wait_for(cx, "carol holds alice's agenda", CONVERGE, |cx| {
-                Ok(carol_host.state(cx, &agenda)?.is_some_and(|(at, v)| {
-                    includes(&at, &first_plan) && v["bytes"] == "day one: museum"
+                Ok(carol_host.item(cx, &plans, AGENDA)?.is_some_and(|item| {
+                    first_plan.is(&item["id"]) && item["text"] == "day one: museum"
                 }))
             })?;
-            let carols = carol_host.put_op(cx, &agenda, "tickets bought")?;
+            let carols = carol_host.put(cx, &plans, AGENDA, "tickets bought")?;
             wait_for(cx, "alice holds carol's agenda", CONVERGE, |cx| {
-                Ok(alice_host.state(cx, &agenda)?.is_some_and(|(at, v)| {
-                    includes(&at, &carols)
-                        && includes(&at, &first_plan)
-                        && v["bytes"] == "tickets bought"
-                }))
+                Ok(alice_host
+                    .item(cx, &plans, AGENDA)?
+                    .is_some_and(|item| carols.is(&item["id"]) && item["text"] == "tickets bought"))
             })?;
-            cx.evidence("alice's agenda state includes carol's version: \"tickets bought\"");
-            Ok(carols)
+            cx.evidence("alice's agenda is carol's entry: \"tickets bought\"");
+            Ok(())
         },
     )?;
 
     sc.step("alice writes the agenda again; carol reads it", |cx| {
-        let again = alice_host.put_op(cx, &agenda, "day one: museum, then the park")?;
+        let again = alice_host.put(cx, &plans, AGENDA, "day one: museum, then the park")?;
         wait_for(cx, "carol holds alice's second agenda", CONVERGE, |cx| {
-            Ok(carol_host.state(cx, &agenda)?.is_some_and(|(at, v)| {
-                includes(&at, &again)
-                    && includes(&at, &carols)
-                    && v["bytes"] == "day one: museum, then the park"
+            Ok(carol_host.item(cx, &plans, AGENDA)?.is_some_and(|item| {
+                again.is(&item["id"]) && item["text"] == "day one: museum, then the park"
             }))
         })?;
-        cx.evidence(
-            "carol's agenda state includes alice's second version: \"day one: museum, then the \
-             park\"",
-        );
+        cx.evidence("carol's agenda is alice's second entry: \"day one: museum, then the park\"");
         Ok(())
     })?;
 
     let reunion = format!("{}/32=data/reunion", alice.ns);
-    let board = format!("{reunion}/board");
     let (for_bob, for_carol) = sc.step(
-        "three people, one folder: alice shares a third folder with herself alone and offers it \
+        "three people, one space: alice creates a third space for herself alone and offers it \
          twice — writer, one code for bob and one for carol",
         |cx| {
-            cx.concept("three people, one folder");
-            alice_host.ok(
-                cx,
-                &format!(
-                    "share_folder {reunion} rule=merge writers={ns} readers=person:{ns}",
-                    ns = alice.ns
-                ),
-            )?;
+            cx.concept("three people, one space");
+            alice_host.ok(cx, &format!("create {reunion}"))?;
             let for_bob = offer_writer(cx, &mut alice_host, &reunion)?;
             let for_carol = offer_writer(cx, &mut alice_host, &reunion)?;
             Ok((for_bob, for_carol))
@@ -523,32 +500,20 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "alice, bob and carol each write into the folder's board, and all three read everything: \
-         bob's data host adopts carol's namespace for the folder alone, carol's adopts bob's, \
+        "alice, bob and carol each write into the space's board, and all three read everything: \
+         bob's data host adopts carol's namespace for the space alone, carol's adopts bob's, \
          each daemon carrying the other's Data to its host in transit",
         |cx| {
-            cx.concept("a writer's namespace adopted for one folder (security/transit)");
+            cx.concept("a writer's namespace adopted for one space (security/transit)");
             let puts = [
-                alice_host.put_op(cx, &board, "bring the map")?,
-                bob_host.put_op(cx, &board, "bring the tent")?,
-                carol_host.put_op(cx, &board, "bring the stove")?,
+                alice_host.put(cx, &reunion, BOARD, "bring the map")?,
+                bob_host.put(cx, &reunion, BOARD, "bring the tent")?,
+                carol_host.put(cx, &reunion, BOARD, "bring the stove")?,
             ];
-            // Rule R: all three read one value, the head with the highest
-            // digest of the three (as alice reads their parents).
-            wait_for(cx, "alice holds the three writes", CONVERGE * 2, |cx| {
-                Ok(alice_host
-                    .state(cx, &board)?
-                    .is_some_and(|(at, _)| puts.iter().all(|put| includes(&at, put))))
-            })?;
-            let want = alice_host.winner(
-                cx,
-                &board,
-                &[
-                    (&puts[0], "bring the map"),
-                    (&puts[1], "bring the tent"),
-                    (&puts[2], "bring the stove"),
-                ],
-            )?;
+            // All three read one value: the head with the highest digest of
+            // the three (the heads read from the entries' `after`, as alice's
+            // daemon fetches them).
+            let want = head_winner(cx, "spare", &[&puts[0], &puts[1], &puts[2]])?;
             for (who, host) in [
                 ("alice", &mut alice_host),
                 ("bob", &mut bob_host),
@@ -556,24 +521,21 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             ] {
                 wait_for(
                     cx,
-                    &format!("{who} holds the three writes"),
+                    &format!("{who} reads the three writes' winner"),
                     CONVERGE * 2,
-                    |cx| {
-                        Ok(host.state(cx, &board)?.is_some_and(|(at, v)| {
-                            puts.iter().all(|put| includes(&at, put)) && v["bytes"] == want
-                        }))
-                    },
+                    |cx| host.holds(cx, &reunion, BOARD, want),
                 )?;
                 cx.evidence(&format!(
-                    "{who}'s board state includes alice's, bob's and carol's versions: {want:?}, \
-                     the head with the highest digest"
+                    "{who}'s board is {}: the head with the highest digest of alice's, bob's and \
+                     carol's entries",
+                    want.name
                 ));
             }
             holds_nothing_of(cx, "bob", &carol.ns)?;
             holds_nothing_of(cx, "carol", &bob.ns)?;
             cx.evidence(&format!(
                 "bob's daemon still holds nothing of {} and carol's nothing of {}: each was \
-                 adopted for the folder alone",
+                 adopted for the space alone",
                 carol.ns, bob.ns
             ));
             Ok(())
@@ -582,39 +544,39 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     Ok(())
 }
 
-/// The answer of a join admitted `who` as writer of `folder`, offered by
+/// The answer of a join admitted `who` as writer of `space`, offered by
 /// `inviter`.
-fn joined_as_writer(joined: &Value, folder: &str, inviter: &str, who: &str) -> StepResult<()> {
-    if name(joined["folder"].as_str().unwrap_or_default())? != name(folder)?
+fn joined_as_writer(joined: &Value, space: &str, inviter: &str, who: &str) -> StepResult<()> {
+    if name(joined["space"].as_str().unwrap_or_default())? != name(space)?
         || joined["role"] != "writer"
         || name(joined["inviter"].as_str().unwrap_or_default())? != name(inviter)?
     {
         return Err(format!(
-            "{who} joined {joined}, not {folder} as writer of {inviter}"
+            "{who} joined {joined}, not {space} as writer of {inviter}"
         ));
     }
     Ok(())
 }
 
 /// `node`'s daemon holds no version of `ns`: whatever its data host
-/// adopted of it, it adopted for a folder alone.
+/// adopted of it, it adopted for a space alone.
 fn holds_nothing_of(cx: &mut Cx<'_>, node: &str, ns: &str) -> StepResult<()> {
     match cx.version(node, ns) {
         Some(v) => Err(format!(
-            "{node}'s daemon holds {ns} v{v}: adopted for the node, not for a folder alone"
+            "{node}'s daemon holds {ns} v{v}: adopted for the node, not for a space alone"
         )),
         None => Ok(()),
     }
 }
 
-/// `host` offers `folder`: writer, for an hour, three wrong tries. The code's
+/// `host` offers `space`: writer, for an hour, three wrong tries. The code's
 /// link.
-fn offer_writer(cx: &mut Cx<'_>, host: &mut Host, folder: &str) -> StepResult<String> {
+fn offer_writer(cx: &mut Cx<'_>, host: &mut Host, space: &str) -> StepResult<String> {
     cx.concept("introduction code");
     let until = (now_unix() * 1000 + OFFER_FOR_MS).to_string();
     let ok = host.ok(
         cx,
-        &format!("offer {folder} role=writer until={until} tries=3"),
+        &format!("offer {space} role=writer until={until} tries=3"),
     )?;
     let link = ok["link"].as_str().unwrap_or_default().to_owned();
     if !link.starts_with("ndn-trust://intro/") {

@@ -1,5 +1,5 @@
 //! notes: one person's note, written on two devices apart, merged when they
-//! meet again — the data layer (`ndn_data::Device`) on real daemons.
+//! meet again — the data layer (`ndn_heap::Node`) on real daemons.
 //!
 //! Topology, on the harness's `lo`: laptop (10.200.0.1, the root device of
 //! /nt as /nt/admin/laptop, with its CA) ↔ phone (.2, a member enrolled by
@@ -12,41 +12,43 @@
 //! multicast strategy on each daemon, since each holds /nt: nothing in
 //! either config names the group or its strategy (data-layer spec §12).
 //!
-//! Each device runs `ndn-data` (ndn-tools) on its daemon's socket: the
+//! Each device runs `ndn-heap` (ndn-tools) on its daemon's socket: the
 //! device's data layer with the key `ndn-fwd init`/`enroll` put in the PIB,
 //! verifying with the PIB's trust context, driven line by line over stdin
 //! and answering one JSON object per line — standing in for the host an app
 //! runs in, not for anything the person does.
 //!
-//! Proves: the laptop shares a note collection (the built-in newest register,
-//! `/ndf/merge/newest/v=1`) and writes "day 1"; the phone reads that version.
-//! With UDP between the two cut (nftables), the laptop writes "on the plane"
-//! while the phone writes "trip" and then "in the taxi", each seeing only its
-//! own (neither daemon gets the other's new entry); once the link is back
-//! both reach the same state (same frontier, same value) holding all four
-//! versions, with no step by the person, the value being the head with the
-//! highest digest (the register's newest). Every version is named
-//! `<its device>/32=log/<collection>/seq=<n>`, the two devices write with
-//! different keys (each the key its PIB certifies), each offline version's
-//! parents include `day 1` and neither side's offline versions name the
-//! other's (they are concurrent); the phone's watch delivered the laptop's
-//! versions; and each daemon fetches the other device's log entries,
-//! validating them against /nt's trust context, with the writer device's
-//! key as KeyLocator.
+//! Proves: the laptop creates a notes space (owner alone, sealed) and writes
+//! "day 1" at `trip` (a path of the space: one newest-wins register); the
+//! phone reads that entry. With UDP between the two cut (nftables), the
+//! laptop writes "on the plane" while the phone writes "trip" and then "in
+//! the taxi", each seeing only its own (neither daemon gets the other's new
+//! entry); once the link is back both read the same value with no step by
+//! the person, the value being the head with the highest signed digest (the
+//! register's newest of the two heads, the offline entries). Every entry is
+//! named `<its device>/32=log/<space>/seq=<n>`, the two devices write with
+//! different keys (each the key its PIB certifies), each offline entry
+//! supersedes `day 1` and neither side's offline entries name the other's
+//! (they are concurrent; read from the entries' `after` as a daemon fetches
+//! them); the laptop's next write supersedes both heads, which it therefore
+//! holds; the watches delivered the other device's entries; and each daemon
+//! fetches the other device's log entries, validating them against /nt's
+//! trust context, with the writer device's key as KeyLocator.
 
 use std::process::Command;
 
-use serde_json::Value;
-
-use super::data_host::{CONVERGE, Host, carries_group, includes, key_locator, name, unanswered};
+use super::data_host::{
+    CONVERGE, Host, Put, carries_group, entry_at, highest, key_locator, supersedes, unanswered,
+};
 use crate::scenarios::*;
 use crate::step::{Abort, Scenario};
 use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
 
 const NS: &str = "/nt";
-/// The note collection, in the person's namespace: `<ns>/32=data/<path>`
-/// (data-layer spec §3).
-const NOTES: &str = "/nt/32=data/notes/trip";
+/// The notes space, in the person's namespace: `<ns>/32=data/<c1>`
+/// (heap spec §2), and the register path in it.
+const SPACE: &str = "/nt/32=data/notes";
+const TRIP: &str = "trip";
 const PHONE: &str = "/nt/member/phone";
 /// The laptop's device name: `ndn-fwd init --device laptop` on /nt.
 const LAPTOP: &str = "/nt/admin/laptop";
@@ -142,9 +144,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let (mut laptop, mut phone) = sc.step(
-        "start the data layer on each device (ndn-data on its daemon, signing with its own key)",
+        "start the data layer on each device (ndn-heap on its daemon, signing with its own key)",
         |cx| {
-            cx.concept("data layer host (ndn-data)");
+            cx.concept("data layer host (ndn-heap)");
             let laptop = Host::start(cx, "laptop", &root.identity)?;
             let phone = Host::start(cx, "phone", PHONE)?;
             let laptop_keys = cx.w.keys("laptop");
@@ -174,22 +176,39 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let day1 = sc.step(
-        "the laptop shares the note collection (owner-signed members record) and writes \"day 1\"",
+        "the laptop creates the notes space (owner alone) and writes \"day 1\" at trip",
         |cx| {
-            laptop.ok(cx, &format!("share {NOTES}"))?;
-            laptop.put_op(cx, NOTES, "day 1")
+            laptop.ok(cx, &format!("create {SPACE}"))?;
+            laptop.ok(cx, &format!("watch {SPACE}"))?;
+            laptop.put(cx, SPACE, TRIP, "day 1")
         },
     )?;
     sc.step(
         "the phone watches the notes and reads them until it holds day 1",
         |cx| {
-            phone.ok(cx, &format!("watch {NOTES}"))?;
+            phone.ok(cx, &format!("watch {SPACE}"))?;
             wait_for(cx, "the phone holds day 1", SHORT, |cx| {
                 Ok(phone
-                    .state(cx, NOTES)?
-                    .is_some_and(|(at, value)| includes(&at, &day1) && value["bytes"] == "day 1"))
+                    .item(cx, SPACE, TRIP)?
+                    .is_some_and(|item| day1.is(&item["id"]) && item["text"] == "day 1"))
             })?;
-            cx.evidence("the phone's state includes day 1, value \"day 1\"");
+            cx.evidence("the phone's value at trip is day 1's entry, \"day 1\"");
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "each device reads an entry of the other's (at `sync/<device>`), so both hold the key of \
+         the epoch in force before the link is cut",
+        |cx| {
+            let from_laptop = laptop.put(cx, SPACE, "sync/laptop", "ready")?;
+            wait_for(cx, "the phone reads the laptop's entry", SHORT, |cx| {
+                phone.holds(cx, SPACE, "sync/laptop", &from_laptop)
+            })?;
+            let from_phone = phone.put(cx, SPACE, "sync/phone", "ready")?;
+            wait_for(cx, "the laptop reads the phone's entry", SHORT, |cx| {
+                laptop.holds(cx, SPACE, "sync/phone", &from_phone)
+            })?;
+            cx.evidence("each device read the other's sealed entry: both hold the epoch's key");
             Ok(())
         },
     )?;
@@ -217,33 +236,23 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "apart: the laptop writes \"on the plane\"; the phone writes \"trip\", then \"in the \
          taxi\"; each holds only its own",
         |cx| {
-            let plane = laptop.put_op(cx, NOTES, "on the plane")?;
-            let trip = phone.put_op(cx, NOTES, "trip")?;
-            let taxi = phone.put_op(cx, NOTES, "in the taxi")?;
-            let (at, value) = laptop
-                .state(cx, NOTES)?
-                .ok_or("the laptop holds no state of its own notes")?;
-            if !includes(&at, &plane)
-                || includes(&at, &trip)
-                || includes(&at, &taxi)
-                || value["bytes"] != "on the plane"
-            {
-                return Err(format!(
-                    "the laptop's state while apart is at {at}: {value}"
-                ));
+            let plane = laptop.put(cx, SPACE, TRIP, "on the plane")?;
+            let trip = phone.put(cx, SPACE, TRIP, "trip")?;
+            let taxi = phone.put(cx, SPACE, TRIP, "in the taxi")?;
+            let item = laptop
+                .item(cx, SPACE, TRIP)?
+                .ok_or("the laptop holds no value of its own notes")?;
+            if !plane.is(&item["id"]) || item["text"] != "on the plane" {
+                return Err(format!("the laptop's value while apart is {item}"));
             }
-            cx.evidence(&format!("laptop apart: at {at}, value {value}"));
-            let (at, value) = phone
-                .state(cx, NOTES)?
-                .ok_or("the phone holds no state of the notes")?;
-            if !includes(&at, &trip)
-                || !includes(&at, &taxi)
-                || includes(&at, &plane)
-                || value["bytes"] != "in the taxi"
-            {
-                return Err(format!("the phone's state while apart is at {at}: {value}"));
+            cx.evidence(&format!("laptop apart: {item}"));
+            let item = phone
+                .item(cx, SPACE, TRIP)?
+                .ok_or("the phone holds no value of the notes")?;
+            if !taxi.is(&item["id"]) || item["text"] != "in the taxi" {
+                return Err(format!("the phone's value while apart is {item}"));
             }
-            cx.evidence(&format!("phone apart: at {at}, value {value}"));
+            cx.evidence(&format!("phone apart: {item}"));
             // The cut holds: each daemon asks for the other's new entry, which
             // its writer holds and serves, and gets nothing.
             unanswered(cx, "laptop", &trip.name)?;
@@ -261,98 +270,107 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         Ok(())
     })?;
     sc.step(
-        "both devices reach one state holding all four versions, with no step by the person",
+        "both devices read one value, with no step by the person: the head with the highest \
+         digest",
         |cx| {
-            let all = [&day1, &plane, &trip, &taxi];
-            let mut last = (Value::Null, Value::Null);
-            wait_for(cx, "laptop and phone at one state", CONVERGE, |cx| {
-                let (Some(l), Some(p)) = (laptop.state(cx, NOTES)?, phone.state(cx, NOTES)?) else {
-                    return Ok(false);
-                };
-                let done = all.iter().all(|v| includes(&l.0, v)) && l == p;
-                last = l;
-                Ok(done)
+            // The heads are the two offline entries that end each side's line
+            // (day 1 and the trip tag are superseded); the register's value is
+            // the one with the highest signed digest.
+            let want = highest(&[&plane, &taxi]);
+            wait_for(cx, "laptop and phone read one value", CONVERGE, |cx| {
+                Ok(laptop.holds(cx, SPACE, TRIP, want)? && phone.holds(cx, SPACE, TRIP, want)?)
             })?;
-            let (at, value) = last;
-            // The heads are the two offline versions that end each side's
-            // line (day 1 and the trip tag are superseded); the register's
-            // value is the one with the highest digest.
-            let want = laptop.winner(
-                cx,
-                NOTES,
-                &[
-                    (&day1, "day 1"),
-                    (&plane, "on the plane"),
-                    (&trip, "trip"),
-                    (&taxi, "in the taxi"),
-                ],
-            )?;
-            if value["bytes"] != want {
-                return Err(format!(
-                    "the merged value {value} is not the head with the highest digest ({want:?})"
-                ));
-            }
-            cx.evidence(&format!("both at {at}"));
+            let item = laptop
+                .item(cx, SPACE, TRIP)?
+                .ok_or("the laptop lost its value")?;
             cx.evidence(&format!(
-                "both hold {value}: the head with the highest digest"
+                "both read {item}: the head with the highest digest ({})",
+                want.digest
             ));
             Ok(())
         },
     )?;
-    sc.step(
-        "each device reads the other's versions by name: right writer and name; the offline \
-         versions' parents include day 1 and not each other",
+    let merged = sc.step(
+        "the laptop writes \"home\": its entry supersedes both heads, so the laptop holds the \
+         plane's and the taxi's entries",
         |cx| {
-            // The parents' entry for `writer`, if any.
-            let parent = |v: &Value, writer: &str| {
-                v["parents"]
-                    .as_array()
-                    .and_then(|a| a.iter().find(|e| e["writer"] == writer))
-                    .and_then(|e| e["seq"].as_u64())
-            };
-            let read_day1 = phone.version(cx, NOTES, &day1)?;
-            let read_plane = phone.version(cx, NOTES, &plane)?;
-            let read_trip = laptop.version(cx, NOTES, &trip)?;
-            let read_taxi = laptop.version(cx, NOTES, &taxi)?;
-            cx.evidence(&format!("phone reads {}: {read_day1}", day1.name));
-            for (label, v) in [
-                ("on the plane", &read_plane),
-                ("trip", &read_trip),
-                ("in the taxi", &read_taxi),
-            ] {
-                if parent(v, &day1.writer).is_none_or(|s| s < day1.seq) {
-                    return Err(format!("{label}'s parents do not include day 1: {v}"));
-                }
-                cx.evidence(&format!("{label}: parents {}", v["parents"]));
-            }
-            if parent(&read_plane, &trip.writer).is_some()
-                || parent(&read_trip, &plane.writer).is_some_and(|s| s >= plane.seq)
-                || parent(&read_taxi, &plane.writer).is_some_and(|s| s >= plane.seq)
-            {
-                return Err("the offline versions name each other as parents".into());
-            }
-            if parent(&read_taxi, &trip.writer).is_none_or(|s| s < trip.seq) {
+            let merged = laptop.put(cx, SPACE, TRIP, "home")?;
+            let entry = entry_at(cx, "laptop", &merged)?;
+            if !supersedes(&entry, &plane) || !supersedes(&entry, &taxi) {
                 return Err(format!(
-                    "in the taxi's parents do not include \"trip\": {read_taxi}"
+                    "the laptop's next entry supersedes {:?}, not both heads ({}, {})",
+                    entry.after, plane.name, taxi.name
+                ));
+            }
+            wait_for(cx, "the phone reads home", CONVERGE, |cx| {
+                phone.holds(cx, SPACE, TRIP, &merged)
+            })?;
+            cx.evidence(&format!(
+                "{} supersedes {} and {}; the phone reads \"home\"",
+                merged.name, plane.name, taxi.name
+            ));
+            Ok(merged)
+        },
+    )?;
+    sc.step(
+        "each device's entries are named by their writer and the offline entries' parents \
+         include day 1 and not each other",
+        |cx| {
+            let read_day1 = entry_at(cx, "phone", &day1)?;
+            let read_plane = entry_at(cx, "phone", &plane)?;
+            let read_trip = entry_at(cx, "laptop", &trip)?;
+            let read_taxi = entry_at(cx, "laptop", &taxi)?;
+            cx.evidence(&format!(
+                "phone reads {}: after {:?}",
+                day1.name, read_day1.after
+            ));
+            // `after` of `plane` and `trip` is what each superseded: day 1;
+            // `taxi` supersedes `trip` (the phone wrote it after reading it).
+            for (label, entry) in [("on the plane", &read_plane), ("trip", &read_trip)] {
+                if !supersedes(entry, &day1) {
+                    return Err(format!(
+                        "{label}'s entry does not supersede day 1: {:?}",
+                        entry.after
+                    ));
+                }
+                cx.evidence(&format!("{label}: after {:?}", entry.after));
+            }
+            if supersedes(&read_plane, &trip)
+                || supersedes(&read_plane, &taxi)
+                || supersedes(&read_trip, &plane)
+                || supersedes(&read_taxi, &plane)
+            {
+                return Err("the offline entries name each other as parents".into());
+            }
+            if !supersedes(&read_taxi, &trip) {
+                return Err(format!(
+                    "in the taxi's entry does not supersede \"trip\": {:?}",
+                    read_taxi.after
                 ));
             }
             Ok(())
         },
     )?;
-    sc.step("the phone's watch delivered the laptop's versions", |cx| {
+    sc.step("the watches delivered the other device's entries", |cx| {
         // Draining what arrived since the last answer.
-        phone.ok(cx, &format!("get {}", day1.name))?;
-        let delivered: Vec<String> = phone
-            .watched
-            .iter()
-            .filter_map(|w| w["change"]["version"]["name"].as_str().map(str::to_owned))
-            .collect();
-        for v in [&day1, &plane] {
-            if !delivered.iter().any(|d| name(d).ok() == name(&v.name).ok()) {
-                return Err(format!("{} was not delivered: {delivered:?}", v.name));
+        phone.ok(cx, &format!("members {SPACE}"))?;
+        laptop.ok(cx, &format!("members {SPACE}"))?;
+        let delivered = |host: &Host, put: &Put| {
+            host.watched
+                .iter()
+                .any(|w| put.is(&w["change"]["put"]["id"]))
+        };
+        // The phone's watch was told of day 1 (the laptop's) and, since "home"
+        // decided the path last, of "home"; the laptop's watch of "home" too.
+        for (host, put) in [(&phone, &day1), (&phone, &merged), (&laptop, &merged)] {
+            if !delivered(host, put) {
+                return Err(format!(
+                    "{}'s watch was not told of {}: {:?}",
+                    host.node, put.name, host.watched
+                ));
             }
         }
-        cx.evidence(&format!("watch delivered {delivered:?}"));
+        cx.evidence("the phone's watch delivered day 1 and home; the laptop's, home");
         Ok(())
     })?;
     sc.step(

@@ -1,19 +1,19 @@
 //! signals: two people's live cursors and a live edit through a community
 //! relay that forwards them and cannot read them — ephemeral signals
-//! (`ndn_surface::signal`, the signals spec; data-layer §20 for the gate)
-//! on real daemons: never a version, never stored, never cached.
+//! (`ndn_surface::signal`, the signals spec; heap spec §10.8 for the gate)
+//! on real daemons: never an entry, never stored, never cached.
 //!
 //! Topology and gestures as in [`super::shared`]: alice (/ga) and bob
 //! (/gb), each the root device of their namespace, pointing at each other,
 //! linked through an open community relay (/gr) their trust contexts
 //! advertise; no config holds a route, a UDP link, a `[[peer]]` or a
 //! `[[relay]]`. Each person's device hosts its data layer and its signals
-//! with `ndn-data` (see [`super::data_host`]), its entries in a store
+//! with `ndn-heap` (see [`super::data_host`]), its entries in a store
 //! directory (`--store`). Its signal runs open no local ring
 //! (`--no-signal-ring`): the harness runs every daemon on one host, where a
 //! ring would carry a run past the relay, as it would between two apps on
 //! one real host. The relay's operator is curious: on the relay a capture
-//! (`ndn-data` with no device, `signal-capture`) registers both people's
+//! (`ndn-heap` with no device, `signal-capture`) registers both people's
 //! sync groups on the relay's daemon and prints every signal Interest the
 //! daemon gives it.
 //!
@@ -21,9 +21,9 @@
 //! signals reach bob as Interests `/gb/32=sync/32=signal/<digest>`, bob's
 //! reach alice in `/ga/32=sync`; nothing answers them.
 //!
-//! Proves: alice shares the sealed folder `/ga/32=data/sketch` (writers
-//! /ga,/gb, readers both people) and writes its board; bob reads it. Both
-//! subscribe to the folder's signals. Alice streams 120 cursor signals at
+//! Proves: alice creates the sealed space `/ga/32=data/sketch` (writer /gb,
+//! reader /gb) and writes its board; bob reads it. Both
+//! subscribe to the space's signals. Alice streams 120 cursor signals at
 //! 60 Hz while bob streams 120 of his: each person's signals deliver the
 //! other's through the relay (none off a local ring), at most 5 % lost by
 //! their counters, and the subscriber reads the last of each stream (a
@@ -32,16 +32,16 @@
 //! clock) and octets per packet (each person's stats, and the relay's
 //! capture) are reported. Every signal Interest the relay's capture saw —
 //! in each group at least as many as its member delivered — decodes as
-//! SignalSealed (a key id, a nonce, a ciphertext) and holds no folder
+//! SignalSealed (a key id, a nonce, a ciphertext) and holds no space
 //! name, device or key name, address or payload text. No content store —
 //! the relay's, alice's, bob's daemons — holds anything under the pushes'
 //! or the run headers' names (an erase of each prefix erases nothing), and
 //! neither person's store holds an entry with a `32=signal` component.
 //! Alice's live text, three drafts sent as signals, reaches bob as the
-//! newest draft, and no version came of any signal (bob's watch of the
-//! folder delivered none while they flowed); alice commits the text with
+//! newest draft, and no entry came of any signal (bob's watch of the
+//! space delivered none while they flowed); alice commits the text with
 //! one put, her next sequence, and bob's watch delivers exactly one new
-//! version, his board the committed text.
+//! entry, his board the committed text.
 
 use std::time::Duration;
 
@@ -49,7 +49,7 @@ use bytes::Bytes;
 use ndn_packet::NameComponent;
 use serde_json::Value;
 
-use super::data_host::{CONVERGE, Host, Put, erase_cs, includes, name, stored};
+use super::data_host::{CONVERGE, Host, erase_cs, name, stored};
 use super::shared::{People, people_through_relay};
 use crate::scenarios::*;
 use crate::step::{Abort, Cx, Scenario, StepResult};
@@ -61,11 +61,11 @@ const NAMESPACES: People = People {
 };
 /// The people's sync groups, which carry the pushes.
 const GROUPS: [&str; 2] = ["/ga/32=sync", "/gb/32=sync"];
-/// Alice's folder, the scope of the signals, and its board.
-const FOLDER: &str = "/ga/32=data/sketch";
-const BOARD: &str = "/ga/32=data/sketch/board";
-/// Both people write and read: the folder is sealed to them.
-const BOTH: &str = "writers=/ga,/gb readers=person:/ga,person:/gb";
+/// Alice's space, the scope of the signals, and its board's path.
+const SPACE: &str = "/ga/32=data/sketch";
+const BOARD: &str = "board";
+/// Both people write and read: the space is sealed to them.
+const BOTH: &str = "writers=/gb readers=/gb";
 /// The cursors: how many each person streams, how often.
 const CURSOR: &str = "cursor";
 const COUNT: u64 = 120;
@@ -82,7 +82,7 @@ const STREAMED: Duration = Duration::from_secs(30);
 /// in (the counts check; no verdict depends on it).
 const QUIET: Duration = Duration::from_secs(2);
 
-/// `ndn-data` options of a person's host: its store directory, no ring.
+/// `ndn-heap` options of a person's host: its store directory, no ring.
 fn options(cx: &Cx<'_>, node: &str) -> Vec<String> {
     vec![
         "--store".to_owned(),
@@ -110,11 +110,11 @@ fn received<'a>(
         .filter(move |s| s["sender"] == sender && s["address"] == address)
 }
 
-/// The versions `host`'s watches delivered since `from`.
+/// The entries `host`'s watches delivered since `from`.
 fn versions_since(host: &Host, from: usize) -> Vec<&Value> {
     host.watched[from..]
         .iter()
-        .filter_map(|w| w["change"].get("version"))
+        .filter_map(|w| w["change"].get("put"))
         .collect()
 }
 
@@ -158,9 +158,9 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let (alice_root, bob_root) = people_through_relay(sc, NAMESPACES)?;
 
     let (mut alice, mut bob, mut capture) = sc.step(
-        "start each person's data layer and signals (ndn-data, entries in a store directory, no \
+        "start each person's data layer and signals (ndn-heap, entries in a store directory, no \
          local ring) and, on the relay, its operator's capture of both people's sync groups \
-         (ndn-data with no device: signal-capture /ga/32=sync and /gb/32=sync)",
+         (ndn-heap with no device: signal-capture /ga/32=sync and /gb/32=sync)",
         |cx| {
             cx.concept("signals: live data that is never a version");
             let alice_options = options(cx, "alice");
@@ -181,21 +181,20 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let first = sc.step(
-        "alice shares the folder /ga/32=data/sketch (writers /ga,/gb, readers person:/ga, \
-         person:/gb: sealed to both) and writes its board; both watch the folder; bob reads the \
-         board",
+        "alice creates the space /ga/32=data/sketch (writer /gb, reader /gb: sealed to both) \
+         and writes its board; both watch the space; bob reads the board",
         |cx| {
-            alice.ok(cx, &format!("share_folder {FOLDER} {BOTH}"))?;
-            alice.ok(cx, &format!("watch {FOLDER}"))?;
-            bob.ok(cx, &format!("watch {FOLDER}"))?;
-            let first = alice.put_op(cx, BOARD, "(empty board)")?;
+            alice.ok(cx, &format!("create {SPACE} {BOTH}"))?;
+            alice.ok(cx, &format!("watch {SPACE}"))?;
+            bob.watch_when_ready(cx, SPACE)?;
+            let first = alice.put(cx, SPACE, BOARD, "(empty board)")?;
             wait_for(cx, "bob reads the board", CONVERGE, |cx| {
                 Ok(bob
-                    .state(cx, BOARD)?
-                    .is_some_and(|(at, v)| includes(&at, &first) && v["bytes"] == "(empty board)"))
+                    .item(cx, SPACE, BOARD)?
+                    .is_some_and(|item| first.is(&item["id"]) && item["text"] == "(empty board)"))
             })?;
             cx.evidence(&format!(
-                "alice shared {FOLDER}: {BOTH}; bob's board state includes {}",
+                "alice created {SPACE}: {BOTH}; bob's board is {}",
                 first.name
             ));
             Ok(first)
@@ -203,15 +202,15 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let (alice_from, bob_from, bob_watch_from) = sc.step(
-        "each subscribes to the folder's signals (asked again while NotReady: the record or the \
+        "each subscribes to the space's signals (asked again while NotReady: the record or the \
          sealed epoch's key not held yet)",
         |cx| {
-            let line = format!("signal-subscribe {FOLDER}");
+            let line = format!("signal-subscribe {SPACE}");
             for host in [&mut alice, &mut bob] {
                 let mut refusals = Vec::new();
                 wait_for(
                     cx,
-                    &format!("{} subscribes to {FOLDER}", host.node),
+                    &format!("{} subscribes to {SPACE}", host.node),
                     CONVERGE,
                     |cx| match host.call(cx, &line)? {
                         Ok(_) => Ok(true),
@@ -226,7 +225,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     },
                 )?;
                 cx.evidence(&format!(
-                    "{} subscribed to {FOLDER}{}",
+                    "{} subscribed to {SPACE}{}",
                     host.node,
                     refusals
                         .last()
@@ -251,7 +250,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             for host in [&mut alice, &mut bob] {
                 before.push(stats(cx, host)?);
             }
-            let line = format!("signal-stream {FOLDER} {CURSOR} {COUNT} {HZ}");
+            let line = format!("signal-stream {SPACE} {CURSOR} {COUNT} {HZ}");
             alice.send(cx, &line)?;
             bob.send(cx, &line)?;
             let mut sent = Vec::new();
@@ -300,7 +299,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 )?;
                 let mut seqs = Vec::new();
                 for s in received(host, from, sender, CURSOR) {
-                    if name(s["scope"].as_str().unwrap_or_default())? != name(FOLDER)?
+                    if name(s["scope"].as_str().unwrap_or_default())? != name(SPACE)?
                         || s["local"] != false
                     {
                         return Err(format!("{} received {s}", host.node));
@@ -430,7 +429,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             capture.drain(cx, QUIET)?;
             let plain: Vec<(String, Vec<u8>)> = [
-                (FOLDER, true),
+                (SPACE, true),
                 (alice_root.identity.as_str(), true),
                 (bob_root.identity.as_str(), true),
                 (alice.writer.as_str(), true),
@@ -500,7 +499,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             let prefixes = [
                 format!("{}/32=signal", GROUPS[0]),
                 format!("{}/32=signal", GROUPS[1]),
-                format!("{FOLDER}/32=signal"),
+                format!("{SPACE}/32=signal"),
             ];
             for node in ["relay", "alice", "bob"] {
                 for prefix in &prefixes {
@@ -545,7 +544,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         |cx| {
             cx.concept("commit: live work becomes a version through put");
             for draft in DRAFTS {
-                alice.ok(cx, &format!("signal-send {FOLDER} {TEXT} \"{draft}\""))?;
+                alice.ok(cx, &format!("signal-send {SPACE} {TEXT} \"{draft}\""))?;
             }
             let newest = DRAFTS[DRAFTS.len() - 1];
             let alice_writer = alice.writer.clone();
@@ -567,7 +566,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                  delivered no version since he subscribed"
             ));
             let mark = bob.watched.len();
-            let commit = alice.put_op(cx, BOARD, newest)?;
+            let commit = alice.put(cx, SPACE, BOARD, newest)?;
             if commit.seq != first.seq + 1 {
                 return Err(format!(
                     "alice's commit is seq {}, not {} (her version after the board's first)",
@@ -577,11 +576,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             wait_for(cx, "bob reads the committed text", CONVERGE, |cx| {
                 Ok(bob
-                    .state(cx, BOARD)?
-                    .is_some_and(|(at, v)| includes(&at, &commit) && v["bytes"] == newest))
+                    .item(cx, SPACE, BOARD)?
+                    .is_some_and(|item| commit.is(&item["id"]) && item["text"] == newest))
             })?;
             bob.watched_until(cx, "the commit in bob's watch", CONVERGE, |w| {
-                is_version(w, &commit)
+                commit.is(&w["change"]["put"]["id"])
             })?;
             bob.drain(cx, QUIET)?;
             let new = versions_since(&bob, mark);
@@ -600,9 +599,4 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     Ok(())
-}
-
-/// The watched change is version `v`.
-fn is_version(w: &Value, v: &Put) -> bool {
-    name(w["change"]["version"]["name"].as_str().unwrap_or_default()).ok() == name(&v.name).ok()
 }

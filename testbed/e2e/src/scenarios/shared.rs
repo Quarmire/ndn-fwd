@@ -1,6 +1,6 @@
 //! shared: two people share a document and a chat across their trusted
 //! prefixes through a community relay that carries them and cannot read
-//! them — the data layer (`ndn_data::Device`) on real daemons.
+//! them — the data layer (`ndn_heap::Node`) on real daemons.
 //!
 //! Topology, on the harness's `lo`: alice (10.200.0.1), bob (.2) and a
 //! relay (.3). The relay is the root device of /sr, listening for QUIC
@@ -30,33 +30,31 @@
 //! group with the multicast strategy while the namespace is in transit; on
 //! alice's and bob's daemons the trust-context library runs each held
 //! namespace's group with multicast.
-//! The data layer publishes each change about a collection into the group
-//! of its namespace and of every namespace its members record names (and,
-//! for a members record, its previous record's), so alice reaches bob in
-//! /sb's group and bob alice in /sa's.
+//! The data layer publishes each entry about a space into the space's sync
+//! group, `<owner's namespace>/32=sync/<rest of the space>`: alice's and bob's
+//! devices both take part in alice's.
 //!
-//! Each person's device hosts its data layer with `ndn-data` (see
+//! Each person's device hosts its data layer with `ndn-heap` (see
 //! [`super::data_host`]).
 //!
-//! Proves: alice shares a document (the newest register) and a chat (log
-//! rule) with bob as writer and reader; each reads what the other wrote, the chat by
-//! watch, every version named `<its device>/32=log/<collection>/seq=<n>`.
-//! The relay fetches the versions (in transit: it holds no context of /sa)
-//! and their Content is a sealed record (an epoch and a ciphertext, no
-//! fields) that holds neither plaintext. With UDP between bob and the relay
-//! cut, bob edits the document; alice removes bob as writer and reader.
-//! Once the link is back, alice's state never takes bob's offline edit
-//! (refused outside the cut: ask the owner) and keeps his earlier one;
-//! bob's watch reports his offline version withdrawn by the cut, and
-//! outside the audience his get of the document is sealed; alice's next
-//! version is sealed in a new epoch, which bob cannot open.
+//! Proves: alice creates a document space and a chat space with bob as writer
+//! and reader; each reads what the other wrote (the chat by watch, one path
+//! per message), every entry named `<its device>/32=log/<space>/seq=<n>`.
+//! The relay fetches the entries (in transit: it holds no context of /sa)
+//! and their Content is a sealed entry (an epoch and a ciphertext, no path
+//! in the clear) that holds neither plaintext. With UDP between bob and the
+//! relay cut, bob edits the document; alice removes bob (`change … remove`).
+//! Once the link is back, alice's value never takes bob's offline edit
+//! (refused outside the removal's tips: her watch tells of it) and keeps his
+//! earlier one; bob's watch reports his offline entry withdrawn, and outside
+//! the audience his get of the document is sealed; alice's next entry is
+//! sealed in a new epoch, which bob cannot open.
 
-use bytes::Bytes;
-use ndn_data::wire::{Record, decode_record};
+use ndn_heap::wire::{Body, Entry};
 use serde_json::Value;
 
 use super::data_host::{
-    CONVERGE, Host, Put, includes, key_locator, multicast_at, name, quic_face_to, rib, unanswered,
+    CONVERGE, Host, Put, content_at, key_locator, multicast_at, name, quic_face_to, rib, unanswered,
 };
 use super::direct_paths::link_list;
 use crate::scenarios::*;
@@ -72,12 +70,13 @@ const NAMESPACES: People = People {
     b: NS_B,
     relay: NS_R,
 };
-/// Alice's document and chat, in her namespace.
-const DOC: &str = "/sa/32=data/docs/plan";
+/// Alice's document and chat spaces, in her namespace, and their paths.
+const DOC: &str = "/sa/32=data/docs";
+const PLAN: &str = "plan";
 const CHAT: &str = "/sa/32=data/chat/ab";
 /// Bob writes and reads beside alice; then alice alone.
-const BOTH: &str = "writers=/sa,/sb readers=person:/sa,person:/sb";
-const ALICE_ONLY: &str = "writers=/sa readers=person:/sa";
+const BOTH: &str = "writers=/sb readers=/sb";
+const REMOVE_BOB: &str = "remove=/sb";
 /// The nftables table that cuts bob–relay.
 const CUT_TABLE: &str = "ndn_e2e_shared_cut";
 
@@ -87,9 +86,9 @@ pub const BOB: u8 = 2;
 pub const RELAY: u8 = 3;
 
 /// Link timing that notices a lost link within seconds.
-const FAST_LINKS: &str = "[links]\nkeep_alive_secs = 2\nidle_timeout_secs = 6\n";
+pub(super) const FAST_LINKS: &str = "[links]\nkeep_alive_secs = 2\nidle_timeout_secs = 6\n";
 /// Whatever reaches the other person goes through the relay.
-const NO_DIRECT: &str = "[direct]\nmembership = false\n";
+pub(super) const NO_DIRECT: &str = "[direct]\nmembership = false\n";
 
 /// The namespaces of two people (alice `a`, bob `b`) and of the community
 /// relay between them.
@@ -218,40 +217,11 @@ fn issuer_route(cx: &mut Cx<'_>, ns: &str, face: u64) -> StepResult<Option<Strin
     }))
 }
 
-/// `name` fetched through `node`'s daemon (which validates it against the
-/// trust context before delivering it, or forwards it unvalidated when its
-/// namespace is in transit there): its Content's octets.
-pub fn content_at(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<Vec<u8>> {
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-peek")
-        .args(["--face-socket", &sock, "--hex", name])
-        .timeout(std::time::Duration::from_secs(15));
-    let out = cx.exec(op);
-    if !out.success() {
-        return Err(format!(
-            "ndn-peek of {name} at {node}: {}: {}",
-            out.status_text(),
-            out.stderr.trim()
-        ));
-    }
-    let hex = out
-        .stdout
-        .lines()
-        .map(str::trim)
-        .rfind(|l| !l.is_empty() && l.len() % 2 == 0 && l.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| format!("ndn-peek --hex of {name} shows no content: {}", out.stdout))?;
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("{hex}: {e}")))
-        .collect()
-}
-
-/// The relay fetches version `v` and cannot read it: its Content holds
-/// none of `plain`, and it is a version record whose payload is sealed (an
-/// epoch and a ciphertext, no fields). The relay holds no context of /sa,
-/// so its daemon carried the version in transit, unvalidated. The epoch,
-/// as `<creator>/seq`.
+/// The relay fetches entry `v` and cannot read it: its Content holds none of
+/// `plain`, and it is an entry whose body is sealed (an epoch and a
+/// ciphertext, no path in the clear). The relay holds no context of /sa, so
+/// its daemon carried the entry in transit, unvalidated. The epoch, as
+/// `<creator>/seq`.
 fn relay_sees_sealed(cx: &mut Cx<'_>, v: &Put, plain: &[&str]) -> StepResult<String> {
     if let Some(version) = cx.version("relay", NS_A) {
         return Err(format!("the relay holds {NS_A} v{version}"));
@@ -267,39 +237,35 @@ fn relay_sees_sealed(cx: &mut Cx<'_>, v: &Put, plain: &[&str]) -> StepResult<Str
             v.name
         ));
     }
-    let record = decode_record(Bytes::from(bytes.clone()))
-        .map_err(|e| format!("{} at the relay: {e}", v.name))?;
-    let Record::Version(body) = record else {
-        return Err(format!("{} at the relay is no version record", v.name));
+    let entry = Entry::decode(&bytes).map_err(|e| format!("{} at the relay: {e}", v.name))?;
+    let Body::Sealed(sealed) = &entry.body else {
+        return Err(format!("{} travels unsealed: {:?}", v.name, entry.body));
     };
-    let Some(sealed) = &body.sealed else {
-        return Err(format!("{} travels unsealed: {body:?}", v.name));
-    };
-    if body.fields.fields().next().is_some() || !body.op.is_empty() {
-        return Err(format!("{} carries its fields beside its seal", v.name));
-    }
-    let epoch = format!("{}/seq={}", sealed.epoch.creator, sealed.epoch.seq.0);
+    let epoch = format!("{}/seq={}", sealed.epoch.creator, sealed.epoch.seq);
     cx.evidence(&format!(
         "relay fetched {} (KeyLocator {key}; in transit, unvalidated: the relay holds no context \
-         of {NS_A}): {} octets, a version record sealed in epoch {epoch}, {}-octet ciphertext, no \
-         fields; none of {plain:?} in it",
+         of {NS_A}): {} octets, an entry sealed in epoch {epoch}, {}-octet ciphertext, no path \
+         in the clear; none of {plain:?} in it",
         v.name,
         bytes.len(),
-        sealed.ciphertext.len()
+        sealed.sealed.len()
     ));
     Ok(epoch)
 }
 
-/// `get <what>` at `host` until it answers an error that does not say
-/// retry (a fetch that found no path yet does). The error.
-fn refused(cx: &mut Cx<'_>, host: &mut Host, what: &str) -> StepResult<Value> {
+/// `get <space> <path>` at `host` until it answers an error that does not say
+/// retry. The error.
+fn refused(cx: &mut Cx<'_>, host: &mut Host, space: &str, path: &str) -> StepResult<Value> {
     let mut last = Value::Null;
     wait_for(
         cx,
-        &format!("{} answers get {what} with a final error", host.node),
+        &format!(
+            "{} answers get {space} {path} with a final error",
+            host.node
+        ),
         CONVERGE,
-        |cx| match host.call(cx, &format!("get {what}"))? {
-            Ok(ok) => Err(format!("{} reads {what}: {ok}", host.node)),
+        |cx| match host.call(cx, &format!("get {space} {path}"))? {
+            Ok(ok) => Err(format!("{} reads {space} {path}: {ok}", host.node)),
             Err(e) if e["retry"] == true => Ok(false),
             Err(e) => {
                 last = e;
@@ -310,24 +276,26 @@ fn refused(cx: &mut Cx<'_>, host: &mut Host, what: &str) -> StepResult<Value> {
     Ok(last)
 }
 
-/// A verb's error saying the name is sealed to an audience this device is
+/// A verb's error saying the space is sealed to an audience this device is
 /// not in: ask the owner for a reading key.
 fn sealed_to(e: &Value) -> bool {
-    e["next"] == "ask-owner" && e["message"].as_str().is_some_and(|m| m.contains("sealed"))
+    e["next"] == "ask-owner"
+        && e["message"]
+            .as_str()
+            .is_some_and(|m| m.to_lowercase().contains("sealed"))
 }
 
-/// The watched change in `collection` that is a version holding `text` in
-/// field `field`.
-fn delivers(w: &Value, collection: &str, v: &Put, field: &str, text: &str) -> bool {
-    let version = &w["change"]["version"];
-    name(w["watch"].as_str().unwrap_or_default()).ok() == name(collection).ok()
-        && name(version["name"].as_str().unwrap_or_default()).ok() == name(&v.name).ok()
-        && version["payload"]["entry"][field] == text
+/// The watched change in `space` that is the put of entry `v` holding `text`.
+fn delivers(w: &Value, space: &str, v: &Put, text: &str) -> bool {
+    let put = &w["change"]["put"];
+    name(w["watch"].as_str().unwrap_or_default()).ok() == name(space).ok()
+        && v.is(&put["id"])
+        && put["text"] == text
 }
 
 /// Write `node`'s config and adopt `link` (an inline anchor link) with no
 /// daemon running.
-fn adopt_offline(cx: &mut Cx<'_>, node: &str, ns: &str, link: &str) -> StepResult<()> {
+pub(super) fn adopt_offline(cx: &mut Cx<'_>, node: &str, ns: &str, link: &str) -> StepResult<()> {
     let n = cx.w.node(node);
     std::fs::write(n.config(), n.render()).map_err(|e| format!("{}: {e}", n.config().display()))?;
     let op = cx
@@ -613,10 +581,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let (alice_root, bob_root) = people_through_relay(sc, NAMESPACES)?;
 
     let (mut alice, mut bob) = sc.step(
-        "start the data layer on alice's and bob's devices (ndn-data, each signing with its \
+        "start the data layer on alice's and bob's devices (ndn-heap, each signing with its \
          root device's key)",
         |cx| {
-            cx.concept("data layer host (ndn-data)");
+            cx.concept("data layer host (ndn-heap)");
             let alice = Host::start(cx, "alice", &alice_root.identity)?;
             let bob = Host::start(cx, "bob", &bob_root.identity)?;
             for (h, root) in [(&alice, &alice_root), (&bob, &bob_root)] {
@@ -636,94 +604,88 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "bob watches alice's document and chat; alice shares the document (merge) and the chat \
-         (log) with writers /sa,/sb and readers person:/sa,person:/sb, and watches the chat",
+        "alice creates the document and the chat with writers /sb and readers /sb (owner \
+         alone otherwise), and watches both; bob watches them",
         |cx| {
-            bob.ok(cx, &format!("watch {DOC}"))?;
-            bob.ok(cx, &format!("watch {CHAT}"))?;
-            alice.ok(cx, &format!("share {DOC} rule=merge {BOTH}"))?;
-            alice.ok(cx, &format!("share {CHAT} rule=log {BOTH}"))?;
+            alice.ok(cx, &format!("create {DOC} {BOTH}"))?;
+            alice.ok(cx, &format!("create {CHAT} {BOTH}"))?;
+            alice.ok(cx, &format!("watch {DOC}"))?;
             alice.ok(cx, &format!("watch {CHAT}"))?;
-            cx.evidence(&format!(
-                "alice shared {DOC} (merge) and {CHAT} (log): {BOTH}"
-            ));
+            bob.watch_when_ready(cx, DOC)?;
+            bob.watch_when_ready(cx, CHAT)?;
+            cx.evidence(&format!("alice created {DOC} and {CHAT}: {BOTH}"));
             Ok(())
         },
     )?;
     let (draft1, hi_bob) = sc.step(
-        "alice writes the document \"draft 1\" and the chat text=hi bob",
+        "alice writes the document \"draft 1\" and the chat message m1 \"hi bob\"",
         |cx| {
             Ok((
-                alice.put_op(cx, DOC, "draft 1")?,
-                alice.put(cx, CHAT, "text=\"hi bob\"")?,
+                alice.put(cx, DOC, PLAN, "draft 1")?,
+                alice.put(cx, CHAT, "m1", "hi bob")?,
             ))
         },
     )?;
     sc.step(
-        "bob reads the document until it holds draft 1; his chat watch delivers hi bob, the \
-         chat's newest",
+        "bob reads the document until it holds draft 1; his chat watch delivers hi bob",
         |cx| {
             wait_for(cx, "bob holds draft 1", CONVERGE, |cx| {
                 Ok(bob
-                    .state(cx, DOC)?
-                    .is_some_and(|(at, v)| includes(&at, &draft1) && v["bytes"] == "draft 1"))
+                    .item(cx, DOC, PLAN)?
+                    .is_some_and(|item| draft1.is(&item["id"]) && item["text"] == "draft 1"))
             })?;
-            cx.evidence("bob's document state includes draft 1, value \"draft 1\"");
+            cx.evidence("bob's document is draft 1's entry, \"draft 1\"");
             let w = bob.watched_until(cx, "hi bob in bob's chat watch", CONVERGE, |w| {
-                delivers(w, CHAT, &hi_bob, "text", "hi bob")
+                delivers(w, CHAT, &hi_bob, "hi bob")
             })?;
             cx.evidence(&format!(
                 "bob's chat watch delivered {}",
-                w["change"]["version"]["name"]
+                w["change"]["put"]["id"]
             ));
-            let newest = bob.ok(cx, &format!("get {CHAT}"))?;
-            if newest["version"]["payload"]["entry"]["text"] != "hi bob" {
-                return Err(format!("bob's chat's newest is {newest}, not hi bob"));
+            let item = bob
+                .item(cx, CHAT, "m1")?
+                .ok_or("bob reads no chat message m1")?;
+            if item["text"] != "hi bob" {
+                return Err(format!("bob's chat message m1 is {item}, not hi bob"));
             }
-            cx.evidence(&format!(
-                "bob's get of the chat (log rule): the newest version {}",
-                newest["version"]["name"]
-            ));
+            cx.evidence(&format!("bob's get of the chat message m1: {item}"));
             Ok(())
         },
     )?;
     let looks_good = sc.step(
-        "bob writes the document \"looks good\" and the chat text=hi alice; alice holds both",
+        "bob writes the document \"looks good\" and the chat message m2 \"hi alice\"; alice \
+         holds both",
         |cx| {
-            let looks_good = bob.put_op(cx, DOC, "looks good")?;
-            let hi_alice = bob.put(cx, CHAT, "text=\"hi alice\"")?;
-            let mut last = Value::Null;
+            let looks_good = bob.put(cx, DOC, PLAN, "looks good")?;
+            let hi_alice = bob.put(cx, CHAT, "m2", "hi alice")?;
             wait_for(cx, "alice holds looks good", CONVERGE, |cx| {
-                Ok(alice.state(cx, DOC)?.is_some_and(|(at, v)| {
-                    let done = includes(&at, &looks_good) && includes(&at, &draft1);
-                    last = v;
-                    done
-                }))
+                alice.holds(cx, DOC, PLAN, &looks_good)
             })?;
-            // Bob wrote after reading draft 1, so his version supersedes it:
+            // Bob wrote after reading draft 1, so his entry supersedes it:
             // the one head is looks good.
-            if last["bytes"] != "looks good" {
-                return Err(format!("alice's document value is {last}"));
+            let item = alice
+                .item(cx, DOC, PLAN)?
+                .ok_or("alice lost her document")?;
+            if item["text"] != "looks good" {
+                return Err(format!("alice's document is {item}"));
             }
-            cx.evidence(&format!(
-                "alice's document state includes bob's edit: {last}"
-            ));
+            cx.evidence(&format!("alice's document is bob's edit: {item}"));
             let w = alice.watched_until(cx, "hi alice in alice's chat watch", CONVERGE, |w| {
-                delivers(w, CHAT, &hi_alice, "text", "hi alice")
+                delivers(w, CHAT, &hi_alice, "hi alice")
             })?;
             cx.evidence(&format!(
                 "alice's chat watch delivered {}",
-                w["change"]["version"]["name"]
+                w["change"]["put"]["id"]
             ));
             Ok(looks_good)
         },
     )?;
     let epoch1 = sc.step(
-        "the relay fetches alice's versions through its own daemon, which carries them in transit \
-         (unvalidated: it holds no context of /sa), and cannot read them: each is a sealed record \
-         without its plaintext",
+        "the relay fetches alice's entries through its own daemon, which carries them in \
+         transit (unvalidated: it holds no context of /sa), and cannot read them: each is a \
+         sealed entry without its plaintext",
         |cx| {
-            cx.concept("sealed collections: relays carry ciphertext only");
+            cx.concept("sealed spaces: relays carry ciphertext only");
             let plain = ["draft 1", "hi bob"];
             let epoch = relay_sees_sealed(cx, &draft1, &plain)?;
             relay_sees_sealed(cx, &hi_bob, &plain)?;
@@ -751,30 +713,28 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let offline = sc.step(
-        "offline, bob writes the document \"offline edit\"; his own state holds it",
+        "offline, bob writes the document \"offline edit\"; his own value holds it",
         |cx| {
-            let offline = bob.put_op(cx, DOC, "offline edit")?;
-            let (at, value) = bob
-                .state(cx, DOC)?
-                .ok_or("bob holds no state of the document")?;
-            if !includes(&at, &offline) || value["bytes"] != "offline edit" {
-                return Err(format!("bob's state offline is at {at}, value {value}"));
+            let offline = bob.put(cx, DOC, PLAN, "offline edit")?;
+            let item = bob
+                .item(cx, DOC, PLAN)?
+                .ok_or("bob holds no value of the document")?;
+            if !offline.is(&item["id"]) || item["text"] != "offline edit" {
+                return Err(format!("bob's value offline is {item}"));
             }
-            cx.evidence(&format!("bob offline: at {at}, value {value}"));
+            cx.evidence(&format!("bob offline: {item}"));
             unanswered(cx, "alice", &offline.name)?;
             cx.evidence(&format!("alice's daemon gets no {}", offline.name));
             Ok(offline)
         },
     )?;
     sc.step(
-        "alice removes bob from the document and the chat: writers /sa, readers person:/sa",
+        "alice removes bob from the document and the chat (writers and readers: /sa alone)",
         |cx| {
-            cx.concept("removal cuts and reseal");
-            alice.ok(cx, &format!("share {DOC} rule=merge {ALICE_ONLY}"))?;
-            alice.ok(cx, &format!("share {CHAT} rule=log {ALICE_ONLY}"))?;
-            cx.evidence(&format!(
-                "alice shared {DOC} and {CHAT} again: {ALICE_ONLY}"
-            ));
+            cx.concept("removal tips and reseal");
+            alice.ok(cx, &format!("change {DOC} {REMOVE_BOB}"))?;
+            alice.ok(cx, &format!("change {CHAT} {REMOVE_BOB}"))?;
+            cx.evidence(&format!("alice removed /sb from {DOC} and {CHAT}"));
             Ok(())
         },
     )?;
@@ -784,47 +744,43 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         Ok(())
     })?;
     sc.step(
-        "alice refuses bob's offline edit (outside the cut: ask the owner) and keeps looks good",
+        "alice refuses bob's offline edit (outside the removal's tips: her watch tells of it) \
+         and keeps looks good",
         |cx| {
-            let e = refused(cx, &mut alice, &offline.name)?;
-            if e["next"] != "ask-owner" {
-                return Err(format!("alice's get of {} answers {e}", offline.name));
-            }
-            cx.evidence(&format!(
-                "alice> get {}: {} (next: {})",
-                offline.name, e["message"], e["next"]
-            ));
-            let (at, value) = alice
-                .state(cx, DOC)?
-                .ok_or("alice holds no state of her document")?;
-            // Rule R (c): nothing the removed writer signed after the cut
-            // appears in the value.
-            if includes(&at, &offline)
-                || !includes(&at, &looks_good)
-                || value["bytes"] != "looks good"
+            let w = alice.watched_until(cx, "the offline edit refused", CONVERGE, |w| {
+                let alert = &w["change"]["alert"];
+                name(w["watch"].as_str().unwrap_or_default()).ok() == name(DOC).ok()
+                    && (alert["kind"] == "outside-cut" || alert["kind"] == "refused")
+                    && offline.is(&alert["id"])
+            })?;
+            cx.evidence(&format!("alice's document watch: {}", w["change"]));
+            // Nothing the removed writer signed above the tips appears in
+            // the value.
+            let item = alice
+                .item(cx, DOC, PLAN)?
+                .ok_or("alice lost her document")?;
+            if offline.is(&item["id"])
+                || !looks_good.is(&item["id"])
+                || item["text"] != "looks good"
             {
-                return Err(format!("alice's document state is at {at}, value {value}"));
+                return Err(format!("alice's document is {item}"));
             }
-            cx.evidence(&format!("alice's document state: at {at}, value {value}"));
+            cx.evidence(&format!("alice's document: {item}"));
             Ok(())
         },
     )?;
     sc.step(
-        "bob's watch reports his offline version withdrawn by alice's cut of /sb; outside the \
+        "bob's watch reports his offline entry withdrawn by alice's removal; outside the \
          audience now, his get of the document is sealed (ask the owner)",
         |cx| {
             let w = bob.watched_until(cx, "the offline edit withdrawn", CONVERGE, |w| {
-                let withdrawn = &w["change"]["withdrawn"];
                 name(w["watch"].as_str().unwrap_or_default()).ok() == name(DOC).ok()
-                    && withdrawn["id"]["writer"] == offline.writer.as_str()
-                    && withdrawn["id"]["seq"] == offline.seq
-                    && name(withdrawn["cut_of"].as_str().unwrap_or_default()).ok()
-                        == name(NS_B).ok()
+                    && offline.is(&w["change"]["withdrawn"]["id"])
             })?;
             cx.evidence(&format!("bob's document watch: {}", w["change"]));
-            match bob.call(cx, &format!("get {DOC}"))? {
+            match bob.call(cx, &format!("get {DOC} {PLAN}"))? {
                 Err(e) if sealed_to(&e) => cx.evidence(&format!(
-                    "bob> get {DOC}: {} (next: {})",
+                    "bob> get {DOC} {PLAN}: {} (next: {})",
                     e["message"], e["next"]
                 )),
                 other => return Err(format!("bob's get of the document answers {other:?}")),
@@ -836,34 +792,26 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "alice writes the document \"draft 2\" in a new epoch; bob cannot read it (sealed: ask \
          the owner)",
         |cx| {
-            let draft2 = alice.put_op(cx, DOC, "draft 2")?;
-            let (_, value) = alice
-                .state(cx, DOC)?
-                .ok_or("alice holds no state of her document")?;
-            if value["bytes"] != "draft 2" {
-                return Err(format!("alice's document value is {value}"));
+            let draft2 = alice.put(cx, DOC, PLAN, "draft 2")?;
+            let item = alice
+                .item(cx, DOC, PLAN)?
+                .ok_or("alice lost her document")?;
+            if !draft2.is(&item["id"]) || item["text"] != "draft 2" {
+                return Err(format!("alice's document is {item}"));
             }
             let epoch2 = relay_sees_sealed(cx, &draft2, &["draft 2"])?;
             if epoch2 == epoch1 {
                 return Err(format!("draft 2 is sealed in draft 1's epoch {epoch1}"));
             }
             cx.evidence(&format!("draft 2's epoch {epoch2}, draft 1's {epoch1}"));
-            let e = refused(cx, &mut bob, &draft2.name)?;
+            let e = refused(cx, &mut bob, DOC, PLAN)?;
             if !sealed_to(&e) {
-                return Err(format!("bob's get of {} answers {e}", draft2.name));
+                return Err(format!("bob's get of the document answers {e}"));
             }
-            let message = &e["message"];
             cx.evidence(&format!(
-                "bob> get {}: {message} (next: {})",
-                draft2.name, e["next"]
+                "bob> get {DOC} {PLAN}: {} (next: {})",
+                e["message"], e["next"]
             ));
-            match bob.call(cx, &format!("get {DOC}"))? {
-                Err(e) if sealed_to(&e) => cx.evidence(&format!(
-                    "bob> get {DOC}: {} (next: {})",
-                    e["message"], e["next"]
-                )),
-                other => return Err(format!("bob's get of the document answers {other:?}")),
-            }
             Ok(())
         },
     )?;

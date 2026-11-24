@@ -1,7 +1,7 @@
 //! stolen: a device's key is stolen; the owner reports the loss, ends the
 //! key with a revocation cut bounded by when the device was lost,
 //! re-admits the honest note the cut left out, and nothing the thief wrote
-//! stays anywhere — the data layer (`ndn_data::Device`) and the root flow
+//! stays anywhere — the data layer (`ndn_heap::Node`) and the root flow
 //! on real daemons (data-layer slice 5, "keys over time").
 //!
 //! Topology, on the harness's `lo`: laptop (10.200.0.1, the root device of
@@ -11,7 +11,7 @@
 //! phone enroll by invite over a UDP face that routes `/st` to the laptop
 //! (the only `[[route]]` any config holds; it also carries their trust
 //! context refreshes, every second); every device's links notice a lost
-//! peer within seconds. Each device hosts its data layer with `ndn-data`
+//! peer within seconds. Each device hosts its data layer with `ndn-heap`
 //! (see [`super::data_host`]); the phone's keeps its entries in a store
 //! directory too (`--store`), as a phone keeps its data on its disk.
 //!
@@ -24,46 +24,44 @@
 //! until the key is revoked. It dials the tab and the laptop; the tab
 //! listens where the thief's network reaches it, the laptop only while it
 //! is open at a café (closed at home otherwise), and the phone is on a
-//! flight. Its host runs a week behind (`--clock-offset-ms`), so what it
-//! writes claims to predate the revocation; it continues the phone's log
-//! from the image (the seqs after the phone's last one).
+//! flight. Its host runs a week behind (`--clock-offset-ms`, which changes only
+//! the times a device reads, never what any device accepts); it continues the
+//! phone's log from the image (the seqs after the phone's last one).
 //!
 //! Proves: the phone's notes reach every device; apart, the phone writes a
-//! note nobody sees, and the thief's backdated notes reach the tab, which
-//! takes them (the key is not revoked yet). Opened at the café, the laptop
-//! — the root device — takes them too, over the thief's link: after the
-//! time the phone was lost. The owner reports the loss there (`ndn-data`
-//! `suspect <phone key> <when it was lost>`): the laptop takes nothing new
-//! of the key from then on (a later thief note is refused there as
-//! suspected, while the tab takes it) and keeps what it held. The owner
-//! takes the cut from what the laptop first verified before the loss (`cut
-//! <phone key> <file>`, bounded by the suspected-since time): runs that
-//! cover the phone's notes and none of the thief's or the offline note,
-//! with the thief's notes the laptop took after the loss left out and
-//! listed by full name. A cut of a key neither suspected nor bounded is
-//! refused; so are revocations with a cut of another key, with a cut file
-//! made without a bound, without an answer to "When did you lose it?"
-//! (`--lost`), or with a loss time before the cut's bound — each signs
-//! nothing. Back home, the owner revokes the phone with its cut (`ndn-fwd
-//! revoke /st/member/phone --cut <file> --lost <when>`), which lists the
-//! left-out entries; the laptop, following its daemon's trust stream,
-//! withdraws the thief's notes it took. The thief writes once more after
-//! the revocation, dated before it; the tab, which has not heard of the
-//! revocation yet, takes that too. Once the laptop is back and the tab
+//! note nobody sees, and the thief's notes reach the tab, which takes them
+//! (the key is not revoked yet). Opened at the café, the laptop — the root
+//! device — takes them too, over the thief's link: after the time the phone
+//! was lost. The owner reports the loss there (`ndn-heap` `suspect <phone key>
+//! <when it was lost>`): the laptop takes nothing new of the key from then
+//! on (a later thief note is refused there as suspected: its watch tells of
+//! it; the tab takes it) and keeps what it held. The owner takes the cut from
+//! what the laptop first verified before the loss (`cut <phone key> <file>`,
+//! bounded by the suspected-since time): runs that cover the phone's notes
+//! and none of the thief's or the offline note, with the thief's notes the
+//! laptop took after the loss left out and listed by full name. A cut of a
+//! key neither suspected nor bounded is refused; so are revocations with a
+//! cut of another key, with a cut file made without a bound, without an
+//! answer to "When did you lose it?" (`--lost`), or with a loss time before
+//! the cut's bound — each signs nothing. Back home, the owner revokes the
+//! phone with its cut (`ndn-fwd revoke /st/member/phone --cut <file> --lost
+//! <when>`), which lists the left-out entries; the laptop, following its
+//! daemon's trust stream, withdraws the thief's notes it took. The thief
+//! writes once more after the revocation; the tab, which has not heard of
+//! the revocation yet, takes that too. Once the laptop is back and the tab
 //! holds the new version, the tab withdraws every thief note (each reported
-//! to its watch as withdrawn by the cut of the phone's key; a `get` of each
-//! is refused outside the cut, ask the owner) while the phone's notes stay
-//! at every honest device, and the thief, no longer linked, reaches no one
-//! with a further write. The phone, back, adopts the revocation and reports
-//! its own offline note as refused, with its full name and digest; it
-//! enrolls again (a new key) and the owner re-admits that exact version
-//! (`ndn-fwd readmit <phone key> <full name>`; a name without its digest is
-//! refused): every daemon delivers that exact version by its full name (the
-//! phone's host serves it; the laptop's and the tab's daemons validate it,
-//! signed by the revoked key, as in the cut now), and it appears at the
-//! laptop and the tab, while no honest device answers any thief note (not
-//! even at the offline note's name, where the thief wrote other bytes) and
-//! the thief's notes the cut left out stay refused.
+//! to its watch as withdrawn by the cut of the phone's key, none left as the
+//! value) while the phone's notes stay at every honest device, and the
+//! thief, no longer linked, reaches no one with a further write. The phone,
+//! back, adopts the revocation and reports its own offline note as refused,
+//! with its full name and digest; it enrolls again (a new key) and the owner
+//! re-admits that exact entry (`ndn-fwd readmit <phone key> <full name>`; a
+//! name without its digest is refused): every daemon delivers that exact
+//! entry by its full name (the phone's host serves it; the laptop's and the
+//! tab's daemons validate it, signed by the revoked key, as in the cut now),
+//! and it appears at the laptop and the tab, while no honest device reads
+//! any thief note as its value and the thief's notes the cut left out stay
+//! refused.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -73,15 +71,17 @@ use ndn_cert::CutFile;
 use serde_json::Value;
 
 use super::data_host::{
-    CONVERGE, Host, Put, carries_group, delivered, includes, name, quic_face_to, rib, unanswered,
+    CONVERGE, Host, Put, carries_group, delivered, name, quic_face_to, rib, unanswered,
 };
 use crate::scenarios::*;
 use crate::step::{Abort, Cx, Scenario, StepResult};
 use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
 
 const NS: &str = "/st";
-/// The note collection, in the person's namespace (data-layer spec §3).
-const NOTES: &str = "/st/32=data/notes/trip";
+/// The notes space, in the person's namespace (heap spec §2), and the
+/// register path every device writes in it.
+const SPACE: &str = "/st/32=data/notes";
+const TRIP: &str = "trip";
 /// The laptop's device name: `ndn-fwd init --device laptop` on /st.
 const LAPTOP: &str = "/st/admin/laptop";
 const TAB: &str = "/st/member/tab";
@@ -157,28 +157,18 @@ fn peer(device: &str, host: u8) -> PeerCfg {
     }
 }
 
-/// The bytes of version `v` as `host` reads it by name: `Ok(text)` when it
-/// answers a version, `Err(error)` when it answers an error.
-fn text_at(cx: &mut Cx<'_>, host: &mut Host, v: &Put) -> StepResult<Result<String, Value>> {
-    Ok(host.call(cx, &format!("get {}", v.name))?.map(|ok| {
-        ok["version"]["bytes"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned()
-    }))
-}
-
-/// `host` answers `get` of thief version `v` with no thief text: an error,
-/// or (at a name the thief shares with an honest version) the honest one.
-fn never_answers(cx: &mut Cx<'_>, host: &mut Host, v: &Put) -> StepResult<String> {
-    match text_at(cx, host, v)? {
-        Ok(text) if THIEF_TEXTS.contains(&text.as_str()) => Err(format!(
-            "{} answers the thief's {} with {text:?}; expected a refusal (or the honest \
-             version at that name)",
-            host.node, v.name
-        )),
-        Ok(text) => Ok(format!("answers the honest {text:?}")),
-        Err(e) => Ok(format!("error, next {}", e["next"])),
+/// `host` reads neither thief entry `v` nor any thief text as its value of
+/// `TRIP`: an error when it does, else what it reads (an honest entry).
+fn never_value(cx: &mut Cx<'_>, host: &mut Host, v: &Put) -> StepResult<String> {
+    match host.item(cx, SPACE, TRIP)? {
+        Some(item) if v.is(&item["id"]) || THIEF_TEXTS.iter().any(|t| item["text"] == *t) => {
+            Err(format!(
+                "{} reads {item} at {TRIP}; expected no thief entry ({}) to be its value",
+                host.node, v.name
+            ))
+        }
+        Some(item) => Ok(format!("reads the honest {}", item["text"])),
+        None => Ok("reads nothing".into()),
     }
 }
 
@@ -209,9 +199,9 @@ fn is_full_name_of(full: &str, v: &Put) -> StepResult<bool> {
 }
 
 /// Whether the cut's answer (`ranges`: `[{prefix, runs: [[first, last]]}]`)
-/// accepts `seq` of the phone's entries in `NOTES`.
+/// accepts `seq` of the phone's entries in `SPACE`.
 fn cut_covers(cut: &Value, seq: u64) -> StepResult<bool> {
-    let prefix = name(&format!("{PHONE}/32=log{NOTES}"))?;
+    let prefix = name(&format!("{PHONE}/32=log{SPACE}"))?;
     let mut covered = false;
     for r in cut["ranges"].as_array().into_iter().flatten() {
         if name(r["prefix"].as_str().unwrap_or_default())? != prefix {
@@ -225,38 +215,22 @@ fn cut_covers(cut: &Value, seq: u64) -> StepResult<bool> {
 }
 
 /// `host` withdraws each of `notes` (written with `key`, outside its cut):
-/// its watch reports each withdrawn by the cut of `key`, its `get` of each
-/// is refused outside the cut (ask the owner), and it reports each refused
-/// by its full name with digest.
+/// its watch reports each withdrawn by the cut of `key`, none is its value of
+/// `TRIP` any more, and it reports each refused by its full name with digest.
 fn withdraws(cx: &mut Cx<'_>, host: &mut Host, notes: &[&Put], key: &str) -> StepResult<()> {
     for v in notes {
         let w = host.watched_until(cx, &format!("{} withdrawn", v.name), CONVERGE, |w| {
             let d = &w["change"]["withdrawn"];
-            d["id"]["writer"] == v.writer.as_str()
-                && d["id"]["seq"] == v.seq
-                && name(d["cut_of"].as_str().unwrap_or_default()).ok() == name(key).ok()
+            v.is(&d["id"]) && name(d["cut_of"].as_str().unwrap_or_default()).ok() == name(key).ok()
         })?;
         cx.evidence(&format!("{} watch: {}", host.node, w["change"]));
-        let mut last = Value::Null;
         let node = host.node.clone();
-        wait_for(
-            cx,
-            &format!("{node} refuses {} outside the cut", v.name),
-            CONVERGE,
-            |cx| {
-                Ok(match text_at(cx, host, v)? {
-                    Err(e) => {
-                        let done = e["next"] == "ask-owner"
-                            && name(e["outside_cut"]["of"].as_str().unwrap_or_default()).ok()
-                                == name(key).ok();
-                        last = e;
-                        done
-                    }
-                    Ok(_) => false,
-                })
-            },
-        )?;
-        cx.evidence(&format!("{node} get {}: {}", v.name, last["outside_cut"]));
+        if host.holds(cx, SPACE, TRIP, v)? {
+            return Err(format!(
+                "{node} still reads {} as its value after withdrawing it",
+                v.name
+            ));
+        }
     }
     let refused = refused_names(cx, host, key)?;
     for v in notes {
@@ -425,7 +399,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let (mut laptop, mut tab, mut phone) = sc.step(
         "start the data layer on each device; the phone's keeps its entries on its disk too",
         |cx| {
-            cx.concept("data layer host (ndn-data)");
+            cx.concept("data layer host (ndn-heap)");
             let laptop = Host::start(cx, "laptop", &root.identity)?;
             let tab = Host::start(cx, "tab", TAB)?;
             let phone = Host::start_with(
@@ -451,13 +425,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let phone_key = phone.writer.clone();
 
     let day1 = sc.step(
-        "the laptop shares the notes and writes \"day 1\"; every device watches them",
+        "the laptop creates the notes space (owner alone) and writes \"day 1\"; every device \
+         watches it",
         |cx| {
-            laptop.ok(cx, &format!("share {NOTES}"))?;
-            let day1 = laptop.put_op(cx, NOTES, "day 1")?;
-            laptop.ok(cx, &format!("watch {NOTES}"))?;
-            tab.ok(cx, &format!("watch {NOTES}"))?;
-            phone.ok(cx, &format!("watch {NOTES}"))?;
+            laptop.ok(cx, &format!("create {SPACE}"))?;
+            let day1 = laptop.put(cx, SPACE, TRIP, "day 1")?;
+            laptop.ok(cx, &format!("watch {SPACE}"))?;
+            tab.watch_when_ready(cx, SPACE)?;
+            phone.watch_when_ready(cx, SPACE)?;
             Ok(day1)
         },
     )?;
@@ -465,24 +440,21 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "the phone writes two notes; the laptop and the tab hold them",
         |cx| {
             wait_for(cx, "the phone holds day 1", SHORT, |cx| {
-                Ok(phone
-                    .state(cx, NOTES)?
-                    .is_some_and(|(at, _)| includes(&at, &day1)))
+                phone.holds(cx, SPACE, TRIP, &day1)
             })?;
-            let n1 = phone.put_op(cx, NOTES, "flight at nine")?;
-            let n2 = phone.put_op(cx, NOTES, "trip")?;
+            let n1 = phone.put(cx, SPACE, TRIP, "flight at nine")?;
+            let n2 = phone.put(cx, SPACE, TRIP, "trip")?;
             for host in [&mut laptop, &mut tab] {
                 wait_for(
                     cx,
                     &format!("{} holds the phone's two notes", host.node),
                     CONVERGE,
-                    |cx| {
-                        Ok(host
-                            .state(cx, NOTES)?
-                            .is_some_and(|(at, _)| includes(&at, &n1) && includes(&at, &n2)))
-                    },
+                    |cx| host.holds(cx, SPACE, TRIP, &n2),
                 )?;
-                cx.evidence(&format!("{} holds {} and {}", host.node, n1.name, n2.name));
+                cx.evidence(&format!(
+                    "{} reads {}, which supersedes {}: it holds both",
+                    host.node, n2.name, n1.name
+                ));
             }
             Ok((n1, n2))
         },
@@ -542,7 +514,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let n3 = sc.step(
         "on the flight, the phone writes a note that nobody sees",
         |cx| {
-            let n3 = phone.put_op(cx, NOTES, OFFLINE_TEXT)?;
+            let n3 = phone.put(cx, SPACE, TRIP, OFFLINE_TEXT)?;
             unanswered(cx, "laptop", &n3.name)?;
             unanswered(cx, "tab", &n3.name)?;
             cx.evidence(&format!(
@@ -600,8 +572,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "the thief writes two notes as the phone, continuing its log from the image; the tab \
          takes them (the key is not revoked yet), the laptop hears nothing",
         |cx| {
-            let t1 = thief.put_op(cx, NOTES, THIEF_TEXTS[0])?;
-            let t2 = thief.put_op(cx, NOTES, THIEF_TEXTS[1])?;
+            let t1 = thief.put(cx, SPACE, TRIP, THIEF_TEXTS[0])?;
+            let t2 = thief.put(cx, SPACE, TRIP, THIEF_TEXTS[1])?;
             if t1.seq <= n2.seq {
                 return Err(format!(
                     "the thief wrote seq {}, expected it past the phone's seq {} (the log \
@@ -609,25 +581,18 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     t1.seq, n2.seq
                 ));
             }
-            if name(&t1.name)? == name(&n3.name)? {
-                cx.evidence(&format!(
-                    "the thief's first note and the phone's offline note share the name {} \
-                     (other bytes)",
-                    t1.name
-                ));
-            }
-            for (v, text) in [(&t1, THIEF_TEXTS[0]), (&t2, THIEF_TEXTS[1])] {
-                wait_for(
-                    cx,
-                    &format!("the tab reads {} as the thief wrote it", v.name),
-                    CONVERGE,
-                    |cx| Ok(text_at(cx, &mut tab, v)?.is_ok_and(|t| t == text)),
-                )?;
-            }
-            let read = tab.version(cx, NOTES, &t1)?;
+            // The thief's second note supersedes its first, so the tab reads
+            // the second as its value only holding both.
+            wait_for(
+                cx,
+                &format!("the tab reads {} as the thief wrote it", t2.name),
+                CONVERGE,
+                |cx| tab.holds(cx, SPACE, TRIP, &t2),
+            )?;
             cx.evidence(&format!(
-                "the tab took {} (dated_ms {}, the thief's clock a week behind)",
-                t1.name, read["dated_ms"]
+                "the tab took {} and {}: its value is the second, which supersedes the first \
+                 (the thief's clock a week behind changes nothing it accepts)",
+                t1.name, t2.name
             ));
             unanswered(cx, "laptop", &t2.name)?;
             cx.evidence("the laptop gets none of the thief's notes");
@@ -658,14 +623,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 "the laptop admits the thief's link as {PHONE}: {}",
                 found.unwrap_or_default()
             ));
-            for (v, text) in [(&t1, THIEF_TEXTS[0]), (&t2, THIEF_TEXTS[1])] {
-                wait_for(
-                    cx,
-                    &format!("the laptop reads {} as the thief wrote it", v.name),
-                    CONVERGE,
-                    |cx| Ok(text_at(cx, &mut laptop, v)?.is_ok_and(|t| t == text)),
-                )?;
-            }
+            wait_for(
+                cx,
+                &format!("the laptop reads {} as the thief wrote it", t2.name),
+                CONVERGE,
+                |cx| laptop.holds(cx, SPACE, TRIP, &t2),
+            )?;
             cx.evidence(&format!(
                 "the laptop took {} and {}, after the loss at {lost_ms} ms",
                 t1.name, t2.name
@@ -694,48 +657,42 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
     let ts = sc.step(
         "after the report, the thief writes again: the tab takes it; the laptop takes nothing \
-         new of the suspected key (its get is refused, suspected) and keeps what it took before",
+         new of the suspected key (its watch tells it refused, suspected) and keeps what it \
+         took before",
         |cx| {
-            let ts = thief.put_op(cx, NOTES, THIEF_TEXTS[2])?;
+            let ts = thief.put(cx, SPACE, TRIP, THIEF_TEXTS[2])?;
             wait_for(
                 cx,
                 &format!("the tab reads {} as the thief wrote it", ts.name),
                 CONVERGE,
-                |cx| Ok(text_at(cx, &mut tab, &ts)?.is_ok_and(|t| t == THIEF_TEXTS[2])),
+                |cx| tab.holds(cx, SPACE, TRIP, &ts),
             )?;
-            match text_at(cx, &mut laptop, &ts)? {
-                Err(e)
-                    if name(e["suspected"]["key"].as_str().unwrap_or_default()).ok()
-                        == name(&phone_key).ok() =>
-                {
-                    cx.evidence(&format!(
-                        "laptop get {}: refused, suspected {} (next {})",
-                        ts.name, e["suspected"], e["next"]
-                    ));
-                }
-                other => {
-                    return Err(format!(
-                        "the laptop answers get {} with {other:?}; expected a refusal naming the \
-                         suspected key {phone_key}",
-                        ts.name
-                    ));
-                }
-            }
-            let (at, _) = laptop
-                .state(cx, NOTES)?
-                .ok_or("the laptop holds no state of the notes")?;
-            if includes(&at, &ts) {
+            let w = laptop.watched_until(
+                cx,
+                "the laptop refuses the suspected key's note",
+                CONVERGE,
+                |w| {
+                    let alert = &w["change"]["alert"];
+                    alert["kind"] == "refused" && ts.is(&alert["id"])
+                },
+            )?;
+            let why = w["change"]["alert"]["why"].as_str().unwrap_or_default();
+            if !why.to_lowercase().contains("suspect") {
                 return Err(format!(
-                    "the laptop's state is at {at}, which includes the thief's {}; expected \
-                     nothing new of the suspected key",
-                    ts.name
+                    "the laptop refuses {} with {}; expected a refusal naming the suspected key \
+                     {phone_key}",
+                    ts.name, w["change"]
                 ));
             }
-            if !text_at(cx, &mut laptop, &t1)?.is_ok_and(|t| t == THIEF_TEXTS[0]) {
+            cx.evidence(&format!(
+                "laptop watch: {} refused, suspected ({why}; next {})",
+                ts.name, w["change"]["alert"]["next"]
+            ));
+            if !laptop.holds(cx, SPACE, TRIP, &t2)? {
                 return Err(format!(
                     "the laptop no longer reads {} as it took it; expected what it held before \
                      the report to stay until the revocation decides",
-                    t1.name
+                    t2.name
                 ));
             }
             Ok(ts)
@@ -749,7 +706,33 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
          after the loss left out and listed by full name; nothing the laptop never held",
         |cx| {
             cx.concept("revocation cut");
-            let cut = laptop.ok(cx, &format!("cut {phone_key} {}", cut_file.display()))?;
+            // The laptop holds the thief's second note (its value) before the
+            // first it chains to: the owner takes the cut once both are held,
+            // each left out as the laptop first verified it after the loss.
+            let mut cut = Value::Null;
+            wait_for(
+                cx,
+                "the laptop's cut lists both thief notes",
+                CONVERGE,
+                |cx| {
+                    cut = laptop.ok(cx, &format!("cut {phone_key} {}", cut_file.display()))?;
+                    let listed: Vec<&str> = cut["left_out"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    let mut both = true;
+                    for v in [&t1, &t2] {
+                        let mut found = false;
+                        for f in &listed {
+                            found |= is_full_name_of(f, v)?;
+                        }
+                        both &= found;
+                    }
+                    Ok(both)
+                },
+            )?;
             if name(cut["key"].as_str().unwrap_or_default())? != name(&phone_key)? {
                 return Err(format!(
                     "the cut is of {}, expected {phone_key}",
@@ -942,7 +925,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             Ok(cut)
         },
     )?;
-    let revoked_ms = sc.step(
+    sc.step(
         "the owner revokes the phone with its cut, saying when it was lost: a new trust-context \
          version; the revocation lists the entries the cut left out",
         |cx| {
@@ -967,36 +950,28 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 }
             }
             cx.evidence(&format!("the revocation lists left out: {listed:?}"));
-            Ok(now_ms())
+            Ok(())
         },
     )?;
     sc.step(
         "the laptop, following its daemon's trust stream, adopts the revocation and withdraws \
          the thief's notes it took: each reported to its watch as withdrawn by the cut of the \
-         phone's key, refused outside the cut (ask the owner) and listed refused by full name",
+         phone's key, none left as its value, and listed refused by full name",
         |cx| withdraws(cx, &mut laptop, &[&t1, &t2], &phone_key),
     )?;
     let t3 = sc.step(
-        "after the revocation, the thief writes a note dated before it; the tab, which has not \
-         heard of the revocation, takes it",
+        "after the revocation, the thief writes a note; the tab, which has not heard of the \
+         revocation, takes it",
         |cx| {
-            let t3 = thief.put_op(cx, NOTES, THIEF_TEXTS[3])?;
+            let t3 = thief.put(cx, SPACE, TRIP, THIEF_TEXTS[3])?;
             wait_for(
                 cx,
                 &format!("the tab reads {} as the thief wrote it", t3.name),
                 CONVERGE,
-                |cx| Ok(text_at(cx, &mut tab, &t3)?.is_ok_and(|t| t == THIEF_TEXTS[3])),
+                |cx| tab.holds(cx, SPACE, TRIP, &t3),
             )?;
-            let read = tab.version(cx, NOTES, &t3)?;
-            let dated = read["dated_ms"].as_u64().unwrap_or(u64::MAX);
-            if dated >= revoked_ms {
-                return Err(format!(
-                    "the thief's note is dated {dated} ms, expected before the revocation at \
-                     {revoked_ms} ms (its clock runs a week behind)"
-                ));
-            }
             cx.evidence(&format!(
-                "{} dated {dated} ms, before the revocation at {revoked_ms} ms",
+                "the tab took {}, before it heard of the revocation",
                 t3.name
             ));
             Ok(t3)
@@ -1009,39 +984,37 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     })?;
     sc.step(
         "the tab withdraws every thief note, each reported to its watch as withdrawn by the \
-         cut of the phone's key, and refuses each outside the cut (ask the owner)",
+         cut of the phone's key and none left as its value",
         |cx| withdraws(cx, &mut tab, &[&t1, &t2, &ts, &t3], &phone_key),
     )?;
     sc.step(
-        "the phone's notes stay at the laptop and the tab; neither answers a thief note",
+        "the phone's notes stay at the laptop and the tab; neither reads a thief note",
         |cx| {
             for host in [&mut laptop, &mut tab] {
-                let (at, value) = host
-                    .state(cx, NOTES)?
-                    .ok_or_else(|| format!("{} holds no state of the notes", host.node))?;
-                if !includes(&at, &n1) || !includes(&at, &n2) || includes(&at, &n3) {
+                // The phone's notes up to seq `n2` and nothing of its key past
+                // them: the value is the phone's second note, one of the
+                // honest texts (nothing the thief signed after the cut is it).
+                let item = host
+                    .item(cx, SPACE, TRIP)?
+                    .ok_or_else(|| format!("{} holds no value of the notes", host.node))?;
+                if !n2.is(&item["id"]) || n3.is(&item["id"]) {
                     return Err(format!(
-                        "{}'s state is at {at}; expected the phone's notes up to seq {} and \
-                         nothing of its key past them",
+                        "{} reads {item}; expected the phone's notes up to seq {} and nothing \
+                         of its key past them",
                         host.node, n2.seq
                     ));
                 }
-                // Rule R (c): nothing the thief signed after the cut is the
-                // value; it is one the honest devices wrote.
-                if !HONEST_TEXTS.iter().any(|t| value["bytes"] == *t) {
+                if !HONEST_TEXTS.iter().any(|t| item["text"] == *t) {
                     return Err(format!(
-                        "{}'s notes read {value}, not one of the honest texts {HONEST_TEXTS:?}",
+                        "{}'s notes read {item}, not one of the honest texts {HONEST_TEXTS:?}",
                         host.node
                     ));
                 }
-                for v in [&n1, &n2] {
-                    host.version(cx, NOTES, v)?;
-                }
                 for v in [&t1, &t2, &ts, &t3] {
-                    let how = never_answers(cx, host, v)?;
-                    cx.evidence(&format!("{} get {}: {how}", host.node, v.name));
+                    let how = never_value(cx, host, v)?;
+                    cx.evidence(&format!("{} {} for {}", host.node, how, v.name));
                 }
-                cx.evidence(&format!("{}: at {at}, value {value}", host.node));
+                cx.evidence(&format!("{}: value {item}", host.node));
             }
             Ok(())
         },
@@ -1060,10 +1033,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 |cx| Ok(routes_over_link(cx, "tab", PHONE, THIEF_HOST)?.is_none()),
             )?;
             cx.evidence(&format!("the tab routes {PHONE} to no link with the thief"));
-            let t4 = thief.put_op(cx, NOTES, THIEF_TEXTS[4])?;
+            let t4 = thief.put(cx, SPACE, TRIP, THIEF_TEXTS[4])?;
             for host in [&mut laptop, &mut tab] {
-                let how = never_answers(cx, host, &t4)?;
-                cx.evidence(&format!("{} get {}: {how}", host.node, t4.name));
+                let how = never_value(cx, host, &t4)?;
+                cx.evidence(&format!("{} {} for {}", host.node, how, t4.name));
             }
             Ok(t4)
         },
@@ -1090,8 +1063,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     Ok(full.is_some())
                 },
             )?;
-            for v in [&n1, &n2] {
-                phone.version(cx, NOTES, v)?;
+            if !phone.holds(cx, SPACE, TRIP, &n2)? {
+                return Err(format!(
+                    "the phone no longer reads {} as its value after refusing its offline note",
+                    n2.name
+                ));
             }
             let full = full.unwrap_or_default();
             cx.evidence(&format!("the phone's offline note: {full}"));
@@ -1185,31 +1161,25 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "the offline note appears at the laptop and the tab; the thief's notes stay out",
         |cx| {
             for host in [&mut laptop, &mut tab] {
-                let mut last = (Value::Null, Value::Null);
                 wait_for(
                     cx,
                     &format!("{} holds {} with text {OFFLINE_TEXT:?}", host.node, n3.name),
                     CONVERGE,
-                    |cx| {
-                        let Some(s) = host.state(cx, NOTES)? else {
-                            return Ok(false);
-                        };
-                        let done = includes(&s.0, &n3) && s.1["bytes"] == OFFLINE_TEXT;
-                        last = s;
-                        Ok(done)
-                    },
+                    |cx| host.holds(cx, SPACE, TRIP, &n3),
                 )?;
-                let read = host.version(cx, NOTES, &n3)?;
-                if read["bytes"] != OFFLINE_TEXT {
+                let item = host
+                    .item(cx, SPACE, TRIP)?
+                    .ok_or_else(|| format!("{} lost its value", host.node))?;
+                if item["text"] != OFFLINE_TEXT {
                     return Err(format!(
-                        "{} reads {} as {read}, expected the phone's text {OFFLINE_TEXT:?}",
+                        "{} reads {} as {item}, expected the phone's text {OFFLINE_TEXT:?}",
                         host.node, n3.name
                     ));
                 }
-                cx.evidence(&format!("{}: at {}, value {}", host.node, last.0, last.1));
+                cx.evidence(&format!("{}: value {item}", host.node));
                 for v in [&t1, &t2, &ts, &t3, &t4] {
-                    let how = never_answers(cx, host, v)?;
-                    cx.evidence(&format!("{} get {}: {how}", host.node, v.name));
+                    let how = never_value(cx, host, v)?;
+                    cx.evidence(&format!("{} {} for {}", host.node, how, v.name));
                 }
                 let refused = refused_names(cx, host, &phone_key)?;
                 if refused.contains(&n3_full) {
@@ -1218,13 +1188,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                         host.node
                     ));
                 }
-                // A left-out thief note at the offline note's name (other
-                // bytes) gives way to the re-admitted honest version there;
-                // `never_answers` above shows the thief's bytes stay out.
                 for n in &left_out {
-                    if is_full_name_of(n, &n3)? {
-                        continue;
-                    }
                     if !refused.iter().any(|r| name(r).ok() == name(n).ok()) {
                         return Err(format!(
                             "{} no longer reports {n} refused ({refused:?}); expected the \
@@ -1238,15 +1202,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 cx,
                 &format!("the tab's watch delivers {}", n3.name),
                 CONVERGE,
-                |w| {
-                    let v = &w["change"]["version"];
-                    name(v["name"].as_str().unwrap_or_default()).ok() == name(&n3.name).ok()
-                        && v["bytes"] == OFFLINE_TEXT
-                },
+                |w| n3.is(&w["change"]["put"]["id"]) && w["change"]["put"]["text"] == OFFLINE_TEXT,
             )?;
             cx.evidence(&format!(
                 "tab watch delivered {}",
-                delivered["change"]["version"]["name"]
+                delivered["change"]["put"]["id"]
             ));
             Ok(())
         },
