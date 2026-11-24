@@ -1,13 +1,17 @@
-//! The namespaces local apps asked this daemon to carry in transit
-//! (`security/transit`, `ndn-rs/docs/specs/mgmt-trust.md` "Transit"): a
-//! person's self-certifying namespace an app adopted for one scope of its
-//! own alone (a data host's folders), whose Data this forwarder, not
-//! holding it, forwards unvalidated to the Interests pending for it and
-//! never caches. Each mark is one reason in the engine's count of the
-//! namespace's reasons to be in transit (`TransitPrefixes`), beside the
-//! links'; the first reason and the last run the links' action (the
-//! namespace's sync group with the multicast strategy). A mark is owned by
-//! the management face that asked, and released when that face closes: an
+//! The names local apps asked this daemon to carry in transit
+//! (`security/transit`, `ndn-rs/docs/specs/mgmt-trust.md` "Transit"): either
+//! a person's self-certifying namespace an app adopted for one scope of its
+//! own alone (a data host's spaces), or the two prefixes of an introduction,
+//! `<device>/32=intro` and `<device>/32=hint`, which the joiner's host carries
+//! for the length of one join (the offer and the hint record are signed by a
+//! namespace this daemon does not hold yet; `invite.md` §12.1). Data under
+//! one, which this forwarder, not holding its namespace, would refuse,
+//! is forwarded unvalidated to the Interests pending for it and never cached.
+//! Each mark is one reason in the engine's count of the name's reasons to be
+//! in transit (`TransitPrefixes`), beside the links'; the first reason and the
+//! last run the links' action for a namespace (its sync group with the
+//! `multicast` strategy; an introduction's prefixes have none). A mark is owned
+//! by the management face that asked, and released when that face closes: an
 //! app that ends, crashes or restarts leaves no mark behind. The keyring is
 //! never touched.
 
@@ -16,9 +20,35 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use ndn_engine::ForwarderEngine;
 use ndn_namespace::{TrustRefusal, code};
-use ndn_packet::Name;
+use ndn_packet::tlv_type::{IMPLICIT_SHA256, KEYWORD, PARAMETERS_SHA256};
+use ndn_packet::{Name, NameComponent};
 use ndn_security::self_certifying::self_certifying_digest;
 use ndn_transport::FaceId;
+
+/// What a mark may name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Marked {
+    /// A person's self-certifying namespace.
+    Namespace,
+    /// `<device>/32=intro` or `<device>/32=hint`.
+    Introduction,
+}
+
+impl Marked {
+    /// What `name` is, if a mark may name it: a self-certifying namespace, or
+    /// exactly one device name (plain components: no keyword, no digest) then
+    /// the one keyword `intro` or `hint`, nothing else of a device.
+    fn of(name: &Name) -> Option<Marked> {
+        if matches!(self_certifying_digest(name), Ok(Some(_))) {
+            return Some(Marked::Namespace);
+        }
+        let (last, device) = name.components().split_last()?;
+        let plain =
+            |c: &NameComponent| ![KEYWORD, IMPLICIT_SHA256, PARAMETERS_SHA256].contains(&c.typ);
+        let intro = last.typ == KEYWORD && matches!(last.value.as_ref(), b"intro" | b"hint");
+        (intro && !device.is_empty() && device.iter().all(plain)).then_some(Marked::Introduction)
+    }
+}
 
 pub(crate) struct TransitMarks {
     inner: Arc<Inner>,
@@ -51,18 +81,20 @@ impl TransitMarks {
         namespace: Name,
         carry: bool,
     ) -> Result<ndn_mgmt::TransitInfo, TrustRefusal> {
-        if !matches!(self_certifying_digest(&namespace), Ok(Some(_))) {
+        let Some(marked) = Marked::of(&namespace) else {
             return Err(TrustRefusal::new(
                 code::TRANSIT_NOT_PERSONAL,
                 format!(
-                    "{namespace} is not a self-certifying namespace (/user/<0xA1: 32 bytes>): \
-                     only a person's namespace, adopted by an app for one scope of its own, is \
-                     carried in transit for it; adopt any other namespace on this node from its \
-                     anchor link, or let the link serving its devices carry it"
+                    "{namespace} is neither a self-certifying namespace (/user/<0xA1: 32 bytes>) \
+                     nor an introduction's prefix (<device>/32=intro or <device>/32=hint): only a \
+                     person's namespace, adopted by an app for one scope of its own, or an \
+                     introduction's prefixes, carried for the length of a join, are carried in \
+                     transit for an app; adopt any other namespace on this node from its anchor \
+                     link, or let the link serving its devices carry it"
                 ),
             )
             .with("namespace", namespace.to_string()));
-        }
+        };
         let inner = &self.inner;
         let engine = &inner.engine;
         let transit = engine.transit();
@@ -90,7 +122,9 @@ impl TransitMarks {
                 });
             }
             transit.add(&namespace, || {
-                ndn_namespace::sync_group::carry(engine, &namespace)
+                if marked == Marked::Namespace {
+                    ndn_namespace::sync_group::carry(engine, &namespace);
+                }
             });
             *marks
                 .entry(face)
@@ -101,7 +135,9 @@ impl TransitMarks {
             && let Some(held) = own.get_mut(&namespace)
         {
             transit.remove(&namespace, || {
-                ndn_namespace::sync_group::release(engine, &namespace)
+                if marked == Marked::Namespace {
+                    ndn_namespace::sync_group::release(engine, &namespace);
+                }
             });
             *held -= 1;
             if *held == 0 {
@@ -129,7 +165,9 @@ impl Inner {
         for (namespace, count) in &held {
             for _ in 0..*count {
                 transit.remove(namespace, || {
-                    ndn_namespace::sync_group::release(engine, namespace)
+                    if Marked::of(namespace) == Some(Marked::Namespace) {
+                        ndn_namespace::sync_group::release(engine, namespace);
+                    }
                 });
             }
         }
@@ -154,7 +192,7 @@ impl Inner {
             held: self
                 .engine
                 .keyring()
-                .is_some_and(|k| k.version_of(namespace).is_some()),
+                .is_some_and(|k| !k.context_for(namespace).namespace().is_empty()),
         }
     }
 }
@@ -260,6 +298,66 @@ mod tests {
         );
         assert_eq!(mark(None, false).marks, 0);
         assert!(!engine.transit().covers(&page));
+        shutdown.shutdown().await;
+    }
+
+    /// An introduction's two prefixes `<device>/32=intro` and `<device>/32=hint`
+    /// (the joiner's host carries them for the length of a join, whose offer
+    /// and hint record are signed by a namespace the daemon does not hold yet)
+    /// are marked like a person's namespace — and nothing else of a device is:
+    /// not its other prefixes, not a longer name under the keyword, not a
+    /// keyword with no device before it. Their release works the same, and
+    /// neither takes the sync-group action a namespace takes.
+    #[tokio::test]
+    async fn an_introductions_prefixes_and_no_other_name_of_a_device_are_marked() {
+        let (engine, shutdown) = EngineBuilder::new(EngineConfig::default())
+            .build()
+            .await
+            .expect("engine build");
+        let marks = TransitMarks::new(engine.clone());
+        let name = |s: &str| s.parse::<Name>().expect("a name");
+        let intro = name("/alice/member/laptop/32=intro");
+        let hint = name("/alice/member/laptop/32=hint");
+        let offer = name("/alice/member/laptop/32=intro/32=offer/abc");
+        let record = name("/alice/member/laptop/32=hint/abc");
+
+        let held = marks.mark(None, intro.clone(), true);
+        assert_eq!(held.expect("the intro prefix").marks, 1);
+        assert_eq!(
+            marks
+                .mark(None, hint.clone(), true)
+                .expect("the hint prefix")
+                .marks,
+            1
+        );
+        assert!(engine.transit().covers(&offer));
+        assert!(engine.transit().covers(&record));
+        assert!(
+            !engine
+                .transit()
+                .covers(&name("/alice/member/laptop/32=log/x")),
+            "another prefix of the device is not carried"
+        );
+        assert!(!engine.transit().covers(&name("/alice/member/laptop")));
+
+        for refused in [
+            name("/alice/member/laptop"),
+            name("/alice/member/laptop/32=log"),
+            name("/alice/member/laptop/32=intro/32=offer"),
+            name("/alice/member/laptop/32=hint/abc"),
+            name("/32=intro"),
+        ] {
+            let why = marks
+                .mark(None, refused.clone(), true)
+                .expect_err("not an introduction prefix");
+            assert!(why.is(code::TRANSIT_NOT_PERSONAL), "{refused}: {why:?}");
+        }
+
+        assert_eq!(marks.mark(None, hint, false).expect("released").marks, 0);
+        assert!(
+            !engine.transit().covers(&record),
+            "the release takes it out"
+        );
         shutdown.shutdown().await;
     }
 }
