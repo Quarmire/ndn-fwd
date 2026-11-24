@@ -17,7 +17,7 @@ binaries:
 | `ndn-mgmt-response-verify` | Check a mgmt control response is signed by a trust anchor |
 | `ndn-mgmt-notification-fetch` | Fetch one NFD-style mgmt notification Data |
 | `ndn-safebag-witness` | Testbed-only SafeBag interop witness vs `ndnsec` |
-| `ndn-data` | Host one device's data layer on a running forwarder; verbs on stdin, JSON lines out |
+| `ndn-heap` | Host one device's data layer and introductions on a running forwarder; verbs on stdin, JSON lines out |
 
 ## Get started
 
@@ -180,28 +180,33 @@ The remaining binaries back the `testbed/` harness; each takes
   notification Data packet.
 - `ndn-safebag-witness` — testbed-only SafeBag interop witness against
   ndn-cxx `ndnsec export`/`import`.
-- `ndn-data` — one device's data layer (`ndn_data::Device`) attached to a
-  running `ndn-fwd` over its socket, signing with the device's key from
-  the daemon's PIB and verifying with the PIB's trust contexts (adopting
-  each newer version the daemon tells of on its trust stream,
-  `/localhost/nfd/security/notifications`, from the PIB it stored it in);
-  reads `share`/`put`/`get`/`watch`/
-  `suspect`/`unsuspect`/`cut`/`refused` lines on stdin and answers one
-  JSON object per line (the host of the `notes`, `shared`
-  and `stolen` e2e scenarios; `suspect <key> [<when>]`, on reporting a device lost,
-  stops the device taking new entries of that key; `cut <key> <file>
-  [--held-before <when>] [--upto <collection>=<seq>]...` (`<when>`: ms
-  since the epoch or RFC 3339) writes the cut file
-  `ndn-fwd revoke --cut` takes — only the entries this device first
-  verified before the bound (default: the time the key was suspected
-  since; a cut with no bound is refused) — and lists by full name the
-  entries it left out; `refused <key>` lists the full names
-  `ndn-fwd readmit` takes). `--store <dir>` keeps the
-  device's entries on disk too, so a host started again resumes its log;
-  `--clock-offset-ms` shifts only the dates it writes. Collections are
-  named `<ns>/32=data/<path>` (e.g. `/nt/32=data/notes/trip`), `<ns>` the
-  namespace of the trust context that governs the device. The verbs over
-  forwarder management come with the data layer's slice 7.
+- `ndn-heap` — one device's data layer (`ndn_heap::Node`) and introductions
+  (`ndn_invite::Invites`) attached to a running `ndn-fwd` over its socket,
+  signing with the device's key from the daemon's PIB and verifying with the
+  PIB's trust contexts (adopting each newer version the daemon tells of on
+  its trust stream, `/localhost/nfd/security/notifications`, from the PIB it
+  stored it in); reads `create`/`change`/`members`/`put`/`get`/`watch`/
+  `follow`/`flush`/`close`/`offer`/`close_offer`/`join`/
+  `suspect`/`unsuspect`/`suspected`/`cut`/`refused` lines (and `signal-*`)
+  on stdin and answers one JSON object per line (the host of the `notes`,
+  `folder`, `invite`, `shared`, `stolen`, `signals` and `follower` e2e
+  scenarios; `suspect <key> [<when>]`, on reporting a device lost, stops the
+  device taking new entries of that key; `cut <key> <file>
+  [--held-before <when>] [--upto <space>=<seq>]...` (`<when>`: ms since the
+  epoch or RFC 3339) writes the cut file `ndn-fwd revoke --cut` takes — only
+  the entries this device first verified before the bound (default: the time
+  the key was suspected since; a cut with no bound is refused) — and lists by
+  full name the entries it left out; `refused <key>` lists the full names
+  `ndn-fwd readmit` takes). A `join` asks the daemon to carry the inviter's
+  introduction prefixes in transit for the length of the join, so the host
+  runs as a member of a group in the daemon's `[security] transit_groups` (or
+  as an operator). `--store <dir>` keeps the device's entries on disk too, so
+  a host started again resumes its logs; `--clock-offset-ms` shifts only the
+  times it reads. Spaces are named `<ns>/32=data/<name>` (e.g.
+  `/nt/32=data/notes`), `<ns>` the namespace of the trust context that
+  governs the device; a path inside one is relative to it. Without `--device`
+  it answers `signal-capture` and `quit` only (a relay's capture). The verbs
+  and their JSON shapes are the module doc of `src/heap.rs`.
 
 ## License
 
