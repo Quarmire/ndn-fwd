@@ -19,6 +19,7 @@ mod destroyed;
 mod direct_paths;
 mod dv;
 mod folder;
+mod follower;
 mod invite;
 mod lifecycle;
 mod membership;
@@ -58,6 +59,7 @@ pub const ALL: &[&str] = &[
     "invite",
     "self-certifying",
     "signals",
+    "follower",
     "address-change",
 ];
 
@@ -85,6 +87,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "invite" => invite::run(sc),
         "self-certifying" => self_certifying::run(sc),
         "signals" => signals::run(sc),
+        "follower" => follower::run(sc),
         "address-change" => address_change::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
