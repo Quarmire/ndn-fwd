@@ -208,7 +208,8 @@ The remaining binaries back the `testbed/` harness; each takes
   times it reads. Spaces are named `<ns>/32=data/<name>` (e.g.
   `/nt/32=data/notes`), `<ns>` the namespace of the trust context that
   governs the device; a path inside one is relative to it. Without `--device`
-  it answers `signal-capture` and `quit` only (a relay's capture). The verbs
+  it answers `signal-capture <route>` (every push `…/32=signal/<digest>` under the
+  route, e.g. `<owner>/32=sync`) and `quit` only (a relay's capture). The verbs
   and their JSON shapes are the module doc of `src/heap.rs`.
 
 ## License

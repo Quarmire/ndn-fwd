@@ -21,7 +21,7 @@ use ndn_app::{Connection, IpcConnection};
 use ndn_heap::host::NodeHandle;
 use ndn_ipc::ForwarderClient;
 use ndn_packet::lp::{LpPacket, is_lp_packet};
-use ndn_packet::{Interest, Name, NameComponent};
+use ndn_packet::{Interest, Name};
 use ndn_surface::signal::wire::{Packet, decode_packet, push_packet};
 use ndn_surface::signal::{
     RunId, Signal, SignalError, SignalOptions, SignalRun, SignalStats, Signals,
@@ -42,9 +42,10 @@ pub const STREAM_USAGE: &str = "usage: signal-stream <space> <address> <count> <
                                 `n=<i> sent_us=<µs since the epoch>`; answered once all are \
                                 sent)";
 pub const CLOSE_USAGE: &str = "usage: signal-close <space> (ends the space's run)";
-pub const CAPTURE_USAGE: &str = "usage: signal-capture <group> (a sync group \
-                                 `<ns>/32=sync/…`: every signal pushed into it that reaches \
-                                 this daemon, one line each)";
+pub const CAPTURE_USAGE: &str = "usage: signal-capture <route> (the owner's `<owner>/32=sync`, \
+                                 or a space's group below it: every push \
+                                 `…/32=signal/<digest>` under it that reaches this daemon, one \
+                                 line each)";
 
 /// The highest rate a stream may ask for: the sender's limit is 120
 /// packets per second per run. The process's push budget (80 push
@@ -310,9 +311,10 @@ async fn stream(
     }))
 }
 
-/// `signal-capture <group>`: register `group` on this daemon over a
-/// connection of its own and print every signal Interest it is given — what
-/// a relay's operator sees of signals in transit. Needs no device.
+/// `signal-capture <route>`: register `route` on this daemon over a
+/// connection of its own and print every push Interest under it
+/// ([`is_push_into`]) — what a relay's operator sees of signals in transit,
+/// the `capture` of each line being the route as registered. Needs no device.
 pub async fn capture(face_socket: &str, args: &[String]) -> Result<Verb, SignalError> {
     let [group] = args else {
         return Ok(Verb::Usage(CAPTURE_USAGE.to_owned()));
@@ -325,9 +327,6 @@ pub async fn capture(face_socket: &str, args: &[String]) -> Result<Verb, SignalE
             )));
         }
     };
-    let pushed = group
-        .clone()
-        .append_component(NameComponent::keyword(Bytes::from_static(b"signal")));
     let conn = connect(face_socket).await?;
     conn.register_prefix(&group).await.map_err(|e| {
         SignalError::Io(format!(
@@ -335,10 +334,11 @@ pub async fn capture(face_socket: &str, args: &[String]) -> Result<Verb, SignalE
         ))
     })?;
     let shown = group.to_string();
+    let route = group.clone();
     tokio::spawn(async move {
         while let Some(wire) = conn.recv().await {
             if let Some(interest) = interest_of(wire)
-                && interest.name.has_prefix(&pushed)
+                && is_push_into(&route, &interest.name)
             {
                 println!(
                     "{}",
@@ -348,6 +348,24 @@ pub async fn capture(face_socket: &str, args: &[String]) -> Result<Verb, SignalE
         }
     });
     Ok(Verb::Done(json!({"group": group.to_string()})))
+}
+
+/// Whether `name` is a push into the route the capture registered: a name
+/// under `route` whose last two components are the keyword `32=signal` and
+/// the packet's digest. A push goes to the group of the space it is about,
+/// `<owner>/32=sync/<the space's rest>/32=signal/<digest>`, which lies under
+/// the owner's `<owner>/32=sync` the capture registers (as the surface routes
+/// it: `ndn_surface::signal::wire::route_of`); an SVS Sync Interest or a fetch
+/// of the group carries no `32=signal` and is no push.
+fn is_push_into(route: &Name, name: &Name) -> bool {
+    let comps = name.components();
+    let [.., signal, _digest] = comps else {
+        return false;
+    };
+    comps.len() > route.len() + 1
+        && name.has_prefix(route)
+        && signal.typ == ndn_packet::tlv_type::KEYWORD
+        && signal.value.as_ref() == b"signal"
 }
 
 /// The Interest a connection received, out of its link-protocol frame.
@@ -479,4 +497,44 @@ pub fn error(e: &SignalError) -> Value {
         v["retry_after_ms"] = json!(retry_after.as_millis() as u64);
     }
     v
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn n(s: &str) -> Name {
+        s.parse().expect("a name")
+    }
+
+    /// A push is `<owner>/32=sync/<space rest>/32=signal/<digest>`: a capture
+    /// registered at the owner's `<owner>/32=sync` shows it, whatever the
+    /// space's rest; an Interest with no `32=signal` before its last component
+    /// is no push (an SVS Sync Interest, a fetch), nor is one outside the route.
+    #[test]
+    fn a_push_into_a_spaces_group_is_captured_and_nothing_else_is() {
+        let route = n("/ga/32=sync");
+        let push = n("/ga/32=sync/notes/32=signal/digest");
+        assert!(is_push_into(&route, &push), "a push into a space's group");
+        assert!(is_push_into(&route, &n("/ga/32=sync/32=signal/digest")));
+        assert!(is_push_into(
+            &route,
+            &n("/ga/32=sync/a/b/c/32=signal/digest")
+        ));
+        assert!(
+            !is_push_into(&route, &n("/ga/32=sync/notes/v=1")),
+            "an SVS Sync Interest"
+        );
+        assert!(!is_push_into(&route, &n("/ga/32=sync/notes/32=signal/x/y")));
+        assert!(!is_push_into(&route, &n("/ga/32=sync/32=signal")));
+        assert!(!is_push_into(
+            &route,
+            &n("/gb/32=sync/notes/32=signal/digest")
+        ));
+        let group = n("/ga/32=sync/notes");
+        assert!(is_push_into(&group, &push));
+        assert!(!is_push_into(
+            &group,
+            &n("/ga/32=sync/other/32=signal/digest")
+        ));
+    }
 }

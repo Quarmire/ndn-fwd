@@ -178,9 +178,12 @@
 //!   lines are read): the run, the first and last sequence, how long it took.
 //! - `signal-stats`: the counters of this device's signals since they started
 //!   — sent packets and octets, delivered, and what was dropped, by why.
-//! - `signal-capture <group>`: register `group` (`<ns>/32=sync/…`) on the
-//!   daemon over a connection of its own and print every signal Interest it is
-//!   given — what a relay's operator sees of the signals its daemon forwards.
+//! - `signal-capture <route>`: register `route` (the owner's `<owner>/32=sync`,
+//!   or a space's group `<owner>/32=sync/<rest>` below it) on the daemon over a
+//!   connection of its own and print every push Interest under it (a name
+//!   ending `…/32=signal/<digest>`: a signal's push goes to the group of its
+//!   space, which the owner's route covers) — what a relay's operator sees of
+//!   the signals its daemon forwards. Sync Interests of the group are not shown.
 //!   Needs no device: started without `--device` (and `--pib`), the tool
 //!   answers this verb and `quit` only (one binary: the e2e names this run
 //!   `ndn-heap-capture` in its logs).
