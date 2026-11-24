@@ -744,18 +744,52 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         Ok(())
     })?;
     sc.step(
-        "alice refuses bob's offline edit (outside the removal's tips: her watch tells of it) \
-         and keeps looks good",
+        "the removal and bob's offline edit meet: alice never takes the edit (her watch tells \
+         of it as outside the removal's tips, or bob, who learns the removal first, withdraws \
+         it and so never serves it) and keeps looks good",
         |cx| {
-            let w = alice.watched_until(cx, "the offline edit refused", CONVERGE, |w| {
-                let alert = &w["change"]["alert"];
-                name(w["watch"].as_str().unwrap_or_default()).ok() == name(DOC).ok()
-                    && (alert["kind"] == "outside-cut" || alert["kind"] == "refused")
-                    && offline.is(&alert["id"])
+            // Both orders are the layer's: a refused entry is never applied or
+            // served (heap spec §3.8), so alice alerts only when she fetches the
+            // edit before bob has judged it himself against the removal.
+            let of_doc = |w: &Value| name(w["watch"].as_str().unwrap_or_default()).ok() == name(DOC).ok();
+            let told = |h: &Host| {
+                h.watched.iter().any(|w| {
+                    let alert = &w["change"]["alert"];
+                    of_doc(w)
+                        && (alert["kind"] == "outside-cut" || alert["kind"] == "refused")
+                        && offline.is(&alert["id"])
+                })
+            };
+            let withdrew = |h: &Host| {
+                h.watched
+                    .iter()
+                    .any(|w| of_doc(w) && offline.is(&w["change"]["withdrawn"]["id"]))
+            };
+            wait_for(cx, "alice is told of the offline edit or bob withdrew it", CONVERGE, |cx| {
+                alice.drain(cx, std::time::Duration::from_millis(200))?;
+                bob.drain(cx, std::time::Duration::from_millis(200))?;
+                Ok(told(&alice) || withdrew(&bob))
             })?;
-            cx.evidence(&format!("alice's document watch: {}", w["change"]));
-            // Nothing the removed writer signed above the tips appears in
-            // the value.
+            let by_alert = told(&alice);
+            cx.evidence(if by_alert {
+                "alice fetched the edit after the removal: her watch tells it refused (outside the cut)"
+            } else {
+                "bob judged his edit against the removal before alice asked for it: withdrawn, so not served"
+            });
+            // Settled: bob's withdrawal is the other end of either order.
+            wait_for(cx, "bob withdrew his offline edit", CONVERGE, |cx| {
+                bob.drain(cx, std::time::Duration::from_millis(200))?;
+                Ok(withdrew(&bob))
+            })?;
+            alice.drain(cx, std::time::Duration::from_secs(2))?;
+            // Nothing the removed writer signed above the tips appears in the
+            // value, nor was it ever delivered to alice as a value.
+            if alice.watched.iter().any(|w| {
+                of_doc(w)
+                    && (offline.is(&w["change"]["put"]["id"]) || offline.is(&w["change"]["removed"]["id"]))
+            }) {
+                return Err("alice's watch delivered bob's offline edit as a value".to_owned());
+            }
             let item = alice
                 .item(cx, DOC, PLAN)?
                 .ok_or("alice lost her document")?;

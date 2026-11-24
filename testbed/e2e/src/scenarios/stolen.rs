@@ -71,7 +71,7 @@ use ndn_cert::CutFile;
 use serde_json::Value;
 
 use super::data_host::{
-    CONVERGE, Host, Put, carries_group, delivered, name, quic_face_to, rib, unanswered,
+    CONVERGE, Host, Put, carries_group, delivered, name, quic_face_to, rib, stored, unanswered,
 };
 use crate::scenarios::*;
 use crate::step::{Abort, Cx, Scenario, StepResult};
@@ -402,7 +402,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "start the data layer on each device; the phone's keeps its entries on its disk too",
         |cx| {
             cx.concept("data layer host (ndn-heap)");
-            let laptop = Host::start(cx, "laptop", &root.identity)?;
+            let laptop_dir = cx.w.node("laptop").dir.join("data-store");
+            let laptop = Host::start_with(
+                cx,
+                "laptop",
+                &root.identity,
+                &["--store".to_owned(), laptop_dir.display().to_string()],
+            )?;
             let tab = Host::start(cx, "tab", TAB)?;
             let phone = Host::start_with(
                 cx,
@@ -630,6 +636,18 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 &format!("the laptop reads {} as the thief wrote it", t2.name),
                 CONVERGE,
                 |cx| laptop.holds(cx, SPACE, TRIP, &t2),
+            )?;
+            // The newest note is applied as soon as it is taken, its
+            // predecessor asked for after it (heap spec §7.3): the owner
+            // suspects the key only once the laptop holds both, or the
+            // predecessor would be refused as suspected and never held.
+            let laptop_store = cx.w.node("laptop").dir.join("data-store");
+            let first = name(&t1.name)?;
+            wait_for(
+                cx,
+                &format!("the laptop holds {} as well", t1.name),
+                CONVERGE,
+                |_| Ok(stored(&laptop_store)?.iter().any(|(n, _)| *n == first)),
             )?;
             cx.evidence(&format!(
                 "the laptop took {} and {}, after the loss at {lost_ms} ms",

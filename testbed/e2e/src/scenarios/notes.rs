@@ -38,10 +38,11 @@
 use std::process::Command;
 
 use super::data_host::{
-    CONVERGE, Host, Put, carries_group, entry_at, highest, key_locator, supersedes, unanswered,
+    CONVERGE, Host, Put, carries_group, entry_at, highest, key_locator, name, stored, supersedes,
+    unanswered,
 };
 use crate::scenarios::*;
-use crate::step::{Abort, Scenario};
+use crate::step::{Abort, Cx, Scenario};
 use crate::world::{CaCfg, NodeCfg, PeerCfg, addr};
 
 const NS: &str = "/nt";
@@ -59,6 +60,15 @@ const CUT_TABLE: &str = "ndn_e2e_notes_cut";
 
 fn n(s: &str) -> String {
     format!("{NS}{s}")
+}
+
+/// `ndn-heap` options of a device's host: its entries kept in a store
+/// directory of its node, which the steps read to see what it holds.
+fn store(cx: &Cx<'_>, node: &str) -> Vec<String> {
+    vec![
+        "--store".to_owned(),
+        cx.w.node(node).dir.join("data-store").display().to_string(),
+    ]
 }
 
 pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
@@ -147,8 +157,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "start the data layer on each device (ndn-heap on its daemon, signing with its own key)",
         |cx| {
             cx.concept("data layer host (ndn-heap)");
-            let laptop = Host::start(cx, "laptop", &root.identity)?;
-            let phone = Host::start(cx, "phone", PHONE)?;
+            let laptop = Host::start_with(cx, "laptop", &root.identity, &store(cx, "laptop"))?;
+            let phone = Host::start_with(cx, "phone", PHONE, &store(cx, "phone"))?;
             let laptop_keys = cx.w.keys("laptop");
             if !laptop
                 .writer
@@ -280,6 +290,17 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             wait_for(cx, "laptop and phone read one value", CONVERGE, |cx| {
                 Ok(laptop.holds(cx, SPACE, TRIP, want)? && phone.holds(cx, SPACE, TRIP, want)?)
             })?;
+            // The winner alone says nothing of the loser: a device that holds
+            // the winner may not yet have taken the other head, and its next
+            // entry would supersede only what it holds. Each device holds
+            // both heads' entries before anyone writes again.
+            for (node, head) in [("laptop", &taxi), ("phone", &plane)] {
+                let dir = cx.w.node(node).dir.join("data-store");
+                let wanted = name(&head.name)?;
+                wait_for(cx, &format!("{node} holds {}", head.name), CONVERGE, |_| {
+                    Ok(stored(&dir)?.iter().any(|(n, _)| *n == wanted))
+                })?;
+            }
             let item = laptop
                 .item(cx, SPACE, TRIP)?
                 .ok_or("the laptop lost its value")?;
