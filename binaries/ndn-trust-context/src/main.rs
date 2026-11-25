@@ -12,6 +12,11 @@
 //! payload carries the **signed** context Data, which adopters verify against
 //! the expected fingerprint. Without them it carries the unsigned legacy content,
 //! which adopters refuse by default.
+//!
+//! `inspect` prints each revocation cut the context holds on one line: its
+//! sequence-number ranges, its tips (`<log prefix> seq=<n> digest=<hex>`: the
+//! cut names the last entry of a log instead of a manifest of every entry),
+//! its exact entries, key digest and manifest.
 
 use std::path::PathBuf;
 
@@ -19,7 +24,9 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use ndn_packet::Name;
 use ndn_security::{FilePib, SignedTrustContext};
-use ndn_trust_context::{ContextSpec, build_anchor_envelope, build_signed_anchor_envelope};
+use ndn_trust_context::{
+    ContextSpec, build_anchor_envelope, build_signed_anchor_envelope, describe_cut,
+};
 use ndn_trust_envelope::TrustEnvelope;
 
 #[derive(Parser)]
@@ -91,7 +98,9 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = QrFormat::Ascii)]
         qr_format: QrFormat,
     },
-    /// Decode an anchor envelope and print what it grants (round-trip / debugging).
+    /// Decode an anchor envelope and print what it grants (round-trip /
+    /// debugging), each revocation cut with its ranges, its tips (log
+    /// prefix, sequence number, signed-region digest) and its manifest.
     Inspect {
         /// The `ndn-trust://anchor/…` URI (or its https mirror; legacy
         /// `ndn-ctx:1:…` payloads still parse).
@@ -286,30 +295,10 @@ fn main() -> Result<()> {
                 }
             );
             // Each revocation cut: the packets its key signed that stay
-            // accepted (per prefix, the sequence-number runs) and how many
-            // exact packets were re-admitted.
+            // accepted (per prefix, the sequence-number runs; per log, the
+            // tip), and how many exact packets were re-admitted.
             for cut in ctx.revocation_cuts() {
-                let ranges: Vec<String> = cut
-                    .ranges()
-                    .iter()
-                    .map(|r| {
-                        let runs: Vec<String> =
-                            r.runs.iter().map(|(a, b)| format!("{a}..{b}")).collect();
-                        format!("{} seq {}", r.prefix, runs.join(","))
-                    })
-                    .collect();
-                println!(
-                    "cut:          {} [{}] exact={} key_digest={} manifest={}",
-                    cut.key(),
-                    ranges.join("; "),
-                    cut.exact().len(),
-                    match cut.key_digest() {
-                        Some(d) => d.iter().map(|b| format!("{b:02x}")).collect(),
-                        None => "none".to_string(),
-                    },
-                    cut.manifest()
-                        .map_or("none".to_string(), ToString::to_string)
-                );
+                println!("{}", describe_cut(cut));
             }
         }
     }

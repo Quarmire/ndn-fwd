@@ -16,6 +16,10 @@
 //!   context content). Adopters refuse it by default (its schema could have
 //!   been altered in transit); it exists only for tooling that cannot reach
 //!   the anchor's signing key.
+//!
+//! [`describe_cut`] is how `ndn-trust-context inspect` prints a revocation
+//! cut of a context: its ranges, its tips (one `(log prefix, seq, digest)`
+//! per space, instead of a manifest of every entry) and its exact entries.
 
 // Documentation ratchet: this crate's public API is fully documented; keep it so.
 #![deny(missing_docs)]
@@ -23,7 +27,7 @@
 use anyhow::{Result, anyhow};
 use ndn_cert::{anchor_fingerprint, open_signed_context};
 use ndn_packet::{Data, Name};
-use ndn_security::{Certificate, SchemaBlob, SignedTrustContext, Signer};
+use ndn_security::{Certificate, RevocationCut, SchemaBlob, SignedTrustContext, Signer};
 use ndn_trust_envelope::TrustEnvelope;
 
 /// What to put in a trust context. Anchors are raw certificate Data wires;
@@ -108,6 +112,48 @@ pub fn build_context(spec: &ContextSpec) -> Result<SignedTrustContext> {
     Ok(ctx)
 }
 
+/// One line describing `cut`, as `ndn-trust-context inspect` prints it:
+/// `cut:          <key> [<ranges>] tips=[<tips>] exact=<n>
+/// key_digest=<hex|none> manifest=<name|none>`. Each range is `<prefix> seq
+/// <a>..<b>,…`; each tip is `<log prefix> seq=<n> digest=<hex>` (the SHA-256
+/// of the tip entry's signed region); entries are separated by `; `. A cut
+/// names a manifest of every entry its ranges accept, or a tip per log (or
+/// both): below a tip, entries are accepted by name and bound by the data
+/// layer's chain test, not by this line.
+pub fn describe_cut(cut: &RevocationCut) -> String {
+    let ranges: Vec<String> = cut
+        .ranges()
+        .iter()
+        .map(|r| {
+            let runs: Vec<String> = r.runs.iter().map(|(a, b)| format!("{a}..{b}")).collect();
+            format!("{} seq {}", r.prefix, runs.join(","))
+        })
+        .collect();
+    let tips: Vec<String> = cut
+        .tips()
+        .iter()
+        .map(|t| format!("{} seq={} digest={}", t.prefix, t.seq, hex(&t.digest)))
+        .collect();
+    format!(
+        "cut:          {} [{}] tips=[{}] exact={} key_digest={} manifest={}",
+        cut.key(),
+        ranges.join("; "),
+        tips.join("; "),
+        cut.exact().len(),
+        match cut.key_digest() {
+            Some(d) => hex(d),
+            None => "none".to_string(),
+        },
+        cut.manifest()
+            .map_or("none".to_string(), ToString::to_string)
+    )
+}
+
+/// Lowercase hex of `bytes`.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Build the context, sign it into Data with `signer` (whose key must be one
 /// of the context's anchors) through its async signing path — so a root in a
 /// hardware or sealed store works — and wrap it as an inline anchor envelope
@@ -162,6 +208,31 @@ pub fn build_anchor_envelope(spec: &ContextSpec) -> Result<TrustEnvelope> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `inspect` shows a cut's tips (prefix, sequence number, signed-region
+    /// digest in hex) beside its ranges, and a cut with neither shows both
+    /// lists empty.
+    #[test]
+    fn a_cut_is_described_with_its_tips_beside_its_ranges() {
+        let notes: Name = "/home/bob/member/phone/32=log/notes".parse().unwrap();
+        let photos: Name = "/home/bob/member/phone/32=log/photos".parse().unwrap();
+        let mut cut = RevocationCut::new("/home/bob/member/phone/KEY/k".parse().unwrap());
+        cut.add_run(&photos, 1, 3);
+        cut.add_tip(&notes, 7, [0xab; 32]);
+        let line = describe_cut(&cut);
+        assert!(
+            line.contains(&format!("{photos} seq 1..3")),
+            "ranges are listed: {line}"
+        );
+        assert!(
+            line.contains(&format!("tips=[{notes} seq=7 digest={}]", "ab".repeat(32))),
+            "tips are listed: {line}"
+        );
+        assert!(line.contains("manifest=none"), "{line}");
+
+        let bare = RevocationCut::new("/home/bob/member/phone/KEY/k".parse().unwrap());
+        assert!(describe_cut(&bare).contains("[] tips=[]"), "{bare:?}");
+    }
 
     /// Author → `ndn-trust://` URI → parse (what a scanner does), returning the
     /// `(version, content)` pair `decode_content` / `adopt_context` take.
