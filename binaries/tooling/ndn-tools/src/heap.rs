@@ -116,7 +116,7 @@
 //!   holds stay) until a revocation of the key decides (adopting it ends the
 //!   mark) or `unsuspect <key>` lifts the mark (the answer says whether it was
 //!   suspected). `suspected <key>`: `{"key","since_ms":<ms>|null}`.
-//! - `cut <key> <file> [--held-before <when>] [--upto <space>=<seq>]...`
+//! - `cut <key> <file> [--held-before <when>] [--upto <space>=<seq>]... [--tips]`
 //!   (`<when>` as for `suspect`): the revocation cut of `<key>` as this device
 //!   holds it (`Node::revocation_cut`), bounded by this device's own
 //!   observation: every entry of that key it holds verified and has not
@@ -124,10 +124,19 @@
 //!   the key is suspected since) and, for each `--upto` space, whose seq is at
 //!   most `<seq>`. A key neither suspected nor given `--held-before` is
 //!   refused: say when the device was lost. Written to `<file>` as the cut file
-//!   `ndn-fwd revoke <device> --cut <file>` takes (`ndn_cert::CutFile`). The
-//!   answer lists the ranges, the bound and, by full name with digest, the
-//!   entries of the key this device holds that the bound left out; each is
-//!   re-admitted one by one with `ndn-fwd readmit` once checked.
+//!   `ndn-fwd revoke <device> --cut <file>` takes (`ndn_cert::CutFile`). Without
+//!   `--tips` the cut lists the seqs it keeps (ranges) and a manifest of every
+//!   entry kept. With `--tips` (at most once) the cut names one tip per space
+//!   instead — the log prefix, the seq and the signed-region digest of the
+//!   highest kept entry whose whole chain below it this device holds and keeps
+//!   — and no ranges and no manifest: what the cut accepts below a tip is
+//!   bound by the data layer's chain test (an entry of the key stays only if
+//!   it is on the tip's chain), so the cut stays small however many entries
+//!   the key signed; kept entries off a tip's chain are left out. The answer
+//!   lists the ranges, the tips (`prefix`, `seq`, `digest`), the bound and, by
+//!   full name with digest, the entries of the key this device holds that the
+//!   bound left out; each is re-admitted one by one with `ndn-fwd readmit`
+//!   once checked.
 //! - `refused <key>`: the full names (each ending in the implicit digest of
 //!   the refused packet) of every entry of `<key>` this device holds refused
 //!   because the key is revoked and its cut does not accept them — refused on
@@ -840,7 +849,11 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
                 Ok(k) => k,
                 Err(e) => return Ok(Verb::Usage(e)),
             };
-            let (given, upto) = match cut_options(options) {
+            let CutLine {
+                held_before: given,
+                upto,
+                tips,
+            } = match cut_options(options) {
                 Ok(o) => o,
                 Err(e) => return Ok(Verb::Usage(format!("{e}; {CUT_USAGE}"))),
             };
@@ -859,7 +872,7 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
             let bound = CutBound {
                 held_before,
                 upto,
-                ..CutBound::default()
+                tips,
             };
             let proposal = h.node.revocation_cut(&key, &bound)?;
             let mut cut_file = CutFile::new(proposal.cut);
@@ -999,8 +1012,10 @@ const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key i
                              default now)";
 
 const CUT_USAGE: &str = "usage: cut <key> <file> [--held-before <when>] [--upto \
-                         <space>=<seq>]... (<when> as ms since the epoch or RFC 3339; \
-                         --held-before defaults to the time the key was suspected since)";
+                         <space>=<seq>]... [--tips] (<when> as ms since the epoch or RFC \
+                         3339; --held-before defaults to the time the key was suspected \
+                         since; --tips names one tip per space instead of a manifest of \
+                         every entry kept)";
 
 const OFFER_USAGE: &str = "usage: offer <space> role=reader|writer until=<when> tries=<n> \
                            (a space of this device's namespace; <when>, the offer's expiry by \
@@ -1183,20 +1198,44 @@ fn time(when: &str) -> Result<Timestamp, String> {
         .map_err(|_| format!("{when:?} is too far in the future"))
 }
 
+/// A `cut` line's options: when the device was lost, the per-space seq
+/// bounds, and whether the cut names a tip per space.
+#[derive(Debug, Default)]
+struct CutLine {
+    held_before: Option<Timestamp>,
+    upto: BTreeMap<Name, u64>,
+    tips: bool,
+}
+
 /// A `cut` line's options after the key and the file: `--held-before
-/// <when>` (at most once) and `--upto <space>=<seq>` (once per space). A
-/// space name may hold `=` (`32=data`), a seq never does: each `--upto`
-/// splits at its last `=`.
-fn cut_options(words: &[String]) -> Result<(Option<Timestamp>, BTreeMap<Name, u64>), String> {
-    let (mut held_before, mut upto) = (None, BTreeMap::new());
+/// <when>` (at most once), `--upto <space>=<seq>` (once per space) and
+/// `--tips` (at most once, no value). A space name may hold `=` (`32=data`),
+/// a seq never does: each `--upto` splits at its last `=`.
+fn cut_options(words: &[String]) -> Result<CutLine, String> {
+    const OPTIONS: &str = "--held-before, --upto or --tips";
+    let mut line = CutLine::default();
     let mut rest = words;
-    while let [option, value, more @ ..] = rest {
+    while let [option, more @ ..] = rest {
+        if option == "--tips" {
+            if std::mem::replace(&mut line.tips, true) {
+                return Err("--tips is given twice".into());
+            }
+            rest = more;
+            continue;
+        }
+        let [value, more @ ..] = more else {
+            return Err(if option == "--held-before" || option == "--upto" {
+                format!("{option:?} needs a value")
+            } else {
+                format!("{option:?} is not {OPTIONS}")
+            });
+        };
         match option.as_str() {
-            "--held-before" if held_before.is_some() => {
+            "--held-before" if line.held_before.is_some() => {
                 return Err("--held-before is given twice".into());
             }
             "--held-before" => {
-                held_before = Some(time(value).map_err(|e| format!("--held-before: {e}"))?);
+                line.held_before = Some(time(value).map_err(|e| format!("--held-before: {e}"))?);
             }
             "--upto" => {
                 let (space, seq) = value
@@ -1208,19 +1247,15 @@ fn cut_options(words: &[String]) -> Result<(Option<Timestamp>, BTreeMap<Name, u6
                 let seq = seq
                     .parse::<u64>()
                     .map_err(|e| format!("--upto {value:?}: seq {seq:?}: {e}"))?;
-                if upto.insert(space, seq).is_some() {
+                if line.upto.insert(space, seq).is_some() {
                     return Err(format!("--upto names the space of {value:?} twice"));
                 }
             }
-            _ => return Err(format!("{option:?} is not --held-before or --upto")),
+            _ => return Err(format!("{option:?} is not {OPTIONS}")),
         }
         rest = more;
     }
-    match rest.first() {
-        None => Ok((held_before, upto)),
-        Some(o) if o == "--held-before" || o == "--upto" => Err(format!("{o:?} needs a value")),
-        Some(o) => Err(format!("{o:?} is not --held-before or --upto")),
-    }
+    Ok(line)
 }
 
 /// Octets written as hex.
@@ -1505,15 +1540,19 @@ mod tests {
     /// space name's own `=` is not the seq's, and each bound is given once.
     #[test]
     fn a_cut_bounds_by_time_and_by_space_seq() {
-        let (held_before, upto) = cut_options(&words(&[
+        let line = cut_options(&words(&[
             "--held-before",
             "1793808000000",
             "--upto",
             "/alice/32=data/notes=4",
+            "--tips",
         ]))
         .unwrap();
-        assert_eq!(held_before, Some(Timestamp(1_793_808_000_000)));
-        assert_eq!(upto.get(&n("/alice/32=data/notes")), Some(&4));
+        assert_eq!(line.held_before, Some(Timestamp(1_793_808_000_000)));
+        assert_eq!(line.upto.get(&n("/alice/32=data/notes")), Some(&4));
+        assert!(line.tips);
+        assert!(!cut_options(&words(&["--held-before", "1"])).unwrap().tips);
+        assert!(cut_options(&words(&["--tips", "--tips"])).is_err());
         assert!(cut_options(&words(&["--held-before"])).is_err());
         assert!(
             cut_options(&words(&[

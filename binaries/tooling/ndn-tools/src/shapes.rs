@@ -232,7 +232,9 @@ pub fn next_step(n: NextStep) -> &'static str {
     }
 }
 
-/// A revocation cut: its key, its runs of seqs per prefix, its exact
+/// A revocation cut: its key, its runs of seqs per prefix, its tips (per
+/// log: the log prefix, the tip's seq and the hex SHA-256 of its signed
+/// region; a cut in the tips form has no ranges and no manifest), its exact
 /// (re-admitted) names, the SHA-256 of the key's public key it binds
 /// (`key_digest`) and the full name of its manifest's root packet
 /// (`manifest`), each `null` when the cut has none.
@@ -242,6 +244,11 @@ pub fn revocation_cut(c: &RevocationCut) -> Value {
         "ranges": c.ranges().iter().map(|r| json!({
             "prefix": r.prefix.to_string(),
             "runs": r.runs.iter().map(|(first, last)| json!([first, last])).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+        "tips": c.tips().iter().map(|t| json!({
+            "prefix": t.prefix.to_string(),
+            "seq": t.seq,
+            "digest": hex(&t.digest),
         })).collect::<Vec<_>>(),
         "exact": c.exact().iter().map(ToString::to_string).collect::<Vec<_>>(),
         "key_digest": c.key_digest().map(|d| hex(d.as_slice())),
@@ -395,5 +402,26 @@ mod tests {
         }));
         assert!(heap.get("introduction").is_none());
         assert_eq!(heap["next"], "fix-request");
+    }
+
+    /// A cut in the tips form lists its tips (log prefix, seq, signed-region
+    /// digest in hex) beside its empty ranges and has no manifest; a cut
+    /// without tips lists none.
+    #[test]
+    fn a_cut_lists_its_tips_beside_its_ranges() {
+        let mut cut = RevocationCut::new(n("/alice/member/phone/KEY/1"));
+        assert_eq!(revocation_cut(&cut)["tips"], json!([]));
+        cut.add_tip(&n("/alice/member/phone/32=log/notes"), 7, [0xcd; 32]);
+        let shown = revocation_cut(&cut);
+        assert_eq!(
+            shown["tips"],
+            json!([{
+                "prefix": n("/alice/member/phone/32=log/notes").to_string(),
+                "seq": 7,
+                "digest": "cd".repeat(32),
+            }])
+        );
+        assert_eq!(shown["ranges"], json!([]));
+        assert!(shown["manifest"].is_null());
     }
 }

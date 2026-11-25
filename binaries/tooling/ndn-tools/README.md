@@ -192,11 +192,13 @@ The remaining binaries back the `testbed/` harness; each takes
   `folder`, `invite`, `shared`, `stolen`, `signals` and `follower` e2e
   scenarios; `suspect <key> [<when>]`, on reporting a device lost, stops the
   device taking new entries of that key; `cut <key> <file>
-  [--held-before <when>] [--upto <space>=<seq>]...` (`<when>`: ms since the
-  epoch or RFC 3339) writes the cut file `ndn-fwd revoke --cut` takes — only
-  the entries this device first verified before the bound (default: the time
-  the key was suspected since; a cut with no bound is refused) — and lists by
-  full name the entries it left out; `refused <key>` lists the full names
+  [--held-before <when>] [--upto <space>=<seq>]... [--tips]` (`<when>`: ms
+  since the epoch or RFC 3339) writes the cut file `ndn-fwd revoke --cut`
+  takes — only the entries this device first verified before the bound
+  (default: the time the key was suspected since; a cut with no bound is
+  refused); with `--tips` the cut names one tip per space (log prefix, seq,
+  signed-region digest) instead of a manifest of every entry kept — and lists
+  by full name the entries it left out; `refused <key>` lists the full names
   `ndn-fwd readmit` takes). A `join` asks the daemon to carry the inviter's
   introduction prefixes in transit for the length of the join, so the host
   runs as a member of a group in the daemon's `[security] transit_groups` (or
