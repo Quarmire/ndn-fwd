@@ -15,6 +15,15 @@
 //! (see [`super::data_host`]); the phone's keeps its entries in a store
 //! directory too (`--store`), as a phone keeps its data on its disk.
 //!
+//! The notes space is public (`readers=anyone`, never sealed). In a sealed
+//! space a suspected key is granted no epoch key and the owner's node rotates
+//! the epoch (heap spec §9.8): once the thief's host heard the new epoch (the
+//! laptop's link, open at the café) it could not write at all ("not ready"),
+//! so the thief's later writes — what the cut must refuse — could not be made
+//! with the real client. A public space has no epochs; the thief writes until
+//! the revocation. The tab writes one memo so the laptop holds an entry of the
+//! tab's key (the cut of another key, below, needs one).
+//!
 //! The thief: the phone leaves its owner's hands (a repair shop; the time
 //! the owner later gives as when it was lost) and its storage is imaged —
 //! its PIB (the phone's key and certificate) and its data store, copied
@@ -85,6 +94,8 @@ const NS: &str = "/st";
 /// register path every device writes in it.
 const SPACE: &str = "/st/32=data/notes";
 const TRIP: &str = "trip";
+/// The path of the tab's own memo, which no thief note touches.
+const MEMO: &str = "memo";
 /// The laptop's device name: `ndn-fwd init --device laptop` on /st.
 const LAPTOP: &str = "/st/admin/laptop";
 const TAB: &str = "/st/member/tab";
@@ -455,10 +466,16 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let phone_key = phone.writer.clone();
 
     let day1 = sc.step(
-        "the laptop creates the notes space (owner alone) and writes \"day 1\"; every device \
-         watches it",
+        "the laptop creates the notes space (public: `readers=anyone`, never sealed, so no epoch \
+         key can fence a thief out of writing) and writes \"day 1\"; every device watches it",
         |cx| {
-            laptop.ok(cx, &format!("create {SPACE}"))?;
+            // A sealed space would stop the thief's later writes by itself: a
+            // suspected key is granted no epoch key and the owner's node
+            // rotates the epoch (heap spec §9.8), so once the thief hears the
+            // new epoch its host refuses to write ("not ready"). This scenario
+            // is about what the cut does to what a thief signed, so the space
+            // is public and the thief can write until the revocation.
+            laptop.ok(cx, &format!("create {SPACE} readers=anyone"))?;
             let day1 = laptop.put(cx, SPACE, TRIP, "day 1")?;
             laptop.ok(cx, &format!("watch {SPACE}"))?;
             tab.watch_when_ready(cx, SPACE)?;
@@ -467,7 +484,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     let (n1, n2) = sc.step(
-        "the phone writes two notes; the laptop and the tab hold them",
+        "the phone writes two notes and the tab one memo (at its own path); the laptop and the \
+         tab hold the phone's notes, the laptop the memo",
         |cx| {
             wait_for(cx, "the phone holds day 1", SHORT, |cx| {
                 phone.holds(cx, SPACE, TRIP, &day1)
@@ -486,6 +504,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     host.node, n2.name, n1.name
                 ));
             }
+            // The space is public, so no key request or grant is signed: the
+            // tab's key signs an entry only by writing one, and the laptop's
+            // cut of the tab's key (a later step) needs an entry of it.
+            let memo = tab.put(cx, SPACE, MEMO, "tab: bring the charger")?;
+            wait_for(cx, "the laptop holds the tab's memo", CONVERGE, |cx| {
+                laptop.holds(cx, SPACE, MEMO, &memo)
+            })?;
             Ok((n1, n2))
         },
     )?;
