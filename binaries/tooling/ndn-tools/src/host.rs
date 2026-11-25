@@ -216,10 +216,19 @@ pub struct IntroTransit {
 }
 
 impl IntroTransit {
-    /// Take every mark back, whichever way the join went.
+    /// Take every mark back, whichever way the join went. A prefix leaves
+    /// `held` only once the daemon has answered its release, so this future
+    /// dropped at any await leaves every prefix not yet answered in `held`,
+    /// and [`Drop`] takes those back. A request that was cancelled in flight
+    /// may be sent twice: the daemon counts marks per connection, and a
+    /// release with none held takes nothing, so the surplus is harmless
+    /// unless another join of this host marks the same prefix (it then fails
+    /// closed, as an unmarked prefix does).
     pub async fn end(mut self) {
-        for prefix in std::mem::take(&mut self.held) {
-            if let Err(why) = self.marks.mark(&prefix, false).await {
+        while let Some(prefix) = self.held.first().cloned() {
+            let released = self.marks.mark(&prefix, false).await;
+            self.held.remove(0);
+            if let Err(why) = released {
                 tracing::warn!(
                     %prefix,
                     "{why}; the daemon keeps carrying it in transit until this host ends"
@@ -268,11 +277,16 @@ pub async fn carry_introduction(
         held: Vec::new(),
     };
     for prefix in ndn_invite::introduction_prefixes(inviter) {
+        // Held before the daemon is asked: a cancel that lands while the
+        // request is in flight (the daemon may already have taken the mark)
+        // finds the prefix in `held` and takes it back. A refusal means
+        // nothing was taken, so the prefix is dropped from `held` again.
+        transit.held.push(prefix.clone());
         if let Err(why) = marks.mark(&prefix, true).await {
+            transit.held.pop();
             transit.end().await;
             return Err(why);
         }
-        transit.held.push(prefix);
     }
     Ok(transit)
 }
@@ -532,16 +546,49 @@ mod tests {
     use super::*;
 
     /// The daemon's marks, recorded; `refuse` names the one it refuses to
-    /// carry.
+    /// carry; `stall` names the one request (a name and whether it carries)
+    /// that the daemon receives and never answers, the first time it is asked.
     #[derive(Default)]
     struct FakeMarks {
         asked: Mutex<Vec<(Name, bool)>>,
         refuse: Option<Name>,
+        stall: Mutex<Option<(Name, bool)>>,
     }
 
     impl FakeMarks {
         fn asked(&self) -> Vec<(Name, bool)> {
             self.asked.lock().unwrap().clone()
+        }
+
+        fn stalling(name: &Name, carry: bool) -> Self {
+            Self {
+                stall: Mutex::new(Some((name.clone(), carry))),
+                ..Self::default()
+            }
+        }
+
+        /// Wait until the marks taken back are exactly `released`, in
+        /// whatever order the runtime tells them in.
+        async fn released_eventually(&self, released: &[Name]) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let mut taken_back: Vec<Name> = self
+                    .asked()
+                    .into_iter()
+                    .filter(|(_, carry)| !carry)
+                    .map(|(name, _)| name)
+                    .collect();
+                taken_back.dedup();
+                if released.iter().all(|name| taken_back.contains(name)) {
+                    return;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the marks were not taken back: {:?}",
+                    self.asked()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
     }
 
@@ -552,6 +599,18 @@ mod tests {
                 return Err(format!("the daemon refused to carry {name}"));
             }
             self.asked.lock().unwrap().push((name.clone(), carry));
+            let stalled = {
+                let mut stall = self.stall.lock().unwrap();
+                if stall.as_ref() == Some(&(name.clone(), carry)) {
+                    stall.take();
+                    true
+                } else {
+                    false
+                }
+            };
+            if stalled {
+                std::future::pending::<()>().await;
+            }
             Ok(())
         }
     }
@@ -675,5 +734,44 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// A cancel that lands while the second mark is in flight — the daemon
+    /// has the request and may have taken the mark — takes both back: the
+    /// prefix being asked for is held before the await, not after it.
+    #[tokio::test]
+    async fn a_cancel_while_the_second_mark_is_in_flight_leaves_no_mark() {
+        let inviter = n("/alice/member/laptop");
+        let [intro, hint] = ndn_invite::introduction_prefixes(&inviter);
+        let fake = Arc::new(FakeMarks::stalling(&hint, true));
+        let marks: Arc<dyn Marks> = fake.clone();
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(50),
+            carrying_introduction(&marks, &inviter, std::future::pending::<()>()),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the second mark never answers: it timed out"
+        );
+        fake.released_eventually(&[intro, hint]).await;
+    }
+
+    /// A cancel that lands while `end` waits for the daemon's answer to the
+    /// first release takes back the second too: every prefix not yet
+    /// released is still in `held` at each await.
+    #[tokio::test]
+    async fn a_cancel_while_ending_leaves_no_mark() {
+        let inviter = n("/alice/member/laptop");
+        let [intro, hint] = ndn_invite::introduction_prefixes(&inviter);
+        let fake = Arc::new(FakeMarks::stalling(&intro, false));
+        let marks: Arc<dyn Marks> = fake.clone();
+        let transit = carry_introduction(&marks, &inviter).await.expect("carried");
+        let cancelled = tokio::time::timeout(Duration::from_millis(50), transit.end()).await;
+        assert!(
+            cancelled.is_err(),
+            "the first release never answers: it timed out"
+        );
+        fake.released_eventually(&[intro, hint]).await;
     }
 }
