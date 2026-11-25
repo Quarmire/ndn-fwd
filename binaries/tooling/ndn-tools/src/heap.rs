@@ -856,7 +856,11 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
             }
             // Neither bound: the layer refuses, saying to tell when the
             // device was lost.
-            let bound = CutBound { held_before, upto };
+            let bound = CutBound {
+                held_before,
+                upto,
+                ..CutBound::default()
+            };
             let proposal = h.node.revocation_cut(&key, &bound)?;
             let mut cut_file = CutFile::new(proposal.cut);
             cut_file.held_before = held_before.map(|t| t.0);
