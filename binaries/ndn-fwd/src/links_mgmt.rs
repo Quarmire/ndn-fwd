@@ -308,7 +308,7 @@ fn path(path: PathStatus) -> LinkPathEntry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bytes::Bytes;
     use ndn_face_quic::{KeyFingerprint, LinkKey, LinkKeySource, LinkTransportConfig};
@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// Links with one configured device, `vps`, that is never dialled.
-    fn links(cancel: &CancellationToken) -> Arc<Links> {
+    pub(crate) fn links(cancel: &CancellationToken) -> Arc<Links> {
         let key = LinkKey::from_signer(Arc::new(Ed25519Signer::from_seed(
             &[7; 32],
             "/ns/member/d/KEY/k".parse().unwrap(),

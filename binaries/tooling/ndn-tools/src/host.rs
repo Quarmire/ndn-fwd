@@ -156,12 +156,13 @@ pub fn adopt_told(pib_root: &Path, keyring: &Keyring, namespace: &str, version: 
 /// alone.
 const ADOPT_LIMIT: Duration = Duration::from_secs(60);
 
-/// The daemon's transit marks, as the host asks for them
-/// (`security/transit`, owned by the connection that asks).
+/// The daemon's marks, as the host asks for them (`security/transit`, owned
+/// by the connection that asks): a name carried in transit, or the sync
+/// group of a space the host follows ([`FollowedGroups`]).
 #[async_trait::async_trait]
 pub trait Marks: Send + Sync {
-    /// Ask the daemon to carry `name` in transit (`carry`: one mark more,
-    /// owned by this connection) or to take one mark back.
+    /// Ask the daemon to mark `name` (`carry`: one mark more, owned by this
+    /// connection) or to take one mark back.
     async fn mark(&self, name: &Name, carry: bool) -> Result<(), String>;
 }
 
@@ -173,7 +174,7 @@ pub struct DaemonMarks(pub MgmtClient);
 #[async_trait::async_trait]
 impl Marks for DaemonMarks {
     async fn mark(&self, namespace: &Name, carry: bool) -> Result<(), String> {
-        let what = if carry { "carry" } else { "stop carrying" };
+        let what = if carry { "mark" } else { "take the mark off" };
         self.0
             .security_transit(namespace, carry)
             .await
@@ -181,21 +182,82 @@ impl Marks for DaemonMarks {
             .map_err(|e| match ndn_ipc::trust_refusal_in(&e) {
                 Some(refusal) if refusal.is(ndn_cert::report::code::TRANSIT_NOT_PERMITTED) => {
                     format!(
-                        "the daemon refused to {what} {namespace} in transit: {refusal} (run \
-                         this host as a member of a group in the daemon's `[security] \
-                         transit_groups`, which may carry namespaces in transit and change \
-                         nothing else of its trust, then start it again)"
+                        "the daemon refused to {what} {namespace}: {refusal} (run this host as a \
+                         member of a group in the daemon's `[security] transit_groups`, which \
+                         may mark namespaces and followed spaces and change nothing else of its \
+                         trust, then start it again)"
                     )
                 }
                 Some(refusal) => {
-                    format!("the daemon refused to {what} {namespace} in transit: {refusal}")
+                    format!("the daemon refused to {what} {namespace}: {refusal}")
                 }
                 None => format!(
-                    "asking the daemon to {what} {namespace} in transit: {e}; if the daemon \
-                     restarted, start this host again (the daemon released this host's marks \
-                     with its connection)"
+                    "asking the daemon to {what} {namespace}: {e}; if the daemon restarted, \
+                     start this host again (the daemon released this host's marks with its \
+                     connection)"
                 ),
             })
+    }
+}
+
+/// The sync group of `space` when this device follows it: the group
+/// `<owner>/32=sync/<rest>` ([`ndn_heap::wire::sync_group_of`]) of a space
+/// whose owner is not `own`, this device's namespace. A space of the device's
+/// own namespace is no following: its relays route the namespace's group
+/// for the devices they serve (ndn-link.md §10), whatever the spaces.
+pub fn followed_group(own: &Name, space: &Name) -> Option<Name> {
+    let parsed = ndn_heap::wire::parse_space_name(space)?;
+    if parsed.owner == *own {
+        return None;
+    }
+    ndn_heap::wire::sync_group_of(space)
+}
+
+/// The groups of the spaces this host follows, told to the daemon as marks
+/// over the connection that owns them ([`Marks`]), so the daemon's links tell
+/// the relays this device uses to route exactly those groups to it
+/// (ndn-link.md §5.10, mgmt-trust.md "Transit"): not the namespace of a
+/// space followed, which would route every space of its owner.
+pub struct FollowedGroups {
+    marks: Arc<dyn Marks>,
+    /// This device's namespace (empty: none governs its name).
+    own: Name,
+    /// The groups marked now. Held across the daemon's answers, so two
+    /// syncs never mark one group twice.
+    told: tokio::sync::Mutex<std::collections::BTreeSet<Name>>,
+}
+
+impl FollowedGroups {
+    pub fn new(marks: Arc<dyn Marks>, own: Name) -> Self {
+        Self {
+            marks,
+            own,
+            told: tokio::sync::Mutex::default(),
+        }
+    }
+
+    /// Make the daemon's marks the groups of `spaces` this device follows
+    /// ([`followed_group`]): mark the ones not marked yet and take back the
+    /// ones no longer wanted. The first refusal ends it, saying why and what
+    /// to do; what was marked before stays marked, and a later call tries
+    /// again.
+    pub async fn sync(&self, spaces: impl IntoIterator<Item = Name>) -> Result<(), String> {
+        let wanted: std::collections::BTreeSet<Name> = spaces
+            .into_iter()
+            .filter_map(|space| followed_group(&self.own, &space))
+            .collect();
+        let mut told = self.told.lock().await;
+        let add: Vec<Name> = wanted.difference(&told).cloned().collect();
+        let drop: Vec<Name> = told.difference(&wanted).cloned().collect();
+        for group in add {
+            self.marks.mark(&group, true).await?;
+            told.insert(group);
+        }
+        for group in drop {
+            self.marks.mark(&group, false).await?;
+            told.remove(&group);
+        }
+        Ok(())
     }
 }
 
@@ -773,5 +835,79 @@ mod tests {
             "the first release never answers: it timed out"
         );
         fake.released_eventually(&[intro, hint]).await;
+    }
+
+    /// A space this device follows is a space of another owner: its group is
+    /// `<owner>/32=sync/<rest>`, never the owner's namespace or whole group
+    /// (`<owner>/32=sync` would have the relays route every space of the
+    /// owner), and a space of the device's own namespace is no following.
+    #[test]
+    fn only_a_space_of_another_owner_is_followed_by_its_own_group() {
+        let own = n("/bob");
+        let doc = n("/alice/32=data/doc");
+        assert_eq!(
+            followed_group(&own, &doc),
+            Some(n("/alice/32=sync/doc")),
+            "the space's own group"
+        );
+        assert_eq!(
+            followed_group(&own, &n("/alice/32=data/proj/plan")),
+            Some(n("/alice/32=sync/proj/plan"))
+        );
+        assert_eq!(followed_group(&own, &n("/bob/32=data/mine")), None);
+        assert_eq!(followed_group(&own, &n("/alice")), None, "no space");
+        assert_eq!(followed_group(&own, &n("/alice/32=data")), None);
+    }
+
+    /// What the daemon is asked is exactly the groups of the spaces followed:
+    /// each marked once however often the spaces are given, none for a space
+    /// of the device's own namespace, a mark taken back when the space is no
+    /// longer followed, and a refusal comes back as the daemon's words with
+    /// nothing else marked, to be tried again by the next call.
+    #[tokio::test]
+    async fn the_daemon_is_told_the_groups_of_the_spaces_followed_and_no_more() {
+        let (doc, chat) = (n("/alice/32=data/doc"), n("/alice/32=data/chat"));
+        let mine = n("/bob/32=data/mine");
+        let fake = Arc::new(FakeMarks::default());
+        let follows = FollowedGroups::new(fake.clone(), n("/bob"));
+
+        follows
+            .sync([doc.clone(), mine.clone(), doc.clone()])
+            .await
+            .expect("marked");
+        assert_eq!(fake.asked(), [(n("/alice/32=sync/doc"), true)]);
+        follows.sync([doc.clone(), mine.clone()]).await.unwrap();
+        assert_eq!(
+            fake.asked().len(),
+            1,
+            "the same set asks the daemon nothing"
+        );
+
+        follows.sync([chat.clone(), mine.clone()]).await.unwrap();
+        let asked = fake.asked();
+        assert!(
+            asked.contains(&(n("/alice/32=sync/chat"), true)),
+            "{asked:?}"
+        );
+        assert!(
+            asked.contains(&(n("/alice/32=sync/doc"), false)),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().all(|(name, _)| name.has_prefix(&n("/alice"))),
+            "a group of the device's own namespace was marked: {asked:?}"
+        );
+
+        let refusing = Arc::new(FakeMarks {
+            refuse: Some(n("/alice/32=sync/doc")),
+            ..FakeMarks::default()
+        });
+        let follows = FollowedGroups::new(refusing.clone(), n("/bob"));
+        let why = follows.sync([doc.clone()]).await.unwrap_err();
+        assert!(why.contains("the daemon refused"), "{why}");
+        assert!(refusing.asked().is_empty(), "nothing was marked");
+        let follows = FollowedGroups::new(fake.clone(), n("/bob"));
+        follows.sync(Vec::new()).await.unwrap();
+        assert_eq!(fake.asked().len(), asked.len(), "no spaces, no marks");
     }
 }

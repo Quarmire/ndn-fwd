@@ -91,7 +91,17 @@
 //! - `follow <space>`: carry the space (`Node::follow`): verify, store and serve
 //!   it, publish no vector entry, hold no read key. Answer `{"space"}`; a
 //!   follower stores nothing it cannot verify, so the host must hold the owner's
-//!   trust context (else entries wait, `Pending(adoption)`).
+//!   trust context (else entries wait, `Pending(adoption)`). **The relays are
+//!   told**: for each space this device follows — open here as a member or
+//!   carried — of an owner other than its own namespace, the host marks the
+//!   space's sync group (`<owner>/32=sync/<space>`, `ndn_heap::wire::sync_group_of`)
+//!   on the daemon over its one management connection (`security/transit`),
+//!   and the daemon's links tell the relays they use to route exactly that
+//!   group to this device, no other space of the same owner (ndn-link.md
+//!   §5.10). A daemon that refuses (this host not in its `transit_groups`, no
+//!   links, more than 32 spaces) says why: the answer then adds
+//!   `{"relays_not_told": "<why>"}` and the space is carried all the same;
+//!   the next verb tries again.
 //! - `flush`: wait for a flush covering everything written so far. Answer `{}`.
 //! - `close`: stop cleanly (refuse new puts, drain, flush, record a clean close
 //!   in each space: the next start has no hole), answer `{}`, and end the
@@ -262,7 +272,7 @@ use ndn_security::{CertCache, FilePib, SecurityManager, Validator};
 use ndn_surface::signal::SignalOptions;
 use ndn_sync::{DataStore, MemoryStore};
 
-use host::{DaemonHost, DaemonMarks, carrying_introduction, follow_contexts};
+use host::{DaemonHost, DaemonMarks, FollowedGroups, carrying_introduction, follow_contexts};
 use shapes::{
     heap_error, hex, invite_error, members, next_step, revocation_cut, role_word, usage_error,
     value_fields,
@@ -334,6 +344,26 @@ struct Hosted {
     /// The device's clock: `suspect` without a time marks the key from now,
     /// as the device dates what it verifies.
     clock: Clock,
+    /// The groups of the spaces this device follows, told to the daemon.
+    follows: FollowedGroups,
+    /// The spaces `follow` carries (the layer lists the ones open as a member).
+    carried: std::sync::Mutex<Vec<Name>>,
+}
+
+impl Hosted {
+    /// Tell the daemon the spaces this device follows now: the ones open here
+    /// as a member and the ones carried. `Err`: the daemon's words.
+    async fn sync_follows(&self) -> Result<(), String> {
+        let mut spaces = self.node.spaces();
+        spaces.extend(
+            self.carried
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .cloned(),
+        );
+        self.follows.sync(spaces).await
+    }
 }
 
 #[tokio::main]
@@ -448,12 +478,18 @@ async fn main() -> Result<()> {
             ..SignalOptions::default()
         },
     );
+    let follows = FollowedGroups::new(Arc::clone(&host.marks), host.namespace.clone());
     let hosted = Hosted {
         node,
         invites,
         host,
         clock,
+        follows,
+        carried: std::sync::Mutex::default(),
     };
+    if let Err(why) = hosted.sync_follows().await {
+        tracing::warn!("{why}");
+    }
 
     // Signal streams in flight: each prints its answer once done, while
     // the next lines are read.
@@ -488,7 +524,11 @@ async fn main() -> Result<()> {
         } else {
             run(&hosted, verb, args).await.map_err(|e| e.json())
         };
-        if let Some(line) = answer_line(verb, outcome, &mut later) {
+        let line = answer_line(verb, outcome, &mut later);
+        if let Err(why) = hosted.sync_follows().await {
+            tracing::warn!("{why}");
+        }
+        if let Some(line) = line {
             println!("{line}");
         }
     }
@@ -730,9 +770,15 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
                 Err(e) => return Ok(Verb::Usage(e)),
             };
             let follower = h.node.follow(&space).await?;
-            Ok(Verb::Done(
-                json!({"space": space.to_string(), "held": follower.held()}),
-            ))
+            h.carried
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(space.clone());
+            let mut ok = json!({"space": space.to_string(), "held": follower.held()});
+            if let Err(why) = h.sync_follows().await {
+                ok["relays_not_told"] = json!(why);
+            }
+            Ok(Verb::Done(ok))
         }
         ("follow", _) => usage("usage: follow <space>"),
         ("flush", []) => {

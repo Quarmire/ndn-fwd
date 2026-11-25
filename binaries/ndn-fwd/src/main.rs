@@ -1335,6 +1335,12 @@ async fn main() -> Result<()> {
             context_sync,
         },
     ));
+    // The space groups local apps mark as followed are what the links tell
+    // the relays this device uses (ndn-link.md §5.10).
+    #[cfg(feature = "quic")]
+    if let Some(links) = &links {
+        trust_admin.transit.follow_with(Arc::clone(links));
+    }
     context_refresh::spawn_periodic(
         Arc::clone(&trust_admin),
         fwd_config.security.context_refresh_secs,

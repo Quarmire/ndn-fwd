@@ -502,8 +502,16 @@ fn trust_phrase(w: &W<'_>) -> Option<String> {
         ),
         "transit-not-personal" => format!(
             "only a person's own name (/user/ and a key's hash) can be carried for a scoped \
-             adoption, or an introduction's prefix (<device>/32=intro, <device>/32=hint), and \
-             {ns} is neither: follow it on the Trusted prefixes screen, or let a link carry it"
+             adoption, an introduction's prefix (<device>/32=intro, <device>/32=hint) or the \
+             group of a space an app follows (<owner>/32=sync/<space>), and {ns} is none of \
+             them{}: follow it on the Trusted prefixes screen, or let a link carry it",
+            w.wrap("why", " (", ")")
+        ),
+        "transit-follows-full" => format!(
+            "this device follows {} spaces for its apps, more than a connection can tell a relay \
+             (at most {}): stop following a space before following {ns}",
+            w.or("followed", "too many"),
+            w.or("max", "32")
         ),
         "transit-not-permitted" => format!(
             "{} may not have this device carry another person's name for an app: only {}{} may",
