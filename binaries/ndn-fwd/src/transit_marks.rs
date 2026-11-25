@@ -520,7 +520,7 @@ mod tests {
             marks.mark(None, doc.clone(), true).expect("a group").marks,
             1
         );
-        assert_eq!(links.followed_groups(), [doc.clone()]);
+        assert_eq!(links.followed_groups(), std::slice::from_ref(&doc));
         assert!(
             !engine.transit().covers(&doc),
             "a followed group is not carried in transit"
@@ -535,12 +535,16 @@ mod tests {
             "one mark is left on the group"
         );
         marks.mark(None, doc.clone(), false).unwrap();
-        assert_eq!(links.followed_groups(), [chat.clone()]);
+        assert_eq!(links.followed_groups(), std::slice::from_ref(&chat));
 
         for bad in ["/sa", "/sa/32=sync", "/32=sync/x", "/sa/32=sync/a/b/c/d/e"] {
             let refused = marks.mark(None, name(bad), true).unwrap_err();
             assert!(refused.is(code::TRANSIT_NOT_PERSONAL), "{bad}: {refused:?}");
-            assert_eq!(links.followed_groups(), [chat.clone()], "{bad} changed it");
+            assert_eq!(
+                links.followed_groups(),
+                std::slice::from_ref(&chat),
+                "{bad} changed it"
+            );
         }
         let whole = marks.mark(None, name("/sa/32=sync"), true).unwrap_err();
         assert!(whole.reason.contains("whole group"), "{}", whole.reason);
