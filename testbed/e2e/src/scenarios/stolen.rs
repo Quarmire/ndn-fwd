@@ -36,12 +36,15 @@
 //! <when it was lost>`): the laptop takes nothing new of the key from then
 //! on (a later thief note is refused there as suspected: its watch tells of
 //! it; the tab takes it) and keeps what it held. The owner takes the cut from
-//! what the laptop first verified before the loss (`cut <phone key> <file>`,
-//! bounded by the suspected-since time): runs that cover the phone's notes
-//! and none of the thief's or the offline note, with the thief's notes the
-//! laptop took after the loss left out and listed by full name. A cut of a
-//! key neither suspected nor bounded is refused; so are revocations with a
-//! cut of another key, with a cut file made without a bound, without an
+//! what the laptop first verified before the loss (`cut <phone key> <file>
+//! --held-before <when it was lost> --tips`): one tip of the phone's log, its
+//! last note the laptop held before the loss, no ranges and no manifest, the
+//! cut file carrying that tip in the cut TLV; the thief's notes the laptop took
+//! after the loss left out and listed by full name (the same cut in the
+//! manifest form, bounded by the suspected-since time, is taken too: runs that
+//! cover the phone's notes and none of the thief's or the offline note). A cut
+//! of a key neither suspected nor bounded is refused; so are revocations with
+//! a cut of another key, with a cut file made without a bound, without an
 //! answer to "When did you lose it?" (`--lost`), or with a loss time before
 //! the cut's bound — each signs nothing. Back home, the owner revokes the
 //! phone with its cut (`ndn-fwd revoke /st/member/phone --cut <file> --lost
@@ -212,6 +215,25 @@ fn cut_covers(cut: &Value, seq: u64) -> StepResult<bool> {
         });
     }
     Ok(covered)
+}
+
+/// A tip of the cut's answer (`tips`: `[{prefix, seq, digest}]`).
+struct CutTip {
+    seq: u64,
+    digest: String,
+}
+
+/// The tip of the log `prefix` in the cut's answer, if it names one.
+fn cut_tip(cut: &Value, prefix: &ndn_packet::Name) -> StepResult<Option<CutTip>> {
+    for t in cut["tips"].as_array().into_iter().flatten() {
+        if name(t["prefix"].as_str().unwrap_or_default())? == *prefix {
+            return Ok(Some(CutTip {
+                seq: t["seq"].as_u64().unwrap_or_default(),
+                digest: t["digest"].as_str().unwrap_or_default().to_owned(),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// `host` withdraws each of `notes` (written with `key`, outside its cut):
@@ -721,11 +743,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     let cut_file = sc.world.node("laptop").dir.join("phone.cut");
     let left_out = sc.step(
-        "on the laptop, the owner takes the cut of the phone's key, bounded by when it was lost \
-         (the time it is suspected since): the phone's notes; the thief's notes the laptop took \
-         after the loss left out and listed by full name; nothing the laptop never held",
+        "on the laptop, the owner takes the cut of the phone's key as one tip per space, bounded \
+         by when it was lost: the tip is the phone's last note the laptop held before the loss \
+         (no ranges, no manifest); the thief's notes the laptop took after the loss left out \
+         and listed by full name; nothing the laptop never held",
         |cx| {
             cx.concept("revocation cut");
+            let phone_log = name(&format!("{PHONE}/32=log{SPACE}"))?;
             // The laptop holds the thief's second note (its value) before the
             // first it chains to: the owner takes the cut once both are held,
             // each left out as the laptop first verified it after the loss.
@@ -735,7 +759,13 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 "the laptop's cut lists both thief notes",
                 CONVERGE,
                 |cx| {
-                    cut = laptop.ok(cx, &format!("cut {phone_key} {}", cut_file.display()))?;
+                    cut = laptop.ok(
+                        cx,
+                        &format!(
+                            "cut {phone_key} {} --held-before {lost_ms} --tips",
+                            cut_file.display()
+                        ),
+                    )?;
                     let listed: Vec<&str> = cut["left_out"]
                         .as_array()
                         .into_iter()
@@ -759,28 +789,58 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     cut["key"]
                 ));
             }
-            if cut["held_before_ms"] != lost_ms {
+            if cut["held_before_ms"] != lost_ms || cut["held_before_from"] != "given" {
                 return Err(format!(
-                    "the cut is bounded at {} ms, expected {lost_ms} ms (the time the phone's \
-                     key is suspected since)",
-                    cut["held_before_ms"]
+                    "the cut is bounded at {} ms ({}), expected {lost_ms} ms as given \
+                     (--held-before, the time the phone was lost)",
+                    cut["held_before_ms"], cut["held_before_from"]
+                ));
+            }
+            if !cut["ranges"].as_array().is_some_and(Vec::is_empty)
+                || !cut["manifest"].is_null()
+                || cut["manifest_packets"] != 0
+            {
+                return Err(format!(
+                    "the cut {cut} lists ranges or a manifest; expected the tips form: tips \
+                     alone, no ranges, no manifest"
+                ));
+            }
+            let tip = cut_tip(&cut, &phone_log)?.ok_or_else(|| {
+                format!(
+                    "the cut {cut} names no tip of {phone_log}; expected one tip of the phone's \
+                     log in the notes space"
+                )
+            })?;
+            if cut["tips"].as_array().map(Vec::len) != Some(1) {
+                return Err(format!(
+                    "the cut {cut} names more than the one tip of {phone_log}; expected one tip \
+                     per space and the phone wrote in one"
+                ));
+            }
+            // The tip is the phone's last note held before the loss; every
+            // note past it (the offline note, the thief's) is outside.
+            if tip.seq != n2.seq || tip.digest != n2.digest {
+                return Err(format!(
+                    "the cut's tip is seq {} with digest {:?}, expected seq {} with the \
+                     signed-region digest {:?} of {}",
+                    tip.seq, tip.digest, n2.seq, n2.digest, n2.name
                 ));
             }
             for v in [&n1, &n2] {
-                if !cut_covers(&cut, v.seq)? {
+                if v.seq > tip.seq {
                     return Err(format!(
-                        "the cut {cut} leaves out the phone's {}; expected it accepted (held \
-                         before the loss)",
-                        v.name
+                        "the cut's tip seq {} leaves out the phone's {}; expected it at or \
+                         below the tip (held before the loss)",
+                        tip.seq, v.name
                     ));
                 }
             }
             for v in [&n3, &t1, &t2, &ts] {
-                if cut_covers(&cut, v.seq)? {
+                if v.seq <= tip.seq {
                     return Err(format!(
-                        "the cut {cut} accepts seq {} ({}), which the laptop never held or \
-                         first held after the loss; expected it outside",
-                        v.seq, v.name
+                        "the cut's tip seq {} accepts seq {} ({}), which the laptop never held \
+                         or first held after the loss; expected it above the tip",
+                        tip.seq, v.seq, v.name
                     ));
                 }
             }
@@ -808,7 +868,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     if is_full_name_of(f, v)? {
                         return Err(format!(
                             "the cut leaves out the phone's {} ({f}); expected it in the cut \
-                             (held before the loss)",
+                             (held before the loss, on the tip's chain)",
                             v.name
                         ));
                     }
@@ -834,9 +894,85 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     file.held_before
                 ));
             }
-            cx.evidence(&format!("cut: {}", cut["ranges"]));
+            let carried = file.cut.tip_for(&phone_log).map(|t| t.seq);
+            if carried != Some(tip.seq)
+                || !file.cut.ranges().is_empty()
+                || file.cut.manifest().is_some()
+                || !file.manifest.is_empty()
+            {
+                return Err(format!(
+                    "{} carries the tip {carried:?} with {} range(s) and {} manifest packet(s); \
+                     expected the cut TLV with the tip of seq {} alone, no ranges and no \
+                     manifest",
+                    cut_file.display(),
+                    file.cut.ranges().len(),
+                    file.manifest.len(),
+                    tip.seq
+                ));
+            }
+            cx.evidence(&format!("cut tips: {}", cut["tips"]));
             cx.evidence(&format!("left out: {left_out:?}"));
             Ok(left_out)
+        },
+    )?;
+    sc.step(
+        "the same cut in the manifest form (the bound defaults to the time the key is suspected \
+         since): runs that cover the phone's notes and none of the thief's or the offline note, \
+         a manifest of what it keeps, no tips, the same entries left out",
+        |cx| {
+            let file = cx.w.node("laptop").dir.join("phone-manifest.cut");
+            let cut = laptop.ok(cx, &format!("cut {phone_key} {}", file.display()))?;
+            if cut["held_before_ms"] != lost_ms || cut["held_before_from"] != "suspected" {
+                return Err(format!(
+                    "the manifest cut is bounded at {} ms ({}), expected {lost_ms} ms as \
+                     suspected (the time the phone's key is suspected since)",
+                    cut["held_before_ms"], cut["held_before_from"]
+                ));
+            }
+            if !cut["tips"].as_array().is_some_and(Vec::is_empty)
+                || cut["manifest"].is_null()
+                || cut["manifest_packets"].as_u64().unwrap_or_default() == 0
+            {
+                return Err(format!(
+                    "the cut {cut} names tips or no manifest; expected the manifest form: \
+                     ranges with a manifest, no tips"
+                ));
+            }
+            for v in [&n1, &n2] {
+                if !cut_covers(&cut, v.seq)? {
+                    return Err(format!(
+                        "the cut {cut} leaves out the phone's {}; expected it accepted (held \
+                         before the loss)",
+                        v.name
+                    ));
+                }
+            }
+            for v in [&n3, &t1, &t2, &ts] {
+                if cut_covers(&cut, v.seq)? {
+                    return Err(format!(
+                        "the cut {cut} accepts seq {} ({}), which the laptop never held or \
+                         first held after the loss; expected it outside",
+                        v.seq, v.name
+                    ));
+                }
+            }
+            let mut manifest_left: Vec<String> = cut["left_out"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str().map(str::to_owned))
+                .collect();
+            let mut tips_left = left_out.clone();
+            manifest_left.sort();
+            tips_left.sort();
+            if manifest_left != tips_left {
+                return Err(format!(
+                    "the manifest cut leaves out {manifest_left:?}, the tips cut {tips_left:?}; \
+                     expected the same entries (every note past the phone's last before the loss)"
+                ));
+            }
+            cx.evidence(&format!("manifest cut: {}", cut["ranges"]));
+            Ok(())
         },
     )?;
     sc.step(
@@ -1173,6 +1309,45 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     ));
                 }
                 cx.evidence(&format!("{node} delivers {n3_full}, signed by {key}"));
+            }
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "the phone's notes at and below the tip stay accepted by every device: each daemon, \
+         validating them under the cut of tips, delivers the first note (below the tip, by \
+         name) and the tip itself, signed by the revoked key",
+        |cx| {
+            for node in ["phone", "laptop", "tab"] {
+                for v in [&n1, &n2] {
+                    let mut got = Err(String::new());
+                    wait_for(
+                        cx,
+                        &format!("{node}'s daemon delivers {}", v.name),
+                        CONVERGE,
+                        |cx| {
+                            got = delivered(cx, node, &v.name);
+                            Ok(got.is_ok())
+                        },
+                    )
+                    .map_err(|e| {
+                        let last = got.as_ref().err().cloned().unwrap_or_default();
+                        format!("{e}; the last fetch: {last}")
+                    })?;
+                    let key = got
+                        .unwrap_or_default()
+                        .lines()
+                        .find_map(|l| l.trim().strip_prefix("key:").map(|k| k.trim().to_owned()))
+                        .unwrap_or_default();
+                    if key != phone_key {
+                        return Err(format!(
+                            "{} at {node} is signed by {key:?}, expected the revoked key \
+                             {phone_key} (accepted by the tip of its cut)",
+                            v.name
+                        ));
+                    }
+                    cx.evidence(&format!("{node} delivers {}, signed by {key}", v.name));
+                }
             }
             Ok(())
         },
