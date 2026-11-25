@@ -15,14 +15,19 @@
 //! (see [`super::data_host`]); the phone's keeps its entries in a store
 //! directory too (`--store`), as a phone keeps its data on its disk.
 //!
-//! The notes space is public (`readers=anyone`, never sealed). In a sealed
-//! space a suspected key is granted no epoch key and the owner's node rotates
-//! the epoch (heap spec §9.8): once the thief's host heard the new epoch (the
-//! laptop's link, open at the café) it could not write at all ("not ready"),
-//! so the thief's later writes — what the cut must refuse — could not be made
-//! with the real client. A public space has no epochs; the thief writes until
-//! the revocation. The tab writes one memo so the laptop holds an entry of the
-//! tab's key (the cut of another key, below, needs one).
+//! The notes space is sealed (the default: readers are the owner alone). Once
+//! the owner marks the phone's key suspected the laptop signs a new epoch and
+//! grants its key to no suspected key (heap spec §9.8): an honest device
+//! writes in the new epoch once it holds the key (a `put` answers "not ready"
+//! until then, and the harness puts again), so the scenario has the laptop
+//! write a note in it and waits until the tab reads that note (it holds the
+//! new epoch's key); the tab then writes a memo the laptop reads. The mark is
+//! the laptop's alone: the tab, which holds the new key and does not know the
+//! mark, can still grant it to the thief's host until the revocation reaches
+//! the tab (heap spec §9.9), so the thief can write after the report, and
+//! after the revocation, as far as the tab has not heard of it. The tab's
+//! memo is also the entry of the tab's key the laptop needs for the cut of
+//! another key, below.
 //!
 //! The thief: the phone leaves its owner's hands (a repair shop; the time
 //! the owner later gives as when it was lost) and its storage is imaged —
@@ -42,9 +47,11 @@
 //! (the key is not revoked yet). Opened at the café, the laptop — the root
 //! device — takes them too, over the thief's link: after the time the phone
 //! was lost. The owner reports the loss there (`ndn-heap` `suspect <phone key>
-//! <when it was lost>`): the laptop takes nothing new of the key from then
-//! on (a later thief note is refused there as suspected: its watch tells of
-//! it; the tab takes it) and keeps what it held. The owner takes the cut from
+//! <when it was lost>`): the laptop signs a new epoch of the sealed space, the
+//! tab reads a note the laptop writes in it and writes a memo the laptop reads
+//! (honest devices still write); the laptop takes nothing new of the key from
+//! then on (a later thief note is refused there as suspected: its watch tells
+//! of it; the tab takes it) and keeps what it held. The owner takes the cut from
 //! what the laptop first verified before the loss (`cut <phone key> <file>
 //! --held-before <when it was lost> --tips`): one tip of the phone's log, its
 //! last note the laptop held before the loss, no ranges and no manifest, the
@@ -96,6 +103,8 @@ const SPACE: &str = "/st/32=data/notes";
 const TRIP: &str = "trip";
 /// The path of the tab's own memo, which no thief note touches.
 const MEMO: &str = "memo";
+/// The path of the note the laptop writes in the new epoch.
+const OWNER_NOTE: &str = "owner";
 /// The laptop's device name: `ndn-fwd init --device laptop` on /st.
 const LAPTOP: &str = "/st/admin/laptop";
 const TAB: &str = "/st/member/tab";
@@ -466,16 +475,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     let phone_key = phone.writer.clone();
 
     let day1 = sc.step(
-        "the laptop creates the notes space (public: `readers=anyone`, never sealed, so no epoch \
-         key can fence a thief out of writing) and writes \"day 1\"; every device watches it",
+        "the laptop creates the notes space (sealed: its readers are the owner alone) and \
+         writes \"day 1\"; every device watches it",
         |cx| {
-            // A sealed space would stop the thief's later writes by itself: a
-            // suspected key is granted no epoch key and the owner's node
-            // rotates the epoch (heap spec §9.8), so once the thief hears the
-            // new epoch its host refuses to write ("not ready"). This scenario
-            // is about what the cut does to what a thief signed, so the space
-            // is public and the thief can write until the revocation.
-            laptop.ok(cx, &format!("create {SPACE} readers=anyone"))?;
+            laptop.ok(cx, &format!("create {SPACE}"))?;
             let day1 = laptop.put(cx, SPACE, TRIP, "day 1")?;
             laptop.ok(cx, &format!("watch {SPACE}"))?;
             tab.watch_when_ready(cx, SPACE)?;
@@ -504,9 +507,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     host.node, n2.name, n1.name
                 ));
             }
-            // The space is public, so no key request or grant is signed: the
-            // tab's key signs an entry only by writing one, and the laptop's
-            // cut of the tab's key (a later step) needs an entry of it.
+            // The laptop's cut of the tab's key (a later step) needs an entry
+            // of it: the tab writes one memo.
             let memo = tab.put(cx, SPACE, MEMO, "tab: bring the charger")?;
             wait_for(cx, "the laptop holds the tab's memo", CONVERGE, |cx| {
                 laptop.holds(cx, SPACE, MEMO, &memo)
@@ -656,11 +658,12 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     sc.step(
-        "the laptop opens at a café the thief's network reaches: the thief's link, as the \
-         phone, reaches it, and the laptop takes the thief's two notes (the key is neither \
-         revoked nor suspected yet), after the time the phone was lost",
+        "the laptop opens at a café the thief's network and the tab's reach: the thief's link, \
+         as the phone, reaches it, and the laptop takes the thief's two notes (the key is \
+         neither revoked nor suspected yet), after the time the phone was lost",
         |cx| {
             drop(laptop_thief);
+            drop(laptop_tab);
             let mut found = None;
             wait_for(
                 cx,
@@ -718,6 +721,33 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             cx.evidence(&format!(
                 "the laptop suspects {phone_key} since {lost_ms} ms"
+            ));
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "the report makes the laptop sign a new epoch (a suspected key is granted no epoch key, \
+         heap spec §9.8): the laptop writes a note in it, the tab reads it (it holds the new \
+         epoch's key) and writes a memo in the new epoch the laptop reads",
+        |cx| {
+            cx.concept("epoch of a sealed space");
+            let note = laptop.put(cx, SPACE, OWNER_NOTE, "laptop: home by six")?;
+            wait_for(
+                cx,
+                &format!("the tab reads {}, sealed in the new epoch", note.name),
+                CONVERGE,
+                |cx| tab.holds(cx, SPACE, OWNER_NOTE, &note),
+            )?;
+            let memo = tab.put(cx, SPACE, MEMO, "tab: charger found")?;
+            wait_for(
+                cx,
+                &format!("the laptop reads {}", memo.name),
+                CONVERGE,
+                |cx| laptop.holds(cx, SPACE, MEMO, &memo),
+            )?;
+            cx.evidence(&format!(
+                "after the report the laptop's {} and the tab's {} are read by the other",
+                note.name, memo.name
             ));
             Ok(())
         },
@@ -1098,12 +1128,14 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.expect_version("laptop", NS, v0)
         },
     )?;
-    let _laptop_thief = sc.step(
-        "the owner closes the laptop and goes home: the thief's network no longer reaches it",
+    let (_laptop_thief, laptop_tab) = sc.step(
+        "the owner closes the laptop and goes home: neither the thief's network nor the tab's \
+         reaches it, so the tab hears nothing of the revocation to come",
         |cx| {
-            let cut = cut_udp(cx, CUT_LAPTOP_THIEF, addr(LAPTOP_HOST), addr(THIEF_HOST))?;
-            cx.evidence("nftables drops UDP between the laptop and the thief again");
-            Ok(cut)
+            let thief = cut_udp(cx, CUT_LAPTOP_THIEF, addr(LAPTOP_HOST), addr(THIEF_HOST))?;
+            let tab = cut_udp(cx, CUT_LAPTOP_TAB, addr(LAPTOP_HOST), addr(TAB_HOST))?;
+            cx.evidence("nftables drops UDP between the laptop and the thief, and the tab, again");
+            Ok((thief, tab))
         },
     )?;
     sc.step(
