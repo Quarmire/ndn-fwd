@@ -25,19 +25,25 @@
 //!
 //! **A revocation cut** (`--cut <file>`: the cut file a device's data layer
 //! writes with its `cut` verb — the RevocationCut TLV 0x0428, the bound it
-//! used, the entries the bound left out and the cut manifest's packets) is
+//! used, the entries the bound left out and the cut manifest's packets, if
+//! the cut has a manifest) is
 //! signed in the same version, beside the revocation of exactly its key:
 //! the packets it accepts (the key's log entries the data layer first
 //! verified before the loss, each by its exact bytes as the manifest lists
-//! them) stay accepted everywhere, every other packet the key signed is
+//! them; or, in a cut of tips, the packets below each log's tip by name and
+//! the tip by the digest of its signed region, each device's data layer
+//! keeping below a tip only the tip's own chain) stay accepted everywhere,
+//! every other packet the key signed is
 //! refused. The CLI asks **"When did you lose it?"** (`--lost <when>`
 //! without a terminal: RFC 3339, `2h ago`, or `now`) and refuses a cut
 //! file made without a time bound, or bounded later than that answer — it
 //! could accept what a thief wrote after the loss. Its key must be one the
 //! version revokes, the cut must list only that key's device log, name the
-//! key's public key and carry its whole manifest, else nothing is signed
-//! (`cut-refused`). The manifest's packets are stored beside the contexts
-//! and served with the version. The entries the bound left out are listed:
+//! key's public key and carry its whole manifest (a cut of tips needs none),
+//! else nothing is signed
+//! (`cut-refused`). The manifest's packets, if any, are stored beside the
+//! contexts and served with the version. The entries the bound left out (in
+//! a cut of tips also the entries off a tip's chain) are listed:
 //! each is refused with the rest, and a genuine one is re-admitted later by
 //! its full name ([`crate::readmit`]).
 //!
@@ -63,7 +69,7 @@ use ndn_namespace::root::{self, RootError};
 use ndn_packet::Name;
 use ndn_security::RevocationCut;
 
-use crate::onboard::{flag, pib_dir, positionals};
+use crate::onboard::{flag, hex_lower, pib_dir, positionals};
 use crate::root_host::{
     Secrets, daemon, handed_text, namespace_arg, now_ms, print_keys_to_end, render,
     render_before_signing,
@@ -226,15 +232,90 @@ pub(crate) fn print_left_out(file: &CutFile) {
     for name in &file.left_out {
         println!("left_out       = {name}");
     }
-    if !file.left_out.is_empty() {
-        println!("# The entries left out (verified at or after the loss) are refused with the");
-        println!("# rest. Re-admit one you know is genuine, one by one, by its full name:");
-        println!("#   ndn-fwd readmit {} <full-name>", file.cut.key());
+    for line in left_out_lines(file) {
+        println!("{line}");
     }
 }
 
-/// `cut` as the CLI shows it: per prefix its sequence-number runs, then
-/// how many exact packets it re-admits.
+/// The comment lines after the entries a cut left out: why they are refused
+/// and how to re-admit a genuine one; none when the cut left nothing out.
+/// A cut of tips leaves out also the entries off a tip's chain.
+fn left_out_lines(file: &CutFile) -> Vec<String> {
+    if file.left_out.is_empty() {
+        return Vec::new();
+    }
+    let why = match file.cut.tips().is_empty() {
+        true => "verified at or after the loss",
+        false => "verified at or after the loss, or off the chain of a tip",
+    };
+    vec![
+        format!("# The entries left out ({why}) are refused with the"),
+        "# rest. Re-admit one you know is genuine, one by one, by its full name:".to_string(),
+        format!("#   ndn-fwd readmit {} <full-name>", file.cut.key()),
+    ]
+}
+
+/// The comment lines saying what a revocation with `cut` keeps, and how to
+/// re-admit a genuine packet outside it. A cut with a manifest keeps the
+/// packets it lists by their exact bytes; a cut of tips keeps the packets
+/// below each tip by name (each device's data layer keeps below a tip only
+/// the chain of the tip) and each tip by the digest of its signed region.
+fn cut_keeps_lines(cut: &RevocationCut) -> Vec<String> {
+    let key = cut.key();
+    let mut lines = Vec::new();
+    match (cut.manifest().is_some(), cut.tips().is_empty()) {
+        (_, true) => {
+            lines.push(
+                "# With the cut, the packets it lists (by their exact bytes, as its manifest"
+                    .to_string(),
+            );
+            lines.push(
+                "# lists them) stay accepted, and the CA keeps serving the certificates of"
+                    .to_string(),
+            );
+        }
+        (false, false) => {
+            lines.push(
+                "# With the cut, the packets below each of its tips (by name; a device keeps"
+                    .to_string(),
+            );
+            lines.push(
+                "# below a tip only the tip's own chain) and each tip (by the digest of its"
+                    .to_string(),
+            );
+            lines.push(
+                "# signed region) stay accepted, and the CA keeps serving the certificates of"
+                    .to_string(),
+            );
+        }
+        (true, false) => {
+            lines.push(
+                "# With the cut, the packets its manifest lists (by their exact bytes), the"
+                    .to_string(),
+            );
+            lines.push(
+                "# packets below each of its tips (by name; a device keeps below a tip only"
+                    .to_string(),
+            );
+            lines.push(
+                "# the tip's own chain) and each tip (by the digest of its signed region) stay"
+                    .to_string(),
+            );
+            lines.push("# accepted, and the CA keeps serving the certificates of".to_string());
+        }
+    }
+    lines.push(format!(
+        "# {key} to verify them; everything else it signed is refused. A genuine"
+    ));
+    lines.push("# packet outside the cut is re-admitted by its full name:".to_string());
+    lines.push(format!("#   ndn-fwd readmit {key} <full-name>"));
+    lines
+}
+
+/// `cut` as the CLI shows it: per prefix its sequence-number runs, then per
+/// log its tip (`<log prefix> tip seq <n> digest <hex>`: the digest is the
+/// SHA-256 of the tip entry's signed region), then how many exact packets it
+/// re-admits.
 pub(crate) fn cut_text(cut: &RevocationCut) -> String {
     let mut parts: Vec<String> = cut
         .ranges()
@@ -251,6 +332,14 @@ pub(crate) fn cut_text(cut: &RevocationCut) -> String {
             format!("{} seq {}", range.prefix, runs.join(","))
         })
         .collect();
+    parts.extend(cut.tips().iter().map(|tip| {
+        format!(
+            "{} tip seq {} digest {}",
+            tip.prefix,
+            tip.seq,
+            hex_lower(&tip.digest)
+        )
+    }));
     if !cut.exact().is_empty() {
         parts.push(format!("{} exact packet(s)", cut.exact().len()));
     }
@@ -327,12 +416,9 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
             println!("# serving their certificates.");
         }
         Some(file) => {
-            let key = file.cut.key();
-            println!("# With the cut, the packets it lists (by their exact bytes, as its manifest");
-            println!("# lists them) stay accepted, and the CA keeps serving the certificates of");
-            println!("# {key} to verify them; everything else it signed is refused. A genuine");
-            println!("# packet outside the cut is re-admitted by its full name:");
-            println!("#   ndn-fwd readmit {key} <full-name>");
+            for line in cut_keeps_lines(&file.cut) {
+                println!("{line}");
+            }
         }
     }
     print_keys_to_end(&pib_dir);
@@ -672,5 +758,102 @@ mod tests {
         node.ca.follow_held(&keyring);
         assert!(node.ca.get_served_cert(&certificate).is_none());
         node.shutdown.shutdown().await;
+    }
+}
+
+#[cfg(test)]
+mod cut_text_tests {
+    use super::*;
+
+    fn n(s: &str) -> Name {
+        s.parse().unwrap()
+    }
+
+    /// A cut of tips: the log prefix, the tip's seq and its digest in hex,
+    /// beside the ranges of a cut with a manifest.
+    fn tip_cut() -> RevocationCut {
+        let mut cut = RevocationCut::new(n("/home/member/phone/KEY/1"));
+        cut.add_tip(&n("/home/member/phone/32=log/notes"), 7, [0xab; 32]);
+        cut
+    }
+
+    fn file_of(cut: RevocationCut, left_out: &[&str]) -> CutFile {
+        let mut file = CutFile::new(cut);
+        file.left_out = left_out.iter().map(|s| n(s)).collect();
+        file
+    }
+
+    /// The CLI lists a cut's tips (prefix, seq, digest in hex) as well as
+    /// its ranges and exact packets, so the owner checking a cut sees every
+    /// form it takes; a cut with none says it accepts nothing.
+    #[test]
+    fn a_cut_text_lists_the_tips_beside_the_ranges() {
+        assert_eq!(
+            cut_text(&tip_cut()),
+            format!(
+                "{} tip seq 7 digest {}",
+                n("/home/member/phone/32=log/notes"),
+                "ab".repeat(32)
+            )
+        );
+        let mut both = tip_cut();
+        both.add_run(&n("/home/member/phone/32=log/todo"), 1, 3);
+        let text = cut_text(&both);
+        assert!(
+            text.starts_with(&format!(
+                "{} seq 1..3; ",
+                n("/home/member/phone/32=log/todo")
+            )) && text.contains(" tip seq 7 digest "),
+            "{text}"
+        );
+        assert_eq!(
+            cut_text(&RevocationCut::new(n("/home/member/phone/KEY/1"))),
+            "accepts nothing"
+        );
+    }
+
+    /// A cut of tips says it keeps the packets below each tip by name and
+    /// each tip by its signed-region digest, and not that a manifest lists
+    /// them: a cut with a manifest still says its manifest.
+    #[test]
+    fn what_a_cut_keeps_names_tips_where_there_is_no_manifest() {
+        let tips = cut_keeps_lines(&tip_cut()).join("\n");
+        assert!(
+            tips.contains("below each of its tips") && tips.contains("signed region"),
+            "{tips}"
+        );
+        assert!(!tips.contains("manifest"), "{tips}");
+        assert!(
+            tips.contains("ndn-fwd readmit /home/member/phone/KEY/1 <full-name>"),
+            "{tips}"
+        );
+        let mut listed = RevocationCut::new(n("/home/member/phone/KEY/1"));
+        let notes = n("/home/member/phone/32=log/notes");
+        let built = ndn_security::cut_manifest::build(
+            &n("/home/bob"),
+            listed.key(),
+            &[(notes.clone(), 1, [1; 32])],
+        )
+        .unwrap();
+        listed.add_run(&notes, 1, 1);
+        listed.set_manifest(built.root).unwrap();
+        let manifest = cut_keeps_lines(&listed).join("\n");
+        assert!(manifest.contains("manifest"), "{manifest}");
+        assert!(!manifest.contains("tip"), "{manifest}");
+    }
+
+    /// The entries a cut of tips leaves out include those off a tip's chain,
+    /// and the note says so; a cut without tips says what it always said;
+    /// no entry left out, no note.
+    #[test]
+    fn the_left_out_note_names_the_chain_of_a_tip() {
+        let out = ["/home/member/phone/32=log/notes/seq=2"];
+        let tips = left_out_lines(&file_of(tip_cut(), &out)).join("\n");
+        assert!(tips.contains("off the chain of a tip"), "{tips}");
+        let mut ranged = RevocationCut::new(n("/home/member/phone/KEY/1"));
+        ranged.add_run(&n("/home/member/phone/32=log/notes"), 1, 3);
+        let plain = left_out_lines(&file_of(ranged, &out)).join("\n");
+        assert!(!plain.contains("tip"), "{plain}");
+        assert!(left_out_lines(&file_of(tip_cut(), &[])).is_empty());
     }
 }

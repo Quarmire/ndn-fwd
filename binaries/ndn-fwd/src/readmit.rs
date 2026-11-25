@@ -11,8 +11,11 @@
 //! stays refused. The checks come before anything is asked: this is the
 //! root device of the key's namespace (`--namespace` must name it when
 //! given), the held version holds a cut for exactly that key, and each name
-//! is a full name in the key's device log `<device>/32=log/...`. Names the
-//! cut accepts already are left out; with none left, nothing is signed.
+//! is a full name in the key's device log `<device>/32=log/...`. A cut of
+//! tips accepts a name below a tip by name, but a device's data layer keeps
+//! below a tip only the tip's chain, so a name below a tip is added as an
+//! exact entry too. Names the cut's ranges decide or lists already are left
+//! out; with none left, nothing is signed.
 //! Then the root is unlocked as for a revocation, the signer dropped right
 //! after, and the version handed to the daemon that uses the PIB (stored
 //! for its next start when none listens).
@@ -65,6 +68,15 @@ fn plan_refused(e: RootError) -> anyhow::Error {
     render(e)
 }
 
+/// The `trust_context` line when every name given is decided already: nothing
+/// is signed.
+fn already_line(held: u64) -> String {
+    format!(
+        "trust_context  = v{held} (every name given is decided by the cut's ranges or is listed \
+         in it already; nothing was signed)"
+    )
+}
+
 /// `ndn-fwd readmit <key> <full-name>...`.
 pub(crate) async fn run(args: &[String]) -> Result<()> {
     let words = positionals(args);
@@ -95,7 +107,7 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
         for name in &names {
             println!("readmitted     = {name} (already)");
         }
-        println!("trust_context  = v{held} (its cut accepts every name given; nothing signed)");
+        println!("{}", already_line(held));
         print_keys_to_end(&pib_dir);
         return Ok(());
     }
@@ -127,4 +139,23 @@ pub(crate) async fn run(args: &[String]) -> Result<()> {
     println!("# other packet outside the key's cut stays refused.");
     print_keys_to_end(&pib_dir);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A re-admission with nothing to add says whose decision stands: a
+    /// name is decided by the cut's ranges, or listed in it as an exact
+    /// entry (also a name below a tip), never "accepted" alone — a tip
+    /// accepts a name below it by name, yet the data layer still drops it
+    /// unless it is listed.
+    #[test]
+    fn nothing_to_add_says_the_cut_decides_or_lists_every_name() {
+        assert_eq!(
+            already_line(7),
+            "trust_context  = v7 (every name given is decided by the cut's ranges or is listed \
+             in it already; nothing was signed)"
+        );
+    }
 }

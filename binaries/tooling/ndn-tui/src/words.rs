@@ -1185,7 +1185,8 @@ fn root_phrase(w: &W<'_>) -> Option<String> {
             w.error()
         ),
         "nothing-to-sign" => format!(
-            "{} has everything asked already: nothing to sign",
+            "{} has everything asked already (a key revoked already; a name the cut's ranges \
+             decide or that it lists already): nothing was signed",
             w.version_or("version", "the current version")
         ),
         "cut-refused" => match w.get("why") {
@@ -2471,6 +2472,27 @@ mod tests {
         for bad in FORBIDDEN {
             assert!(!text.contains(bad), "{what}: {bad:?} in {text:?}");
         }
+    }
+
+    /// Nothing to sign says why: what was asked is decided already — a key
+    /// revoked, a name the key's cut decides by its ranges or lists as an
+    /// exact entry (also below a tip) — and that nothing was signed.
+    #[test]
+    fn nothing_to_sign_says_the_cut_decides_or_lists_what_was_asked() {
+        let facts: Params = [("version", "7")]
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let text = sentence("nothing-to-sign", &facts).unwrap();
+        assert_clean("nothing-to-sign", &text);
+        assert!(
+            text.starts_with("Version 7 ")
+                && text.contains("a name the cut's ranges decide or that it lists already")
+                && text.ends_with("nothing was signed."),
+            "{text}"
+        );
+        let bare = sentence("nothing-to-sign", &Params::new()).unwrap();
+        assert!(bare.starts_with("The current version "), "{bare}");
     }
 
     /// No sentence, with its params missing or all set, names a host's

@@ -52,8 +52,9 @@
 //! revocation: a cut file the device's data layer wrote, bounded at or
 //! before the time the old root device was lost (**"When did you lose
 //! it?"**, `--lost <when>` without a terminal) and carrying its whole
-//! manifest, else nothing is signed (`cut-refused`); its manifest packets
-//! are stored and served with `N+1`, and the entries its bound left out
+//! manifest (a cut of tips, one tip per log, needs none), else nothing is
+//! signed (`cut-refused`); its manifest packets, if any, are stored and
+//! served with `N+1`, and the entries its bound left out
 //! are listed for re-admission one by one ([`crate::readmit`]). The old CA
 //! no longer chains then, so a key revoked with a cut could not renew and
 //! the packets its cut accepts would stop verifying: once `N+1` is taken,
