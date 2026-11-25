@@ -10,7 +10,7 @@
 //! the other and the namespace's sync group `/nt/32=sync` over that link
 //! while it is up, and the trust-context library runs the group with the
 //! multicast strategy on each daemon, since each holds /nt: nothing in
-//! either config names the group or its strategy (data-layer spec §12).
+//! either config names the group or its strategy (ndn-rs `heap.md` §2.5).
 //!
 //! Each device runs `ndn-heap` (ndn-tools) on its daemon's socket: the
 //! device's data layer with the key `ndn-fwd init`/`enroll` put in the PIB,
@@ -53,7 +53,7 @@ const TRIP: &str = "trip";
 const PHONE: &str = "/nt/member/phone";
 /// The laptop's device name: `ndn-fwd init --device laptop` on /nt.
 const LAPTOP: &str = "/nt/admin/laptop";
-/// The namespace's sync group (data-layer spec §12).
+/// The namespace's sync group (ndn-rs `heap.md` §2.5).
 const GROUP: &str = "/nt/32=sync";
 /// The nftables table that cuts laptop–phone.
 const CUT_TABLE: &str = "ndn_e2e_notes_cut";

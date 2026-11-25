@@ -109,7 +109,7 @@ const OWNER_NOTE: &str = "owner";
 const LAPTOP: &str = "/st/admin/laptop";
 const TAB: &str = "/st/member/tab";
 const PHONE: &str = "/st/member/phone";
-/// The namespace's sync group (data-layer spec §12).
+/// The namespace's sync group (ndn-rs `heap.md` §2.5).
 const GROUP: &str = "/st/32=sync";
 /// How far behind the thief's clock runs.
 const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;

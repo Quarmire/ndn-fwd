@@ -99,7 +99,7 @@ pub struct People {
     pub relay: &'static str,
 }
 
-/// A namespace's sync group (data-layer spec §12).
+/// A namespace's sync group (ndn-rs `heap.md` §2.5).
 fn group(ns: &str) -> String {
     format!("{ns}/32=sync")
 }
