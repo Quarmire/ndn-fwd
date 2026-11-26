@@ -122,6 +122,41 @@ fn alert(a: &Alert) -> Value {
             json!({"kind": "unbacked-counter", "device": device.to_string(), "seen": seen})
         }
         Alert::StoreFailed { why } => json!({"kind": "store-failed", "why": why}),
+        Alert::ChannelForgery {
+            writer,
+            channel,
+            key_epoch,
+            seq,
+            via,
+        } => json!({
+            "kind": "channel-forgery",
+            "writer": writer.to_string(),
+            "channel": format!("{channel:016x}"),
+            "key_epoch": key_epoch,
+            "seq": seq,
+            "via": via.0,
+            "what_to_do": "a frame of this channel is not the one its sender sent (the sender's \
+                           signed checkpoint contradicts it): a holder of the channel key made \
+                           it; the face it came over (`via`) is barred from channel frames; \
+                           look at that link, and remove the member that holds the key if it \
+                           is not expected",
+        }),
+        Alert::ChannelCheckpoint {
+            writer,
+            channel,
+            key_epoch,
+            via,
+        } => json!({
+            "kind": "channel-checkpoint",
+            "writer": writer.to_string(),
+            "channel": format!("{channel:016x}"),
+            "key_epoch": key_epoch,
+            "via": via.0,
+            "what_to_do": "a checkpoint of this channel opened under the channel key and was \
+                           not signed by the sender: a holder of the key made it; the session \
+                           was dropped and the face it came over (`via`) is barred; ask the \
+                           sender again once that link is dealt with",
+        }),
     }
 }
 
