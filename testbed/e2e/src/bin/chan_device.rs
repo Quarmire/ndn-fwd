@@ -507,7 +507,7 @@ async fn run(d: &Arc<Device>, line: &str) -> Result<Value, Value> {
                                 false,
                             ));
                         }
-                        tracing::info!("the ask of {sender} is asked again: {e}");
+                        tracing::debug!("the ask of {sender} is asked again: {e}");
                         tokio::time::sleep(Duration::from_millis(200)).await;
                     }
                 }

@@ -323,11 +323,13 @@ impl Dev {
         while !done(self) {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
+                let events: Vec<String> = self.events.iter().map(Value::to_string).collect();
                 return Err(format!(
-                    "{}: {what}: not within {}s ({} events so far){}",
+                    "{}: {what}: not within {}s ({} events so far: {}){}",
                     self.node,
                     within.as_secs(),
                     self.events.len(),
+                    events.join(" "),
                     self.tail()
                 ));
             }
@@ -869,10 +871,34 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.concept("one copy per link, fan-out at the relay");
             let base = hop_base(cx, &channel, &mut sender, &mut [&mut carol, &mut dave], &relay_device)?;
             sender.ok(cx, &format!("emit {SPACE} {POS} 20 100 a"))?;
+            let mut late = Vec::new();
             for dev in [&mut carol, &mut dave] {
-                dev.until(cx, "all 20 messages of the burst", BURST, |d| {
+                if let Err(e) = dev.until(cx, "all 20 messages of the burst", BURST, |d| {
                     d.gots("a-").len() == 20
-                })?;
+                }) {
+                    late.push(e);
+                }
+            }
+            if !late.is_empty() {
+                let hop = read_hop(cx, &channel, &mut sender, &mut [&mut carol, &mut dave], &relay_device, &base)
+                    .map(|h| {
+                        format!(
+                            "frames since before the burst: the sender's link sent {}, the relay's \
+                             route took {} and sent {}, carol's link received {}, dave's {}",
+                            h.sent, h.routed, h.out, h.received[0], h.received[1]
+                        )
+                    })
+                    .unwrap_or_else(|e| e);
+                let tables: Vec<String> = [&mut sender, &mut carol, &mut dave]
+                    .into_iter()
+                    .map(|d| {
+                        let table = d.side(cx).map_or_else(|e| e, |s| s.text);
+                        format!("{} side table:\n{table}", d.node)
+                    })
+                    .collect();
+                return Err(format!("{}\n{hop}\n{}", late.join("\n"), tables.join("\n")));
+            }
+            for dev in [&mut carol, &mut dave] {
                 let got = dev.gots("a-");
                 let want: Vec<String> = (0..20).map(|i| format!("a-{i}")).collect();
                 let texts: Vec<String> = got.iter().map(|(_, t)| t.clone()).collect();
