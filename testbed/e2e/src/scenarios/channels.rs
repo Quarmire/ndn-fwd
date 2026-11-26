@@ -19,9 +19,12 @@
 //! The people's gestures: each creates a namespace (`ndn-fwd init`) and adopts the trust contexts
 //! of the ones it must know (the sender those of both receivers, whose asks it judges; each
 //! receiver the sender's; every device the relay's, which a link to a relay of another namespace
-//! needs to carry channel frames: the relay is one it follows). The sender creates a space for
-//! the two, each opens it, takes the channel (`get`: the signed ask over the links) and the sender
-//! emits.
+//! needs to carry channel frames: the relay is one it follows; carol dave's, whose device is her
+//! forwarder). /cd's trust context states `relay_roles = ["admin", "node"]` at init (the default
+//! is `node` only): dave's device is the root device of /cd, an admin device, and the link
+//! policy carol judges her link to it by is the one /cd's owner stated. The sender creates a
+//! space for the two, each opens it, takes the channel (`get`: the signed ask over the links) and
+//! the sender emits.
 //!
 //! Proves:
 //! 1. through the relay, both receivers get every message the sender emits, in order; the
@@ -38,7 +41,9 @@
 //!    channel key at a sequence the sender has not reached (`ndn-heap`'s `adversary` feature: the
 //!    one seam that forges) and sends it to carol over his link. Carol's `get` delivers it
 //!    (inside the stated window a forged frame is delivered as the sender's), the sender goes on,
-//!    and its next checkpoint does not list it: carol raises `Alert::ChannelForgery` for the
+//!    and its next checkpoint does not list it, within the stated window (the sender hands her at
+//!    most `(CHECKPOINT_MS + EXPOSE_SLACK_MS) / EMIT_GAP_MS` messages past the forged sequence
+//!    before the alert): carol raises `Alert::ChannelForgery` for the
 //!    sequence and the link, her evidence holds a `Mismatch` for that frame from that link, her
 //!    `get` yields `Retracted` over it, her forwarder's `side/list` shows that link barred
 //!    (dave's and the relay's show none), the sender's later frames do not reach her over it
@@ -83,6 +88,15 @@ const FORGED_NAME_ID: u64 = 4_000;
 /// sender has used (data, checkpoints, keep-alives), within what a receiver takes, and within
 /// what a burst of the sender's messages passes in about a second.
 const AHEAD: u64 = 20;
+/// The checkpoint period every device runs the channel with (the default, channel.md §15.9).
+const CHECKPOINT_MS: u64 = 20;
+/// What a forged frame's exposure may take beyond the checkpoint period once the sender has
+/// passed its sequence: the stated window is `P + d + ε` (§15.9), `d` the stream's delay to the
+/// receiver (two forwarders and two QUIC hops here) and `ε` the verification; this is `d + ε`
+/// with room for a loaded host.
+const EXPOSE_SLACK_MS: u64 = 180;
+/// The gap of the sender's messages in the forgery's burst.
+const EMIT_GAP_MS: u64 = 25;
 
 // ── a device process ────────────────────────────────────────────────────────────────────────
 
@@ -131,6 +145,8 @@ impl Dev {
             pib.display().to_string(),
             "--bind".to_owned(),
             format!("{ip}:{port}"),
+            "--checkpoint-ms".to_owned(),
+            CHECKPOINT_MS.to_string(),
         ];
         args.extend_from_slice(extra);
         let program = cx.w.bins.dir.join("chan-device");
@@ -663,9 +679,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     let roots = sc.step(
         "each creates a namespace (ndn-fwd init): the relay /cr, the sender /cs, carol /cc, dave \
-         /cd; each person adopts the trust contexts of the namespaces it must know (the sender \
-         the receivers', each receiver the sender's, every device the relay's, and carol dave's: \
-         her link goes to him) — the relay adopts none",
+         /cd (whose link policy lets its admin devices relay: dave's device is one, and carol's \
+         forwarder); each person adopts the trust contexts of the namespaces it must know (the \
+         sender the receivers', each receiver the sender's, every device the relay's, and carol \
+         dave's: her link goes to him) — the relay adopts none",
         |cx| {
             cx.concept("namespaces of three people and a relay");
             let mut roots = Vec::new();
@@ -682,7 +699,18 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                         member_days: None,
                     });
                 }
-                let (root, _) = init_root_with(cx, node, ns, device, node == "rroot")?;
+                if node == "dave" {
+                    // /cd's link policy, stated by its owner at init: the devices of /cd that
+                    // may be a relay are its admin devices too (the default is node devices
+                    // only). Dave's device is the root device of /cd, an admin device; carol
+                    // adopts the context after this, so her links are judged by this policy.
+                    cx.w.node_mut("dave").cfg.extra_toml = format!(
+                        "[ca]\nenabled = true\nprefix = \"{NS_D}\"\nidentity = \"{NS_D}/CA\"\n\
+                         relay_roles = [\"admin\", \"node\"]\n"
+                    );
+                }
+                let (root, _) =
+                    init_root_with(cx, node, ns, device, matches!(node, "rroot" | "dave"))?;
                 cx.evidence(&format!("{node}: init {ns}: device {}", root.identity));
                 roots.push(root);
             }
@@ -1129,7 +1157,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                  it) under the channel key and sent it to carol over his face {dave_to_carol}; it \
                  arrives at carol over her face {carol_to_dave}"
             ));
-            sender.ok(cx, &format!("emit {SPACE} {POS} 40 25 d"))?;
+            sender.ok(cx, &format!("emit {SPACE} {POS} 40 {EMIT_GAP_MS} d"))?;
             carol.until(cx, "the forgery alert and the retraction", BURST, |d| {
                 d.event("alert", "channel-forgery").is_some() && d.event("notice", "retracted").is_some()
             })?;
@@ -1140,6 +1168,27 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 ));
             }
             let alert_at = carol.event("alert", "channel-forgery").map(|(i, _)| i).expect("kept");
+            // The window (§15.9): the first checkpoint that covers the forged sequence exposes it
+            // within the period, the stream's delay and a verification of the sender's passing
+            // it. The sender emits a message every EMIT_GAP_MS, so it hands carol at most this
+            // many messages past the forged sequence before the alert (order of what the device
+            // printed, not the clock of this host).
+            let past = carol.events[..alert_at]
+                .iter()
+                .filter(|e| {
+                    e["ev"] == "got"
+                        && e["writer"] == sender.device.as_str()
+                        && e["seq"].as_u64().is_some_and(|s| s > seq)
+                })
+                .count() as u64;
+            let allowed = (CHECKPOINT_MS + EXPOSE_SLACK_MS) / EMIT_GAP_MS;
+            if past > allowed {
+                return Err(format!(
+                    "the forgery at {seq} was exposed after carol was handed {past} of the sender's \
+                     messages past it (one every {EMIT_GAP_MS} ms), beyond the stated window \
+                     (the {CHECKPOINT_MS} ms period plus {EXPOSE_SLACK_MS} ms: {allowed} messages)"
+                ));
+            }
             let (retracted_at, retracted) = carol.event("notice", "retracted").expect("waited for it");
             let (from, to) = (retracted["from"].as_u64().unwrap_or(u64::MAX), retracted["to"].as_u64().unwrap_or(0));
             if !(from <= seq && seq <= to) {
@@ -1188,10 +1237,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             cx.evidence(&format!(
                 "carol: the forged message (seq {seq}) was delivered (event {delivered_at}), then \
-                 the alert ChannelForgery (event {alert_at}: channel {channel}, seq {seq}, via face \
-                 {carol_to_dave}) and Retracted {from}..={to} (event {retracted_at}); evidence: \
-                 Mismatch at {seq} from ingress {carol_to_dave}; carol's side/list: face \
-                 {carol_to_dave} barred; dave's and the relay's: none"
+                 the alert ChannelForgery (event {alert_at}, after {past} of the sender's messages \
+                 past the forged sequence, {allowed} allowed by the window: channel {channel}, seq \
+                 {seq}, via face {carol_to_dave}) and Retracted {from}..={to} (event \
+                 {retracted_at}); evidence: Mismatch at {seq} from ingress {carol_to_dave}; \
+                 carol's side/list: face {carol_to_dave} barred; dave's and the relay's: none"
             ));
             Ok((seq, carol_to_dave))
         },
@@ -1206,7 +1256,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.concept("a barred link still carries NDN traffic");
             let (_, carol_to_dave) = forged;
             let drops0 = carol.side(cx)?.quarantined_drops;
-            sender.ok(cx, &format!("put {SPACE} note after the bar"))?;
+            sender.ok(cx, &format!("put {SPACE} /note after the bar"))?;
             wait_for(
                 cx,
                 "carol reads the entry the sender put",
@@ -1271,8 +1321,36 @@ fn linked_to(cx: &mut Cx<'_>, dev: &mut Dev, device: &str) -> StepResult<bool> {
 }
 
 /// The counters a burst is measured from: the sender's link's frames sent, the relay route's
-/// frames, the relay's frames out, and each receiver's link's frames received.
+/// frames, the relay's frames out, and each receiver's link's frames received. Read until two
+/// reads a moment apart agree: the relay counts a frame into its route before it counts it out
+/// to the sinks, so a read while a frame is between the two (a late checkpoint after the
+/// receivers' `get`) would start the burst's counters out of step for good.
 fn hop_base(
+    cx: &mut Cx<'_>,
+    channel: &str,
+    sender: &mut Dev,
+    receivers: &mut [&mut Dev],
+    relay_device: &str,
+) -> StepResult<(u64, u64, u64, Vec<u64>)> {
+    let mut last = read_base(cx, channel, sender, receivers, relay_device)?;
+    let deadline = Instant::now() + SHORT;
+    loop {
+        thread::sleep(Duration::from_millis(150));
+        let now = read_base(cx, channel, sender, receivers, relay_device)?;
+        if now == last {
+            return Ok(now);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the channel's counters did not settle within {}s: {last:?}, then {now:?}",
+                SHORT.as_secs()
+            ));
+        }
+        last = now;
+    }
+}
+
+fn read_base(
     cx: &mut Cx<'_>,
     channel: &str,
     sender: &mut Dev,
