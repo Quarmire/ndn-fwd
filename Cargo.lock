@@ -3077,19 +3077,28 @@ dependencies = [
  "bip39",
  "bytes",
  "humantime",
+ "ndn-app",
  "ndn-cert",
  "ndn-config",
+ "ndn-engine",
+ "ndn-face-quic",
  "ndn-heap",
  "ndn-invite",
  "ndn-ipc",
+ "ndn-link",
  "ndn-namespace",
  "ndn-packet",
  "ndn-security",
+ "ndn-sync",
+ "ndn-transport",
  "ndn-trust-envelope",
  "ndn-tui",
  "serde_json",
  "sha2 0.11.0",
  "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3229,6 +3238,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tracing",
 ]
 
 [[package]]

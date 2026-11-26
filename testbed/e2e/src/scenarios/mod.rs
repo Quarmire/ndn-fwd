@@ -13,6 +13,7 @@ use crate::world::{addr, now_unix, parse_utc};
 
 mod address_change;
 mod approval;
+mod channels;
 mod compromised;
 mod data_host;
 mod destroyed;
@@ -61,6 +62,7 @@ pub const ALL: &[&str] = &[
     "signals",
     "follower",
     "address-change",
+    "channels",
 ];
 
 pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
@@ -89,6 +91,7 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "signals" => signals::run(sc),
         "follower" => follower::run(sc),
         "address-change" => address_change::run(sc),
+        "channels" => channels::run(sc),
         other => unreachable!("unknown scenario {other}"),
     }
 }

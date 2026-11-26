@@ -51,7 +51,7 @@ SCENARIOS: lifecycle, lifecycle-push, recovery-destroyed,
            recovery-compromised, negatives, approval, quic-links,
            direct-paths, phone-links, relays, on-demand, membership,
            multi-prefix, tui, dv, notes, shared, stolen, folder, invite,
-           self-certifying, signals, follower, address-change
+           self-certifying, signals, follower, address-change, channels
 ";
 
 #[derive(Clone, Debug, Default)]
@@ -196,6 +196,19 @@ fn binaries(args: &Args) -> Result<PathBuf, String> {
         if !ok {
             return Err("cargo build of ndn-repo follow failed".into());
         }
+        // The `channels` scenario's devices: this crate's own `chan-device`
+        // (an embedded forwarder, its links and a heap node), built with the
+        // `adversary` feature of ndn-heap that only this crate enables.
+        println!("ndn-e2e: building chan-device (channels) …");
+        let ok = Command::new("cargo")
+            .args(["build", "-p", "ndn-e2e", "--bin", "chan-device"])
+            .current_dir(&ws)
+            .status()
+            .map_err(|e| format!("cargo: {e}"))?
+            .success();
+        if !ok {
+            return Err("cargo build of chan-device failed".into());
+        }
     }
     let meta = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
@@ -221,6 +234,7 @@ fn outer(args: &Args) -> Result<bool, String> {
         "ndn-sec",
         "examples/phone_host",
         "ndn-repo",
+        "chan-device",
     ] {
         if !bin_dir.join(b).is_file() {
             return Err(format!("{b} not found in {}", bin_dir.display()));

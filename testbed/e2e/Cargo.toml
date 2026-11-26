@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
+# `cargo run -p ndn-e2e` runs the harness, not the `channels` scenario's device helper.
+default-run = "ndn-e2e"
 
 [package.metadata.scope]
 classification = "tooling"
@@ -13,12 +15,18 @@ classification = "tooling"
 name = "ndn-e2e"
 path = "src/main.rs"
 
+# The `channels` scenario's devices: one process each, an embedded forwarder, its links and a
+# heap node (see the file's header for why a device cannot be an `ndn-fwd` daemon plus `ndn-heap`).
+[[bin]]
+name = "chan-device"
+path = "src/bin/chan_device.rs"
+
 [dependencies]
 # Deterministic mistyped / swapped recovery words: the harness picks a variant
 # whose BIP39 checksum fails, so the refusal it asserts is the checksum's.
 bip39      = { version = "2.2", default-features = false, features = ["std"] }
 serde_json = { workspace = true }
-tokio      = { workspace = true, features = ["rt", "rt-multi-thread", "net", "signal", "macros", "time"] }
+tokio      = { workspace = true, features = ["rt", "rt-multi-thread", "net", "signal", "macros", "time", "io-std", "io-util", "sync"] }
 # The `approval` scenario's one fixture: a version of the trust context
 # signed on the root device with the schema namespaces were created with
 # before `#deny`/`#pending` (no CLI signs a chosen schema), handed to the
@@ -39,7 +47,7 @@ ndn-namespace = { workspace = true }
 # The `shared` scenario reads a sealed entry as a relay fetched it
 # (`ndn_heap::wire::Entry`): ciphertext beside its epoch, no path.
 bytes      = { workspace = true }
-ndn-heap   = { workspace = true }
+ndn-heap   = { workspace = true, features = ["adversary"] }
 # The `invite` scenario parses and mistypes the short code it was offered.
 ndn-invite = { workspace = true }
 # The `folder` scenario compares a large value read back with what was put,
@@ -48,6 +56,17 @@ sha2       = { workspace = true }
 # The `stolen` scenario answers `ndn-fwd revoke --lost` with the exact
 # loss time it marked the phone suspected since (RFC 3339, milliseconds).
 humantime = "2"
+# `chan-device`: the embedded forwarder, its QUIC links and the heap node over them, and the
+# `adversary` seam of ndn-heap (a key holder that forges a frame), which only this crate enables.
+ndn-engine    = { workspace = true }
+ndn-app       = { workspace = true }
+ndn-link      = { workspace = true, features = ["engine"] }
+ndn-face-quic = { workspace = true }
+ndn-transport = { workspace = true }
+ndn-sync      = { workspace = true }
+tokio-util    = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
