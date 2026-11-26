@@ -137,9 +137,14 @@ fn alert(a: &Alert) -> Value {
             "via": via.0,
             "what_to_do": "a frame of this channel is not the one its sender sent (the sender's \
                            signed checkpoint contradicts it): a holder of the channel key made \
-                           it; the face it came over (`via`) is barred from channel frames; \
-                           look at that link, and remove the member that holds the key if it \
-                           is not expected",
+                           it. The node asked its forwarder to bar the face it came over \
+                           (`via`) from channel frames, but this alert does not say it did: \
+                           the forwarder refuses the node's own face and a face it does not \
+                           hold, and a node with no IngressBar attached asks nothing (the \
+                           node's log says which: `barred for N s`, `could not be barred`, or \
+                           `NOT barred`). Look at that link, bar it at the forwarder if it is \
+                           not barred, and remove the member that holds the key if it is not \
+                           expected",
         }),
         Alert::ChannelCheckpoint {
             writer,
@@ -153,9 +158,13 @@ fn alert(a: &Alert) -> Value {
             "key_epoch": key_epoch,
             "via": via.0,
             "what_to_do": "a checkpoint of this channel opened under the channel key and was \
-                           not signed by the sender: a holder of the key made it; the session \
-                           was dropped and the face it came over (`via`) is barred; ask the \
-                           sender again once that link is dealt with",
+                           not signed by the sender: a holder of the key made it, and the \
+                           session was dropped. The node asked its forwarder to bar the face \
+                           it came over (`via`) from channel frames, but this alert does not \
+                           say it did (see the node's log: `barred for N s`, `could not be \
+                           barred`, or `NOT barred` with no IngressBar attached); bar that \
+                           link at the forwarder if it is not barred, and ask the sender \
+                           again once that link is dealt with",
         }),
     }
 }
