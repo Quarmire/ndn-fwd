@@ -185,11 +185,11 @@ The remaining binaries back the `testbed/` harness; each takes
   signing with the device's key from the daemon's PIB and verifying with the
   PIB's trust contexts (adopting each newer version the daemon tells of on
   its trust stream, `/localhost/nfd/security/notifications`, from the PIB it
-  stored it in); reads `create`/`change`/`members`/`put`/`get`/`watch`/
-  `follow`/`flush`/`close`/`offer`/`close_offer`/`join`/
-  `suspect`/`unsuspect`/`suspected`/`cut`/`refused` lines (and `signal-*`)
+  stored it in); reads `create`/`change`/`members`/`put`/`kept`/`emit`/`get`/
+  `watch`/`follow`/`flush`/`close`/`offer`/`close_offer`/`join`/
+  `suspect`/`unsuspect`/`suspected`/`cut`/`refused`/`evidence` lines
   on stdin and answers one JSON object per line (the host of the `notes`,
-  `folder`, `invite`, `shared`, `stolen`, `signals` and `follower` e2e
+  `folder`, `invite`, `shared`, `stolen` and `follower` e2e
   scenarios; `suspect <key> [<when>]`, on reporting a device lost, stops the
   device taking new entries of that key; `cut <key> <file>
   [--held-before <when>] [--upto <space>=<seq>]... [--tips]` (`<when>`: ms
@@ -209,9 +209,21 @@ The remaining binaries back the `testbed/` harness; each takes
   after the vouched relays; `--clock-offset-ms` shifts only the
   times it reads. Spaces are named `<ns>/32=data/<name>` (e.g.
   `/nt/32=data/notes`), `<ns>` the namespace of the trust context that
-  governs the device; a path inside one is relative to it. Without `--device`
-  it answers `signal-capture <route>` (every push `…/32=signal/<digest>` under the
-  route, e.g. `<owner>/32=sync`) and `quit` only (a relay's capture). The verbs
+  governs the device; a path inside one is relative to it. The channel verbs
+  follow `ndn_heap::Heap`: `put` writes a kept, signed, durable value;
+  `kept <space> <path>` is its one-shot read (`Heap::kept`, the verb this tool
+  called `get` before the channel, so a path is read by one name and `get` is
+  the stream: no alias remains); `emit <space> <path> (text=<value>|hex=<octets>)
+  [--mode latest|reliable|window] [--stand <secs>]` sends one live message
+  that is never an entry; `get <space> <path> [--prefix] [--no-kept]
+  [--no-live] [--mode …] [--verified]` streams the kept values and the live
+  emissions together, each item saying by its `kind` which it is; `evidence`
+  lists the channel evidence the node holds. The node reaches the daemon over
+  its socket, which carries NDN packets only, so channel frames reach
+  receivers only where a node's connection carries them (the e2e's
+  `chan-device` runs an embedded engine for that). `ndn-heap` needs `--device`
+  (there is no device-less capture mode: channel frames are not NDN packets, so
+  a daemon's operator has nothing of them to capture). The verbs
   and their JSON shapes are the module doc of `src/heap.rs`.
 
 ## License

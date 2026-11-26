@@ -52,7 +52,7 @@
 //! components (`trip/day1`, with or without a leading `/`). A name that is
 //! no space (or a path that is no path) is refused with why. A space is
 //! opened here by the first verb that names it (`create` makes it; `members`,
-//! `put`, `get`, `watch` and `offer` open one made elsewhere that this device
+//! `put`, `kept`, `emit`, `get`, `watch` and `offer` open one made elsewhere that this device
 //! is a member of); every space the device held is opened again at start.
 //!
 //! Verbs (one per line; values with spaces in double quotes, `\"` and `\\`
@@ -81,9 +81,9 @@
 //!   exactly when the space's sync state holds no other device). Answer
 //!   `{"space","path","id","removed":<bool>}` plus the value as an item shows
 //!   it (`len`, `text`/`hex`/`sha256`).
-//! - `get <space> <path>`: the path's value, local, never waiting for the
-//!   network: `{"space","path","item":<item>|null}` (`null`: never put, or
-//!   removed).
+//! - `kept <space> <path>`: the path's kept value (`Heap::kept`, once `get`: the name says what
+//!   it reads, and `get` is the stream below), local, never waiting for the network, never
+//!   an emission: `{"space","path","item":<item>|null}` (`null`: never put, or removed).
 //! - `watch <space>`: from now on, first every current head, then every
 //!   change, each as its own line (below), until the process ends. A watch that
 //!   lagged resumes by itself (the layer's `Lagged` is shown, then the
@@ -180,33 +180,37 @@
 //!   for its whole run, which owns the marks (the daemon releases them when the
 //!   host ends), and fetches its trust-context versions over its own
 //!   connection; the daemon needs a route to each such namespace.
-//! - `signal-subscribe <space>`: from now on, every signal of the space (live
-//!   data that is never an entry and never stored: `ndn_surface::signal`) from
-//!   every member as its own line — the newest per (sender, address), never a
-//!   backlog. Refused NotMember (ask the owner) or NotReady (no members record
-//!   or, sealed, no epoch key held yet: ask again). The device's signals start
-//!   on the first signal verb, over a connection to the daemon of their own.
-//! - `signal-open <space>`: a run over the space (a fresh run key, its header
-//!   signed by this device's key); `signal-send` and `signal-stream` open one
-//!   when none is open. `signal-close <space>` ends it.
-//! - `signal-send <space> <address> <payload>`: one signal on the space's run
-//!   (address at most 64 octets, payload at most 768): its sequence.
-//! - `signal-stream <space> <address> <count> <hz>`: `count` signals at `hz`
-//!   per second (at most 120) on the space's run, each payload `n=<i>
-//!   sent_us=<µs since the epoch>`, answered once all are sent (while the next
-//!   lines are read): the run, the first and last sequence, how long it took.
-//! - `signal-stats`: the counters of this device's signals since they started
-//!   — sent packets and octets, delivered, and what was dropped, by why.
-//! - `signal-capture <route>`: register `route` (the owner's `<owner>/32=sync`,
-//!   or a space's group `<owner>/32=sync/<rest>` below it) on the daemon over a
-//!   connection of its own and print every push Interest under it (a name
-//!   ending `…/32=signal/<digest>`: a signal's push goes to the group of its
-//!   space, which the owner's route covers) — what a relay's operator sees of
-//!   the signals its daemon forwards. Sync Interests of the group are not shown.
-//!   Needs no device: started without `--device` (and `--pib`), the tool
-//!   answers this verb and `quit` only (one binary: the e2e names this run
-//!   `ndn-heap-capture` in its logs).
+//! - `emit <space> <path> (text=<value>|hex=<octets>) [--mode latest|reliable|window]
+//!   [--stand <secs>]`: one live message at the path of the space over this device's channel
+//!   (`Heap::emit`: never an entry, never stored, never cached; a value as for `put`). `--mode`
+//!   is `latest` (the default: the newest per path, loss allowed, never blocks), `reliable`
+//!   (every message in order, or a visible gap) or `window` (reliable, plus the default
+//!   replayable window a joiner asks for: the last 256 messages, 1 MiB, 10 s). `--stand <secs>`
+//!   (1 to 3600) lets the message stand for a receiver that joins later, for that long. A
+//!   sender with no receiver sends nothing and answers at once. Answer `{"space","path","mode",
+//!   "stand_secs","len"}`; a refusal says why and what to do (`NotWriter`: `ask-owner`;
+//!   `NotReady`, `Congested`: `retry-later`; `TooLarge`, a mode the path has no stream for:
+//!   `fix-request`).
+//! - `get <space> <path> [--prefix] [--no-kept] [--no-live] [--mode latest|reliable|window]
+//!   [--verified]`: from now on, as lines (below) until the process ends, the values at the
+//!   path (with `--prefix`: at it and below it; `/` is every path) the way `Heap::get` merges
+//!   them: the kept values first, then each kept change, with each live emission of the space's
+//!   writers' channels, every item saying by its `kind` which it is. `--no-kept` leaves the
+//!   kept values out (emissions alone), `--no-live` the emissions (kept values alone; no
+//!   channel is asked for); both is refused. `--mode` joins only that mode's channels (default:
+//!   every mode a sender offers); `--verified` delivers a frame only after a signed checkpoint
+//!   lists it (`Trust::Verified`: it prevents a key holder's forgery, at up to one checkpoint
+//!   period of latency). Answer `{"space","path","prefix","kept","live"}`.
+//! - `evidence`: what this node holds that a frame of a channel was not its sender's
+//!   (`NodeHandle::channel_evidence`, oldest first, in memory): `{"evidence":[{"kind",
+//!   "channel","sender","key_epoch","seq0","ingress","when_ms"}]}`.
 //! - `quit` (or end of input).
+//!
+//! The node this tool starts reaches the forwarder over its management socket, which carries NDN
+//! packets only: a channel frame (marker octet `0x00`) is not one, and `ndn_app::IpcConnection`
+//! refuses it. `emit` and `get` run on that node as they run on any, and a channel's frames
+//! reach receivers only where the node's connection carries them (an embedded engine, as the
+//! e2e's `chan-device` runs; see the `channels` scenario).
 //!
 //! Output lines: `{"ready":{"device","writer"}}` once the layer runs; per verb
 //! `{"verb":…,"ok":{…}}` or `{"verb":…,"error":{"message","retry","next",
@@ -238,21 +242,21 @@
 //! (`device`, `seq`: a device signed two packets at one name), `outside-cut`
 //! (`id`), `refused` (`id`, `why`, `next`), `rolled-back` (`reserved`, `seen`:
 //! re-enrol the device), `gap-signed` (`after`, `resumed`), `unbacked-counter`
-//! (`device`, `seen`) or `store-failed` (`why`). Per received signal
-//! `{"signal":{"scope","sender","run","seq","address","payload","expires_ms",
-//! "local"}}` (address and payload as text, or `{"hex"}` when not UTF-8; with
-//! `"latency_us"`, by this host's clock, when the payload carries
-//! `sent_us=<µs>`, as a stream's does); per captured signal Interest
-//! `{"capture":<group>,"interest":{"name","octets","params_hex","digest_ok",
-//! "decodes_as"}}` (`SignalSealed` with its `key_id`, or `SignalBody` with the
-//! `scope_digest` (16 octets, hex, of the scope's name: the name itself rides
-//! only in a run header) and run it shows, or `undecodable` with why); a signal
-//! refusal's error carries `retry_after_ms` when over the sender's rate.
-//! `--no-signal-ring` opens no local ring per run. Logs go to stderr.
+//! (`device`, `seen`) or `store-failed` (`why`).
+//!
+//! Per item of a `get` `{"get":<space>,"got":{"path","by","writer","kind",…}}` and the value as
+//! an item shows it: `kind` is `"kept"` with `id` (an id), `as_of_ms` (how long ago it was
+//! written, `null` when not known) and `removed` (the path was removed: the value is empty), or
+//! `"emitted"` with `seq` (the channel's) and `stands_ms` (what is left of a stated lifetime,
+//! `null` for a live emission). Per notice `{"get":<space>,"notice":{"kind","what_to_do",…}}`,
+//! `kind` one of `lagged` (`missed`: emissions the mode dropped), `withdrawn` (`id`, `why`, as a
+//! watch's: an entry this get delivered was refused after the fact; the value that follows
+//! stands), `live-ended` (`end`: `ended` with `writer`, or `no-path`; `why`; `next`) or
+//! `retracted` (`writer`, `from`, `to`: discard what was delivered with an emitted `seq` in that
+//! range). Logs go to stderr.
 
 mod host;
 mod shapes;
-mod signal;
 mod store;
 
 use std::collections::BTreeMap;
@@ -263,28 +267,26 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use clap::Parser;
-use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::task::JoinSet;
 
 use ndn_app::{Connection, IpcConnection, demux_cert_fetcher};
 use ndn_cert::CutFile;
 use ndn_heap::{
-    Change, Clock, Config, CutBound, Frontier, Heap, HeapError, MembersChange, Node, PutOptions,
-    Readers, Share, Timestamp, Transport,
+    Change, ChannelMode, Clock, Config, CutBound, EmitError, EmitOptions, Frontier, GetOptions,
+    Heap, HeapError, Live, MembersChange, Modes, Node, PutOptions, Readers, STAND_MAX, Select,
+    Share, Timestamp, Transport, Trust, Window,
 };
 use ndn_invite::{IntroPolicy, InviteConfig, InviteError, Invites, Offer, Role};
 use ndn_ipc::{ForwarderClient, MgmtClient};
 use ndn_packet::Name;
 use ndn_security::{CertCache, FilePib, SecurityManager, Validator};
-use ndn_surface::signal::SignalOptions;
 use ndn_sync::{DataStore, MemoryStore};
 
 use host::{DaemonHost, DaemonMarks, FollowedGroups, carrying_introduction, follow_contexts};
 use shapes::{
-    heap_error, hex, invite_error, members, next_step, revocation_cut, role_word, usage_error,
-    value_fields,
+    emit_error, evidence, got, heap_error, hex, invite_error, members, next_step, notice,
+    revocation_cut, role_word, usage_error, value_fields,
 };
 use store::DirStore;
 
@@ -300,10 +302,9 @@ const MAX_CHAIN: usize = 5;
 struct Cli {
     /// The device: its key must be `<device>/KEY/<id>` in the PIB, with a
     /// currently valid certificate (e.g. `/alice/member/phone`, as `ndn-fwd
-    /// enroll` certified it). Without it the tool hosts no device and
-    /// answers `signal-capture` and `quit` only (a relay's capture).
+    /// enroll` certified it).
     #[arg(long)]
-    device: Option<String>,
+    device: String,
 
     /// The daemon's PIB directory: the device's key and the trust contexts
     /// (needed with `--device`).
@@ -334,12 +335,6 @@ struct Cli {
     /// whatever it serves is verified like any packet.
     #[arg(long = "holder", value_name = "DEVICE", value_parser = parse_holder)]
     holder: Vec<Name>,
-
-    /// Open no local ring per signal run: this device's signals reach
-    /// subscribers on this host through the forwarder only, as they reach
-    /// other hosts.
-    #[arg(long)]
-    no_signal_ring: bool,
 
     #[arg(long, default_value_t = ndn_config::ManagementConfig::default().face_socket)]
     face_socket: String,
@@ -391,9 +386,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
-    let Some(device) = &cli.device else {
-        return capture_host(&cli.face_socket).await;
-    };
+    let device = &cli.device;
     let device: Name = device
         .parse()
         .map_err(|e| anyhow!("--device {device:?}: {e}"))?;
@@ -469,7 +462,7 @@ async fn main() -> Result<()> {
         device.clone(),
         keys,
         validator,
-        Arc::clone(&store),
+        store,
         config,
     )
     .await
@@ -487,15 +480,6 @@ async fn main() -> Result<()> {
         "{}",
         json!({"ready": {"device": device.to_string(), "writer": node.writer().to_string()}})
     );
-    let signals = signal::SignalHost::new(
-        node.handle(),
-        store,
-        cli.face_socket.clone(),
-        SignalOptions {
-            local_ring: !cli.no_signal_ring,
-            ..SignalOptions::default()
-        },
-    );
     let follows = FollowedGroups::new(Arc::clone(&host.marks), host.namespace.clone());
     let hosted = Hosted {
         node,
@@ -509,12 +493,8 @@ async fn main() -> Result<()> {
         tracing::warn!("{why}");
     }
 
-    // Signal streams in flight: each prints its answer once done, while
-    // the next lines are read.
-    let mut later = JoinSet::new();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.context("read stdin")? {
-        while later.try_join_next().is_some() {}
         let words = match split(&line) {
             Ok(w) => w,
             Err(e) => {
@@ -529,110 +509,53 @@ async fn main() -> Result<()> {
             break;
         }
         if verb == "close" && args.is_empty() {
-            // Every signal stream still waiting answers, then the node
-            // drains, flushes and records a clean close in each space.
-            while later.join_next().await.is_some() {}
-            signals.shutdown();
+            // The node drains, flushes and records a clean close in each space.
             hosted.node.close().await;
             println!("{}", json!({"verb": "close", "ok": {}}));
             return Ok(());
         }
-        let outcome = if verb.starts_with("signal-") {
-            signals.run(verb, args).await.map_err(|e| signal::error(&e))
-        } else {
-            run(&hosted, verb, args).await.map_err(|e| e.json())
-        };
-        let line = answer_line(verb, outcome, &mut later);
+        let line = answer_line(verb, run(&hosted, verb, args).await.map_err(|e| e.json()));
         if let Err(why) = hosted.sync_follows().await {
             tracing::warn!("{why}");
         }
-        if let Some(line) = line {
-            println!("{line}");
-        }
+        println!("{line}");
     }
-    // Every signal stream still waiting answers before the layer stops.
-    while later.join_next().await.is_some() {}
-    signals.shutdown();
     hosted.node.shutdown();
     Ok(())
 }
 
-/// The answer line of a verb's outcome (its error already an error
-/// object); `None` for a verb answered later, whose line `later` prints
-/// once it is done.
-fn answer_line(verb: &str, outcome: Result<Verb, Value>, later: &mut JoinSet<()>) -> Option<Value> {
+/// The answer line of a verb's outcome (its error already an error object).
+fn answer_line(verb: &str, outcome: Result<Verb, Value>) -> Value {
     match outcome {
-        Ok(Verb::Done(ok)) => Some(json!({"verb": verb, "ok": ok})),
-        Ok(Verb::Later(answer)) => {
-            let verb = verb.to_owned();
-            later.spawn(async move {
-                let line = match answer.await {
-                    Ok(ok) => json!({"verb": verb, "ok": ok}),
-                    Err(e) => json!({"verb": verb, "error": e}),
-                };
-                println!("{line}");
-            });
-            None
-        }
-        Ok(Verb::Usage(why)) => Some(usage_error(verb, &why)),
-        Err(e) => Some(json!({"verb": verb, "error": e})),
+        Ok(Verb::Done(ok)) => json!({"verb": verb, "ok": ok}),
+        Ok(Verb::Usage(why)) => usage_error(verb, &why),
+        Err(e) => json!({"verb": verb, "error": e}),
     }
-}
-
-/// Without `--device`: no data layer and no key, only `signal-capture`
-/// (what a relay's operator sees of the signals its daemon forwards) and
-/// `quit`.
-async fn capture_host(face_socket: &str) -> Result<()> {
-    println!("{}", json!({"ready": {"device": null}}));
-    let mut later = JoinSet::new();
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Some(line) = lines.next_line().await.context("read stdin")? {
-        let words = match split(&line) {
-            Ok(w) => w,
-            Err(e) => {
-                println!("{}", usage_error("", &e));
-                continue;
-            }
-        };
-        let Some((verb, args)) = words.split_first() else {
-            continue;
-        };
-        let outcome = match verb.as_str() {
-            "quit" => break,
-            "signal-capture" => signal::capture(face_socket, args)
-                .await
-                .map_err(|e| signal::error(&e)),
-            _ => Ok(Verb::Usage(format!(
-                "this ndn-heap hosts no device (started without --device): it answers \
-                 signal-capture and quit; start it with --device and --pib for {verb}"
-            ))),
-        };
-        if let Some(line) = answer_line(verb, outcome, &mut later) {
-            println!("{line}");
-        }
-    }
-    Ok(())
 }
 
 /// What one verb line came to.
 enum Verb {
     Done(Value),
-    /// Replied to later, while the next lines are read (a signal stream):
-    /// its `ok` object, or its error object.
-    Later(BoxFuture<'static, Result<Value, Value>>),
     /// The line is not a verb this tool knows, or its arguments are wrong.
     Usage(String),
 }
 
-/// Why a verb failed: the data layer's error or the introductions'.
+/// Why a verb failed: the data layer's error, the channel's, or the introductions'.
 enum Fail {
     Heap(HeapError),
+    Emit(EmitError),
     Invite(InviteError),
 }
 
 impl From<HeapError> for Fail {
     fn from(e: HeapError) -> Self {
         Fail::Heap(e)
+    }
+}
+
+impl From<EmitError> for Fail {
+    fn from(e: EmitError) -> Self {
+        Fail::Emit(e)
     }
 }
 
@@ -647,6 +570,7 @@ impl Fail {
     fn json(&self) -> Value {
         match self {
             Fail::Heap(e) => heap_error(e),
+            Fail::Emit(e) => emit_error(e),
             Fail::Invite(e) => invite_error(e),
         }
     }
@@ -736,17 +660,68 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
             Ok(Verb::Done(ok))
         }
         ("put", _) => usage(PUT_USAGE),
-        ("get", [space, path]) => {
+        ("kept", [space, path]) => {
             let (space, path) = match (name(space), path_name(path)) {
                 (Ok(s), Ok(p)) => (s, p),
-                (Err(e), _) | (_, Err(e)) => return Ok(Verb::Usage(format!("{e}; {GET_USAGE}"))),
+                (Err(e), _) | (_, Err(e)) => return Ok(Verb::Usage(format!("{e}; {KEPT_USAGE}"))),
             };
             let heap = heap_of(&h.node, &space).await?;
-            let item = heap.get(&path).await?;
+            let item = heap.kept(&path).await?;
             Ok(Verb::Done(json!({
                 "space": space.to_string(),
                 "path": path.to_string(),
                 "item": item.as_ref().map(shapes::item),
+            })))
+        }
+        ("kept", _) => usage(KEPT_USAGE),
+        ("emit", [space, path, rest @ ..]) => {
+            let (space, path) = match (name(space), path_name(path)) {
+                (Ok(s), Ok(p)) => (s, p),
+                (Err(e), _) | (_, Err(e)) => return Ok(Verb::Usage(format!("{e}; {EMIT_USAGE}"))),
+            };
+            let line = match emit_options(rest).await {
+                Ok(l) => l,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {EMIT_USAGE}"))),
+            };
+            let heap = heap_of(&h.node, &space).await?;
+            heap.emit(&path, line.value.clone(), line.options()).await?;
+            let mut ok = json!({
+                "space": space.to_string(),
+                "path": path.to_string(),
+                "mode": mode_name(line.mode),
+                "stand_secs": line.stand.map(|d| d.as_secs()),
+            });
+            ok["len"] = json!(line.value.len());
+            Ok(Verb::Done(ok))
+        }
+        ("emit", _) => usage(EMIT_USAGE),
+        ("get", [space, path, rest @ ..]) => {
+            let space = match name(space) {
+                Ok(s) => s,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {GET_USAGE}"))),
+            };
+            let line = match get_options(path, rest) {
+                Ok(l) => l,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {GET_USAGE}"))),
+            };
+            let heap = heap_of(&h.node, &space).await?;
+            let mut items = heap.get(line.select.clone(), line.options)?;
+            let listed = space.to_string();
+            tokio::spawn(async move {
+                while let Some(next) = items.next().await {
+                    let line = match next {
+                        Ok(item) => json!({"get": listed, "got": got(&item)}),
+                        Err(n) => json!({"get": listed, "notice": notice(&n)}),
+                    };
+                    println!("{line}");
+                }
+            });
+            Ok(Verb::Done(json!({
+                "space": space.to_string(),
+                "path": line.path.to_string(),
+                "prefix": line.prefix,
+                "kept": line.options.kept,
+                "live": line.options.live == Live::Emitted,
             })))
         }
         ("get", _) => usage(GET_USAGE),
@@ -980,11 +955,13 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
             })))
         }
         ("join", _) => usage(JOIN_USAGE),
+        ("evidence", []) => Ok(Verb::Done(json!({
+            "evidence": h.node.channel_evidence().iter().map(evidence).collect::<Vec<_>>(),
+        }))),
+        ("evidence", _) => usage("usage: evidence"),
         _ => usage(
-            "verbs: create, change, members, put, get, watch, follow, flush, close, \
-             suspect, unsuspect, suspected, cut, refused, offer, close_offer, join, \
-             signal-subscribe, \
-             signal-open, signal-send, signal-stream, signal-close, signal-stats, signal-capture, \
+            "verbs: create, change, members, put, kept, emit, get, watch, follow, flush, close, \
+             suspect, unsuspect, suspected, cut, refused, offer, close_offer, join, evidence, \
              quit",
         ),
     }
@@ -1005,7 +982,21 @@ const PUT_USAGE: &str = "usage: put <space> <path> (text=<value>|hex=<octets>) [
                          @<file> is the file's bytes, @@... a value starting with @; --durable \
                          returns after a flush covering the entry)";
 
-const GET_USAGE: &str = "usage: get <space> <path> (the path is relative to the space)";
+const KEPT_USAGE: &str = "usage: kept <space> <path> (the path's kept value, local, never \
+                          waiting for the network; the path is relative to the space)";
+
+const EMIT_USAGE: &str = "usage: emit <space> <path> (text=<value>|hex=<octets>) [--mode \
+                          latest|reliable|window] [--stand <secs>] (one live message, never an \
+                          entry; the path is relative to the space; --mode defaults to latest; \
+                          --stand 1 to 3600 seconds lets it stand for a receiver that joins \
+                          later)";
+
+const GET_USAGE: &str = "usage: get <space> <path> [--prefix] [--no-kept] [--no-live] [--mode \
+                         latest|reliable|window] [--verified] (kept values and live emissions at \
+                         the path, or at it and below it with --prefix, as lines until the \
+                         process ends; --no-kept leaves the kept values out, --no-live the \
+                         emissions, not both; --mode joins only that mode's channels; --verified \
+                         waits for a signed checkpoint before it delivers a frame)";
 
 const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key is suspected: \
                              when the device was lost, as ms since the epoch or RFC 3339; \
@@ -1128,13 +1119,193 @@ async fn put_options(words: &[String]) -> Result<(Bytes, bool), String> {
         if value.is_some() {
             return Err("the line gives the value twice".into());
         }
-        value = Some(match key {
-            "text" => field_value(v).await?,
-            "hex" => unhex(v).map(Bytes::from)?,
-            _ => return Err(format!("{word:?} is neither text=, hex= nor --durable")),
+        value = Some(match value_of(key, v).await {
+            Some(value) => value?,
+            None => return Err(format!("{word:?} is neither text=, hex= nor --durable")),
         });
     }
     Ok((value.ok_or("no value: text= or hex=")?, durable))
+}
+
+/// The octets of a `text=<value>` (as [`field_value`] reads it) or `hex=<octets>` word; `None`
+/// when `key` is neither.
+async fn value_of(key: &str, value: &str) -> Option<Result<Bytes, String>> {
+    match key {
+        "text" => Some(field_value(value).await),
+        "hex" => Some(unhex(value).map(Bytes::from)),
+        _ => None,
+    }
+}
+
+/// A channel mode as a line names it.
+fn mode_word(word: &str) -> Result<ChannelMode, String> {
+    match word {
+        "latest" => Ok(ChannelMode::Latest),
+        "reliable" => Ok(ChannelMode::Reliable),
+        "window" => Ok(ChannelMode::Window),
+        _ => Err(format!("--mode {word:?} is not latest, reliable or window")),
+    }
+}
+
+/// A channel mode as an answer names it.
+fn mode_name(mode: ChannelMode) -> &'static str {
+    match mode {
+        ChannelMode::Latest => "latest",
+        ChannelMode::Reliable => "reliable",
+        ChannelMode::Window => "window",
+    }
+}
+
+/// An option given at most once: `Err` when `seen` already was.
+fn once<T>(slot: &mut Option<T>, value: T, option: &str) -> Result<(), String> {
+    match slot.replace(value) {
+        None => Ok(()),
+        Some(_) => Err(format!("{option} is given twice")),
+    }
+}
+
+/// An `emit` line's words after the path.
+struct EmitLine {
+    value: Bytes,
+    mode: ChannelMode,
+    stand: Option<Duration>,
+}
+
+impl EmitLine {
+    /// What `Heap::emit` is given: the mode (a window is the default one), standing when asked.
+    fn options(&self) -> EmitOptions {
+        let options = match self.mode {
+            ChannelMode::Latest => EmitOptions::latest(),
+            ChannelMode::Reliable => EmitOptions::reliable(),
+            ChannelMode::Window => EmitOptions::window(Window::DEFAULT),
+        };
+        match self.stand {
+            Some(lifetime) => options.standing(lifetime),
+            None => options,
+        }
+    }
+}
+
+/// An `emit` line's words after the path: the value, `text=<value>` or `hex=<octets>` once
+/// (an empty one is a message of no octets, no removal: a channel keeps no entries), `--mode
+/// latest|reliable|window` (at most once; default `latest`) and `--stand <secs>` (at most once;
+/// 1 to [`STAND_MAX`]).
+async fn emit_options(words: &[String]) -> Result<EmitLine, String> {
+    const OPTIONS: &str = "text=, hex=, --mode or --stand";
+    let (mut value, mut mode, mut stand) = (None, None, None);
+    let mut rest = words;
+    while let [word, more @ ..] = rest {
+        rest = more;
+        match word.as_str() {
+            "--mode" | "--stand" => {
+                let [arg, more @ ..] = rest else {
+                    return Err(format!("{word:?} needs a value"));
+                };
+                rest = more;
+                if word == "--mode" {
+                    once(&mut mode, mode_word(arg)?, "--mode")?;
+                } else {
+                    let secs = arg
+                        .parse::<u64>()
+                        .map_err(|_| format!("--stand {arg:?} is not a whole number of seconds"))?;
+                    if secs == 0 || secs > STAND_MAX.as_secs() {
+                        return Err(format!(
+                            "--stand {secs} is outside 1 to {} seconds, the lifetime a message \
+                             may stand for",
+                            STAND_MAX.as_secs()
+                        ));
+                    }
+                    once(&mut stand, Duration::from_secs(secs), "--stand")?;
+                }
+            }
+            _ => {
+                let (key, v) = word
+                    .split_once('=')
+                    .ok_or_else(|| format!("{word:?} is not {OPTIONS}"))?;
+                let Some(octets) = value_of(key, v).await else {
+                    return Err(format!("{word:?} is not {OPTIONS}"));
+                };
+                once(&mut value, octets?, "the value")?;
+            }
+        }
+    }
+    Ok(EmitLine {
+        value: value.ok_or("no value: text= or hex=")?,
+        mode: mode.unwrap_or(ChannelMode::Latest),
+        stand,
+    })
+}
+
+/// A `get` line: what to select, and how.
+struct GetLine {
+    path: Name,
+    prefix: bool,
+    select: Select,
+    options: GetOptions,
+}
+
+/// A `get` line's path and the options after it: `--prefix`, `--no-kept`, `--no-live` and
+/// `--verified` (flags, at most once) and `--mode latest|reliable|window` (at most once).
+/// Asking for neither kept values nor emissions is refused, and so is a channel option with
+/// `--no-live`, which asks for no channel.
+fn get_options(path: &str, words: &[String]) -> Result<GetLine, String> {
+    const OPTIONS: &str = "--prefix, --no-kept, --no-live, --mode or --verified";
+    let path = path_name(path)?;
+    let (mut prefix, mut no_kept, mut no_live, mut verified, mut mode) =
+        (None, None, None, None, None);
+    let mut rest = words;
+    while let [word, more @ ..] = rest {
+        rest = more;
+        match word.as_str() {
+            "--prefix" => once(&mut prefix, (), "--prefix")?,
+            "--no-kept" => once(&mut no_kept, (), "--no-kept")?,
+            "--no-live" => once(&mut no_live, (), "--no-live")?,
+            "--verified" => once(&mut verified, (), "--verified")?,
+            "--mode" => {
+                let [arg, more @ ..] = rest else {
+                    return Err(format!("{word:?} needs a value"));
+                };
+                rest = more;
+                once(&mut mode, mode_word(arg)?, "--mode")?;
+            }
+            _ => return Err(format!("{word:?} is not {OPTIONS}")),
+        }
+    }
+    if no_kept.is_some() && no_live.is_some() {
+        return Err(
+            "--no-kept and --no-live together ask for nothing: leave one of them out".into(),
+        );
+    }
+    if no_live.is_some() && (mode.is_some() || verified.is_some()) {
+        return Err("--mode and --verified are about channels, and --no-live asks for none".into());
+    }
+    let mut options = GetOptions {
+        kept: no_kept.is_none(),
+        live: if no_live.is_some() {
+            Live::Off
+        } else {
+            Live::Emitted
+        },
+        ..GetOptions::default()
+    };
+    if let Some(mode) = mode {
+        options.modes = Modes::only(mode);
+    }
+    if verified.is_some() {
+        options.trust = Trust::Verified;
+    }
+    let prefix = prefix.is_some();
+    let select = if prefix {
+        Select::Prefix(path.clone())
+    } else {
+        Select::Path(path.clone())
+    };
+    Ok(GetLine {
+        path,
+        prefix,
+        select,
+        options,
+    })
 }
 
 /// An `offer` line's options after the space: `role=`, `until=` and
@@ -1330,6 +1501,8 @@ fn split(line: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
+    use ndn_heap::Mode;
+
     use super::*;
 
     /// The device's own certificate and its issuer's (a trust anchor of the
@@ -1445,8 +1618,11 @@ mod tests {
     /// is refused at the command line, with why.
     #[test]
     fn holders_are_repeatable_device_names() {
-        let cli = Cli::try_parse_from([
-            "ndn-heap",
+        let device = ["ndn-heap", "--device", "/alice/member/phone"];
+        let with = |more: &[&'static str]| {
+            Cli::try_parse_from(device.into_iter().chain(more.iter().copied()))
+        };
+        let cli = with(&[
             "--holder",
             "/hold/node/repo",
             "--holder",
@@ -1457,13 +1633,24 @@ mod tests {
             cli.holder,
             vec![n("/hold/node/repo"), n("/other/node/repo")]
         );
-        assert!(Cli::try_parse_from(["ndn-heap"]).unwrap().holder.is_empty());
-        let refused = Cli::try_parse_from(["ndn-heap", "--holder", "/"])
+        assert!(with(&[]).unwrap().holder.is_empty());
+        let refused = with(&["--holder", "/"])
             .err()
             .expect("the root names no device")
             .to_string();
         assert!(refused.contains("names no device"), "{refused}");
-        assert!(Cli::try_parse_from(["ndn-heap", "--holder", "no-slash"]).is_err());
+        assert!(with(&["--holder", "no-slash"]).is_err());
+    }
+
+    /// The host is always a device's: with no `--device` the command line is refused (the
+    /// device-less mode that only captured signal Interests is gone with signals).
+    #[test]
+    fn a_host_needs_its_device() {
+        let refused = Cli::try_parse_from(["ndn-heap"])
+            .err()
+            .expect("no device is refused")
+            .to_string();
+        assert!(refused.contains("--device"), "{refused}");
     }
 
     /// A space is private to its owner unless the line lists readers, public
@@ -1564,5 +1751,90 @@ mod tests {
             .is_err()
         );
         assert!(cut_options(&words(&["--when", "1"])).is_err());
+    }
+
+    /// An emit line gives one value, a mode (default `latest`) and a lifetime to
+    /// stand for, each once; an empty value is a message, a lifetime outside 1 to
+    /// 3600 seconds is refused here with the bound, and a window is the default one.
+    #[tokio::test]
+    async fn an_emit_gives_one_value_a_mode_and_a_lifetime() {
+        let line = emit_options(&words(&["text=hello"])).await.unwrap();
+        assert_eq!(&line.value[..], b"hello");
+        assert_eq!(line.options(), EmitOptions::latest());
+        let line = emit_options(&words(&["--mode", "reliable", "hex=00ff", "--stand", "30"]))
+            .await
+            .unwrap();
+        assert_eq!(&line.value[..], &[0x00, 0xff]);
+        assert_eq!(
+            line.options(),
+            EmitOptions::reliable().standing(Duration::from_secs(30))
+        );
+        let line = emit_options(&words(&["text=", "--mode", "window"]))
+            .await
+            .unwrap();
+        assert!(line.value.is_empty(), "an empty value is a message");
+        assert_eq!(line.options().mode, Mode::Window(Window::DEFAULT));
+        let long = STAND_MAX.as_secs();
+        assert!(
+            emit_options(&words(&["text=a", "--stand", &long.to_string()]))
+                .await
+                .is_ok()
+        );
+        for bad in [
+            &["text=a", "--stand", "0"][..],
+            &["text=a", "--stand", &(long + 1).to_string()],
+            &["text=a", "--stand", "soon"],
+            &["text=a", "--stand"],
+            &["text=a", "--stand", "1", "--stand", "2"],
+            &["text=a", "--mode", "fast"],
+            &["text=a", "--mode", "latest", "--mode", "latest"],
+            &["text=a", "hex=00"],
+            &["--mode", "latest"],
+            &["text=a", "--durable"],
+            &["hex=0"],
+        ] {
+            assert!(
+                emit_options(&words(bad)).await.is_err(),
+                "{bad:?} should be refused"
+            );
+        }
+    }
+
+    /// A get line selects one path or a prefix, wants kept values and emissions by default, can
+    /// leave either out (not both), joins one mode, asks for a verified checkpoint, and refuses
+    /// what contradicts itself, each option once.
+    #[test]
+    fn a_get_selects_a_path_or_a_prefix_and_the_parts_it_wants() {
+        let line = get_options("trip/day1", &[]).unwrap();
+        assert_eq!(line.select, Select::Path(n("/trip/day1")));
+        assert!(!line.prefix);
+        assert_eq!(line.options, GetOptions::default());
+        assert!(line.options.kept && line.options.live == Live::Emitted);
+
+        let line =
+            get_options("/", &words(&["--prefix", "--verified", "--mode", "window"])).unwrap();
+        assert_eq!(line.select, Select::Prefix(Name::root()));
+        assert_eq!(line.options.trust, Trust::Verified);
+        assert_eq!(line.options.modes, Modes::only(ChannelMode::Window));
+
+        let emissions = get_options("pos", &words(&["--no-kept"])).unwrap();
+        assert!(!emissions.options.kept && emissions.options.live == Live::Emitted);
+        let kept = get_options("pos", &words(&["--no-live"])).unwrap();
+        assert!(kept.options.kept && kept.options.live == Live::Off);
+
+        for bad in [
+            &["--no-kept", "--no-live"][..],
+            &["--no-live", "--mode", "latest"],
+            &["--no-live", "--verified"],
+            &["--prefix", "--prefix"],
+            &["--mode"],
+            &["--mode", "fast"],
+            &["--live"],
+        ] {
+            assert!(
+                get_options("pos", &words(bad)).is_err(),
+                "{bad:?} should be refused"
+            );
+        }
     }
 }

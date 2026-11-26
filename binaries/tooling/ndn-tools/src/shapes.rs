@@ -1,10 +1,13 @@
-//! The JSON the host prints: ids, items, members, changes, alerts and
-//! errors (the shapes the module doc of `heap.rs` lists).
+//! The JSON the host prints: ids, items, members, changes, alerts, the items and notices of a
+//! `get`, channel evidence and errors (the shapes the module doc of `heap.rs` lists).
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use ndn_heap::{Alert, Change, EntryId, HeapError, Item, Members, NextStep, Readers, Refusal};
+use ndn_heap::{
+    Alert, Change, ChannelEvidence, EmitError, EntryId, GetNotice, Got, HeapError, Item, Kind,
+    LiveEnd, Members, NextStep, Readers, Refusal,
+};
 use ndn_invite::{IntroRefusal, InviteError, Role};
 use ndn_security::RevocationCut;
 
@@ -75,20 +78,7 @@ pub fn change(c: &Change) -> Value {
     match c {
         Change::Put(i) => json!({"put": item(i)}),
         Change::Removed(i) => json!({"removed": item(i)}),
-        Change::Withdrawn { id: i, why } => {
-            let mut w = json!({"id": id(i), "why": why.to_string()});
-            match why {
-                // A cut: the device cut, and the seq its tip keeps.
-                Refusal::OutsideCut(cut) => {
-                    w["cut_of"] = json!(cut.device.to_string());
-                    w["keeps_to"] = json!(cut.keeps_to);
-                }
-                // An issuer refused by the durable rule: never re-admitted.
-                Refusal::Untrusted { .. } => w["untrusted"] = json!(true),
-                _ => {}
-            }
-            json!({ "withdrawn": w })
-        }
+        Change::Withdrawn { id: i, why } => json!({ "withdrawn": withdrawal(i, why) }),
         Change::Members(m) => json!({"members": members(m)}),
         Change::Alert(a) => json!({"alert": alert(a)}),
         Change::Lagged { missed } => json!({"lagged": {
@@ -97,6 +87,122 @@ pub fn change(c: &Change) -> Value {
                            heads again from the start"
         }}),
     }
+}
+
+/// An entry refused after the fact: `{"id","why"}` and, by cause, `cut_of` (the device cut) and
+/// `keeps_to` (the seq its tip keeps) when a revocation's cut withdrew it, or `untrusted` when
+/// the durable rule refused its issuer.
+fn withdrawal(i: &EntryId, why: &Refusal) -> Value {
+    let mut w = json!({"id": id(i), "why": why.to_string()});
+    match why {
+        Refusal::OutsideCut(cut) => {
+            w["cut_of"] = json!(cut.device.to_string());
+            w["keeps_to"] = json!(cut.keeps_to);
+        }
+        // An issuer refused by the durable rule: never re-admitted.
+        Refusal::Untrusted { .. } => w["untrusted"] = json!(true),
+        _ => {}
+    }
+    w
+}
+
+/// An item of a `get`: `{"path","by","writer","kind"}` and the value as an item shows it
+/// (`len`, `text`/`hex`/`sha256`); a kept one adds `id`, `as_of_ms` and `removed`, an emitted one
+/// `seq` and `stands_ms`.
+pub fn got(g: &Got) -> Value {
+    let mut m = Map::new();
+    m.insert("path".into(), json!(g.path.to_string()));
+    m.insert("by".into(), json!(g.by.to_string()));
+    m.insert("writer".into(), json!(g.writer.to_string()));
+    match &g.kind {
+        Kind::Kept(k) => {
+            m.insert("kind".into(), json!("kept"));
+            m.insert("id".into(), id(&k.id));
+            m.insert("as_of_ms".into(), json!(k.as_of.map(millis)));
+            m.insert("removed".into(), json!(k.removed));
+        }
+        Kind::Emitted(e) => {
+            m.insert("kind".into(), json!("emitted"));
+            m.insert("seq".into(), json!(e.seq));
+            m.insert("stands_ms".into(), json!(e.stands.map(millis)));
+        }
+        other => {
+            m.insert("kind".into(), json!("other"));
+            m.insert("debug".into(), json!(format!("{other:?}")));
+        }
+    }
+    value_fields(&g.bytes, &mut m);
+    Value::Object(m)
+}
+
+/// A duration as whole milliseconds.
+fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// What a `get` tells besides items: `{"kind","what_to_do",…}`.
+pub fn notice(n: &GetNotice) -> Value {
+    match n {
+        GetNotice::Lagged { missed } => json!({
+            "kind": "lagged",
+            "missed": missed,
+            "what_to_do": "the mode dropped this many emissions (or the sequence has a gap): they \
+                           are gone; a slow reader of kept values is never told this, it is \
+                           given the current values again",
+        }),
+        GetNotice::Withdrawn { id: i, why } => {
+            let mut v = withdrawal(i, why);
+            v["kind"] = json!("withdrawn");
+            v["what_to_do"] = json!(
+                "an entry this get delivered was refused after the fact: the value that stands \
+                 is the one that follows, or none (a kept item with removed set) when the path \
+                 has no head left"
+            );
+            v
+        }
+        GetNotice::LiveEnded(end) => {
+            let (kind, why, who) = match end {
+                LiveEnd::Ended { writer, reason } => {
+                    ("ended", reason.to_string(), Some(writer.to_string()))
+                }
+                LiveEnd::NoPath { why } => ("no-path", why.clone(), None),
+            };
+            let mut v = json!({
+                "kind": "live-ended",
+                "end": kind,
+                "why": why,
+                "next": next_token(end.next()),
+                "what_to_do": "the live part of this get ended and its kept part goes on; get \
+                               again when the live part is wanted",
+            });
+            if let Some(writer) = who {
+                v["writer"] = json!(writer);
+            }
+            v
+        }
+        GetNotice::Retracted { writer, from, to } => json!({
+            "kind": "retracted",
+            "writer": writer.to_string(),
+            "from": from,
+            "to": to,
+            "what_to_do": "a signed checkpoint contradicts these emissions: discard what this get \
+                           delivered from this writer with an emitted seq from `from` to `to`",
+        }),
+    }
+}
+
+/// One piece of channel evidence: `{"kind","channel","sender","key_epoch","seq0","ingress",
+/// "when_ms"}`, the channel id in hex and the face the frame came over.
+pub fn evidence(e: &ChannelEvidence) -> Value {
+    json!({
+        "kind": format!("{:?}", e.kind),
+        "channel": format!("{:016x}", e.channel),
+        "sender": e.sender.to_string(),
+        "key_epoch": e.key_epoch,
+        "seq0": e.seq0,
+        "ingress": e.ingress.0,
+        "when_ms": e.when.0,
+    })
 }
 
 /// What the host should know of a space.
@@ -194,6 +300,20 @@ pub fn heap_error(e: &HeapError) -> Value {
     let mut v = error(e.to_string(), e.retry(), e.next());
     if let HeapError::Refused { why, .. } = e {
         refusal(&mut v, why);
+    }
+    v
+}
+
+/// An emit's refusal as an error answer: why, whether to ask again, what to do next, and
+/// `retry_after_ms` when the queue was full.
+pub fn emit_error(e: &EmitError) -> Value {
+    let mut v = error(
+        e.to_string(),
+        matches!(e.next(), NextStep::RetryLater),
+        e.next(),
+    );
+    if let EmitError::Congested { retry_after } = e {
+        v["retry_after_ms"] = json!(millis(*retry_after));
     }
     v
 }
@@ -302,9 +422,12 @@ pub fn revocation_cut(c: &RevocationCut) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use bytes::Bytes;
-    use ndn_heap::{Cut, Timestamp};
+    use ndn_heap::{Cut, Emitted, EndReason, EvidenceKind, Kept, Timestamp};
     use ndn_packet::Name;
+    use ndn_transport::FaceId;
 
     use super::*;
 
@@ -467,5 +590,173 @@ mod tests {
         );
         assert_eq!(shown["ranges"], json!([]));
         assert!(shown["manifest"].is_null());
+    }
+
+    fn got_of(kind: Kind, bytes: &[u8]) -> Got {
+        Got {
+            path: n("/pos"),
+            bytes: Bytes::copy_from_slice(bytes),
+            by: n("/alice"),
+            writer: n("/alice/member/phone"),
+            kind,
+        }
+    }
+
+    /// A `get` item says which it is: a kept one carries its entry's id, how old it is and
+    /// whether it is a removal; an emitted one the channel's sequence and what is left of a
+    /// stated lifetime; both the value as an item shows it.
+    #[test]
+    fn a_get_item_says_whether_it_is_kept_or_emitted() {
+        let kept = got(&got_of(
+            Kind::Kept(Kept {
+                id: entry(),
+                as_of: Some(Duration::from_millis(1500)),
+                removed: false,
+            }),
+            b"on the plane",
+        ));
+        assert_eq!(kept["kind"], "kept");
+        assert_eq!(kept["id"]["seq"], 7);
+        assert_eq!(kept["as_of_ms"], 1500);
+        assert_eq!(kept["removed"], false);
+        assert_eq!(kept["text"], "on the plane");
+        assert_eq!(kept["writer"], "/alice/member/phone");
+        assert!(kept.get("seq").is_none());
+
+        let removal = got(&got_of(
+            Kind::Kept(Kept {
+                id: entry(),
+                as_of: None,
+                removed: true,
+            }),
+            b"",
+        ));
+        assert_eq!(
+            (&removal["removed"], &removal["as_of_ms"]),
+            (&json!(true), &Value::Null)
+        );
+        assert_eq!(removal["len"], 0);
+
+        let emitted = got(&got_of(
+            Kind::Emitted(Emitted {
+                seq: 42,
+                stands: Some(Duration::from_secs(30)),
+            }),
+            &[0xff],
+        ));
+        assert_eq!(emitted["kind"], "emitted");
+        assert_eq!(emitted["seq"], 42);
+        assert_eq!(emitted["stands_ms"], 30_000);
+        assert_eq!(emitted["hex"], "ff");
+        assert!(emitted.get("id").is_none());
+        let live = got(&got_of(
+            Kind::Emitted(Emitted {
+                seq: 43,
+                stands: None,
+            }),
+            b"x",
+        ));
+        assert!(live["stands_ms"].is_null());
+    }
+
+    /// Each notice says what to do; an end names the writer whose session ended, a missing path
+    /// does not; a retraction gives the range to discard.
+    #[test]
+    fn a_get_notice_says_what_to_do() {
+        let lagged = notice(&GetNotice::Lagged { missed: 3 });
+        assert_eq!(
+            (lagged["kind"].as_str(), lagged["missed"].as_u64()),
+            (Some("lagged"), Some(3))
+        );
+        let ended = notice(&GetNotice::LiveEnded(LiveEnd::Ended {
+            writer: n("/alice/member/phone"),
+            reason: EndReason::Closed,
+        }));
+        assert_eq!(ended["kind"], "live-ended");
+        assert_eq!(ended["end"], "ended");
+        assert_eq!(ended["writer"], "/alice/member/phone");
+        let no_path = notice(&GetNotice::LiveEnded(LiveEnd::NoPath {
+            why: "no frame reached this device".into(),
+        }));
+        assert_eq!(no_path["end"], "no-path");
+        assert_eq!(no_path["next"], "fix-local");
+        assert!(no_path.get("writer").is_none());
+        let retracted = notice(&GetNotice::Retracted {
+            writer: n("/alice/member/phone"),
+            from: 10,
+            to: 12,
+        });
+        assert_eq!(
+            (retracted["from"].as_u64(), retracted["to"].as_u64()),
+            (Some(10), Some(12))
+        );
+        let withdrawn = notice(&GetNotice::Withdrawn {
+            id: entry(),
+            why: Refusal::OutsideCut(Cut {
+                device: n("/alice/member/phone"),
+                keeps_to: 3,
+            }),
+        });
+        assert_eq!(withdrawn["kind"], "withdrawn");
+        assert_eq!(withdrawn["id"]["seq"], 7);
+        assert_eq!(withdrawn["cut_of"], "/alice/member/phone");
+        assert_eq!(withdrawn["keeps_to"], 3);
+        for v in [&lagged, &withdrawn, &ended, &no_path, &retracted] {
+            assert!(v["what_to_do"].is_string(), "{v} says nothing to do");
+        }
+    }
+
+    /// An emit's refusal keeps `message`, `retry`, `next` and `next_step`, a full queue says when
+    /// to try again, and what the caller can do about each cause is the heap's own word for it.
+    #[test]
+    fn an_emit_refusal_says_why_and_what_to_do() {
+        let not_writer = emit_error(&EmitError::NotWriter {
+            space: n("/bob/32=data/chat"),
+            why: "ask the owner".into(),
+        });
+        assert_eq!(not_writer["next"], "ask-owner");
+        assert_eq!(not_writer["retry"], false);
+        assert!(not_writer["message"].as_str().unwrap().contains("/bob"));
+        assert!(not_writer["next_step"].is_string());
+        let congested = emit_error(&EmitError::Congested {
+            retry_after: Duration::from_millis(5),
+        });
+        assert_eq!(congested["retry"], true);
+        assert_eq!(congested["retry_after_ms"], 5);
+        let too_large = emit_error(&EmitError::TooLarge {
+            what: "message",
+            size: 9,
+            max: 8,
+        });
+        assert_eq!(too_large["next"], "fix-request");
+        assert!(too_large.get("retry_after_ms").is_none());
+    }
+
+    /// Evidence names its kind, the channel in hex, the sender, the sequence and the face the
+    /// frame came over.
+    #[test]
+    fn evidence_names_the_channel_the_sender_and_the_face() {
+        let shown = evidence(&ChannelEvidence {
+            kind: EvidenceKind::Mismatch,
+            channel: 0x0102_0304_0506_0708,
+            sender: n("/alice/member/phone"),
+            key_epoch: 2,
+            seq0: 77,
+            frame: Bytes::from_static(b"frame"),
+            frame_digest: None,
+            ingress: FaceId(9),
+            proof: Bytes::new(),
+            proof_digest: None,
+            when: Timestamp(1_700_000_000_123),
+        });
+        assert_eq!(shown["kind"], "Mismatch");
+        assert_eq!(shown["channel"], "0102030405060708");
+        assert_eq!(shown["sender"], "/alice/member/phone");
+        assert_eq!(
+            (shown["key_epoch"].as_u64(), shown["seq0"].as_u64()),
+            (Some(2), Some(77))
+        );
+        assert_eq!(shown["ingress"], 9);
+        assert_eq!(shown["when_ms"], 1_700_000_000_123u64);
     }
 }

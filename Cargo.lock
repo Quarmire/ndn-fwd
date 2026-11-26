@@ -3899,18 +3899,6 @@ name = "ndn-signals-core"
 version = "0.1.0"
 
 [[package]]
-name = "ndn-storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "ndn-packet",
- "ndn-tlv",
- "portable-atomic",
- "tracing",
-]
-
-[[package]]
 name = "ndn-store"
 version = "0.1.0"
 dependencies = [
@@ -3958,30 +3946,6 @@ dependencies = [
  "ndn-strategy",
  "ndn-transport",
  "smallvec",
-]
-
-[[package]]
-name = "ndn-surface"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chacha20poly1305",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "ndn-app",
- "ndn-face-shm",
- "ndn-foundation-types",
- "ndn-heap",
- "ndn-packet",
- "ndn-security",
- "ndn-storage",
- "ndn-sync",
- "ndn-tlv",
- "ndn-transport",
- "sha2 0.11.0",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4036,7 +4000,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "clap",
- "futures",
  "humantime",
  "ndn-app",
  "ndn-cert",
@@ -4049,7 +4012,6 @@ dependencies = [
  "ndn-mgmt-wire",
  "ndn-packet",
  "ndn-security",
- "ndn-surface",
  "ndn-sync",
  "ndn-tools-core",
  "ndn-transport",
