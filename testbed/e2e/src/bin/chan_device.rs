@@ -29,8 +29,8 @@
 //! | `create <space> readers=<ns,…> [writers=<ns,…>]` | the space |
 //! | `open <space>` | the space is open here (an error that says `retry` until its record is held) |
 //! | `put <space> <path> <text>` | the entry's id |
-//! | `item <space> <path>` | the value at the path (`null`: none yet) |
-//! | `get <space> <sender device> [verified]` | takes the channel: an `Items`, then the signed ask (asked again while it says retry); the channel's id, mode and checkpoint period. The `Items`' deliveries are printed as `{"ev":"got",…}` and its notices as `{"ev":"notice",…}` |
+//! | `item <space> <path>` | the kept value at the path (`Heap::kept`; `null`: none yet) |
+//! | `get <space> <sender device> [verified] [kept]` | takes the channel: an `Items` (`Heap::get`: emissions only, or with `kept` the kept values first too), then the signed ask (asked again while it says retry); the channel's id, mode and checkpoint period. The `Items`' deliveries are printed as `{"ev":"got",…}` (with `kind` `emitted` and `seq`, or `kept` and `entry`, the entry's seq) and its notices as `{"ev":"notice",…}` |
 //! | `leave` | drops the `Items` (the receiver leaves the channel) |
 //! | `emit <space> <path> <count> <gap ms> <prefix>` | `count` messages `<prefix>-<i>` of `Heap::emit`, `gap` apart |
 //! | `watch <space>` | alerts of the space as `{"ev":"alert",…}` |
@@ -364,15 +364,18 @@ fn print(v: &Value) {
 }
 
 fn got_event(g: &ndn_heap::Got) -> Value {
-    let seq = match &g.kind {
-        Kind::Emitted(e) => Some(e.seq),
-        _ => None,
+    let (kind, seq, entry) = match &g.kind {
+        Kind::Emitted(e) => ("emitted", Some(e.seq), None),
+        Kind::Kept(k) => ("kept", None, Some(k.id.seq)),
+        _ => ("other", None, None),
     };
     json!({
         "ev": "got",
+        "kind": kind,
         "path": g.path.to_string(),
         "text": String::from_utf8_lossy(&g.bytes),
         "seq": seq,
+        "entry": entry,
         "writer": g.writer.to_string(),
     })
 }
@@ -380,6 +383,9 @@ fn got_event(g: &ndn_heap::Got) -> Value {
 fn notice_event(n: &GetNotice) -> Value {
     match n {
         GetNotice::Lagged { missed } => json!({"ev": "notice", "kind": "lagged", "missed": missed}),
+        GetNotice::Withdrawn { id, why } => json!({
+            "ev": "notice", "kind": "withdrawn", "entry": id.seq, "why": why.to_string(),
+        }),
         GetNotice::LiveEnded(end) => {
             let (kind, why) = match end {
                 LiveEnd::Ended { reason, .. } => ("ended", format!("{reason:?}")),
@@ -467,7 +473,7 @@ async fn run(d: &Arc<Device>, line: &str) -> Result<Value, Value> {
         }
         ["item", space, path] => {
             let heap = d.heap(&nm(space)?).await?;
-            let item = heap.get(&nm(path)?).await.map_err(|e| heap_failure(&e))?;
+            let item = heap.kept(&nm(path)?).await.map_err(|e| heap_failure(&e))?;
             Ok(json!({"item": item.map(|i| json!({
                 "text": String::from_utf8_lossy(&i.bytes),
                 "writer": i.writer.to_string(),
@@ -476,8 +482,11 @@ async fn run(d: &Arc<Device>, line: &str) -> Result<Value, Value> {
         ["get", space, sender, rest @ ..] => {
             let (space, sender) = (nm(space)?, nm(sender)?);
             let heap = d.heap(&space).await?;
-            let mut opts = GetOptions::default();
-            if rest.first() == Some(&"verified") {
+            let mut opts = GetOptions {
+                kept: rest.contains(&"kept"),
+                ..GetOptions::default()
+            };
+            if rest.contains(&"verified") {
                 opts.trust = Trust::Verified;
             }
             if d.taken
@@ -489,7 +498,7 @@ async fn run(d: &Arc<Device>, line: &str) -> Result<Value, Value> {
             }
             // An `Items` first, then the ask: a session lapses with its last taker.
             let mut items: Items = heap
-                .live(Select::Prefix(Name::root()), opts)
+                .get(Select::Prefix(Name::root()), opts)
                 .map_err(|e| heap_failure(&e))?;
             let handle = d.node.handle();
             let deadline = tokio::time::Instant::now() + ASK_WITHIN;

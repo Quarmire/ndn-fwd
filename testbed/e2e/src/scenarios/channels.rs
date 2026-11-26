@@ -1,6 +1,6 @@
 //! channels: live data from one device to two people's devices through a relay that holds no
 //! context of theirs, and a forged frame exposed by the sender's signed checkpoint — the channel
-//! (`ndn_heap::Heap::emit` / `live`, channel.md) on real processes over real QUIC links, each
+//! (`ndn_heap::Heap::emit` / `get`, channel.md) on real processes over real QUIC links, each
 //! device on a forwarder of its own in a network namespace of its own.
 //!
 //! The nodes, and where they come from:
@@ -49,6 +49,13 @@
 //!    (dave's and the relay's show none), the sender's later frames do not reach her over it
 //!    while dave, behind no bar, still receives them, and NDN traffic over the barred link works:
 //!    an entry the sender puts reaches her.
+//! 4. a message is no entry, and `get` says which is which — what the retired `signals` scenario
+//!    proved of signals, that live work is never a version until it is put. The sender puts one
+//!    entry (`/note`) before any message; each receiver's `get`, which also asks for kept values,
+//!    delivers it as `kept` with the entry's sequence; after a hundred and more messages emitted
+//!    at another path (`/pos`) no one holds a kept value there, the one entry the sender puts
+//!    later has the next sequence (no message took one), and dave's `get` delivers it as the one
+//!    new kept item among the emitted ones.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::Ipv4Addr;
@@ -76,6 +83,10 @@ const NS_R: &str = "/cr";
 /// The space the sender makes for the two, and the path it emits at.
 const SPACE: &str = "/cs/32=data/chan";
 const POS: &str = "/pos";
+/// The entry the sender puts before it emits, and the one it puts after; the text of each.
+const NOTE: &str = "/note";
+const BEFORE: &str = "before the first message";
+const AFTER: &str = "after the bar";
 /// The relay daemon's host on the harness's `lo`.
 const RELAY: u8 = 3;
 /// The host of /cr's root device, the CA the relay enrolls at.
@@ -365,6 +376,20 @@ impl Dev {
                 let text = e["text"].as_str()?;
                 text.starts_with(prefix)
                     .then(|| (e["seq"].as_u64().unwrap_or_default(), text.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The kept values delivered here at `path`, in the order they came: `(entry seq, text)`.
+    fn kept(&self, path: &str) -> Vec<(u64, String)> {
+        self.events
+            .iter()
+            .filter(|e| e["ev"] == "got" && e["kind"] == "kept" && e["path"] == path)
+            .map(|e| {
+                (
+                    e["entry"].as_u64().unwrap_or_default(),
+                    e["text"].as_str().unwrap_or_default().to_owned(),
+                )
             })
             .collect()
     }
@@ -859,16 +884,62 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
 
+    let note = sc.step(
+        "the sender puts one entry, /note, before it emits anything, and carol and dave read it \
+         (the baseline of the sender's entry sequence: a message is no entry)",
+        |cx| {
+            cx.concept("live work is no version until it is put");
+            let put = sender.ok_when_ready(cx, &format!("put {SPACE} {NOTE} {BEFORE}"))?;
+            let seq = put["seq"]
+                .as_u64()
+                .ok_or_else(|| format!("no seq in {put}"))?;
+            for dev in [&mut carol, &mut dave] {
+                wait_for(
+                    cx,
+                    &format!("{} reads {NOTE}", dev.node),
+                    CONVERGE,
+                    |cx| match dev.call_within(
+                        cx,
+                        &format!("item {SPACE} {NOTE}"),
+                        Duration::from_secs(30),
+                    )? {
+                        Ok(ok) => Ok(ok["item"]["text"] == BEFORE),
+                        Err(e) if e["retry"] == true => Ok(false),
+                        Err(e) => Err(format!("{}> item: {}", dev.node, e["message"])),
+                    },
+                )?;
+            }
+            cx.evidence(&format!(
+                "the sender's {NOTE} is entry seq {seq}; carol and dave read {BEFORE:?}"
+            ));
+            Ok(seq)
+        },
+    )?;
+
     let channel = sc.step(
-        "carol and dave each take the sender's channel (an Items, then the signed ask over the \
-         links through the relay) and watch the space for alerts: one channel, with checkpoints",
+        "carol and dave each take the sender's channel (an Items that also asks for kept values, \
+         then the signed ask over the links through the relay), get /note as a kept value, and \
+         watch the space for alerts: one channel, with checkpoints",
         |cx| {
             cx.concept("channel: the signed ask through a relay");
-            let line = format!("get {SPACE} {}", sender.device);
+            let line = format!("get {SPACE} {} kept", sender.device);
             let mut ids = Vec::new();
             for dev in [&mut carol, &mut dave] {
                 dev.ok(cx, &format!("watch {SPACE}"))?;
                 let got = dev.ok(cx, &line)?;
+                dev.until(
+                    cx,
+                    &format!("{NOTE} delivered as a kept value"),
+                    BURST,
+                    |d| !d.kept(NOTE).is_empty(),
+                )?;
+                let kept = dev.kept(NOTE);
+                if kept != [(note, BEFORE.to_owned())] {
+                    return Err(format!(
+                        "{}'s get delivered {kept:?} at {NOTE}, not entry {note} {BEFORE:?}",
+                        dev.node
+                    ));
+                }
                 if got["checkpoint_ms"].as_u64().is_none() {
                     return Err(format!(
                         "{}'s channel announces no checkpoints: {got}",
@@ -1249,14 +1320,26 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     sc.step(
         "the bar is on channel frames only: the sender puts an entry in the space and it reaches \
-         carol over the barred link (NDN traffic goes on); the sender emits 5 more and dave gets \
-         all 5 while carol gets none, her side table counting the frames it dropped from the \
-         barred link",
+         carol over the barred link (NDN traffic goes on), as the entry after the baseline (the \
+         hundred and more messages took no entry sequence); the sender emits 5 more and dave \
+         gets all 5 while carol gets none, her side table counting the frames it dropped from \
+         the barred link; dave's get delivered the two entries at /note as kept items, and none \
+         at /pos, where the messages went, and no one holds a kept value there",
         |cx| {
             cx.concept("a barred link still carries NDN traffic");
             let (_, carol_to_dave) = forged;
             let drops0 = carol.side(cx)?.quarantined_drops;
-            sender.ok(cx, &format!("put {SPACE} /note after the bar"))?;
+            let put = sender.ok(cx, &format!("put {SPACE} {NOTE} {AFTER}"))?;
+            let commit = put["seq"]
+                .as_u64()
+                .ok_or_else(|| format!("no seq in {put}"))?;
+            if commit != note + 1 {
+                return Err(format!(
+                    "the sender's entry after more than a hundred messages is seq {commit}, not \
+                     {} (the baseline's next): a message took an entry sequence",
+                    note + 1
+                ));
+            }
             wait_for(
                 cx,
                 "carol reads the entry the sender put",
@@ -1275,6 +1358,29 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             dave.until(cx, "all 5 messages of the burst", BURST, |d| {
                 d.gots("e-").len() == 5
             })?;
+            dave.until(cx, "the committed entry as a kept item", CONVERGE, |d| {
+                d.kept(NOTE).len() >= 2
+            })?;
+            dave.settle(cx, Duration::from_millis(500))?;
+            let kept = dave.kept(NOTE);
+            if kept != [(note, BEFORE.to_owned()), (commit, AFTER.to_owned())] {
+                return Err(format!(
+                    "dave's get delivered {kept:?} at {NOTE}, not entries {note} and {commit}"
+                ));
+            }
+            if let Some(e) = dave
+                .events
+                .iter()
+                .find(|e| e["ev"] == "got" && e["kind"] == "kept" && e["path"] == POS)
+            {
+                return Err(format!("dave's get delivered a kept value at {POS}: {e}"));
+            }
+            for dev in [&mut sender, &mut dave] {
+                let ok = dev.ok(cx, &format!("item {SPACE} {POS}"))?;
+                if !ok["item"].is_null() {
+                    return Err(format!("{} holds a kept value at {POS}: {ok}", dev.node));
+                }
+            }
             let mut dropped = 0;
             wait_for(
                 cx,

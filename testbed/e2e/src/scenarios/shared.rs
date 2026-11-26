@@ -15,7 +15,7 @@
 //! 2. each points at the other: adopts the other's inline anchor link;
 //! 3. alice shares the document and the chat with bob (and later shares
 //!    them again without him);
-//! 4. put, get and watch.
+//! 4. put, kept (the point read) and watch.
 //!
 //! No config holds a route, a UDP link, a `[[peer]]` or a `[[relay]]`.
 //! Each device links to the relay its namespace advertises, and over it
@@ -47,7 +47,7 @@
 //! Once the link is back, alice's value never takes bob's offline edit
 //! (refused outside the removal's tips: her watch tells of it) and keeps his
 //! earlier one; bob's watch reports his offline entry withdrawn, and outside
-//! the audience his get of the document is sealed; alice's next entry is
+//! the audience his read of the document (`kept`) is sealed; alice's next entry is
 //! sealed in a new epoch, which bob cannot open.
 
 use ndn_heap::wire::{Body, Entry};
@@ -253,18 +253,18 @@ fn relay_sees_sealed(cx: &mut Cx<'_>, v: &Put, plain: &[&str]) -> StepResult<Str
     Ok(epoch)
 }
 
-/// `get <space> <path>` at `host` until it answers an error that does not say
+/// `kept <space> <path>` at `host` until it answers an error that does not say
 /// retry. The error.
 fn refused(cx: &mut Cx<'_>, host: &mut Host, space: &str, path: &str) -> StepResult<Value> {
     let mut last = Value::Null;
     wait_for(
         cx,
         &format!(
-            "{} answers get {space} {path} with a final error",
+            "{} answers kept {space} {path} with a final error",
             host.node
         ),
         CONVERGE,
-        |cx| match host.call(cx, &format!("get {space} {path}"))? {
+        |cx| match host.call(cx, &format!("kept {space} {path}"))? {
             Ok(ok) => Err(format!("{} reads {space} {path}: {ok}", host.node)),
             Err(e) if e["retry"] == true => Ok(false),
             Err(e) => {
@@ -648,7 +648,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             if item["text"] != "hi bob" {
                 return Err(format!("bob's chat message m1 is {item}, not hi bob"));
             }
-            cx.evidence(&format!("bob's get of the chat message m1: {item}"));
+            cx.evidence(&format!("bob's kept read of the chat message m1: {item}"));
             Ok(())
         },
     )?;
@@ -805,19 +805,19 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
     sc.step(
         "bob's watch reports his offline entry withdrawn by alice's removal; outside the \
-         audience now, his get of the document is sealed (ask the owner)",
+         audience now, his read of the document is sealed (ask the owner)",
         |cx| {
             let w = bob.watched_until(cx, "the offline edit withdrawn", CONVERGE, |w| {
                 name(w["watch"].as_str().unwrap_or_default()).ok() == name(DOC).ok()
                     && offline.is(&w["change"]["withdrawn"]["id"])
             })?;
             cx.evidence(&format!("bob's document watch: {}", w["change"]));
-            match bob.call(cx, &format!("get {DOC} {PLAN}"))? {
+            match bob.call(cx, &format!("kept {DOC} {PLAN}"))? {
                 Err(e) if sealed_to(&e) => cx.evidence(&format!(
-                    "bob> get {DOC} {PLAN}: {} (next: {})",
+                    "bob> kept {DOC} {PLAN}: {} (next: {})",
                     e["message"], e["next"]
                 )),
-                other => return Err(format!("bob's get of the document answers {other:?}")),
+                other => return Err(format!("bob's read of the document answers {other:?}")),
             }
             Ok(())
         },
@@ -840,10 +840,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             cx.evidence(&format!("draft 2's epoch {epoch2}, draft 1's {epoch1}"));
             let e = refused(cx, &mut bob, DOC, PLAN)?;
             if !sealed_to(&e) {
-                return Err(format!("bob's get of the document answers {e}"));
+                return Err(format!("bob's read of the document answers {e}"));
             }
             cx.evidence(&format!(
-                "bob> get {DOC} {PLAN}: {} (next: {})",
+                "bob> kept {DOC} {PLAN}: {} (next: {})",
                 e["message"], e["next"]
             ));
             Ok(())

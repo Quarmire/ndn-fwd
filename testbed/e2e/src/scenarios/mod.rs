@@ -33,7 +33,6 @@ mod quic_links;
 mod relays;
 mod self_certifying;
 mod shared;
-mod signals;
 mod stolen;
 mod tui;
 
@@ -59,7 +58,6 @@ pub const ALL: &[&str] = &[
     "folder",
     "invite",
     "self-certifying",
-    "signals",
     "follower",
     "address-change",
     "channels",
@@ -88,7 +86,6 @@ pub fn run(name: &str, sc: &mut Scenario) -> Result<(), Abort> {
         "folder" => folder::run(sc),
         "invite" => invite::run(sc),
         "self-certifying" => self_certifying::run(sc),
-        "signals" => signals::run(sc),
         "follower" => follower::run(sc),
         "address-change" => address_change::run(sc),
         "channels" => channels::run(sc),

@@ -25,7 +25,7 @@ use crate::world::addr;
 /// SVS's periodic interval for the hosts (default 30 s): how soon two
 /// devices that were apart notice; performance only.
 pub const SYNC_INTERVAL_MS: u64 = 1000;
-/// One verb's answer (a `get` may wait out a fetch's lifetime first).
+/// One verb's answer (a `kept` may wait out a fetch's lifetime first).
 pub const ANSWER: Duration = Duration::from_secs(30);
 /// Devices that were apart reaching one state again.
 pub const CONVERGE: Duration = Duration::from_secs(60);
@@ -36,12 +36,9 @@ pub fn name(s: &str) -> StepResult<ndn_packet::Name> {
 
 /// The host's label among a node's producers.
 const HOST: &str = "ndn-heap";
-/// A capture's label among a node's producers (`ndn-heap` with no device).
-const CAPTURE: &str = "ndn-heap-capture";
 
-/// One device's `ndn-heap` host: its stdin, its answers, the changes its
-/// watches delivered, the signals its subscriptions delivered and, for a
-/// capture, the signal Interests it was given.
+/// One device's `ndn-heap` host: its stdin, its answers and the changes its
+/// watches delivered.
 pub struct Host {
     pub node: String,
     pub device: String,
@@ -50,8 +47,6 @@ pub struct Host {
     stdin: ChildStdin,
     lines: Receiver<String>,
     pub watched: Vec<Value>,
-    pub signals: Vec<Value>,
-    pub captured: Vec<Value>,
     log: PathBuf,
 }
 
@@ -94,20 +89,6 @@ impl Host {
             .as_str()
             .ok_or_else(|| format!("{node}: no writer in {ready}"))?
             .to_owned();
-        Ok(host)
-    }
-
-    /// `ndn-heap` with no device on `node`'s daemon — what an operator runs
-    /// to see the signals the daemon forwards (`signal-capture <group>`);
-    /// ready once it says so. The node's producer, as a host is.
-    pub fn capture(cx: &mut Cx<'_>, node: &str) -> StepResult<Host> {
-        let mut host = Self::spawn(cx, node, CAPTURE, Vec::new())?;
-        let ready = host.next(cx, "start", Duration::from_secs(20))?;
-        if !ready["ready"]["device"].is_null() {
-            return Err(format!(
-                "{node}: ndn-heap without --device did not start bare: {ready}"
-            ));
-        }
         Ok(host)
     }
 
@@ -171,26 +152,19 @@ impl Host {
             stdin,
             lines,
             watched: Vec::new(),
-            signals: Vec::new(),
-            captured: Vec::new(),
             log,
         })
     }
 
-    /// A line the host printed on its own — a watched change, a received
-    /// signal, a captured Interest — kept with its kind; `Some` with the
-    /// line when it is an answer to a verb.
+    /// A line the host printed on its own — a watched change — kept; `Some`
+    /// with the line when it is an answer to a verb.
     fn keep(&mut self, v: Value) -> Option<Value> {
         if v.get("watch").is_some() {
             self.watched.push(v);
-        } else if v.get("signal").is_some() {
-            self.signals.push(v);
-        } else if v.get("capture").is_some() {
-            self.captured.push(v);
+            None
         } else {
-            return Some(v);
+            Some(v)
         }
-        None
     }
 
     /// The next line within `within`, as JSON; `None` when none came.
@@ -264,66 +238,12 @@ impl Host {
         }
     }
 
-    /// Take in what the host prints on its own (watched changes, signals,
-    /// captured Interests) until `done` holds of it, within `within`; how
-    /// long it took.
-    pub fn until(
-        &mut self,
-        cx: &mut Cx<'_>,
-        what: &str,
-        within: Duration,
-        done: impl Fn(&Host) -> bool,
-    ) -> StepResult<Duration> {
-        let started = Instant::now();
-        let deadline = started + within;
-        while !done(self) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(format!(
-                    "{}: {what}: not within {}s{}",
-                    self.node,
-                    within.as_secs(),
-                    self.tail()
-                ));
-            }
-            if let Some(v) = self.line(cx, what, left)?
-                && let Some(v) = self.keep(v)
-            {
-                return Err(format!("{}: an answer to no verb: {v}", self.node));
-            }
-        }
-        Ok(started.elapsed())
-    }
-
-    /// Send one verb line without waiting for its answer: a `signal-stream`
-    /// answers once all its signals are sent, while the next lines are read.
-    /// [`answers`](Self::answers) collects what they came to.
-    pub fn send(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<()> {
+    /// Send one verb line.
+    fn send(&mut self, cx: &mut Cx<'_>, line: &str) -> StepResult<()> {
         cx.note(&format!("{}> {line}", self.node));
         writeln!(self.stdin, "{line}")
             .and_then(|()| self.stdin.flush())
             .map_err(|e| format!("{}: ndn-heap stdin: {e}{}", self.node, self.tail()))
-    }
-
-    /// The answers to `n` lines [`send`](Self::send) sent, in the order they
-    /// came, all within `within`: each its `ok` object, or its `error`.
-    pub fn answers(
-        &mut self,
-        cx: &mut Cx<'_>,
-        what: &str,
-        n: usize,
-        within: Duration,
-    ) -> StepResult<Vec<Result<Value, Value>>> {
-        let deadline = Instant::now() + within;
-        let mut got = Vec::with_capacity(n);
-        while got.len() < n {
-            let left = deadline.saturating_duration_since(Instant::now());
-            let answer = self
-                .next(cx, what, left)
-                .map_err(|e| format!("{e} ({} of {n} answers came)", got.len()))?;
-            got.push(Self::outcome(what, answer).map_err(|e| format!("{}{e}", self.node))?);
-        }
-        Ok(got)
     }
 
     /// An answer line's `ok` object, or its `error` object.
@@ -428,14 +348,14 @@ impl Host {
     /// there (never put, removed) or the space is not held yet (an error that
     /// says retry).
     pub fn item(&mut self, cx: &mut Cx<'_>, space: &str, path: &str) -> StepResult<Option<Value>> {
-        match self.call(cx, &format!("get {space} {path}"))? {
+        match self.call(cx, &format!("kept {space} {path}"))? {
             Ok(mut ok) => Ok(match ok["item"].take() {
                 Value::Null => None,
                 item => Some(item),
             }),
             Err(e) if e["retry"] == true => Ok(None),
             Err(e) => Err(format!(
-                "{}> get {space} {path}: {} (next: {})",
+                "{}> kept {space} {path}: {} (next: {})",
                 self.node, e["message"], e["next_step"]
             )),
         }
@@ -483,11 +403,9 @@ impl Host {
         Ok(())
     }
 
-    /// Take in what the host printed on its own (watched changes, signals,
-    /// captured Interests) until none came for `quiet` (or for at most five
-    /// times that while lines keep coming), so [`watched`](Self::watched),
-    /// [`signals`](Self::signals) and [`captured`](Self::captured) hold
-    /// what it delivered so far.
+    /// Take in what the host printed on its own (watched changes) until none
+    /// came for `quiet` (or for at most five times that while lines keep
+    /// coming), so [`watched`](Self::watched) holds what it delivered so far.
     pub fn drain(&mut self, cx: &mut Cx<'_>, quiet: Duration) -> StepResult<()> {
         let deadline = Instant::now() + quiet * 5;
         while Instant::now() < deadline
@@ -704,16 +622,6 @@ pub fn unanswered(cx: &mut Cx<'_>, node: &str, name: &str) -> StepResult<()> {
         ));
     }
     Ok(())
-}
-
-/// Erase every copy `node`'s content store caches under `prefix`.
-pub fn erase_cs(cx: &mut Cx<'_>, node: &str, prefix: &str) -> StepResult<String> {
-    let sock = cx.w.node(node).sock().display().to_string();
-    let op = cx
-        .tool("ndn-ctl")
-        .args(["--socket", &sock, "cs", "erase", prefix]);
-    let out = cx.ok(op, "cs erase")?;
-    Ok(out.stdout.trim().to_owned())
 }
 
 /// `node`'s QUIC link face to the daemon bound to `host`'s address

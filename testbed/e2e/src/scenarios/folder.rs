@@ -270,7 +270,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                         .map(|p| {
                             Ok(format!(
                                 "{p}: {:?}",
-                                bob.call(cx, &format!("get {SPACE} {p}"))?
+                                bob.call(cx, &format!("kept {SPACE} {p}"))?
                             ))
                         })
                         .collect::<Result<Vec<_>, String>>()?;
