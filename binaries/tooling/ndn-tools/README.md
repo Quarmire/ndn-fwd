@@ -218,12 +218,17 @@ The remaining binaries back the `testbed/` harness; each takes
   that is never an entry; `get <space> <path> [--prefix] [--no-kept]
   [--no-live] [--mode …] [--verified]` streams the kept values and the live
   emissions together, each item saying by its `kind` which it is; `evidence`
-  lists the channel evidence the node holds. The node reaches the daemon over
-  its socket, which carries NDN packets only, so channel frames reach
-  receivers only where a node's connection carries them (the e2e's
-  `chan-device` runs an embedded engine for that). `ndn-heap` needs `--device`
-  (there is no device-less capture mode: channel frames are not NDN packets, so
-  a daemon's operator has nothing of them to capture). The verbs
+  lists the channel evidence the node holds. The node runs its channels through
+  the daemon it connects to: a channel's frames travel as side records on the
+  daemon's face socket beside its NDN packets and the daemon's side table
+  routes them, so a `get` in one `ndn-heap` process receives what an `emit` in
+  another sends (start the receiver's `get` first: an `emit` is not
+  acknowledged, and one with no receiver yet sends nothing; its answer says
+  `"delivery":{"confirmed":false,…}`). A start where the connection carries no
+  channel frames fails with the reason. `text=@<path>` reads a regular file of
+  at most 64 MiB (a device, pipe or directory is refused). `ndn-heap` needs
+  `--device` (there is no device-less capture mode: channel frames are not NDN
+  packets, so a daemon's operator has nothing of them to capture). The verbs
   and their JSON shapes are the module doc of `src/heap.rs`.
 
 ## License

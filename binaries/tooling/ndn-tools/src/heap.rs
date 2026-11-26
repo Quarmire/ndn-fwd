@@ -187,8 +187,10 @@
 //!   (every message in order, or a visible gap) or `window` (reliable, plus the default
 //!   replayable window a joiner asks for: the last 256 messages, 1 MiB, 10 s). `--stand <secs>`
 //!   (1 to 3600) lets the message stand for a receiver that joins later, for that long. A
-//!   sender with no receiver sends nothing and answers at once. Answer `{"space","path","mode",
-//!   "stand_secs","len"}`; a refusal says why and what to do (`NotWriter`: `ask-owner`;
+//!   sender with no receiver sends nothing and answers at once, and nothing in the node
+//!   acknowledges a receiver, so an answer says so: `"delivery":{"confirmed":false,"note"}`
+//!   (start the receivers' `get` first). Answer `{"space","path","mode","stand_secs","len",
+//!   "delivery"}`; a refusal says why and what to do (`NotWriter`: `ask-owner`;
 //!   `NotReady`, `Congested`: `retry-later`; `TooLarge`, a mode the path has no stream for:
 //!   `fix-request`).
 //! - `get <space> <path> [--prefix] [--no-kept] [--no-live] [--mode latest|reliable|window]
@@ -206,11 +208,15 @@
 //!   "channel","sender","key_epoch","seq0","ingress","when_ms"}]}`.
 //! - `quit` (or end of input).
 //!
-//! The node this tool starts reaches the forwarder over its management socket, which carries NDN
-//! packets only: a channel frame (marker octet `0x00`) is not one, and `ndn_app::IpcConnection`
-//! refuses it. `emit` and `get` run on that node as they run on any, and a channel's frames
-//! reach receivers only where the node's connection carries them (an embedded engine, as the
-//! e2e's `chan-device` runs; see the `channels` scenario).
+//! The node this tool starts runs its channels through the daemon it connects to
+//! (`attach_forwarder`): `emit` and `get` send and receive a channel's frames as side records on
+//! the daemon's face socket (a channel frame, marker octet `0x00`, is not an NDN packet, and the
+//! socket carries it beside the NDN packets, ndn-rs `docs/specs/channel.md` §14.9), and the
+//! daemon's side table routes them. The tool has to run over the unix socket alone, which it
+//! does; a start where the connection carries no channel frames fails with the reason and
+//! what to do instead of leaving `emit` and `get` to do nothing. Two tool processes on one
+//! daemon (or on two daemons linked by a relay) exchange emissions: the receiver's `get` first,
+//! then the sender's `emit`.
 //!
 //! Output lines: `{"ready":{"device","writer"}}` once the layer runs; per verb
 //! `{"verb":…,"ok":{…}}` or `{"verb":…,"error":{"message","retry","next",
@@ -467,6 +473,18 @@ async fn main() -> Result<()> {
     )
     .await
     .map_err(|e| anyhow!("{device}: {e} (next: {})", next_step(e.next())))?;
+    // The channels run through the daemon: the session Data carries the route label and the
+    // frames travel as side records on this socket. Without this a node has no carrier and
+    // `emit` and `get` would send and hear nothing, so a daemon whose face carries none is a
+    // start failure, not a verb that does nothing.
+    node.attach_forwarder().map_err(|e| {
+        anyhow!(
+            "{device}: the connection to the forwarder at {} carries no channel frames: {e} \
+             (next: {})",
+            cli.face_socket,
+            next_step(e.next())
+        )
+    })?;
     let invites = Invites::start(&node, host.clone(), IntroPolicy::new(), InviteConfig::new())
         .map_err(|e| anyhow!("{device}: {e} (next: {})", next_step(e.next())))?;
     // After the layer listens on the keyring: every newer version adopted
@@ -690,6 +708,7 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
                 "path": path.to_string(),
                 "mode": mode_name(line.mode),
                 "stand_secs": line.stand.map(|d| d.as_secs()),
+                "delivery": shapes::emit_delivery(line.stand),
             });
             ok["len"] = json!(line.value.len());
             Ok(Verb::Done(ok))
@@ -1444,17 +1463,62 @@ fn unhex(s: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+/// The most octets a value file (`text=@<path>`) is read for: the largest value a `put` takes
+/// (64 MiB, the heap's own limit), so a file over it is refused here, before it is held in
+/// memory, and the heap's check of the size is the one that decides for anything under it.
+const VALUE_FILE_MAX: u64 = 64 << 20;
+
 /// A value a line gives: the text itself, the bytes of the file `@<path>`
 /// names, or (`@@…`) the text after its first `@`.
 async fn field_value(value: &str) -> Result<Bytes, String> {
     match value.strip_prefix('@') {
         Some(text) if text.starts_with('@') => Ok(Bytes::copy_from_slice(text.as_bytes())),
-        Some(path) => tokio::fs::read(path)
-            .await
-            .map(Bytes::from)
-            .map_err(|e| format!("read {path:?}: {e}")),
+        Some(path) => read_value_file(path, VALUE_FILE_MAX).await,
         None => Ok(Bytes::copy_from_slice(value.as_bytes())),
     }
+}
+
+/// The bytes of the regular file at `path`, at most `max` of them. A device, a pipe or a
+/// directory has no end to read to (`/dev/zero` would fill memory), so it is refused, and so is
+/// a file longer than `max`; either says why and what to give instead.
+async fn read_value_file(path: &str, max: u64) -> Result<Bytes, String> {
+    use tokio::io::AsyncReadExt;
+    let not_regular = || {
+        format!(
+            "read {path:?}: not a regular file (a device, pipe or directory has no end to read \
+             to); give a file, or the value itself as text= or hex="
+        )
+    };
+    // Looked at before it is opened: opening a pipe with no writer would wait for one.
+    let meta = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| format!("read {path:?}: {e}"))?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("read {path:?}: {e}"))?;
+    // What was opened is what is judged: the path may have been replaced since.
+    let meta = file
+        .metadata()
+        .await
+        .map_err(|e| format!("read {path:?}: {e}"))?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("read {path:?}: {e}"))?;
+    if bytes.len() as u64 > max {
+        return Err(format!(
+            "read {path:?}: the file is longer than {max} octets, the most a value may be; give \
+             a smaller file"
+        ));
+    }
+    Ok(Bytes::from(bytes))
 }
 
 /// A line split into words: whitespace separates them, double quotes keep
@@ -1836,5 +1900,52 @@ mod tests {
                 "{bad:?} should be refused"
             );
         }
+    }
+
+    /// `text=@<path>` reads a regular file, at most the bound: a device (`/dev/zero` has no end), a
+    /// directory and a file over the bound are refused with a reason and what to give instead,
+    /// before the value is held in memory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_value_file_is_a_regular_file_within_the_bound() {
+        let dir = std::env::temp_dir().join(format!("ndn-heap-value-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("v.bin");
+        std::fs::write(&file, b"0123456789").unwrap();
+        let path = file.to_str().unwrap();
+
+        assert_eq!(
+            read_value_file(path, 10).await.unwrap(),
+            Bytes::from_static(b"0123456789")
+        );
+        let long = read_value_file(path, 9).await.unwrap_err();
+        assert!(long.contains("longer than 9 octets"), "{long}");
+        assert!(long.contains("give a smaller file"), "{long}");
+
+        let device = read_value_file("/dev/zero", 1 << 20).await.unwrap_err();
+        assert!(device.contains("not a regular file"), "{device}");
+        assert!(device.contains("text= or hex="), "{device}");
+        let directory = read_value_file(dir.to_str().unwrap(), 10)
+            .await
+            .unwrap_err();
+        assert!(directory.contains("not a regular file"), "{directory}");
+        let missing = read_value_file(dir.join("none").to_str().unwrap(), 10)
+            .await
+            .unwrap_err();
+        assert!(missing.starts_with("read "), "{missing}");
+
+        // The line's own form goes through the same read.
+        assert!(
+            field_value("@/dev/zero")
+                .await
+                .unwrap_err()
+                .contains("not a regular file")
+        );
+        assert_eq!(
+            field_value(&format!("@{path}")).await.unwrap(),
+            Bytes::from_static(b"0123456789")
+        );
+        assert_eq!(field_value("@@x").await.unwrap(), Bytes::from_static(b"@x"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

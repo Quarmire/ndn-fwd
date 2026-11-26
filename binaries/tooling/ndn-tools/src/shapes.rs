@@ -108,7 +108,8 @@ fn withdrawal(i: &EntryId, why: &Refusal) -> Value {
 
 /// An item of a `get`: `{"path","by","writer","kind"}` and the value as an item shows it
 /// (`len`, `text`/`hex`/`sha256`); a kept one adds `id`, `as_of_ms` and `removed`, an emitted one
-/// `seq` and `stands_ms`.
+/// `seq`, `stands_ms` and `verified` (whether a signed checkpoint of the sender listed the frame
+/// before it was given: `false` for a `Prompt` get, `true` for `--verified`).
 pub fn got(g: &Got) -> Value {
     let mut m = Map::new();
     m.insert("path".into(), json!(g.path.to_string()));
@@ -125,6 +126,7 @@ pub fn got(g: &Got) -> Value {
             m.insert("kind".into(), json!("emitted"));
             m.insert("seq".into(), json!(e.seq));
             m.insert("stands_ms".into(), json!(e.stands.map(millis)));
+            m.insert("verified".into(), json!(e.verified));
         }
         other => {
             m.insert("kind".into(), json!("other"));
@@ -180,6 +182,13 @@ pub fn notice(n: &GetNotice) -> Value {
             }
             v
         }
+        GetNotice::KeptEnded { why } => json!({
+            "kind": "kept-ended",
+            "why": why,
+            "what_to_do": "the kept part of this get ended and gives nothing more, while its live \
+                           part goes on: get again; it either goes on or is refused with the \
+                           same reason, which says what to do",
+        }),
         GetNotice::Retracted { writer, from, to } => json!({
             "kind": "retracted",
             "writer": writer.to_string(),
@@ -302,6 +311,31 @@ pub fn heap_error(e: &HeapError) -> Value {
         refusal(&mut v, why);
     }
     v
+}
+
+/// What an `emit` answer says of delivery, as `{"confirmed":false,"note":…}`. `Heap::emit` is
+/// fire-and-forget: it returns `()` when the message is handed to the channel, and a sender with
+/// no receiver sends nothing and returns at once (docs/specs/channel.md §17). The node has no
+/// count of receivers or acknowledgement to report, so the answer says that nothing here
+/// confirms a receiver got it, rather than let an `ok` read as "delivered".
+pub fn emit_delivery(stand: Option<std::time::Duration>) -> Value {
+    let kept = match stand {
+        Some(lifetime) => format!(
+            "; it also stands for {} s, so a receiver that joins within that time is given it",
+            lifetime.as_secs()
+        ),
+        None => "; it does not stand, so a receiver that joins later never gets it (--stand \
+                 keeps it for one)"
+            .into(),
+    };
+    json!({
+        "confirmed": false,
+        "note": format!(
+            "emit is not acknowledged: the message went to the receivers this device's channel \
+             holds now, and to none if no receiver has asked yet. Start the receivers' `get` \
+             first, then emit{kept}"
+        ),
+    })
 }
 
 /// An emit's refusal as an error answer: why, whether to ask again, what to do next, and
@@ -641,6 +675,7 @@ mod tests {
             Kind::Emitted(Emitted {
                 seq: 42,
                 stands: Some(Duration::from_secs(30)),
+                verified: false,
             }),
             &[0xff],
         ));
@@ -653,10 +688,16 @@ mod tests {
             Kind::Emitted(Emitted {
                 seq: 43,
                 stands: None,
+                verified: true,
             }),
             b"x",
         ));
         assert!(live["stands_ms"].is_null());
+        // Whether a signed checkpoint listed the frame before it was given: a `Prompt` item says
+        // `false` for good, a `Verified` one `true`.
+        assert_eq!(emitted["verified"], false);
+        assert_eq!(live["verified"], true);
+        assert!(kept.get("verified").is_none());
     }
 
     /// Each notice says what to do; an end names the writer whose session ended, a missing path
@@ -701,9 +742,42 @@ mod tests {
         assert_eq!(withdrawn["id"]["seq"], 7);
         assert_eq!(withdrawn["cut_of"], "/alice/member/phone");
         assert_eq!(withdrawn["keeps_to"], 3);
-        for v in [&lagged, &withdrawn, &ended, &no_path, &retracted] {
+        let kept_ended = notice(&GetNotice::KeptEnded {
+            why: "this device's person is no reader of the space any more".into(),
+        });
+        assert_eq!(kept_ended["kind"], "kept-ended");
+        assert_eq!(
+            kept_ended["why"],
+            "this device's person is no reader of the space any more"
+        );
+        for v in [
+            &lagged,
+            &withdrawn,
+            &ended,
+            &no_path,
+            &retracted,
+            &kept_ended,
+        ] {
             assert!(v["what_to_do"].is_string(), "{v} says nothing to do");
         }
+    }
+
+    /// An `emit` that returned `ok` does not read as delivered: the answer says nothing confirms a
+    /// receiver got it, that none got it if no receiver had asked, and how to make a late
+    /// receiver get it.
+    #[test]
+    fn an_emit_says_that_delivery_is_not_confirmed() {
+        let plain = emit_delivery(None);
+        assert_eq!(plain["confirmed"], false);
+        let note = plain["note"].as_str().unwrap();
+        assert!(note.contains("not acknowledged"), "{note}");
+        assert!(note.contains("none if no receiver has asked"), "{note}");
+        assert!(note.contains("--stand"), "{note}");
+        let standing = emit_delivery(Some(Duration::from_secs(30)))["note"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(standing.contains("stands for 30 s"), "{standing}");
     }
 
     /// An emit's refusal keeps `message`, `retry`, `next` and `next_step`, a full queue says when

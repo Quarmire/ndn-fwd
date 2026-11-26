@@ -11,10 +11,11 @@
 //!   or peer in its config: its side table and the routes the link library made are all it has.
 //! - **sender** (/cs), **carol** (/cc) and **dave** (/cd): `chan-device` processes
 //!   (`src/bin/chan_device.rs`), one in each roamer's network namespace (`nat.rs`), the PIB of an
-//!   `ndn-fwd init` each. A device cannot be an `ndn-fwd` daemon with `ndn-heap` beside it: the
-//!   daemon's unix-socket and shared-memory faces carry NDN packets only, and a channel frame is
-//!   not one. `chan-device` is an embedded forwarder (`ndn-engine`), the daemon's link layer
-//!   (`ndn-link`, over the same crates `ndn-fwd` uses) and a heap node on the forwarder's app face.
+//!   `ndn-fwd init` each. They are `chan-device`, not an `ndn-fwd` daemon with `ndn-heap` beside
+//!   it, because the scenario drives a forwarder's side table and links and forges a frame, which
+//!   the tool does not expose: `chan-device` is an embedded forwarder (`ndn-engine`), the
+//!   daemon's link layer (`ndn-link`, over the same crates `ndn-fwd` uses) and a heap node on the
+//!   forwarder's app face.
 //!
 //! The people's gestures: each creates a namespace (`ndn-fwd init`) and adopts the trust contexts
 //! of the ones it must know (the sender those of both receivers, whose asks it judges; each
@@ -561,10 +562,15 @@ impl Side {
     }
 }
 
-/// The relay daemon's `side/list`, over its management socket (a signed command, as `ndn-ctl`
-/// signs: the module is an ndn-rs extension; `ndn-ctl` has no verb for it).
+/// The relay daemon's `side/list`: see [`daemon_side`].
 fn relay_side(cx: &mut Cx<'_>) -> StepResult<Side> {
-    let sock = cx.w.node("relay").sock().display().to_string();
+    daemon_side(cx, "relay")
+}
+
+/// `node`'s daemon's `side/list`, over its management socket (a signed command, as `ndn-ctl`
+/// signs: the module is an ndn-rs extension; `ndn-ctl` has no verb for it).
+fn daemon_side(cx: &mut Cx<'_>, node: &str) -> StepResult<Side> {
+    let sock = cx.w.node(node).sock().display().to_string();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -572,17 +578,17 @@ fn relay_side(cx: &mut Cx<'_>) -> StepResult<Side> {
     let (code, text) = rt.block_on(async move {
         let client = ndn_ipc::MgmtClient::connect(&sock)
             .await
-            .map_err(|e| format!("connect to the relay's management socket: {e}"))?;
+            .map_err(|e| format!("connect to the management socket: {e}"))?;
         let params = ndn_config::ControlParameters::default();
         client
             .send_cmd_raw("side", "list", Some(&params))
             .await
             .map(|(code, text, _)| (code, text))
-            .map_err(|e| format!("side/list on the relay: {e}"))
+            .map_err(|e| format!("side/list: {e}"))
     })?;
-    cx.note(&format!("relay> side/list -> {code}\n{text}"));
+    cx.note(&format!("{node}> side/list -> {code}\n{text}"));
     if code != 200 {
-        return Err(format!("side/list on the relay answered {code}: {text}"));
+        return Err(format!("side/list on {node} answered {code}: {text}"));
     }
     Side::parse(&text)
 }

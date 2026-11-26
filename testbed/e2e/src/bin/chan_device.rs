@@ -2,13 +2,16 @@
 //! links and the device's data layer, driven by lines on stdin, answered by one JSON object per
 //! line on stdout.
 //!
-//! **Why this is not an `ndn-fwd` daemon with `ndn-heap` beside it.** A channel frame is not an NDN
-//! packet: it travels the forwarder's side table (`ndn_engine::side`), and the unix-socket and
-//! shared-memory faces of a daemon frame what they carry as TLV packets, which a channel frame
-//! (marker octet `0x00`) is not. `ndn_app::IpcConnection::send_side` says so and refuses. The heap
-//! node of a channel device therefore runs over an *embedded* engine (`EngineAppExt::app_face`),
-//! as `ndn-ext`'s `chan_relay` example runs it; what this process adds to that example is the rest
-//! of what a daemon does for a device, from the same crates the daemon uses:
+//! **Why this is not an `ndn-fwd` daemon with `ndn-heap` beside it.** The device is also a QUIC
+//! link endpoint with its own admission, which the `channels` scenario drives and inspects
+//! (`links`, `side`, `forge`: the faces and counters of the forwarder in this process). A
+//! daemon with `ndn-heap` beside it carries channel frames too (ndn-rs `ipc_seam` test: nodes
+//! over `IpcConnection` to a real engine), but the tool exposes neither a forwarder's side table
+//! nor a way to seal a forged frame. The heap node of a channel device therefore runs over an
+//! *embedded* engine
+//! (`EngineAppExt::app_face`), as `ndn-ext`'s `chan_relay` example runs it; what this process
+//! adds to that example is the rest of what a daemon does for a device, from the same crates
+//! the daemon uses:
 //!
 //! - the device's key, certificates and trust contexts from the PIB `ndn-fwd init` and `adopt`
 //!   wrote (`SecurityManager::from_pib`, `ndn_cert::load_persisted_contexts`);
@@ -392,6 +395,9 @@ fn notice_event(n: &GetNotice) -> Value {
                 LiveEnd::NoPath { why } => ("no-path", why.clone()),
             };
             json!({"ev": "notice", "kind": "live-ended", "end": kind, "why": why})
+        }
+        GetNotice::KeptEnded { why } => {
+            json!({"ev": "notice", "kind": "kept-ended", "why": why})
         }
         GetNotice::Retracted { writer, from, to } => json!({
             "ev": "notice", "kind": "retracted", "writer": writer.to_string(),
