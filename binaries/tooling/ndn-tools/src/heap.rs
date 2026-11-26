@@ -213,10 +213,14 @@
 //! the daemon's face socket (a channel frame, marker octet `0x00`, is not an NDN packet, and the
 //! socket carries it beside the NDN packets, ndn-rs `docs/specs/channel.md` §14.9), and the
 //! daemon's side table routes them. The tool has to run over the unix socket alone, which it
-//! does; a start where the connection carries no channel frames fails with the reason and
-//! what to do instead of leaving `emit` and `get` to do nothing. Two tool processes on one
-//! daemon (or on two daemons linked by a relay) exchange emissions: the receiver's `get` first,
-//! then the sender's `emit`.
+//! does; `attach_forwarder` also says to the daemon, with the hello record, that this client
+//! reads side records (a daemon sends one only to a client that said so: an older client
+//! would be put out of step by it, §14.9). A start where the connection carries no channel
+//! frames fails with the reason and what to do instead of leaving `emit` and `get` to do
+//! nothing. Two tool processes on one daemon, or on two daemons linked over QUIC (the
+//! `notes` scenario of `testbed/e2e`, a laptop and a phone of one person), exchange
+//! emissions: the receiver's `get` first, then the sender's `emit`. A daemon that predates the
+//! record closes the connection on the hello: run the daemon of this build.
 //!
 //! Output lines: `{"ready":{"device","writer"}}` once the layer runs; per verb
 //! `{"verb":…,"ok":{…}}` or `{"verb":…,"error":{"message","retry","next",

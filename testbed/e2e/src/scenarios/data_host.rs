@@ -47,6 +47,8 @@ pub struct Host {
     stdin: ChildStdin,
     lines: Receiver<String>,
     pub watched: Vec<Value>,
+    /// The items and notices a `get` printed (`{"get":<space>,"got":…}` or `…"notice":…`).
+    pub gets: Vec<Value>,
     log: PathBuf,
 }
 
@@ -152,6 +154,7 @@ impl Host {
             stdin,
             lines,
             watched: Vec::new(),
+            gets: Vec::new(),
             log,
         })
     }
@@ -162,8 +165,45 @@ impl Host {
         if v.get("watch").is_some() {
             self.watched.push(v);
             None
+        } else if v.get("get").is_some() {
+            self.gets.push(v);
+            None
         } else {
             Some(v)
+        }
+    }
+
+    /// Wait until an item or a notice a `get` printed matches `matches`, within `within`: the
+    /// first that does (one delivered before counts). A line that is an answer to no verb is an
+    /// error.
+    pub fn gets_until(
+        &mut self,
+        cx: &mut Cx<'_>,
+        what: &str,
+        within: Duration,
+        matches: impl Fn(&Value) -> bool,
+    ) -> StepResult<Value> {
+        let deadline = Instant::now() + within;
+        let mut seen = 0;
+        loop {
+            if let Some(g) = self.gets[seen..].iter().find(|g| matches(g)) {
+                return Ok(g.clone());
+            }
+            seen = self.gets.len();
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(format!(
+                    "{}: {what}: not delivered within {}s{}",
+                    self.node,
+                    within.as_secs(),
+                    self.tail()
+                ));
+            }
+            if let Some(v) = self.line(cx, what, left)?
+                && let Some(v) = self.keep(v)
+            {
+                return Err(format!("{}: an answer to no verb: {v}", self.node));
+            }
         }
     }
 

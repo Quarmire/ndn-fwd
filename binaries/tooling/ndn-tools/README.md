@@ -224,7 +224,11 @@ The remaining binaries back the `testbed/` harness; each takes
   routes them, so a `get` in one `ndn-heap` process receives what an `emit` in
   another sends (start the receiver's `get` first: an `emit` is not
   acknowledged, and one with no receiver yet sends nothing; its answer says
-  `"delivery":{"confirmed":false,…}`). A start where the connection carries no
+  `"delivery":{"confirmed":false,…}`). The tool says to its daemon that it reads
+  side records (the hello; a daemon sends a record only to a client that said
+  so, so an older client is never put out of step), and the e2e scenario `notes`
+  drives `emit` and `get` of two tools on two daemons over a real QUIC link. A
+  start where the connection carries no
   channel frames fails with the reason. `text=@<path>` reads a regular file of
   at most 64 MiB (a device, pipe or directory is refused). `ndn-heap` needs
   `--device` (there is no device-less capture mode: channel frames are not NDN

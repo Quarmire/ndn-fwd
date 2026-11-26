@@ -34,8 +34,19 @@
 //! holds; the watches delivered the other device's entries; and each daemon
 //! fetches the other device's log entries, validating them against /nt's
 //! trust context, with the writer device's key as KeyLocator.
+//!
+//! Before the cut, the channel (`Heap::emit` and `Heap::get`) crosses the same two daemons and
+//! the real QUIC link between them, driven by the tool's own verbs: the phone's `ndn-heap`
+//! `get`s (emissions only) and the laptop's `emit`s, `latest` first and then five `reliable`
+//! messages (which arrive in order), and back, the phone's `emit` reaching the laptop's `get`.
+//! The frames go from each tool to its daemon as side records on the daemon's unix socket (the
+//! tool says it reads them with the hello, `attach_forwarder`), through the daemons' side
+//! tables and the link's datagram and stream carriers: a tool that does not attach the
+//! forwarder fails this step, its `get` hearing nothing.
 
 use std::process::Command;
+
+use serde_json::Value;
 
 use super::data_host::{
     CONVERGE, Host, Put, carries_group, entry_at, highest, key_locator, name, stored, supersedes,
@@ -219,6 +230,74 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 laptop.holds(cx, SPACE, "sync/phone", &from_phone)
             })?;
             cx.evidence("each device read the other's sealed entry: both hold the epoch's key");
+            Ok(())
+        },
+    )?;
+    sc.step(
+        "the laptop's `emit` reaches the phone's `get` through the two daemons (ndn-heap tool, \
+         unix socket, QUIC link): the phone takes the laptop's channel, the laptop emits five \
+         reliable messages, which arrive in order; the laptop takes the phone's channel and the \
+         phone's latest emission reaches the laptop's `get`",
+        |cx| {
+            cx.concept("channel frames over a daemon's socket: the tool's emit and get");
+            // `get` asks nobody: a device's channel is taken when its announce is heard (once
+            // when the sender opens it, every 30 s after; a device is asked at most once in 10 s,
+            // channel.md §9). So each direction takes one `get` of one mode, made before the
+            // sender's first emission of that mode opens the channel.
+            phone.ok(
+                cx,
+                &format!("get {SPACE} / --prefix --no-kept --mode reliable"),
+            )?;
+            laptop.ok(
+                cx,
+                &format!("get {SPACE} / --prefix --no-kept --mode latest"),
+            )?;
+            let probe = live_between(cx, &mut laptop, &mut phone, "reliable", "rprobe")?;
+            if probe["got"]["writer"] != laptop.device.as_str() {
+                return Err(format!(
+                    "the phone's get delivered {probe}, not the laptop's"
+                ));
+            }
+            cx.evidence(&format!("laptop emit (reliable) -> phone get: {probe}"));
+            for i in 1..=5 {
+                let line = format!("emit {SPACE} live/r text=\"r{i}\" --mode reliable");
+                let sent = laptop.ok(cx, &line)?;
+                if sent["delivery"]["confirmed"] != false {
+                    return Err(format!("an emit that cannot know a delivery says {sent}"));
+                }
+            }
+            let last = phone.gets_until(cx, "the fifth reliable message", SHORT, |g| {
+                g["got"]["text"] == "r5"
+            })?;
+            let order: Vec<(u64, String)> = phone
+                .gets
+                .iter()
+                .filter(|g| g["got"]["kind"] == "emitted" && g["got"]["path"] == "/live/r")
+                .filter_map(|g| {
+                    Some((
+                        g["got"]["seq"].as_u64()?,
+                        g["got"]["text"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect();
+            let texts: Vec<&str> = order.iter().map(|(_, t)| t.as_str()).collect();
+            if texts != ["r1", "r2", "r3", "r4", "r5"] || order.windows(2).any(|w| w[0].0 >= w[1].0)
+            {
+                return Err(format!(
+                    "the phone's get delivered the reliable messages as {order:?}, not r1..r5 in \
+                     the channel's order (last: {last})"
+                ));
+            }
+            cx.evidence(&format!(
+                "laptop emit (reliable) -> phone get, in order: {order:?}"
+            ));
+            let back = live_between(cx, &mut phone, &mut laptop, "latest", "pong")?;
+            if back["got"]["writer"] != PHONE {
+                return Err(format!(
+                    "the laptop's get delivered {back}, not the phone's"
+                ));
+            }
+            cx.evidence(&format!("phone emit (latest) -> laptop get: {back}"));
             Ok(())
         },
     )?;
@@ -416,4 +495,48 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         },
     )?;
     Ok(())
+}
+
+/// `from` emits `<word> <n>` in `mode` until `to`'s `get` delivers an emission whose text starts
+/// with `<word> `: the receiver's signed ask and the first emission race, and a sender that has
+/// no receiver yet sends nothing and says so. The item the get printed.
+fn live_between(
+    cx: &mut Cx<'_>,
+    from: &mut Host,
+    to: &mut Host,
+    mode: &str,
+    word: &str,
+) -> StepResult<Value> {
+    let mut sent = 0;
+    let mut item = None;
+    wait_for(
+        cx,
+        &format!(
+            "{}'s get delivers {}'s {mode} emission {word:?}",
+            to.node, from.node
+        ),
+        SHORT,
+        |cx| {
+            sent += 1;
+            from.ok(
+                cx,
+                &format!("emit {SPACE} live/{word} text=\"{word} {sent}\" --mode {mode}"),
+            )?;
+            let wanted = format!("{word} ");
+            match to.gets_until(cx, "an emission", Duration::from_millis(500), |g| {
+                g["got"]["kind"] == "emitted"
+                    && g["got"]["text"]
+                        .as_str()
+                        .is_some_and(|t| t.starts_with(&wanted))
+            }) {
+                Ok(g) => {
+                    item = Some(g);
+                    Ok(true)
+                }
+                Err(e) if e.contains("not delivered within") => Ok(false),
+                Err(e) => Err(e),
+            }
+        },
+    )?;
+    item.ok_or_else(|| "no emission".to_owned())
 }
