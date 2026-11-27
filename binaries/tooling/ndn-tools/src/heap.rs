@@ -203,6 +203,27 @@
 //!   every mode a sender offers); `--verified` delivers a frame only after a signed checkpoint
 //!   lists it (`Trust::Verified`: it prevents a key holder's forgery, at up to one checkpoint
 //!   period of latency). Answer `{"space","path","prefix","kept","live"}`.
+//! - `query <space> <path> [--query <text>] [--device <device>]... [--timeout-ms <n>] [--proof]`:
+//!   ask the space's servers a question about the path (`Heap::get` with `GetOptions::ask`, no
+//!   kept values and no emissions) and wait until every server asked has answered or failed or
+//!   the deadline passed. Each answer and notice is a line as `get`'s, headed `"query"` instead of
+//!   `"get"` (below). `--query` is the question's text (default: empty); `--device` names a server
+//!   to ask, repeatable (default: the devices that announced they serve the path, at most 16);
+//!   `--timeout-ms` is the deadline, 1 to 10000 (default 3000); `--proof` keeps each answer's signed
+//!   Data (`proof`, hex). Answer `{"space","path","answers","done"}` when at least one server
+//!   answered (a server's refusal is an answer; `done` is the `answers-done` notice), else the
+//!   error `no server answered` (`retry-later`, with `answers`, the `answers-done` notice) — this
+//!   host answers every verb with a line and ends with `close` or `quit`, so a script tells a
+//!   query nobody answered by that `error`, not by the process's exit status. A reader of the
+//!   space may ask; a server that does not list this device's person is a `query-failed`
+//!   (`next` `ask-owner`).
+//! - `serve <space> <prefix> (--answer <text> | --refuse <code>:<text>) [--for-ms <n>]`: answer
+//!   every query under the prefix of the space (`Heap::serve`) with the text, or refuse it with
+//!   the application's `code` (0 to 65535) and text, until `--for-ms` milliseconds have passed or
+//!   the process ends; at the end a line `{"serve":<space>,"ended":<prefix>}` says the prefix is
+//!   served no more. Only a writer's device serves; any other is refused with why
+//!   (`ask-owner`). Answer `{"space","prefix","replies":"answer"|"refusal","for_ms"}`. Nothing
+//!   it answers is stored.
 //! - `evidence`: what this node holds that a frame of a channel was not its sender's
 //!   (`NodeHandle::channel_evidence`, oldest first, in memory): `{"evidence":[{"kind",
 //!   "channel","sender","key_epoch","seq0","ingress","when_ms"}]}`.
@@ -254,16 +275,23 @@
 //! re-enrol the device), `gap-signed` (`after`, `resumed`), `unbacked-counter`
 //! (`device`, `seen`) or `store-failed` (`why`).
 //!
-//! Per item of a `get` `{"get":<space>,"got":{"path","by","writer","kind",…}}` and the value as
+//! Per item of a `get` (a `query`: the same, headed `"query"`) `{"get":<space>,"got":{"path","by",
+//! "writer","kind",…}}` and the value as
 //! an item shows it: `kind` is `"kept"` with `id` (an id), `as_of_ms` (how long ago it was
-//! written, `null` when not known) and `removed` (the path was removed: the value is empty), or
+//! written, `null` when not known) and `removed` (the path was removed: the value is empty),
 //! `"emitted"` with `seq` (the channel's) and `stands_ms` (what is left of a stated lifetime,
-//! `null` for a live emission). Per notice `{"get":<space>,"notice":{"kind","what_to_do",…}}`,
-//! `kind` one of `lagged` (`missed`: emissions the mode dropped), `withdrawn` (`id`, `why`, as a
+//! `null` for a live emission), or `"answered"` (a query's answer) with `query` (its id), `via`
+//! (`signed`), `refusal` (`{"code","text"}` when the server's handler refused: the value is then
+//! empty; else `null`) and `proof` (only with `--proof`). Per notice
+//! `{"get":<space>,"notice":{"kind","what_to_do",…}}`,
+//! `kind` one of `lagged` (`missed`: emissions the mode dropped, or answers a slow reader lost),
+//! `withdrawn` (`id`, `why`, as a
 //! watch's: an entry this get delivered was refused after the fact; the value that follows
-//! stands), `live-ended` (`end`: `ended` with `writer`, or `no-path`; `why`; `next`) or
+//! stands), `live-ended` (`end`: `ended` with `writer`, or `no-path`; `why`; `next`),
 //! `retracted` (`writer`, `from`, `to`: discard what was delivered with an emitted `seq` in that
-//! range). Logs go to stderr.
+//! range), `query-failed` (`server`, `why`, `next`: one server's query failed) or `answers-done`
+//! (`asked`, `answered`, `refused`, `failed`, `silent`, `not_asked`: every server asked is in
+//! exactly one of the first four counts, and the line ends a `query`). Logs go to stderr.
 
 mod host;
 mod shapes;
@@ -283,9 +311,10 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use ndn_app::{Connection, IpcConnection, demux_cert_fetcher};
 use ndn_cert::CutFile;
 use ndn_heap::{
-    Change, ChannelMode, Clock, Config, CutBound, EmitError, EmitOptions, Frontier, GetOptions,
-    Heap, HeapError, Live, MembersChange, Modes, Node, PutOptions, Readers, STAND_MAX, Select,
-    Share, Timestamp, Transport, Trust, Window,
+    Ask, Change, ChannelMode, Clock, Config, CutBound, EmitError, EmitOptions, Frontier, GetNotice,
+    GetOptions, Heap, HeapError, Kind, Live, MembersChange, Modes, Node, PutOptions, Query,
+    Readers, Reply, STAND_MAX, Select, ServeError, Share, Targets, Timestamp, Transport, Trust,
+    Window,
 };
 use ndn_invite::{IntroPolicy, InviteConfig, InviteError, Invites, Offer, Role};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -295,8 +324,8 @@ use ndn_sync::{DataStore, MemoryStore};
 
 use host::{DaemonHost, DaemonMarks, FollowedGroups, carrying_introduction, follow_contexts};
 use shapes::{
-    emit_error, evidence, got, heap_error, hex, invite_error, members, next_step, notice,
-    revocation_cut, role_word, usage_error, value_fields,
+    emit_error, evidence, got, heap_error, hex, invite_error, members, next_step, no_answer,
+    notice, revocation_cut, role_word, serve_error, usage_error, value_fields,
 };
 use store::DirStore;
 
@@ -562,11 +591,15 @@ enum Verb {
     Usage(String),
 }
 
-/// Why a verb failed: the data layer's error, the channel's, or the introductions'.
+/// Why a verb failed: the data layer's error, the channel's, the introductions', a refused
+/// `serve`, or a `query` nobody answered.
 enum Fail {
     Heap(HeapError),
     Emit(EmitError),
     Invite(InviteError),
+    Serve(ServeError),
+    /// No server answered a `query`; the `answers-done` notice it ended with, if it had one.
+    NoAnswer(Option<Value>),
 }
 
 impl From<HeapError> for Fail {
@@ -587,6 +620,12 @@ impl From<InviteError> for Fail {
     }
 }
 
+impl From<ServeError> for Fail {
+    fn from(e: ServeError) -> Self {
+        Fail::Serve(e)
+    }
+}
+
 impl Fail {
     /// The error object of an answer.
     fn json(&self) -> Value {
@@ -594,6 +633,8 @@ impl Fail {
             Fail::Heap(e) => heap_error(e),
             Fail::Emit(e) => emit_error(e),
             Fail::Invite(e) => invite_error(e),
+            Fail::Serve(e) => serve_error(e),
+            Fail::NoAnswer(done) => no_answer(done.clone()),
         }
     }
 }
@@ -728,6 +769,7 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
                 Err(e) => return Ok(Verb::Usage(format!("{e}; {GET_USAGE}"))),
             };
             let heap = heap_of(&h.node, &space).await?;
+            let (kept, live) = (line.options.kept, line.options.live == Live::Emitted);
             let mut items = heap.get(line.select.clone(), line.options)?;
             let listed = space.to_string();
             tokio::spawn(async move {
@@ -743,11 +785,87 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
                 "space": space.to_string(),
                 "path": line.path.to_string(),
                 "prefix": line.prefix,
-                "kept": line.options.kept,
-                "live": line.options.live == Live::Emitted,
+                "kept": kept,
+                "live": live,
             })))
         }
         ("get", _) => usage(GET_USAGE),
+        ("query", [space, path, rest @ ..]) => {
+            let space = match name(space) {
+                Ok(s) => s,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {QUERY_USAGE}"))),
+            };
+            let line = match query_options(path, rest) {
+                Ok(l) => l,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {QUERY_USAGE}"))),
+            };
+            let heap = heap_of(&h.node, &space).await?;
+            let mut items = heap.get(Select::Path(line.path.clone()), line.options)?;
+            let listed = space.to_string();
+            let (mut answers, mut done) = (0u64, None);
+            while let Some(next) = items.next().await {
+                let shown = match next {
+                    Ok(item) => {
+                        // A refusal is an answer: the server spoke.
+                        answers += u64::from(matches!(item.kind, Kind::Answered(_)));
+                        json!({"query": listed, "got": got(&item)})
+                    }
+                    Err(n) => {
+                        let shown = notice(&n);
+                        if matches!(n, GetNotice::AnswersDone { .. }) {
+                            done = Some(shown.clone());
+                        }
+                        json!({"query": listed, "notice": shown})
+                    }
+                };
+                println!("{shown}");
+            }
+            if answers == 0 {
+                return Err(Fail::NoAnswer(done));
+            }
+            Ok(Verb::Done(json!({
+                "space": listed,
+                "path": line.path.to_string(),
+                "answers": answers,
+                "done": done,
+            })))
+        }
+        ("query", _) => usage(QUERY_USAGE),
+        ("serve", [space, prefix, rest @ ..]) => {
+            let space = match name(space) {
+                Ok(s) => s,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {SERVE_USAGE}"))),
+            };
+            let line = match serve_options(prefix, rest) {
+                Ok(l) => l,
+                Err(e) => return Ok(Verb::Usage(format!("{e}; {SERVE_USAGE}"))),
+            };
+            let heap = heap_of(&h.node, &space).await?;
+            let reply = line.reply.clone();
+            let serving = heap.serve(line.prefix.clone(), move |_query: Query| {
+                let reply = reply.clone();
+                async move { reply }
+            })?;
+            let (listed, served, for_ms) = (space.to_string(), line.prefix.to_string(), line.stay);
+            tokio::spawn(async move {
+                match for_ms {
+                    Some(stay) => tokio::time::sleep(stay).await,
+                    None => std::future::pending().await,
+                }
+                drop(serving);
+                println!("{}", json!({"serve": listed, "ended": served}));
+            });
+            Ok(Verb::Done(json!({
+                "space": space.to_string(),
+                "prefix": line.prefix.to_string(),
+                "replies": match line.reply {
+                    Reply::Refuse(_) => "refusal",
+                    _ => "answer",
+                },
+                "for_ms": line.stay.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            })))
+        }
+        ("serve", _) => usage(SERVE_USAGE),
         ("watch", [space]) => {
             let space = match name(space) {
                 Ok(s) => s,
@@ -983,9 +1101,9 @@ async fn run(h: &Hosted, verb: &str, args: &[String]) -> Result<Verb, Fail> {
         }))),
         ("evidence", _) => usage("usage: evidence"),
         _ => usage(
-            "verbs: create, change, members, put, kept, emit, get, watch, follow, flush, close, \
-             suspect, unsuspect, suspected, cut, refused, offer, close_offer, join, evidence, \
-             quit",
+            "verbs: create, change, members, put, kept, emit, get, query, serve, watch, follow, \
+             flush, close, suspect, unsuspect, suspected, cut, refused, offer, close_offer, join, \
+             evidence, quit",
         ),
     }
 }
@@ -1020,6 +1138,18 @@ const GET_USAGE: &str = "usage: get <space> <path> [--prefix] [--no-kept] [--no-
                          process ends; --no-kept leaves the kept values out, --no-live the \
                          emissions, not both; --mode joins only that mode's channels; --verified \
                          waits for a signed checkpoint before it delivers a frame)";
+
+const QUERY_USAGE: &str = "usage: query <space> <path> [--query <text>] [--device <device>]... \
+                           [--timeout-ms <n>] [--proof] (ask the space's servers a question \
+                           about the path and wait for the answers; --device names the servers \
+                           to ask, repeatable, default: the devices that announced they serve \
+                           the path; --timeout-ms is the deadline, 1 to 10000, default 3000; \
+                           --proof keeps each answer's signed Data)";
+
+const SERVE_USAGE: &str = "usage: serve <space> <prefix> (--answer <text> | --refuse <code>:<text>) \
+                           [--for-ms <n>] (answer every query under the prefix of the space \
+                           with the text, or refuse it with the application's code, until \
+                           --for-ms passes or the process ends; this device must be a writer)";
 
 const SUSPECT_USAGE: &str = "usage: suspect <key> [<when>] (since when the key is suspected: \
                              when the device was lost, as ms since the epoch or RFC 3339; \
@@ -1328,6 +1458,139 @@ fn get_options(path: &str, words: &[String]) -> Result<GetLine, String> {
         prefix,
         select,
         options,
+    })
+}
+
+/// A `query` line: the path asked and the options of its `get`.
+struct QueryLine {
+    path: Name,
+    options: GetOptions,
+}
+
+/// The value after an option that takes one; `rest` moves past it.
+fn option_value<'a>(word: &str, rest: &mut &'a [String]) -> Result<&'a str, String> {
+    match rest {
+        [value, more @ ..] => {
+            *rest = more;
+            Ok(value)
+        }
+        [] => Err(format!("{word:?} needs a value")),
+    }
+}
+
+/// A `query` line's path and the options after it: `--query <text>` and `--timeout-ms <n>` (at
+/// most once), `--proof` (a flag, at most once) and `--device <device>` (repeatable). The
+/// question is a `get` of no kept values and no emissions that asks. The limits (the deadline's
+/// range, at most 16 servers) are the data layer's, told when the verb runs.
+fn query_options(path: &str, words: &[String]) -> Result<QueryLine, String> {
+    const OPTIONS: &str = "--query, --device, --timeout-ms or --proof";
+    let path = path_name(path)?;
+    let (mut query, mut timeout, mut proof) = (None, None, None);
+    let mut devices = Vec::new();
+    let mut rest = words;
+    while let [word, more @ ..] = rest {
+        rest = more;
+        match word.as_str() {
+            "--proof" => once(&mut proof, (), "--proof")?,
+            "--query" => {
+                let text = option_value(word, &mut rest)?;
+                once(&mut query, text.to_owned(), "--query")?;
+            }
+            "--timeout-ms" => {
+                let ms = option_value(word, &mut rest)?;
+                let ms = ms
+                    .parse::<u64>()
+                    .map_err(|_| format!("{ms:?} is no number of milliseconds"))?;
+                once(&mut timeout, Duration::from_millis(ms), "--timeout-ms")?;
+            }
+            "--device" => {
+                let device = option_value(word, &mut rest)?;
+                let name = device
+                    .parse::<Name>()
+                    .map_err(|e| format!("{device:?} is no name: {e}"))?;
+                if name.is_empty() {
+                    return Err(format!("{device:?} names no device"));
+                }
+                devices.push(name);
+            }
+            _ => return Err(format!("{word:?} is not {OPTIONS}")),
+        }
+    }
+    let mut ask = Ask::new(Bytes::from(query.unwrap_or_default()));
+    if !devices.is_empty() {
+        ask.targets = Targets::Devices(devices);
+    }
+    if let Some(deadline) = timeout {
+        ask.deadline = deadline;
+    }
+    ask.proof = proof.is_some();
+    Ok(QueryLine {
+        path,
+        options: GetOptions {
+            kept: false,
+            live: Live::Off,
+            ask: Some(ask),
+            ..GetOptions::default()
+        },
+    })
+}
+
+/// A `serve` line: the prefix served, what answers it and for how long.
+struct ServeLine {
+    prefix: Name,
+    reply: Reply,
+    stay: Option<Duration>,
+}
+
+/// A `serve` line's prefix and the options after it: exactly one of `--answer <text>` (every
+/// query is answered with the text) and `--refuse <code>:<text>` (every query is refused with
+/// the application's code, a number 0 to 65535, and the text), and `--for-ms <n>` (how long; at
+/// most once each).
+fn serve_options(prefix: &str, words: &[String]) -> Result<ServeLine, String> {
+    const OPTIONS: &str = "--answer, --refuse or --for-ms";
+    let prefix = path_name(prefix)?;
+    let (mut answer, mut refuse, mut stay) = (None, None, None);
+    let mut rest = words;
+    while let [word, more @ ..] = rest {
+        rest = more;
+        match word.as_str() {
+            "--answer" => {
+                let text = option_value(word, &mut rest)?;
+                once(
+                    &mut answer,
+                    Reply::Answer(Bytes::from(text.to_owned())),
+                    "--answer",
+                )?;
+            }
+            "--refuse" => {
+                let spec = option_value(word, &mut rest)?;
+                let (code, text) = spec
+                    .split_once(':')
+                    .ok_or_else(|| format!("{spec:?} is not <code>:<text>"))?;
+                let code = code
+                    .parse::<u16>()
+                    .map_err(|_| format!("{code:?} is no code, a number 0 to 65535"))?;
+                once(&mut refuse, Reply::refuse(code, text), "--refuse")?;
+            }
+            "--for-ms" => {
+                let ms = option_value(word, &mut rest)?;
+                let ms = ms
+                    .parse::<u64>()
+                    .map_err(|_| format!("{ms:?} is no number of milliseconds"))?;
+                once(&mut stay, Duration::from_millis(ms), "--for-ms")?;
+            }
+            _ => return Err(format!("{word:?} is not {OPTIONS}")),
+        }
+    }
+    let reply = match (answer, refuse) {
+        (Some(reply), None) | (None, Some(reply)) => reply,
+        (None, None) => return Err("no reply: --answer <text> or --refuse <code>:<text>".into()),
+        (Some(_), Some(_)) => return Err("--answer and --refuse are one or the other".into()),
+    };
+    Ok(ServeLine {
+        prefix,
+        reply,
+        stay,
     })
 }
 
@@ -1819,6 +2082,91 @@ mod tests {
             .is_err()
         );
         assert!(cut_options(&words(&["--when", "1"])).is_err());
+    }
+
+    /// A query line is a `get` of no kept values and no emissions that asks: the text, the
+    /// devices (repeatable), the deadline and `--proof`; the defaults ask the devices that
+    /// announced the path within 3 s; an option is given once, and none is a stranger.
+    #[test]
+    fn a_query_asks_and_nothing_else() {
+        let line = query_options("/stock/item", &words(&[])).unwrap();
+        assert_eq!(line.path, n("/stock/item"));
+        assert_eq!(
+            line.options,
+            GetOptions {
+                kept: false,
+                live: Live::Off,
+                ask: Some(Ask::new(Bytes::new())),
+                ..GetOptions::default()
+            }
+        );
+        let line = query_options(
+            "stock/item",
+            &words(&[
+                "--query",
+                "how many",
+                "--device",
+                "/bob/phone",
+                "--device",
+                "/bob/tablet",
+                "--timeout-ms",
+                "500",
+                "--proof",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(line.path, n("/stock/item"));
+        let ask = line.options.ask.expect("a query asks");
+        assert_eq!(&ask.query[..], b"how many");
+        assert_eq!(
+            ask.targets,
+            Targets::Devices(vec![n("/bob/phone"), n("/bob/tablet")])
+        );
+        assert_eq!(ask.deadline, Duration::from_millis(500));
+        assert!(ask.proof);
+        for bad in [
+            &["--query"][..],
+            &["--query", "a", "--query", "b"],
+            &["--device", "/"],
+            &["--device", "not a name"],
+            &["--timeout-ms", "soon"],
+            &["--timeout-ms", "1", "--timeout-ms", "2"],
+            &["--proof", "--proof"],
+            &["--prefix"],
+        ] {
+            assert!(query_options("/p", &words(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    /// A serve line gives exactly one reply, an answer or a refusal with its code, and may say how
+    /// long; the code is a `u16` and the text may hold a colon.
+    #[test]
+    fn a_serve_gives_one_reply_and_may_say_for_how_long() {
+        let line = serve_options("/stock", &words(&["--answer", "42"])).unwrap();
+        assert_eq!(line.prefix, n("/stock"));
+        assert_eq!(line.reply, Reply::Answer(Bytes::from_static(b"42")));
+        assert_eq!(line.stay, None);
+        let line = serve_options(
+            "stock",
+            &words(&["--for-ms", "250", "--refuse", "7:no: not now"]),
+        )
+        .unwrap();
+        assert_eq!(line.reply, Reply::refuse(7, "no: not now"));
+        assert_eq!(line.stay, Some(Duration::from_millis(250)));
+        for bad in [
+            &[][..],
+            &["--for-ms", "5"],
+            &["--answer", "a", "--refuse", "1:b"],
+            &["--answer", "a", "--answer", "b"],
+            &["--answer"],
+            &["--refuse", "no-colon"],
+            &["--refuse", "70000:x"],
+            &["--answer", "a", "--for-ms", "soon"],
+            &["--answer", "a", "--for-ms", "1", "--for-ms", "2"],
+            &["--text", "a"],
+        ] {
+            assert!(serve_options("/p", &words(bad)).is_err(), "{bad:?}");
+        }
     }
 
     /// An emit line gives one value, a mode (default `latest`) and a lifetime to

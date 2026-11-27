@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use ndn_heap::{
     Alert, Change, ChannelEvidence, EmitError, EntryId, GetNotice, Got, HeapError, Item, Kind,
-    LiveEnd, Members, NextStep, Readers, Refusal,
+    LiveEnd, Members, NextStep, Readers, Refusal, ServeError, Via,
 };
 use ndn_invite::{IntroRefusal, InviteError, Role};
 use ndn_security::RevocationCut;
@@ -109,7 +109,9 @@ fn withdrawal(i: &EntryId, why: &Refusal) -> Value {
 /// An item of a `get`: `{"path","by","writer","kind"}` and the value as an item shows it
 /// (`len`, `text`/`hex`/`sha256`); a kept one adds `id`, `as_of_ms` and `removed`, an emitted one
 /// `seq`, `stands_ms` and `verified` (whether a signed checkpoint of the sender listed the frame
-/// before it was given: `false` for a `Prompt` get, `true` for `--verified`).
+/// before it was given: `false` for a `Prompt` get, `true` for `--verified`), an answer to a query
+/// `query` (its id), `via`, `refusal` (`{"code","text"}` when the server's handler refused, else
+/// `null`: the value is then empty) and `proof` (the signed Data in hex, when asked for).
 pub fn got(g: &Got) -> Value {
     let mut m = Map::new();
     m.insert("path".into(), json!(g.path.to_string()));
@@ -127,6 +129,28 @@ pub fn got(g: &Got) -> Value {
             m.insert("seq".into(), json!(e.seq));
             m.insert("stands_ms".into(), json!(e.stands.map(millis)));
             m.insert("verified".into(), json!(e.verified));
+        }
+        Kind::Answered(a) => {
+            m.insert("kind".into(), json!("answered"));
+            m.insert("query".into(), json!(a.query.to_string()));
+            m.insert(
+                "via".into(),
+                json!(match a.via {
+                    Via::Signed => "signed",
+                    _ => "other",
+                }),
+            );
+            m.insert(
+                "refusal".into(),
+                json!(
+                    a.refusal
+                        .as_ref()
+                        .map(|r| json!({"code": r.code, "text": r.text}))
+                ),
+            );
+            if let Some(proof) = &a.proof {
+                m.insert("proof".into(), json!(hex(proof)));
+            }
         }
         other => {
             m.insert("kind".into(), json!("other"));
@@ -196,6 +220,32 @@ pub fn notice(n: &GetNotice) -> Value {
             "to": to,
             "what_to_do": "a signed checkpoint contradicts these emissions: discard what this get \
                            delivered from this writer with an emitted seq from `from` to `to`",
+        }),
+        GetNotice::QueryFailed { server, why } => json!({
+            "kind": "query-failed",
+            "server": server.to_string(),
+            "why": why.to_string(),
+            "next": next_token(why.next()),
+            "what_to_do": next_step(why.next()),
+        }),
+        GetNotice::AnswersDone {
+            asked,
+            answered,
+            refused,
+            failed,
+            silent,
+            not_asked,
+        } => json!({
+            "kind": "answers-done",
+            "asked": asked,
+            "answered": answered,
+            "refused": refused,
+            "failed": failed,
+            "silent": silent,
+            "not_asked": not_asked,
+            "what_to_do": "every server asked has resolved or the deadline passed: a server \
+                           counted silent said nothing in time (a late answer is dropped and \
+                           cannot be told from silence); ask again if more is wanted",
         }),
         // The enum grows: a notice this tool has no words for yet says what it is.
         other => json!({
@@ -357,6 +407,31 @@ pub fn emit_error(e: &EmitError) -> Value {
     v
 }
 
+/// A refused `serve` as an error answer: why, whether to ask again, what to do next.
+pub fn serve_error(e: &ServeError) -> Value {
+    error(
+        e.to_string(),
+        matches!(e.next(), NextStep::RetryLater),
+        e.next(),
+    )
+}
+
+/// The error answer of a `query` that no server answered: why, and the end's counts as
+/// `answers` (the `answers-done` notice, `null` when the stream ended without one).
+pub fn no_answer(done: Option<Value>) -> Value {
+    let mut v = error(
+        "no server answered: every server asked failed or said nothing in time, or none was \
+         known to serve the path (the `query-failed` and `answers-done` lines say which); name \
+         the servers with --device, check that they run `serve` for this path and that their \
+         devices are reachable, or raise --timeout-ms"
+            .into(),
+        true,
+        NextStep::RetryLater,
+    );
+    v["answers"] = done.unwrap_or(Value::Null);
+    v
+}
+
 /// An introduction's error as an error answer: the data layer's as
 /// [`heap_error`], a refused offer with `introduction`: `{"why","left"?}`.
 pub fn invite_error(e: &InviteError) -> Value {
@@ -464,7 +539,10 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use ndn_heap::{Cut, Emitted, EndReason, EvidenceKind, Kept, Timestamp};
+    use ndn_heap::{
+        Answered, AppRefusal, Cut, Emitted, EndReason, EvidenceKind, Kept, QueryError, QueryId,
+        Timestamp,
+    };
     use ndn_packet::Name;
     use ndn_transport::FaceId;
 
@@ -753,6 +831,63 @@ mod tests {
             &retracted,
             &kept_ended,
         ] {
+            assert!(v["what_to_do"].is_string(), "{v} says nothing to do");
+        }
+    }
+
+    /// An answer says which query it answers, by which path, the server's refusal if it refused
+    /// and the signed Data when it was asked for; a failure names the server and what to do; the
+    /// end counts every server asked.
+    #[test]
+    fn a_query_says_its_answers_failures_and_end() {
+        let answered = got(&got_of(
+            Kind::Answered(Answered {
+                query: QueryId(0xabc),
+                via: Via::Signed,
+                refusal: None,
+                proof: Some(Bytes::from_static(&[0x01, 0xfe])),
+            }),
+            b"42",
+        ));
+        assert_eq!(answered["kind"], "answered");
+        assert_eq!(answered["query"], QueryId(0xabc).to_string());
+        assert_eq!(answered["via"], "signed");
+        assert!(answered["refusal"].is_null());
+        assert_eq!(answered["proof"], "01fe");
+        assert_eq!(answered["text"], "42");
+        let refused = got(&got_of(
+            Kind::Answered(Answered {
+                query: QueryId(1),
+                via: Via::Signed,
+                refusal: Some(AppRefusal::new(7, "not today")),
+                proof: None,
+            }),
+            b"",
+        ));
+        assert_eq!(refused["refusal"], json!({"code": 7, "text": "not today"}));
+        assert!(refused.get("proof").is_none());
+
+        let failed = notice(&GetNotice::QueryFailed {
+            server: n("/alice/member/tablet"),
+            why: QueryError::NotListed,
+        });
+        assert_eq!(failed["kind"], "query-failed");
+        assert_eq!(failed["server"], "/alice/member/tablet");
+        assert_eq!(failed["next"], "ask-owner");
+        let done = notice(&GetNotice::AnswersDone {
+            asked: 5,
+            answered: 1,
+            refused: 1,
+            failed: 1,
+            silent: 2,
+            not_asked: 0,
+        });
+        assert_eq!(done["kind"], "answers-done");
+        assert_eq!(
+            (done["asked"].as_u64(), done["silent"].as_u64()),
+            (Some(5), Some(2))
+        );
+        for v in [&failed, &done] {
             assert!(v["what_to_do"].is_string(), "{v} says nothing to do");
         }
     }
