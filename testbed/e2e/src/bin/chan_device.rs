@@ -403,6 +403,7 @@ fn notice_event(n: &GetNotice) -> Value {
             "ev": "notice", "kind": "retracted", "writer": writer.to_string(),
             "from": from, "to": to,
         }),
+        other => json!({"ev": "notice", "kind": "other", "debug": format!("{other:?}")}),
     }
 }
 

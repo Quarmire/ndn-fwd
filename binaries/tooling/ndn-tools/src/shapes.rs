@@ -197,6 +197,11 @@ pub fn notice(n: &GetNotice) -> Value {
             "what_to_do": "a signed checkpoint contradicts these emissions: discard what this get \
                            delivered from this writer with an emitted seq from `from` to `to`",
         }),
+        // The enum grows: a notice this tool has no words for yet says what it is.
+        other => json!({
+            "kind": "other",
+            "debug": format!("{other:?}"),
+        }),
     }
 }
 
@@ -641,14 +646,9 @@ mod tests {
     /// stated lifetime; both the value as an item shows it.
     #[test]
     fn a_get_item_says_whether_it_is_kept_or_emitted() {
-        let kept = got(&got_of(
-            Kind::Kept(Kept {
-                id: entry(),
-                as_of: Some(Duration::from_millis(1500)),
-                removed: false,
-            }),
-            b"on the plane",
-        ));
+        let mut aged = Kept::new(entry());
+        aged.as_of = Some(Duration::from_millis(1500));
+        let kept = got(&got_of(Kind::Kept(aged), b"on the plane"));
         assert_eq!(kept["kind"], "kept");
         assert_eq!(kept["id"]["seq"], 7);
         assert_eq!(kept["as_of_ms"], 1500);
@@ -657,14 +657,9 @@ mod tests {
         assert_eq!(kept["writer"], "/alice/member/phone");
         assert!(kept.get("seq").is_none());
 
-        let removal = got(&got_of(
-            Kind::Kept(Kept {
-                id: entry(),
-                as_of: None,
-                removed: true,
-            }),
-            b"",
-        ));
+        let mut removed = Kept::new(entry());
+        removed.removed = true;
+        let removal = got(&got_of(Kind::Kept(removed), b""));
         assert_eq!(
             (&removal["removed"], &removal["as_of_ms"]),
             (&json!(true), &Value::Null)
