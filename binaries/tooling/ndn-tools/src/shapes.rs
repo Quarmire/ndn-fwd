@@ -116,8 +116,8 @@ fn withdrawal(i: &EntryId, why: &Refusal) -> Value {
 pub fn got(g: &Got) -> Value {
     let mut m = Map::new();
     m.insert("path".into(), json!(g.path.to_string()));
-    m.insert("by".into(), json!(g.by.to_string()));
-    m.insert("writer".into(), json!(g.writer.to_string()));
+    m.insert("by".into(), json!(g.author.by.to_string()));
+    m.insert("writer".into(), json!(g.author.writer.to_string()));
     match &g.kind {
         Kind::Kept(k) => {
             m.insert("kind".into(), json!("kept"));
@@ -138,6 +138,7 @@ pub fn got(g: &Got) -> Value {
                 "via".into(),
                 json!(match a.via {
                     Via::Signed => "signed",
+                    Via::Sealed => "sealed",
                     _ => "other",
                 }),
             );
@@ -541,8 +542,8 @@ mod tests {
 
     use bytes::Bytes;
     use ndn_heap::{
-        Answered, AppRefusal, Cut, Emitted, EndReason, EvidenceKind, Kept, QueryError, QueryId,
-        Timestamp,
+        Answered, AppRefusal, Author, Cut, Emitted, EndReason, EvidenceKind, Kept, QueryError,
+        QueryId, Timestamp,
     };
     use ndn_packet::Name;
     use ndn_transport::FaceId;
@@ -714,8 +715,7 @@ mod tests {
         Got {
             path: n("/pos"),
             bytes: Bytes::copy_from_slice(bytes),
-            by: n("/alice"),
-            writer: n("/alice/member/phone"),
+            author: Author::shared(n("/alice"), n("/alice/member/phone")),
             kind,
         }
     }

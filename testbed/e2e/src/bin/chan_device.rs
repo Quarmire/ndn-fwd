@@ -379,7 +379,7 @@ fn got_event(g: &ndn_heap::Got) -> Value {
         "text": String::from_utf8_lossy(&g.bytes),
         "seq": seq,
         "entry": entry,
-        "writer": g.writer.to_string(),
+        "writer": g.author.writer.to_string(),
     })
 }
 
