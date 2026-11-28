@@ -111,7 +111,8 @@ fn withdrawal(i: &EntryId, why: &Refusal) -> Value {
 /// `seq`, `stands_ms` and `verified` (whether a signed checkpoint of the sender listed the frame
 /// before it was given: `false` for a `Prompt` get, `true` for `--verified`), an answer to a query
 /// `query` (its id), `via`, `refusal` (`{"code","text"}` when the server's handler refused, else
-/// `null`: the value is then empty) and `proof` (the signed Data in hex, when asked for).
+/// `null`: the value is then empty) and `proof` (the signed query and the signed answer in hex,
+/// when asked for).
 pub fn got(g: &Got) -> Value {
     let mut m = Map::new();
     m.insert("path".into(), json!(g.path.to_string()));
@@ -836,7 +837,7 @@ mod tests {
     }
 
     /// An answer says which query it answers, by which path, the server's refusal if it refused
-    /// and the signed Data when it was asked for; a failure names the server and what to do; the
+    /// and the proof when it was asked for; a failure names the server and what to do; the
     /// end counts every server asked.
     #[test]
     fn a_query_says_its_answers_failures_and_end() {

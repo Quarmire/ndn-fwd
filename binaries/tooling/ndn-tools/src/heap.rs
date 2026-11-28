@@ -209,13 +209,15 @@
 //!   the deadline passed. Each answer and notice is a line as `get`'s, headed `"query"` instead of
 //!   `"get"` (below). `--query` is the question's text (default: empty); `--device` names a server
 //!   to ask, repeatable (default: the devices that announced they serve the path, at most 16);
-//!   `--timeout-ms` is the deadline, 1 to 10000 (default 3000); `--proof` keeps each answer's signed
-//!   Data (`proof`, hex). Answer `{"space","path","answers","done"}` when at least one server
+//!   `--timeout-ms` is the deadline, 1 to 10000 (default 3000); `--proof` keeps each answer's
+//!   proof (`proof`, hex: the signed query and the signed answer; check it with
+//!   `Heap::verify_answer_proof`). Answer `{"space","path","answers","done"}` when at least one server
 //!   answered (a server's refusal is an answer; `done` is the `answers-done` notice), else the
 //!   error `no server answered` (`retry-later`, with `answers`, the `answers-done` notice) — this
 //!   host answers every verb with a line and ends with `close` or `quit`, so a script tells a
 //!   query nobody answered by that `error`, not by the process's exit status. A reader of the
-//!   space may ask; a server that does not list this device's person is a `query-failed`
+//!   space may ask; a server that does not list this device's person, or that began to serve less
+//!   than 120 s ago (it refuses signed queries for that quiet period), is a `query-failed`
 //!   (`next` `ask-owner`).
 //! - `serve <space> <prefix> (--answer <text> | --refuse <code>:<text>) [--for-ms <n>]`: answer
 //!   every query under the prefix of the space (`Heap::serve`) with the text, or refuse it with
@@ -1144,7 +1146,8 @@ const QUERY_USAGE: &str = "usage: query <space> <path> [--query <text>] [--devic
                            about the path and wait for the answers; --device names the servers \
                            to ask, repeatable, default: the devices that announced they serve \
                            the path; --timeout-ms is the deadline, 1 to 10000, default 3000; \
-                           --proof keeps each answer's signed Data)";
+                           --proof keeps each answer's proof, the signed query and the signed \
+                           answer, in hex; verify it with Heap::verify_answer_proof)";
 
 const SERVE_USAGE: &str = "usage: serve <space> <prefix> (--answer <text> | --refuse <code>:<text>) \
                            [--for-ms <n>] (answer every query under the prefix of the space \
