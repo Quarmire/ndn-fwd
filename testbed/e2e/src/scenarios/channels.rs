@@ -28,14 +28,17 @@
 //! the sender emits.
 //!
 //! Proves:
-//! 1. through the relay, both receivers get every message the sender emits, in order; the
+//! 1. through the relay, both receivers get the sender's messages in order, ending at the newest
+//!    (`Latest` keeps the newest per name and replaces an older message that waits without a
+//!    word, so a message a receiver's consumer was too slow for is not delivered: the frames are
+//!    what is counted, below); the
 //!    relay's side table (`side/list` over its management socket) has one route for the
 //!    channel, sourced at the sender's link, with the two receivers' links as its sinks; the
 //!    sender's link carried one copy of each frame (its side-path counter equals the route's
 //!    frames at the relay) and the relay sent each to two sinks (frames out are twice frames in),
 //!    each receiver's link counting exactly the route's frames;
 //! 2. a receiver that drops its `get` is gone from the route's sinks (one is left) and the
-//!    other still receives everything while the one that left receives nothing;
+//!    other still receives, up to the newest, while the one that left receives nothing;
 //! 3. a key holder's forged frame is exposed by the sender's next checkpoint. Dave, a member
 //!    that holds the channel key, is also carol's forwarder (carol's device links to dave's, which
 //!    serves her by her root fingerprint: a relay behind the relay). Dave seals a frame under the
@@ -379,6 +382,14 @@ impl Dev {
                     .then(|| (e["seq"].as_u64().unwrap_or_default(), text.to_owned()))
             })
             .collect()
+    }
+
+    /// Whether the newest message of a burst of `count` (`{prefix}{count-1}`) has been delivered
+    /// here: the one message a `Latest` channel owes a receiver that is up, since nothing newer
+    /// replaces it.
+    fn burst_ended(&self, prefix: &str, count: usize) -> bool {
+        let newest = format!("{prefix}{}", count - 1);
+        self.gots(prefix).iter().any(|(_, text)| *text == newest)
     }
 
     /// The kept values delivered here at `path`, in the order they came: `(entry seq, text)`.
@@ -966,7 +977,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     )?;
 
     let (sender_face, carol_face, dave_face) = sc.step(
-        "the sender emits 20 messages: carol and dave get all 20, in order, from the sender's \
+        "the sender emits 20 messages: carol and dave get them in order, ending at the newest, \
+         from the sender's \
          device; the relay's side table (side/list over its management socket) has one route \
          for the channel, sourced at the sender's link, with the two receivers' links as its \
          sinks; the sender's link carried one copy of each frame (its counter equals the route's \
@@ -978,8 +990,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             sender.ok(cx, &format!("emit {SPACE} {POS} 20 100 a"))?;
             let mut late = Vec::new();
             for dev in [&mut carol, &mut dave] {
-                if let Err(e) = dev.until(cx, "all 20 messages of the burst", BURST, |d| {
-                    d.gots("a-").len() == 20
+                if let Err(e) = dev.until(cx, "the newest of the 20 messages of the burst", BURST, |d| {
+                    d.burst_ended("a-", 20)
                 }) {
                     late.push(e);
                 }
@@ -1005,14 +1017,7 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             }
             for dev in [&mut carol, &mut dave] {
                 let got = dev.gots("a-");
-                let want: Vec<String> = (0..20).map(|i| format!("a-{i}")).collect();
-                let texts: Vec<String> = got.iter().map(|(_, t)| t.clone()).collect();
-                if texts != want {
-                    return Err(format!("{} got {texts:?}, not {want:?} in order", dev.node));
-                }
-                if got.windows(2).any(|w| w[0].0 >= w[1].0) {
-                    return Err(format!("{}'s sequences do not rise: {got:?}", dev.node));
-                }
+                latest_burst(&dev.node, &got, "a-", 20)?;
                 let writers: Vec<&str> = dev
                     .events
                     .iter()
@@ -1023,11 +1028,15 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                     return Err(format!("{} got messages written by {writers:?}", dev.node));
                 }
                 cx.evidence(&format!(
-                    "{} got a-0..a-19 in order (seqs {}..={}), all from {}",
+                    "{} got {} of a-0..a-19 in order (seqs {}..={}), ending at the newest, all \
+                     from {}; {} not delivered were replaced by a newer message of /pos before \
+                     its consumer ran, as `Latest` does without a word",
                     dev.node,
+                    got.len(),
                     got[0].0,
-                    got[19].0,
-                    sender.device
+                    got[got.len() - 1].0,
+                    sender.device,
+                    20 - got.len()
                 ));
             }
             let faces = (
@@ -1080,7 +1089,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
 
     sc.step(
         "carol drops her get: the relay's route is left with one sink, dave's; the sender emits \
-         10 more, dave gets all 10 and carol none, and the relay sends each frame to one sink",
+         10 more, dave gets them in order up to the newest and carol none, and the relay sends \
+         each frame to one sink",
         |cx| {
             cx.concept("a receiver leaves");
             carol.ok(cx, "leave")?;
@@ -1108,14 +1118,11 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             ));
             let base = hop_base(cx, &channel, &mut sender, &mut [&mut dave], &relay_device)?;
             sender.ok(cx, &format!("emit {SPACE} {POS} 10 100 b"))?;
-            dave.until(cx, "all 10 messages of the burst", BURST, |d| {
-                d.gots("b-").len() == 10
+            dave.until(cx, "the newest of the 10 messages of the burst", BURST, |d| {
+                d.burst_ended("b-", 10)
             })?;
-            let texts: Vec<String> = dave.gots("b-").into_iter().map(|(_, t)| t).collect();
-            let want: Vec<String> = (0..10).map(|i| format!("b-{i}")).collect();
-            if texts != want {
-                return Err(format!("dave got {texts:?}, not {want:?}"));
-            }
+            let got = dave.gots("b-");
+            latest_burst(&dave.node, &got, "b-", 10)?;
             carol.settle(cx, Duration::from_millis(500))?;
             if !carol.gots("b-").is_empty() {
                 return Err(format!("carol, who left, got {:?}", carol.gots("b-")));
@@ -1139,7 +1146,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             })?;
             let h = hop.expect("read at least once");
             cx.evidence(&format!(
-                "dave got b-0..b-9 in order, carol none; since the burst the sender's link sent \
+                "dave got the newest of b-0..b-9 (in order, none older after a newer), carol \
+                 none; since the burst the sender's link sent \
                  {}, the route took {} and sent {} (one sink), dave's link received {}",
                 h.sent, h.routed, h.out, h.received[0]
             ));
@@ -1151,7 +1159,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
     sc.step(
         "carol's device starts again with dave as its relay (its link goes to dave's address, \
          not the relay's; dave serves her by her root fingerprint, no quotas): carol opens the \
-         space, takes the channel and gets 5 messages through two forwarders; the relay's route \
+         space, takes the channel and gets 5 messages (in order, up to the newest) through two \
+         forwarders; the relay's route \
          still has one sink, dave's, and dave's own route has two, his own device and carol's link",
         |cx| {
             cx.concept("a member's forwarder as another's relay");
@@ -1193,14 +1202,16 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
             ));
             sender.ok(cx, &format!("emit {SPACE} {POS} 5 100 c"))?;
             for dev in [&mut carol, &mut dave] {
-                dev.until(cx, "all 5 messages of the burst", BURST, |d| d.gots("c-").len() == 5)?;
+                dev.until(cx, "the newest of the 5 messages of the burst", BURST, |d| {
+                    d.burst_ended("c-", 5)
+                })?;
             }
-            let texts: Vec<String> = carol.gots("c-").into_iter().map(|(_, t)| t).collect();
-            if texts != ["c-0", "c-1", "c-2", "c-3", "c-4"] {
-                return Err(format!("carol got {texts:?}"));
+            for dev in [&carol, &dave] {
+                latest_burst(&dev.node, &dev.gots("c-"), "c-", 5)?;
             }
             cx.evidence(&format!(
-                "carol got c-0..c-4 in order through dave (seqs {:?})",
+                "carol got {} of c-0..c-4 in order through dave, ending at the newest (seqs {:?})",
+                carol.gots("c-").len(),
                 carol.gots("c-").iter().map(|g| g.0).collect::<Vec<_>>()
             ));
             Ok(())
@@ -1328,7 +1339,8 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
         "the bar is on channel frames only: the sender puts an entry in the space and it reaches \
          carol over the barred link (NDN traffic goes on), as the entry after the baseline (the \
          hundred and more messages took no entry sequence); the sender emits 5 more and dave \
-         gets all 5 while carol gets none, her side table counting the frames it dropped from \
+         gets them in order up to the newest while carol gets none, her side table counting the \
+         frames it dropped from \
          the barred link; dave's get delivered the two entries at /note as kept items, and none \
          at /pos, where the messages went, and no one holds a kept value there",
         |cx| {
@@ -1361,9 +1373,10 @@ pub fn run(sc: &mut Scenario) -> Result<(), Abort> {
                 },
             )?;
             sender.ok(cx, &format!("emit {SPACE} {POS} 5 100 e"))?;
-            dave.until(cx, "all 5 messages of the burst", BURST, |d| {
-                d.gots("e-").len() == 5
+            dave.until(cx, "the newest of the 5 messages of the burst", BURST, |d| {
+                d.burst_ended("e-", 5)
             })?;
+            latest_burst(&dave.node, &dave.gots("e-"), "e-", 5)?;
             dave.until(cx, "the committed entry as a kept item", CONVERGE, |d| {
                 d.kept(NOTE).len() >= 2
             })?;
@@ -1482,4 +1495,105 @@ fn read_base(
         rx.push(r.side_frames(cx, relay_device)?.1);
     }
     Ok((tx, route.frames, side.frames_out, rx))
+}
+
+/// What a `Latest` receiver that stayed up is owed by a burst of `count` messages `{prefix}0` …
+/// `{prefix}{count-1}` emitted at one path, whatever the host's load: `Latest` keeps the newest
+/// message per name and says nothing of the ones it replaced (channel.md §12.6: a newer message
+/// replaces an older one that waits, on the sender's queue and in the receiver's, and "a
+/// `Latest` gap is invisible by design"), so a receiver whose consumer did not run between two
+/// frames skips the older. What it is owed, and what is checked:
+/// - nothing but the burst's own messages, each at most once, and never an older after a newer
+///   (the indexes rise), with the sequences rising too;
+/// - the newest message of the burst, which nothing replaces, last.
+///
+/// Every message arriving is no `Latest` guarantee (it was a timing the test asserted: the
+/// receiver's consumer running within the 100 ms between two messages, which a host at a load
+/// of 70 does not keep); the frames' arrival at each hop is what the hop counters assert.
+fn latest_burst(node: &str, got: &[(u64, String)], prefix: &str, count: usize) -> StepResult<()> {
+    let mut last: Option<usize> = None;
+    for (_, text) in got {
+        let index = text
+            .strip_prefix(prefix)
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|i| *i < count)
+            .ok_or_else(|| format!("{node} got {text:?}, no message of the burst {prefix}0..{prefix}{}", count - 1))?;
+        if last.is_some_and(|l| index <= l) {
+            return Err(format!(
+                "{node} got {text:?} after {prefix}{}: an older or a repeated message after a \
+                 newer (got {got:?})",
+                last.unwrap_or_default()
+            ));
+        }
+        last = Some(index);
+    }
+    if last != Some(count - 1) {
+        return Err(format!(
+            "{node} did not end at the newest message {prefix}{} of the burst (got {got:?})",
+            count - 1
+        ));
+    }
+    if got.windows(2).any(|w| w[0].0 >= w[1].0) {
+        return Err(format!("{node}'s sequences do not rise: {got:?}"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::latest_burst;
+
+    fn got(items: &[(u64, usize)]) -> Vec<(u64, String)> {
+        items.iter().map(|(s, i)| (*s, format!("a-{i}"))).collect()
+    }
+
+    /// The failing run of the `channels` scenario at load 70: carol's consumer did not run
+    /// between a-10 (seq 27) and a-12 (seq 31), so the receiver's queue kept a-12 over a-11.
+    #[test]
+    fn a_message_replaced_by_a_newer_one_is_no_failure() {
+        let mut items: Vec<(u64, usize)> = (0..11).map(|i| (7 + 2 * i as u64, i)).collect();
+        items.extend((12..20).map(|i| (7 + 2 * i as u64, i)));
+        assert_eq!(items.len(), 19);
+        latest_burst("carol", &got(&items), "a-", 20).expect("coalescing is what Latest does");
+    }
+
+    #[test]
+    fn every_message_arriving_passes() {
+        let items: Vec<(u64, usize)> = (0..20).map(|i| (7 + 2 * i as u64, i)).collect();
+        latest_burst("dave", &got(&items), "a-", 20).expect("all of them");
+    }
+
+    #[test]
+    fn an_older_message_after_a_newer_fails() {
+        let err = latest_burst("carol", &got(&[(7, 0), (11, 2), (13, 1), (15, 3)]), "a-", 4)
+            .unwrap_err();
+        assert!(err.contains("older or a repeated"), "{err}");
+    }
+
+    #[test]
+    fn a_repeated_message_fails() {
+        let err = latest_burst("carol", &got(&[(7, 0), (9, 1), (11, 1), (13, 2)]), "a-", 3)
+            .unwrap_err();
+        assert!(err.contains("older or a repeated"), "{err}");
+    }
+
+    #[test]
+    fn a_burst_that_does_not_end_at_the_newest_fails() {
+        let err = latest_burst("carol", &got(&[(7, 0), (9, 1)]), "a-", 3).unwrap_err();
+        assert!(err.contains("did not end at the newest"), "{err}");
+    }
+
+    #[test]
+    fn a_message_of_another_burst_fails() {
+        let mut items = got(&[(7, 0), (9, 1)]);
+        items.push((11, "a-5".to_owned()));
+        let err = latest_burst("carol", &items, "a-", 2).unwrap_err();
+        assert!(err.contains("no message of the burst"), "{err}");
+    }
+
+    #[test]
+    fn sequences_that_do_not_rise_fail() {
+        let err = latest_burst("carol", &got(&[(9, 0), (9, 1)]), "a-", 2).unwrap_err();
+        assert!(err.contains("sequences do not rise"), "{err}");
+    }
 }
