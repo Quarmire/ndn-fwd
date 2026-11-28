@@ -283,7 +283,7 @@
 //! written, `null` when not known) and `removed` (the path was removed: the value is empty),
 //! `"emitted"` with `seq` (the channel's) and `stands_ms` (what is left of a stated lifetime,
 //! `null` for a live emission), or `"answered"` (a query's answer) with `query` (its id), `via`
-//! (`signed`), `refusal` (`{"code","text"}` when the server's handler refused: the value is then
+//! (`signed`, or `sealed` for the channel path), `refusal` (`{"code","text"}` when the server's handler refused: the value is then
 //! empty; else `null`) and `proof` (only with `--proof`). Per notice
 //! `{"get":<space>,"notice":{"kind","what_to_do",…}}`,
 //! `kind` one of `lagged` (`missed`: emissions the mode dropped, or answers a slow reader lost),
@@ -315,8 +315,8 @@ use ndn_cert::CutFile;
 use ndn_heap::{
     Ask, Change, ChannelMode, Clock, Config, CutBound, EmitError, EmitOptions, Frontier, GetNotice,
     GetOptions, Heap, HeapError, Kind, Live, MembersChange, Modes, Node, PutOptions, Query,
-    Readers, Reply, STAND_MAX, Select, ServeError, Share, Targets, Timestamp, Transport, Trust,
-    Window,
+    QueryPath, Readers, Reply, STAND_MAX, Select, ServeError, Share, Targets, Timestamp, Transport,
+    Trust, Window,
 };
 use ndn_invite::{IntroPolicy, InviteConfig, InviteError, Invites, Offer, Role};
 use ndn_ipc::{ForwarderClient, MgmtClient};
@@ -1309,6 +1309,7 @@ fn mode_name(mode: ChannelMode) -> &'static str {
         ChannelMode::Latest => "latest",
         ChannelMode::Reliable => "reliable",
         ChannelMode::Window => "window",
+        ChannelMode::Ask => "ask",
     }
 }
 
@@ -1334,6 +1335,8 @@ impl EmitLine {
             ChannelMode::Latest => EmitOptions::latest(),
             ChannelMode::Reliable => EmitOptions::reliable(),
             ChannelMode::Window => EmitOptions::window(Window::DEFAULT),
+            // `mode_word` names no `Ask`: a query's channel carries no emission.
+            ChannelMode::Ask => unreachable!("an emit line never names the Ask mode"),
         };
         match self.stand {
             Some(lifetime) => options.standing(lifetime),
@@ -1482,13 +1485,16 @@ fn option_value<'a>(word: &str, rest: &mut &'a [String]) -> Result<&'a str, Stri
 }
 
 /// A `query` line's path and the options after it: `--query <text>` and `--timeout-ms <n>` (at
-/// most once), `--proof` (a flag, at most once) and `--device <device>` (repeatable). The
+/// most once), `--via signed|channel|auto` (at most once; default `auto`: the channel only for a
+/// session this host already holds, which an earlier `--via channel` query opened, else signed;
+/// `channel` opens the session if none is held and never falls back to signed), `--proof` (a
+/// flag, at most once; signed only) and `--device <device>` (repeatable). The
 /// question is a `get` of no kept values and no emissions that asks. The limits (the deadline's
 /// range, at most 16 servers) are the data layer's, told when the verb runs.
 fn query_options(path: &str, words: &[String]) -> Result<QueryLine, String> {
-    const OPTIONS: &str = "--query, --device, --timeout-ms or --proof";
+    const OPTIONS: &str = "--query, --device, --timeout-ms, --via or --proof";
     let path = path_name(path)?;
-    let (mut query, mut timeout, mut proof) = (None, None, None);
+    let (mut query, mut timeout, mut proof, mut via) = (None, None, None, None);
     let mut devices = Vec::new();
     let mut rest = words;
     while let [word, more @ ..] = rest {
@@ -1498,6 +1504,18 @@ fn query_options(path: &str, words: &[String]) -> Result<QueryLine, String> {
             "--query" => {
                 let text = option_value(word, &mut rest)?;
                 once(&mut query, text.to_owned(), "--query")?;
+            }
+            "--via" => {
+                let word = option_value(word, &mut rest)?;
+                let path = match word {
+                    "auto" => QueryPath::Auto,
+                    "signed" => QueryPath::Signed,
+                    "channel" => QueryPath::Channel,
+                    other => {
+                        return Err(format!("--via {other:?} is not auto, signed or channel"));
+                    }
+                };
+                once(&mut via, path, "--via")?;
             }
             "--timeout-ms" => {
                 let ms = option_value(word, &mut rest)?;
@@ -1527,6 +1545,9 @@ fn query_options(path: &str, words: &[String]) -> Result<QueryLine, String> {
         ask.deadline = deadline;
     }
     ask.proof = proof.is_some();
+    if let Some(via) = via {
+        ask.via = via;
+    }
     Ok(QueryLine {
         path,
         options: GetOptions {
@@ -2139,6 +2160,23 @@ mod tests {
         ] {
             assert!(query_options("/p", &words(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    /// `--via` names the path a query takes: the default is `auto`, and a word that is none of the
+    /// three, or a second `--via`, is refused with the words that are.
+    #[test]
+    fn a_query_names_its_path_with_via() {
+        let via = |items: &[&str]| {
+            query_options("/p", &words(items)).map(|line| line.options.ask.expect("asks").via)
+        };
+        assert_eq!(via(&[]).unwrap(), QueryPath::Auto);
+        assert_eq!(via(&["--via", "auto"]).unwrap(), QueryPath::Auto);
+        assert_eq!(via(&["--via", "signed"]).unwrap(), QueryPath::Signed);
+        assert_eq!(via(&["--via", "channel"]).unwrap(), QueryPath::Channel);
+        let why = via(&["--via", "sealed"]).unwrap_err();
+        assert!(why.contains("auto, signed or channel"), "{why}");
+        assert!(via(&["--via"]).is_err());
+        assert!(via(&["--via", "signed", "--via", "channel"]).is_err());
     }
 
     /// A serve line gives exactly one reply, an answer or a refusal with its code, and may say how
